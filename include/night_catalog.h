@@ -55,6 +55,14 @@ struct NightCatalogTimeRange {
     bool valid() const { return end_ms > start_ms; }
 };
 
+inline NightCatalogTimeRange night_catalog_intersection(
+    const NightCatalogTimeRange &lhs, const NightCatalogTimeRange &rhs) {
+    return {
+        lhs.start_ms > rhs.start_ms ? lhs.start_ms : rhs.start_ms,
+        lhs.end_ms < rhs.end_ms ? lhs.end_ms : rhs.end_ms,
+    };
+}
+
 struct NightCatalogMetrics {
     uint16_t valid_mask = 0;
     uint16_t str_mask = 0;

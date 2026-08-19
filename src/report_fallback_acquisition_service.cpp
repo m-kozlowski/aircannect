@@ -14,14 +14,6 @@ namespace {
 
 constexpr size_t MAX_EVENT_BYTES = 64 * 1024;
 
-NightCatalogTimeRange intersect_ranges(const NightCatalogTimeRange &lhs,
-                                       const NightCatalogTimeRange &rhs) {
-    return {
-        std::max(lhs.start_ms, rhs.start_ms),
-        std::min(lhs.end_ms, rhs.end_ms),
-    };
-}
-
 bool ranges_overlap(const NightCatalogTimeRange &lhs,
                     const NightCatalogTimeRange &rhs) {
     return lhs.start_ms < rhs.end_ms && rhs.start_ms < lhs.end_ms;
@@ -663,9 +655,8 @@ bool ReportFallbackAcquisitionService::accept_series_chunk(
             continue;
         }
 
-        const NightCatalogTimeRange overlap =
-            intersect_ranges(sessions[session_index],
-                             {chunk.start_ms, chunk.end_ms});
+        const NightCatalogTimeRange overlap = night_catalog_intersection(
+            sessions[session_index], {chunk.start_ms, chunk.end_ms});
         if (!overlap.valid()) continue;
 
         uint32_t cursor = sample_index_at_or_after(

@@ -11,14 +11,6 @@
 namespace aircannect {
 namespace {
 
-bool valid_tile(const ReportRangeTileArtifact &tile) {
-    return tile.start_ms > 0 &&
-           tile.start_ms % REPORT_RANGE_TILE_MS == 0 &&
-           tile.start_ms <= INT64_MAX - REPORT_RANGE_TILE_MS &&
-           tile.end_ms == tile.start_ms + REPORT_RANGE_TILE_MS &&
-           tile.size > 0 && tile.size <= UINT32_MAX;
-}
-
 bool tile_follows(const ReportRangeTileArtifact &previous,
                   const ReportRangeTileArtifact &next) {
     return next.start_ms >= previous.end_ms;
@@ -36,7 +28,7 @@ bool valid_input(const ReportArtifactIndexInput &input) {
     ReportRangeTileArtifact previous;
     for (size_t i = 0; i < input.tile_count; ++i) {
         const ReportRangeTileArtifact &tile = input.tiles[i];
-        if (!valid_tile(tile) ||
+        if (!report_range_tile_artifact_valid(tile) ||
             (i > 0 && !tile_follows(previous, tile))) {
             return false;
         }

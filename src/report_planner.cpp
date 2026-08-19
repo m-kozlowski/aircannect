@@ -47,20 +47,11 @@ bool add_count(size_t &total, size_t amount) {
     return CheckedSize::add_to(total, amount);
 }
 
-NightCatalogTimeRange intersect_ranges(const NightCatalogTimeRange &lhs,
-                                       const NightCatalogTimeRange &rhs) {
-    return {
-        std::max(lhs.start_ms, rhs.start_ms),
-        std::min(lhs.end_ms, rhs.end_ms),
-    };
-}
-
 NightCatalogTimeRange requested_window(const ReportArtifactKey &artifact,
                                        const NightCatalogTimeRange &session) {
     if (artifact.kind != ReportArtifactKind::RangeTile) return session;
-    return intersect_ranges(session,
-                            {artifact.range_start_ms,
-                             artifact.range_end_ms});
+    return night_catalog_intersection(
+        session, {artifact.range_start_ms, artifact.range_end_ms});
 }
 
 size_t requested_session_count(const NightCatalog &catalog,
@@ -174,7 +165,7 @@ SourceCandidate evaluate_edf_candidate(
         if ((coverage_mask(coverage[i], quality) & bit) == 0) continue;
 
         const NightCatalogTimeRange overlap =
-            intersect_ranges(window, coverage[i].range);
+            night_catalog_intersection(window, coverage[i].range);
         if (!overlap.valid()) continue;
 
         candidate.available = true;
@@ -207,7 +198,7 @@ SourceCandidate evaluate_edf_candidate(
             if ((coverage_mask(coverage[i], quality) & bit) == 0) continue;
 
             const NightCatalogTimeRange overlap =
-                intersect_ranges(window, coverage[i].range);
+                night_catalog_intersection(window, coverage[i].range);
             if (overlap.valid() && overlap.start_ms <= cursor &&
                 overlap.end_ms > next) {
                 next = overlap.end_ms;
@@ -259,7 +250,7 @@ SourceCandidate evaluate_fallback_candidate(
         }
 
         const NightCatalogTimeRange overlap =
-            intersect_ranges(window, section.coverage);
+            night_catalog_intersection(window, section.coverage);
         if (!overlap.valid()) continue;
 
         candidate.available = true;
@@ -297,7 +288,7 @@ SourceCandidate evaluate_fallback_candidate(
             }
 
             const NightCatalogTimeRange overlap =
-                intersect_ranges(window, section.coverage);
+                night_catalog_intersection(window, section.coverage);
             if (overlap.valid() && overlap.start_ms <= cursor &&
                 overlap.end_ms > next) {
                 next = overlap.end_ms;
@@ -561,7 +552,8 @@ bool count_edf_numeric_operations(const NightCatalog &catalog,
         }
 
         const NightCatalogTimeRange output =
-            intersect_ranges(selected.output_window, coverage[i].range);
+            night_catalog_intersection(selected.output_window,
+                                       coverage[i].range);
         uint32_t first_record = 0;
         uint32_t end_record = 0;
         if (!record_window(file, output, first_record, end_record)) continue;
@@ -595,8 +587,8 @@ bool count_fallback_series_operations(const NightCatalog &catalog,
         if (section.kind != ReportFallbackSectionKind::Series ||
             section.signal != selected.series.signal ||
             section.source != selected.series.source ||
-            !intersect_ranges(selected.output_window,
-                              section.coverage).valid()) {
+            !night_catalog_intersection(selected.output_window,
+                                        section.coverage).valid()) {
             continue;
         }
         if (!add_count(count, 1)) return false;
@@ -700,7 +692,7 @@ bool fallback_sections_complete(const NightCatalog &catalog,
                 if (!section_matches(section)) continue;
 
                 const NightCatalogTimeRange overlap =
-                    intersect_ranges(window, section.coverage);
+                    night_catalog_intersection(window, section.coverage);
                 if (overlap.valid() && overlap.start_ms <= cursor &&
                     overlap.end_ms > next) {
                     next = overlap.end_ms;
@@ -850,7 +842,8 @@ bool count_event_operations(const ReportPlanRequest &request,
                 if (section.kind != ReportFallbackSectionKind::Events ||
                     section.record_count == 0 ||
                     (section.event_mask & fallback_mask) == 0 ||
-                    !intersect_ranges(filter, section.coverage).valid()) {
+                    !night_catalog_intersection(filter,
+                                                section.coverage).valid()) {
                     continue;
                 }
                 if (!add_count(count, 1)) return false;
@@ -921,7 +914,8 @@ bool append_edf_numeric_operations(
 
         ReportReadMapping mapping;
         mapping.output_window =
-            intersect_ranges(selected.output_window, coverage[i].range);
+            night_catalog_intersection(selected.output_window,
+                                       coverage[i].range);
         mapping.series = selected.series;
         mapping.layout = selected.layout;
 
@@ -974,7 +968,8 @@ bool append_fallback_series_operations(
 
         ReportReadMapping mapping;
         mapping.output_window =
-            intersect_ranges(selected.output_window, section.coverage);
+            night_catalog_intersection(selected.output_window,
+                                       section.coverage);
         if (!mapping.output_window.valid()) continue;
         if (i > UINT16_MAX || section.data_size == 0 ||
             section.data_size > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
@@ -1095,8 +1090,8 @@ bool append_event_operations(const ReportPlanRequest &request,
                     if (section.kind !=
                             ReportFallbackSectionKind::Events ||
                         section.record_count == 0 || selected_mask == 0 ||
-                        !intersect_ranges(filter,
-                                          section.coverage).valid() ||
+                        !night_catalog_intersection(
+                            filter, section.coverage).valid() ||
                         section_index > UINT16_MAX ||
                         section.data_size == 0 ||
                         section.data_size >

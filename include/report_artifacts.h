@@ -76,6 +76,8 @@ struct ReportRangeTileArtifact {
     uint32_t crc32 = 0;
 };
 
+bool report_range_tile_artifact_valid(const ReportRangeTileArtifact &tile);
+
 struct ReportArtifactManifestView {
     ReportArtifactKey key;
     uint64_t result_size = 0;

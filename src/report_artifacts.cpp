@@ -9,6 +9,15 @@
 #include "report_range_tile.h"
 
 namespace aircannect {
+
+bool report_range_tile_artifact_valid(const ReportRangeTileArtifact &tile) {
+    return tile.start_ms > 0 &&
+           tile.start_ms % REPORT_RANGE_TILE_MS == 0 &&
+           tile.start_ms <= INT64_MAX - REPORT_RANGE_TILE_MS &&
+           tile.end_ms == tile.start_ms + REPORT_RANGE_TILE_MS &&
+           tile.size > 0 && tile.size <= UINT32_MAX;
+}
+
 namespace {
 
 constexpr uint32_t RESULT_MAGIC = 0x36524341u;    // "ACR6"
@@ -68,14 +77,6 @@ bool valid_result_session_ranges(const ReportResultArtifactData &data) {
 
     return data.therapy_start_ms == data.sessions[0].start_ms &&
            data.therapy_end_ms == data.sessions[data.session_count - 1].end_ms;
-}
-
-bool valid_tile(const ReportRangeTileArtifact &tile) {
-    return tile.start_ms > 0 &&
-           tile.start_ms % REPORT_RANGE_TILE_MS == 0 &&
-           tile.start_ms <= INT64_MAX - REPORT_RANGE_TILE_MS &&
-           tile.end_ms == tile.start_ms + REPORT_RANGE_TILE_MS &&
-           tile.size > 0 && tile.size <= UINT32_MAX;
 }
 
 bool tile_follows(const ReportRangeTileArtifact &previous,
@@ -138,7 +139,7 @@ std::shared_ptr<const LargeByteBuffer> encode_manifest(
     ReportRangeTileArtifact previous;
     for (size_t i = 0; i < tile_count; ++i) {
         ReportRangeTileArtifact tile;
-        if (!read_tile(i, tile) || !valid_tile(tile) ||
+        if (!read_tile(i, tile) || !report_range_tile_artifact_valid(tile) ||
             (i > 0 && !tile_follows(previous, tile))) {
             return {};
         }
@@ -561,7 +562,8 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
     const ReportArtifactManifestView &manifest,
     const ReportRangeTileArtifact &tile) {
     if (!key_is_result(manifest.key) || manifest.result_size == 0 ||
-        manifest.overview_size == 0 || !valid_tile(tile)) {
+        manifest.overview_size == 0 ||
+        !report_range_tile_artifact_valid(tile)) {
         return {};
     }
 
