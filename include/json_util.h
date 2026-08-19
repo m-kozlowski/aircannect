@@ -24,6 +24,7 @@ void append_json_escaped(std::string &out, const char *value, size_t len);
 void append_json_escaped(std::string &out, std::string_view value);
 
 #if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
+bool json_variant_to_string(JsonVariantConst value, String &out);
 void json_add_string(String &out, const char *key, const char *value, bool comma = true);
 void json_add_bool(String &out, const char *key, bool value, bool comma = true);
 void json_add_int(String &out, const char *key, long value, bool comma = true);

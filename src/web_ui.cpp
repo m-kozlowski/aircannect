@@ -36,12 +36,6 @@ size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
     return overhead + raw_len * 6;
 }
 
-bool json_get_string(JsonDocument &doc, const char *key, String &out) {
-    if (!doc[key].is<const char *>()) return false;
-    out = doc[key].as<const char *>();
-    return true;
-}
-
 }  // namespace
 
 bool WebUI::begin(StatusHttpController &status,
@@ -899,7 +893,7 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
 
             String command;
 
-            if (!json_get_string(doc, "cmd", command)) {
+            if (!json_variant_to_string(doc["cmd"], command)) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"missing cmd\"}");
                 return;

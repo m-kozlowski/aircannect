@@ -22,12 +22,6 @@
 namespace aircannect {
 namespace {
 
-bool json_get_string(JsonDocument &doc, const char *key, String &out) {
-    if (!doc[key].is<const char *>()) return false;
-    out = doc[key].as<const char *>();
-    return true;
-}
-
 bool required_size_arg(AsyncWebServerRequest *request,
                        const char *name,
                        size_t &out) {
@@ -397,18 +391,18 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             String filename;
             String target_text;
             String transport_text;
-            if (!json_get_string(doc, "path", path)) {
+            if (!json_variant_to_string(doc["path"], path)) {
                 request->send(
                     400, "application/json",
                     "{\"ok\":false,\"error\":\"missing path\"}");
                 return;
             }
-            (void)json_get_string(doc, "filename", filename);
+            (void)json_variant_to_string(doc["filename"], filename);
 
             ResmedFirmwareTarget target =
                 AC_RESMED_FIRMWARE_DEFAULT_TARGET;
             if (!doc["target"].isNull() &&
-                (!json_get_string(doc, "target", target_text) ||
+                (!json_variant_to_string(doc["target"], target_text) ||
                  !resmed_firmware_target_parse(target_text.c_str(), target))) {
                 request->send(
                     400, "application/json",
@@ -419,7 +413,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             ResmedFirmwareInstallTransport transport =
                 AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
             if (!doc["transport"].isNull() &&
-                (!json_get_string(doc, "transport", transport_text) ||
+                (!json_variant_to_string(doc["transport"], transport_text) ||
                  !resmed_firmware_install_transport_parse(
                      transport_text.c_str(), transport))) {
                 request->send(
@@ -466,7 +460,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             }
 
             String confirm;
-            if (!json_get_string(doc, "confirm", confirm)) {
+            if (!json_variant_to_string(doc["confirm"], confirm)) {
                 request->send(
                     400, "application/json",
                     "{\"ok\":false,\"error\":\"missing confirm\"}");
@@ -498,8 +492,8 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
 
             String sha256;
             String filename;
-            (void)json_get_string(doc, "sha256", sha256);
-            (void)json_get_string(doc, "filename", filename);
+            (void)json_variant_to_string(doc["sha256"], sha256);
+            (void)json_variant_to_string(doc["filename"], filename);
 
             Command command;
             command.kind = CommandKind::ResmedInit;
@@ -527,7 +521,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             }
 
             String data;
-            if (!json_get_string(doc, "data", data)) {
+            if (!json_variant_to_string(doc["data"], data)) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"missing data\"}");
                 return;
@@ -561,8 +555,8 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
 
             String mode;
             String confirm;
-            (void)json_get_string(doc, "mode", mode);
-            (void)json_get_string(doc, "confirm", confirm);
+            (void)json_variant_to_string(doc["mode"], mode);
+            (void)json_variant_to_string(doc["confirm"], confirm);
 
             Command command;
             command.confirmation = confirm.c_str();
@@ -572,8 +566,8 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
                                doc["reset"].as<bool>();
             } else if (mode == "authenticated") {
                 String authentication;
-                if (!json_get_string(doc, "authentication",
-                                     authentication)) {
+                if (!json_variant_to_string(doc["authentication"],
+                                            authentication)) {
                     request->send(
                         400, "application/json",
                         "{\"ok\":false,\"error\":\"missing authentication\"}");
