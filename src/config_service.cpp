@@ -155,6 +155,41 @@ bool ConfigService::replace_as11_ble_credentials(
     return commit_transaction().persisted;
 }
 
+bool ConfigService::complete_onboarding(const char *http_user,
+                                        const char *http_password) {
+    if (store_.data().onboarding_complete && !http_user && !http_password) {
+        return true;
+    }
+    if (!begin_transaction()) return false;
+
+    if (http_user) {
+        const ConfigFieldUpdate user_update = set_transaction_value(
+            "http_user", http_user, false);
+        if (!user_update.accepted()) {
+            clear_transaction();
+            return false;
+        }
+    }
+
+    if (http_password) {
+        const ConfigFieldUpdate password_update = set_transaction_value(
+            "http_pass", http_password, true);
+        if (!password_update.accepted()) {
+            clear_transaction();
+            return false;
+        }
+    }
+
+    const ConfigFieldUpdate update = set_transaction_value(
+        AC_CONFIG_ONBOARDING_KEY, "1", false);
+    if (!update.accepted()) {
+        clear_transaction();
+        return false;
+    }
+
+    return commit_transaction().persisted;
+}
+
 ConfigTransactionResult ConfigService::reset() {
     ConfigTransactionResult result;
     if (transaction_active_) return result;

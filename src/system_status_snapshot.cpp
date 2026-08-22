@@ -58,6 +58,7 @@ SystemStatusSnapshot collect_system_status(
     out.version = aircannect_version();
     out.built = aircannect_build_date();
     out.reset_reason = system_reset_reason_name();
+    out.onboarding_complete = sources.app_config.onboarding_complete;
     if (checkpoint) checkpoint("web_ui.snapshots.status.core");
 
     out.memory = Memory::status();

@@ -17,6 +17,7 @@ class ConfigService;
 
 struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
+    bool onboarding_complete = false;
 
     String hostname = AC_HOSTNAME;
 
@@ -95,6 +96,7 @@ private:
 
     const AppConfigData &data() const { return data_; }
 
+    bool set_onboarding_complete(bool complete);
     bool set_hostname(const String &hostname);
     bool set_as11_transport(As11Transport transport);
     bool set_as11_ble_credentials(const String &address,

@@ -4,7 +4,7 @@
 
 namespace aircannect {
 
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 20;
+static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 21;
 
 enum class AppConfigSchemaMode : uint8_t {
     Initialize,
@@ -35,13 +35,21 @@ constexpr bool app_config_schema_allows_automatic_rewrite(
     return mode == AppConfigSchemaMode::Supported;
 }
 
-constexpr bool app_config_write_includes_schema(AppConfigWriteMode mode) {
-    return mode == AppConfigWriteMode::Complete;
+constexpr bool app_config_write_includes_schema(AppConfigWriteMode mode,
+                                                bool schema_stored) {
+    return mode == AppConfigWriteMode::Complete || !schema_stored;
 }
 
 constexpr bool app_config_write_includes_field(AppConfigWriteMode mode,
                                                bool changed) {
     return mode == AppConfigWriteMode::Complete || changed;
+}
+
+constexpr bool app_config_onboarding_complete(uint32_t stored_schema,
+                                              bool flag_stored,
+                                              bool stored_value) {
+    if (flag_stored) return stored_value;
+    return stored_schema != 0;
 }
 
 }  // namespace aircannect

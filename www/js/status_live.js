@@ -762,12 +762,23 @@
     }
 
     async function loadStatus() {
-      try {
+      if (statusLoadPromise) return statusLoadPromise;
+
+      statusLoadPromise = (async () => {
         const response = await api("/api/status");
         statusData = await response.json();
+        statusLoaded = true;
         renderStatus(statusData);
+        return statusData;
+      })();
+
+      try {
+        return await statusLoadPromise;
       } catch (error) {
         apiError(error);
+        return null;
+      } finally {
+        statusLoadPromise = null;
       }
     }
 

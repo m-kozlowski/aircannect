@@ -1,4 +1,6 @@
     let statusData = {};
+    let statusLoaded = false;
+    let statusLoadPromise = null;
     let streamData = {};
     let settingsData = null;
     let settingsCatalog = [];

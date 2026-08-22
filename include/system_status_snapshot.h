@@ -72,6 +72,7 @@ struct SystemStatusSnapshot {
     const char *version = "";
     const char *built = "";
     const char *reset_reason = "";
+    bool onboarding_complete = false;
     MemoryStatus memory;
     StorageStatus storage;
     WifiStatusSnapshot wifi;

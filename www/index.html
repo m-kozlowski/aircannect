@@ -12,6 +12,30 @@
   <link rel="stylesheet" href="css/responsive.css" data-inline>
 </head>
 <body>
+  <div class="onboarding" id="onboarding" hidden>
+    <section class="onboarding-shell" role="dialog" aria-modal="true"
+             aria-labelledby="onboardingTitle">
+      <header class="onboarding-head">
+        <div>
+          <small>AirCANnect setup</small>
+          <h2 id="onboardingTitle">Initial setup</h2>
+        </div>
+        <span id="onboardingCounter">1 of 6</span>
+      </header>
+      <div class="onboarding-progress" id="onboardingProgress"
+           aria-hidden="true"></div>
+      <div class="onboarding-body" id="onboardingBody"></div>
+      <div class="msg" id="onboardingMsg"></div>
+      <footer class="onboarding-actions" id="onboardingActions">
+        <button class="btn" id="onboardingBack">Back</button>
+        <div class="btns">
+          <button class="btn" id="onboardingSkip">Skip</button>
+          <button class="btn primary" id="onboardingNext">Next</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -856,6 +880,7 @@
   <script src="js/storage_sync.js" data-inline></script>
   <script src="js/status_live.js" data-inline></script>
   <script src="js/settings_config.js" data-inline></script>
+  <script src="js/onboarding.js" data-inline></script>
   <script src="js/boot.js" data-inline></script>
 </body>
 </html>

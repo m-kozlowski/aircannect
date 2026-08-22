@@ -112,6 +112,12 @@ static constexpr AppConfigFieldFlags SECRET_INTERNAL =
      AC_CFG_OFFSET(log_levels)}
 
 static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
+    {AC_CONFIG_ONBOARDING_KEY, AppConfigFieldId::OnboardingComplete,
+     AppConfigGroup::Device, 0, AppConfigFieldType::Bool,
+     PROVISIONABLE,
+     AC_CONFIG_DIRTY_ONBOARDING, "Onboarding complete",
+     "Show first-run setup when disabled.", nullptr, 0, -1,
+     AC_CFG_OFFSET(onboarding_complete)},
     {"host", AppConfigFieldId::Hostname, AppConfigGroup::Device, 10,
      AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_HOSTNAME,
      "Hostname", "Device hostname.", nullptr, 0, -1,
@@ -379,6 +385,9 @@ bool AppConfigFieldWriter::set_value(
     uint16_t parsed_port = 0;
     const AppConfigData &cfg = config.data();
     switch (field.id) {
+        case AppConfigFieldId::OnboardingComplete:
+            if (!parse_bool_yesno(value, parsed_bool)) return false;
+            return config.set_onboarding_complete(parsed_bool);
         case AppConfigFieldId::Hostname:
             return config.set_hostname(value);
         case AppConfigFieldId::As11Transport: {

@@ -10,6 +10,7 @@
       updateLiveViewState("dash");
       loadStatus();
     }
+    initOnboarding();
 
     setInterval(() => {
       if (document.getElementById("p-dash").classList.contains("active")) {

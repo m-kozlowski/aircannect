@@ -26,8 +26,18 @@ public:
     void poll();
 
 private:
+    enum class CommandKind : uint8_t {
+        Update,
+        CompleteOnboarding,
+    };
+
     struct Command {
+        CommandKind kind = CommandKind::Update;
         std::string body;
+        std::string onboarding_user;
+        std::string onboarding_password;
+        bool onboarding_user_set = false;
+        bool onboarding_password_set = false;
     };
 
     static constexpr size_t SectionCount = AC_CONFIG_GROUP_COUNT;
@@ -40,8 +50,11 @@ private:
 
     void send_config(AsyncWebServerRequest *request,
                      const char *section) const;
+    void send_snapshot(AsyncWebServerRequest *request,
+                       const LargeTextBuffer &json) const;
     void send_schema(AsyncWebServerRequest *request) const;
     void send_update(AsyncWebServerRequest *request);
+    void send_onboarding_complete(AsyncWebServerRequest *request);
 
     ConfigService *config_ = nullptr;
     MainLoopInbox<Command, CommandQueueDepth> commands_;

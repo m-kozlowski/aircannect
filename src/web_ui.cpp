@@ -36,6 +36,13 @@ size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
     return overhead + raw_len * 6;
 }
 
+void send_web_ui(AsyncWebServerRequest *request) {
+    AsyncWebServerResponse *response = request->beginResponse(
+        200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
+    response->addHeader("Content-Encoding", "gzip");
+    request->send(response);
+}
+
 }  // namespace
 
 bool WebUI::begin(StatusHttpController &status,
@@ -865,12 +872,8 @@ void WebUI::execute_console_line(const std::string &line) {
 void WebUI::register_routes(HttpRouteModule *const *route_modules,
                             size_t route_module_count) {
     // Static UI and snapshots
-    server_->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        AsyncWebServerResponse *response = request->beginResponse(
-            200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
-        response->addHeader("Content-Encoding", "gzip");
-        request->send(response);
-    });
+    server_->on("/", HTTP_GET, send_web_ui);
+    server_->on(AsyncURIMatcher::exact("/wizard"), HTTP_GET, send_web_ui);
 
     // Web console and file log
     server_->on(

@@ -51,6 +51,9 @@ public:
 
     bool begin();
     const AppConfigData &data() const { return store_.data(); }
+    bool onboarding_complete() const {
+        return store_.data().onboarding_complete;
+    }
     uint32_t revision() const { return revision_; }
 
     // Runtime publication
@@ -72,6 +75,8 @@ public:
     bool replace_as11_ble_credentials(const char *address,
                                       const char *client_id,
                                       const char *master_key_hex);
+    bool complete_onboarding(const char *http_user = nullptr,
+                             const char *http_password = nullptr);
     ConfigTransactionResult reset();
 
 private:

@@ -402,7 +402,8 @@ bool save_config(const AppConfigData &data, const AppConfigData *baseline) {
     }
 
     bool ok = true;
-    if (app_config_write_includes_schema(write_mode)) {
+    if (app_config_write_includes_schema(write_mode,
+                                         prefs.isKey(KEY_SCHEMA))) {
         ok = prefs.putUInt(KEY_SCHEMA, data.schema_version) != 0;
     }
 
@@ -447,7 +448,7 @@ bool AppConfig::load() {
     apply_build_defaults(defaults);
 
     Preferences prefs;
-    if (!prefs.begin(CFG_NS, true)) {
+    if (!prefs.begin(CFG_NS, false)) {
         Log::logf(CAT_CONFIG, LOG_WARN, "failed to open NVS\n");
         return false;
     }
@@ -467,6 +468,8 @@ bool AppConfig::load() {
         return save();
     }
 
+    const bool onboarding_stored = prefs.isKey(AC_CONFIG_ONBOARDING_KEY);
+
     data_ = defaults;
     data_.schema_version = schema;
     size_t field_count = 0;
@@ -474,6 +477,8 @@ bool AppConfig::load() {
     for (size_t i = 0; i < field_count; ++i) {
         load_config_field(prefs, fields[i], defaults, data_);
     }
+    data_.onboarding_complete = app_config_onboarding_complete(
+        schema, onboarding_stored, data_.onboarding_complete);
     prefs.end();
 
     if (!app_config_schema_allows_automatic_rewrite(schema_mode)) {
@@ -668,6 +673,13 @@ bool AppConfig::normalize() {
         unchanged = false;
     }
     return unchanged;
+}
+
+bool AppConfig::set_onboarding_complete(bool complete) {
+    if (data_.onboarding_complete == complete) return true;
+
+    data_.onboarding_complete = complete;
+    return mark_dirty(AC_CONFIG_DIRTY_ONBOARDING);
 }
 
 bool AppConfig::set_hostname(const String &hostname) {

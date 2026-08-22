@@ -270,6 +270,13 @@ void ConfigHttpController::register_routes(AsyncWebServer &server) {
     });
 
     server.on(
+        AsyncURIMatcher::exact("/api/onboarding"), HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            send_onboarding_complete(request);
+        },
+        nullptr, http_request_body_handler);
+
+    server.on(
         AsyncURIMatcher::exact("/api/config"), HTTP_POST,
         [this](AsyncWebServerRequest *request) { send_update(request); },
         nullptr, http_request_body_handler);
@@ -316,6 +323,21 @@ bool ConfigHttpController::enqueue(Command &&command) {
 }
 
 void ConfigHttpController::execute(Command &command) {
+    if (command.kind == CommandKind::CompleteOnboarding) {
+        const char *http_user = command.onboarding_user_set
+                                    ? command.onboarding_user.c_str()
+                                    : nullptr;
+        const char *http_password = command.onboarding_password_set
+                                        ? command.onboarding_password.c_str()
+                                        : nullptr;
+
+        if (!config_->complete_onboarding(http_user, http_password)) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "failed to persist onboarding completion\n");
+        }
+        return;
+    }
+
     JsonDocument doc;
     if (deserializeJson(doc, command.body.c_str())) return;
 
@@ -392,14 +414,20 @@ void ConfigHttpController::send_config(AsyncWebServerRequest *request,
                       "{\"ok\":false,\"error\":\"unknown_section\"}");
         return;
     }
+
+    const LargeTextBuffer &json =
+        index == SectionCount ? all_json_ : section_json_[index];
+    send_snapshot(request, json);
+}
+
+void ConfigHttpController::send_snapshot(
+    AsyncWebServerRequest *request, const LargeTextBuffer &json) const {
     if (xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"cache_busy\"}");
         return;
     }
 
-    const LargeTextBuffer &json =
-        index == SectionCount ? all_json_ : section_json_[index];
     AsyncResponseStream *response = nullptr;
     const bool prepared = http_prepare_json_response(request, json, response);
     xSemaphoreGive(cache_mutex_);
@@ -433,6 +461,46 @@ void ConfigHttpController::send_update(AsyncWebServerRequest *request) {
 
     Command command;
     command.body = std::move(body);
+    const bool queued = enqueue(std::move(command));
+    request->send(queued ? 202 : 503, "application/json",
+                  queued ? "{\"ok\":true,\"result\":\"queued\"}"
+                         : "{\"ok\":false,\"error\":\"queue_full\"}");
+}
+
+void ConfigHttpController::send_onboarding_complete(
+    AsyncWebServerRequest *request) {
+    JsonDocument doc;
+    std::string body;
+    if (!http_parse_json_body(request, doc, body) || !doc.is<JsonObject>()) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad json\"}");
+        return;
+    }
+    JsonObjectConst root = doc.as<JsonObjectConst>();
+    if (!root["http_user"].isNull() &&
+        !root["http_user"].is<const char *>()) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad user\"}");
+        return;
+    }
+    if (!root["http_password"].isNull() &&
+        !root["http_password"].is<const char *>()) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad password\"}");
+        return;
+    }
+
+    Command command;
+    command.kind = CommandKind::CompleteOnboarding;
+    if (root["http_user"].is<const char *>()) {
+        command.onboarding_user = root["http_user"].as<const char *>();
+        command.onboarding_user_set = true;
+    }
+    if (root["http_password"].is<const char *>()) {
+        command.onboarding_password =
+            root["http_password"].as<const char *>();
+        command.onboarding_password_set = true;
+    }
     const bool queued = enqueue(std::move(command));
     request->send(queued ? 202 : 503, "application/json",
                   queued ? "{\"ok\":true,\"result\":\"queued\"}"

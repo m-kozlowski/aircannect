@@ -818,15 +818,19 @@
       }
     }
 
+    async function requestWifiAction(action, extra) {
+      const body = Object.assign({action}, extra || {});
+      const response = await api("/api/wifi", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      return await response.json();
+    }
+
     async function wifiAction(action, extra) {
       try {
-        const body = Object.assign({action}, extra || {});
-        const response = await api("/api/wifi", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(body),
-        });
-        const data = await response.json();
+        const data = await requestWifiAction(action, extra);
         msg("wifiMsg", data.result, data.ok);
         setTimeout(loadWifi, 600);
         setTimeout(loadStatus, 900);
@@ -2120,15 +2124,9 @@
         () => loadAs11BlePairing(false), data.active ? 700 : 500);
     }
 
-    function renderAs11BlePairing(data) {
-      const panel = document.getElementById("as11BlePairing");
-      if (!panel) return;
-
+    function renderAs11BlePairingPanel(panel, data) {
       const snapshot = JSON.stringify(data || {});
-      if (panel.dataset.snapshot === snapshot) {
-        scheduleAs11BlePairingPoll(data);
-        return;
-      }
+      if (panel.dataset.snapshot === snapshot) return;
 
       panel.dataset.snapshot = snapshot;
       panel.innerHTML = "";
@@ -2158,13 +2156,12 @@
             device.address + " / " + device.rssi + " dBm";
           select.appendChild(option);
         });
-        select.id = "as11BleDevice";
         panel.appendChild(row("Device", select));
       }
 
+      let passkey = null;
       if (data.passkey_required) {
-        const passkey = document.createElement("input");
-        passkey.id = "as11BlePasskey";
+        passkey = document.createElement("input");
         passkey.type = "text";
         passkey.inputMode = "numeric";
         passkey.autocomplete = "one-time-code";
@@ -2179,13 +2176,26 @@
         const selectButton = document.createElement("button");
         selectButton.className = "btn primary";
         selectButton.textContent = "Continue";
-        selectButton.onclick = as11BleSelectDevice;
+        const select = panel.querySelector("select");
+        selectButton.onclick = () => {
+          if (select && select.value) {
+            as11BleAction("select", {address: select.value});
+          }
+        };
         buttons.appendChild(selectButton);
       } else if (data.passkey_required) {
         const confirmButton = document.createElement("button");
         confirmButton.className = "btn primary";
         confirmButton.textContent = "Pair";
-        confirmButton.onclick = as11BleSubmitPasskey;
+        confirmButton.onclick = () => {
+          const value = passkey ? passkey.value.trim() : "";
+          if (!/^\d{4}$/.test(value)) {
+            showAs11BlePairingError(
+              "Enter the four-digit code shown on the AS11.");
+            return;
+          }
+          as11BleAction("passkey", {passkey: value});
+        };
         buttons.appendChild(confirmButton);
       } else if (!data.active) {
         const pairButton = document.createElement("button");
@@ -2214,10 +2224,29 @@
 
       const message = document.createElement("div");
       message.className = "msg" + (data.error ? " err" : "");
-      message.id = "as11BleMsg";
+      message.classList.add("as11-ble-msg");
       message.textContent = data.error ||
         (!data.enabled ? "Select BLE transport and save first." : "");
       panel.appendChild(message);
+    }
+
+    function as11BlePairingPanels() {
+      return document.querySelectorAll("[data-as11-ble-pairing]");
+    }
+
+    function showAs11BlePairingError(text) {
+      as11BlePairingPanels().forEach((panel) => {
+        const message = panel.querySelector(".as11-ble-msg");
+        if (!message) return;
+        message.textContent = text;
+        message.className = "msg err as11-ble-msg";
+      });
+    }
+
+    function renderAs11BlePairing(data) {
+      as11BlePairingData = data;
+      as11BlePairingPanels().forEach((panel) =>
+        renderAs11BlePairingPanel(panel, data));
       scheduleAs11BlePairingPoll(data);
     }
 
@@ -2226,7 +2255,7 @@
         const response = await api("/api/as11/ble");
         renderAs11BlePairing(await response.json());
       } catch (error) {
-        if (showError) msg("as11BleMsg", error.message, false);
+        if (showError) showAs11BlePairingError(error.message);
       }
     }
 
@@ -2241,8 +2270,10 @@
           as11BlePairStartDeadline = Date.now() + 10000;
         }
         setTimeout(() => loadAs11BlePairing(true), 150);
+        return true;
       } catch (error) {
-        msg("as11BleMsg", error.message, false);
+        showAs11BlePairingError(error.message);
+        return false;
       }
     }
 
@@ -2283,7 +2314,7 @@
           if (section.id === "as11") {
             const pairing = document.createElement("div");
             pairing.className = "endpoint-config";
-            pairing.id = "as11BlePairing";
+            pairing.dataset.as11BlePairing = "true";
             fields.appendChild(pairing);
           }
         });
@@ -2455,7 +2486,7 @@
           body: JSON.stringify(sections[section]),
         });
         const data = await response.json();
-        queued = queued || !!data.queued;
+        queued = queued || !!data.queued || data.result === "queued";
       }
       return queued;
     }
