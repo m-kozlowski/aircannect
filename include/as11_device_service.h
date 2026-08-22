@@ -14,9 +14,15 @@ enum class As11ResetMode : uint8_t {
     Watchdog,
 };
 
+struct As11ClockWriteResult {
+    bool succeeded = false;
+    int32_t rpc_error_code = 0;
+};
+
 class As11DeviceService {
 public:
     const As11DeviceState &state() const { return state_; }
+    bool take_clock_write_result(As11ClockWriteResult &result);
 
     bool request_healthcheck(RpcRequestPort &rpc,
                              RpcSource source,
@@ -117,6 +123,8 @@ private:
 
     OperationTicket reset_ticket_;
     OperationTicket clock_write_ticket_;
+    As11ClockWriteResult clock_write_result_;
+    bool clock_write_result_pending_ = false;
 
     uint32_t next_generation_ = 0;
     uint32_t revision_ = 0;

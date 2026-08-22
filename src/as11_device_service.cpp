@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <time.h>
 
+#include <ArduinoJson.h>
+
 #include "as11_rpc.h"
 #include "board.h"
 #ifdef ARDUINO
@@ -14,6 +16,17 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t ValidUtcMinMs = 1609459200000LL;
+
+int32_t rpc_error_code(RpcPayloadView payload) {
+    if (payload.empty()) return 0;
+
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(
+        doc, payload.data(), payload.size());
+    if (error || !doc["error"]["code"].is<int32_t>()) return 0;
+
+    return doc["error"]["code"].as<int32_t>();
+}
 
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||
@@ -222,6 +235,15 @@ OperationSubmission As11DeviceService::request_set_datetime_now(
     return submitted;
 }
 
+bool As11DeviceService::take_clock_write_result(
+    As11ClockWriteResult &result) {
+    if (!clock_write_result_pending_) return false;
+
+    result = clock_write_result_;
+    clock_write_result_pending_ = false;
+    return true;
+}
+
 bool As11DeviceService::apply_activity_event_frame(
     const As11EventFrame &frame,
     uint32_t now_ms) {
@@ -278,6 +300,9 @@ void As11DeviceService::device_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     consecutive_query_timeouts_ = 0;
     schedule_initialized_ = false;
     initialize_schedule(now_ms);
+
+    clock_write_result_ = {};
+    clock_write_result_pending_ = false;
 
     boot_revision_++;
     if (boot_revision_ == 0) boot_revision_++;
@@ -616,15 +641,25 @@ void As11DeviceService::complete_therapy(
 
 void As11DeviceService::complete_clock_write(
     const RpcRequestCompletion &completion) {
-    if (completion_succeeded(completion)) return;
+    clock_write_result_.succeeded = completion_succeeded(completion);
+    clock_write_result_.rpc_error_code = completion.response_error
+        ? rpc_error_code(rpc_payload_view(completion.payload))
+        : 0;
+    clock_write_result_pending_ = true;
+
+    if (clock_write_result_.succeeded) return;
 
 #ifdef ARDUINO
-    Log::logf(CAT_GENERAL, LOG_WARN,
-              "[TIME] AS11 SetDateTime failed reason=%s\n",
-              completion.reason.empty() ? "rpc_error"
-                                        : completion.reason.c_str());
-#else
-    (void)completion;
+    if (clock_write_result_.rpc_error_code) {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[TIME] AS11 SetDateTime failed rpc_error=%ld\n",
+                  static_cast<long>(clock_write_result_.rpc_error_code));
+    } else {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[TIME] AS11 SetDateTime failed reason=%s\n",
+                  completion.reason.empty() ? "request_failed"
+                                            : completion.reason.c_str());
+    }
 #endif
 }
 

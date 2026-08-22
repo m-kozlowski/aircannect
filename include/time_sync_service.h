@@ -31,6 +31,7 @@ public:
     bool request_push_esp_to_resmed(RpcSource source);
     bool request_pull_resmed_to_esp(RpcSource source);
     void reset_resmed_push();
+    void note_as11_connection_reset();
 
     bool ntp_synced() const { return ntp_synced_; }
     bool resmed_time_sync_enabled() const {
@@ -55,6 +56,7 @@ private:
     bool resmed_fallback_ready(uint32_t now_ms) const;
     bool resmed_pull_due(uint32_t now_ms) const;
     void poll_resmed_pull(uint32_t now_ms);
+    void poll_resmed_push_result(uint32_t now_ms);
     void poll_resmed_push(uint32_t now_ms);
     bool therapy_running() const;
     bool set_esp_time_from_resmed(const std::string &utc_datetime);
@@ -75,6 +77,7 @@ private:
     bool manual_resmed_pull_pending_ = false;
     bool resmed_push_readback_pending_ = false;
     bool resmed_push_readback_awaiting_response_ = false;
+    bool resmed_push_available_ = true;
 
     uint32_t ntp_started_ms_ = 0;
     uint32_t last_resmed_push_attempt_ms_ = 0;

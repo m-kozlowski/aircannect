@@ -24,6 +24,7 @@ static constexpr uint32_t TIME_SYNC_RESMED_PULL_INTERVAL_MS =
 static constexpr uint32_t TIME_SYNC_RESMED_PUSH_INTERVAL_MS =
     6UL * 60UL * 60UL * 1000UL;
 static constexpr uint32_t TIME_SYNC_RESMED_PUSH_READBACK_DELAY_MS = 2000;
+static constexpr int32_t RPC_METHOD_NOT_FOUND = -32601;
 
 volatile bool g_ntp_synced = false;
 
@@ -61,6 +62,7 @@ void TimeSyncService::poll() {
 
     apply_timezone();
     const uint32_t now_ms = millis();
+    poll_resmed_push_result(now_ms);
     poll_ntp(now_ms);
     if (g_ntp_synced && !ntp_synced_) note_ntp_sync(now_ms);
     poll_resmed_pull(now_ms);
@@ -84,6 +86,10 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
                   "[TIME] AS11 time push deferred: therapy active\n");
         return false;
     }
+    if (source == RpcSource::Scheduler && !resmed_push_available_) {
+        last_status_ = "resmed_push_method_unavailable";
+        return false;
+    }
 
     struct timeval tv = {};
     if (gettimeofday(&tv, nullptr) != 0) {
@@ -97,10 +103,6 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
     const bool queued = device_->request_set_datetime_now(
         *rpc_, source, now_ms, utc_ms).accepted();
     if (queued) {
-        resmed_push_readback_pending_ = true;
-        resmed_push_readback_awaiting_response_ = false;
-        next_resmed_push_readback_ms_ =
-            millis() + TIME_SYNC_RESMED_PUSH_READBACK_DELAY_MS;
         Log::logf(CAT_GENERAL, LOG_DEBUG,
                   "[TIME] AS11 time push queued\n");
     } else {
@@ -132,7 +134,18 @@ void TimeSyncService::reset_resmed_push() {
     resmed_push_readback_pending_ = false;
     resmed_push_readback_awaiting_response_ = false;
     next_resmed_push_readback_ms_ = 0;
+    resmed_push_available_ = true;
     last_status_ = "resmed_push_reset";
+}
+
+void TimeSyncService::note_as11_connection_reset() {
+    resmed_push_available_ = true;
+    resmed_push_readback_pending_ = false;
+    resmed_push_readback_awaiting_response_ = false;
+    next_resmed_push_readback_ms_ = 0;
+    if (app_config_ && app_config_->resmed_time_sync_enabled && ntp_synced_) {
+        next_resmed_push_ms_ = millis();
+    }
 }
 
 bool TimeSyncService::esp_clock_valid() const {
@@ -325,6 +338,40 @@ void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
     }
 }
 
+void TimeSyncService::poll_resmed_push_result(uint32_t now_ms) {
+    As11ClockWriteResult result;
+    if (!device_->take_clock_write_result(result)) return;
+
+    resmed_push_readback_pending_ = false;
+    resmed_push_readback_awaiting_response_ = false;
+    next_resmed_push_readback_ms_ = 0;
+
+    if (result.succeeded) {
+        resmed_push_available_ = true;
+        resmed_push_readback_pending_ = true;
+        next_resmed_push_readback_ms_ =
+            now_ms + TIME_SYNC_RESMED_PUSH_READBACK_DELAY_MS;
+        next_resmed_push_ms_ = now_ms + TIME_SYNC_RESMED_PUSH_INTERVAL_MS;
+        last_status_ = "esp_to_resmed_applied";
+        return;
+    }
+
+    if (result.rpc_error_code == RPC_METHOD_NOT_FOUND) {
+        resmed_push_available_ = false;
+        next_resmed_push_ms_ = 0;
+        last_status_ = "resmed_push_method_unavailable";
+        return;
+    }
+
+    if (app_config_ && app_config_->resmed_time_sync_enabled) {
+        next_resmed_push_ms_ = now_ms + TIME_SYNC_RESMED_PUSH_INTERVAL_MS;
+    }
+    last_status_ = result.rpc_error_code
+        ? "esp_to_resmed_rpc_error_" +
+              std::to_string(result.rpc_error_code)
+        : "esp_to_resmed_request_failed";
+}
+
 void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
     if (!app_config_ || !app_config_->resmed_time_sync_enabled) {
         next_resmed_push_ms_ = 0;
@@ -334,8 +381,16 @@ void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
         return;
     }
     if (!ntp_synced_ || !esp_clock_valid()) return;
+    if (!resmed_push_available_) {
+        next_resmed_push_ms_ = 0;
+        return;
+    }
     if (!next_resmed_push_ms_) next_resmed_push_ms_ = now_ms;
     if (static_cast<int32_t>(now_ms - next_resmed_push_ms_) < 0) return;
+    if (!device_->state().available()) {
+        last_status_ = "resmed_push_waiting_as11";
+        return;
+    }
     if (therapy_running()) {
         next_resmed_push_ms_ = now_ms + TIME_SYNC_RETRY_MS;
         if (last_status_ != "resmed_push_deferred_therapy_active") {

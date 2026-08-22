@@ -505,6 +505,7 @@ static bool configure_as11_transport(const AppConfigData &config) {
         config.as11_ble_master_key.c_str());
 
     const bool selected = rpc_link_selector.select(config.as11_transport);
+    time_sync_service.note_as11_connection_reset();
     if (use_ble) {
         resmed_ota_manager.set_can_available(false);
         as11_service_manager.set_available(false);
@@ -648,6 +649,7 @@ static void drain_rpc_events() {
         if (event.kind == RpcEventKind::BootNotification) {
             as11_service_manager.note_device_boot(millis());
             as11_device_service.device_reset(rpc_transport, millis());
+            time_sync_service.note_as11_connection_reset();
             rpc_transport.set_as11_unavailable(false);
             as11_settings_manager.device_reset(rpc_transport);
         }
