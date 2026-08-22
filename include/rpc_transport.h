@@ -142,7 +142,7 @@ private:
                          size_t payload_len,
                          RpcSource source = RpcSource::Internal,
                          uint32_t id = 0);
-    void report_framing_error(const char *channel, const std::string &error);
+    void publish_framing_error(const char *channel, const std::string &error);
     bool enqueue_request(QueuedRequest &request);
     RpcLinkSendResult send_payload(const std::string &payload);
 

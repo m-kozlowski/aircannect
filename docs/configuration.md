@@ -120,6 +120,7 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `file_log_en` | boolean | on when the build has SD storage | Enable persistent SD-card log files when storage is available. |
 | `log_general` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | General log category level. |
 | `log_can` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | CAN log category level. |
+| `log_ble` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | AS11 BLE transport log category level. |
 | `log_rpc` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | RPC log category level. |
 | `log_tcp` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | TCP bridge log category level. |
 | `log_cli` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | CLI log category level. |

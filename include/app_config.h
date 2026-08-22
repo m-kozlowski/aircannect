@@ -80,6 +80,7 @@ struct AppConfigData {
         LOG_INFO,
         LOG_INFO,
         LOG_INFO,
+        LOG_INFO,
     };
 };
 

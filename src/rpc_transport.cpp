@@ -89,7 +89,7 @@ void RpcTransport::process_link_events(size_t budget) {
                 break;
             case RpcLinkEventKind::FramingError:
                 stats_.rpc_framing_errors++;
-                report_framing_error(link_.name(), event.detail);
+                publish_framing_error(link_.name(), event.detail);
                 break;
             case RpcLinkEventKind::Disconnected:
                 accept_link_reset(event.detail.c_str());
@@ -324,7 +324,10 @@ void RpcTransport::accept_debug_payload(const RpcPayloadRef &payload) {
 
 void RpcTransport::accept_debug_framing_error(const char *detail) {
     stats_.log_framing_errors++;
-    report_framing_error("can-log", detail ? detail : "framing_error");
+    const std::string error = detail ? detail : "framing_error";
+    Log::logf(CAT_CAN, LOG_WARN, "[DEBUG][FRAMING] %s\n",
+              error.c_str());
+    publish_framing_error("can-log", error);
 }
 
 void RpcTransport::accept_boot_notification(const char *detail) {
@@ -500,11 +503,9 @@ void RpcTransport::push_text_event(RpcEventKind kind,
     push_event(kind, std::move(owned), source, id);
 }
 
-void RpcTransport::report_framing_error(const char *channel, const std::string &error) {
+void RpcTransport::publish_framing_error(const char *channel,
+                                         const std::string &error) {
     const char *name = channel ? channel : "?";
-    Log::logf(CAT_RPC, LOG_WARN, "[FRAMING] [%s] %s\n",
-              name, error.c_str());
-
     const std::string event_payload = std::string("[") + name + "] " + error;
     push_text_event(RpcEventKind::FramingError,
                     event_payload.data(), event_payload.size());

@@ -240,6 +240,7 @@ private:
     NimBLEClient *client_ = nullptr;
     NimBLERemoteCharacteristic *tx_ = nullptr;
     NimBLERemoteCharacteristic *rx_ = nullptr;
+    bool tx_write_without_response_ = false;
     TaskHandle_t task_ = nullptr;
     mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
 #endif

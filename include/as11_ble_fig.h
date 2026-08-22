@@ -28,6 +28,8 @@ enum class As11BleFigDecodeState : uint8_t {
     BufferUnavailable,
 };
 
+const char *as11_ble_fig_decode_state_name(As11BleFigDecodeState state);
+
 struct As11BleFigPacket {
     uint16_t vcid = 0;
     std::shared_ptr<const LargeByteBuffer> payload;

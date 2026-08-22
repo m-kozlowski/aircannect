@@ -833,7 +833,7 @@ void setup() {
     time_sync_service.initialize_timezone(config_service.data());
 
     if (!ble_runtime.begin()) {
-        Log::logf(CAT_RPC, LOG_ERROR, "[BLE] runtime init failed\n");
+        Log::logf(CAT_BLE, LOG_ERROR, "runtime init failed\n");
     }
 
     // Boot diagnostics

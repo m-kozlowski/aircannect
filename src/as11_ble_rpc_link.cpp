@@ -18,6 +18,7 @@ static constexpr const char *AS11_BLE_RX_UUID =
     "a6220003-35f1-4b20-afae-cb089d2044aa";
 static constexpr uint32_t AS11_BLE_SCANNER_WAIT_MS =
     AC_OXIMETRY_SENSOR_SCAN_MS + 1000;
+static constexpr TickType_t AS11_BLE_HANDOFF_WAIT = pdMS_TO_TICKS(5);
 
 bool copy_text(char *out, size_t out_size, const char *value) {
     if (!out || out_size == 0) return false;
@@ -160,7 +161,7 @@ RpcLinkSendResult As11BleRpcLink::send(RpcPayloadView payload) {
     portEXIT_CRITICAL(&mux_);
 #endif
 
-    if (!requests_.push(std::move(request))) {
+    if (!requests_.push(std::move(request), AS11_BLE_HANDOFF_WAIT)) {
 #if AC_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
 #endif
@@ -372,7 +373,7 @@ void As11BleRpcLink::task_loop() {
                 RpcLinkEvent event;
                 event.kind = RpcLinkEventKind::Disconnected;
                 event.detail = "ble_disconnected";
-                (void)events_.push(std::move(event));
+                (void)events_.push(std::move(event), AS11_BLE_HANDOFF_WAIT);
                 ready_seen = false;
             }
             disconnect_and_clear();
@@ -408,9 +409,10 @@ void As11BleRpcLink::task_loop() {
             set_status(As11BleLinkState::Ready);
             set_connected(true, client_->getRssi());
             set_authenticated(true);
-            Log::logf(CAT_RPC, LOG_INFO,
-                      "[BLE] AS11 session ready address=%s rssi=%d\n",
-                      config.address, client_->getRssi());
+            Log::logf(CAT_BLE, LOG_INFO,
+                      "AS11 session ready address=%s rssi=%d write=%s\n",
+                      config.address, client_->getRssi(),
+                      tx_write_without_response_ ? "command" : "request");
         }
 
         drain_notifications(true);
@@ -461,6 +463,7 @@ void As11BleRpcLink::release_client() {
 #if AC_BLE_ENABLED
     tx_ = nullptr;
     rx_ = nullptr;
+    tx_write_without_response_ = false;
     if (!client_ || client_->isConnected()) return;
 
     client_->deleteServices();
@@ -897,8 +900,8 @@ void As11BleRpcLink::note_disconnected(int reason) {
     status_.connected = false;
     status_.authenticated = false;
     portEXIT_CRITICAL(&mux_);
-    Log::logf(CAT_RPC, LOG_DEBUG,
-              "[BLE] AS11 disconnected reason=%d\n", reason);
+    Log::logf(CAT_BLE, LOG_DEBUG,
+              "AS11 disconnected reason=%d\n", reason);
 #else
     (void)reason;
 #endif
@@ -906,7 +909,10 @@ void As11BleRpcLink::note_disconnected(int reason) {
 
 void As11BleRpcLink::note_notification(const uint8_t *data, size_t length) {
     RpcPayloadRef payload = copy_rpc_payload(data, length);
-    if (payload && notifications_.push(std::move(payload))) return;
+    if (payload && notifications_.push(std::move(payload),
+                                       AS11_BLE_HANDOFF_WAIT)) {
+        return;
+    }
 
 #if AC_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
@@ -1019,10 +1025,14 @@ bool As11BleRpcLink::discover_pipe() {
 
     tx_ = service->getCharacteristic(AS11_BLE_TX_UUID);
     rx_ = service->getCharacteristic(AS11_BLE_RX_UUID);
-    if (!tx_ || !rx_ || !tx_->canWrite() || !rx_->canNotify()) {
+    const bool tx_writable = tx_ &&
+        (tx_->canWrite() || tx_->canWriteNoResponse());
+
+    if (!tx_writable || !rx_ || !rx_->canNotify()) {
         set_status(As11BleLinkState::Backoff, "gatt_pipe_missing");
         return false;
     }
+    tx_write_without_response_ = tx_->canWriteNoResponse();
 
     const bool subscribed = rx_->subscribe(
         true,
@@ -1160,11 +1170,27 @@ bool As11BleRpcLink::write_fig(uint16_t vcid,
 
     size_t chunk_size = client_->getMTU();
     chunk_size = chunk_size > 3 ? chunk_size - 3 : 20;
+    const size_t chunk_count =
+        (packet->size() + chunk_size - 1) / chunk_size;
+    const bool request_response = !tx_write_without_response_;
+
     for (size_t offset = 0; offset < packet->size();
-         offset += chunk_size) {
+        offset += chunk_size) {
         const size_t remaining = packet->size() - offset;
         const size_t count = remaining < chunk_size ? remaining : chunk_size;
-        if (!tx_->writeValue(packet->data() + offset, count, true)) {
+
+        if (!tx_->writeValue(packet->data() + offset, count,
+                             request_response)) {
+            Log::logf(
+                CAT_BLE, LOG_WARN,
+                "GATT write failed vcid=0x%04x chunk=%u/%u bytes=%u "
+                "mtu=%u connected=%s\n",
+                static_cast<unsigned>(vcid),
+                static_cast<unsigned>(offset / chunk_size + 1),
+                static_cast<unsigned>(chunk_count),
+                static_cast<unsigned>(count),
+                static_cast<unsigned>(client_->getMTU()),
+                client_->isConnected() ? "yes" : "no");
             return false;
         }
     }
@@ -1195,7 +1221,7 @@ void As11BleRpcLink::drain_notifications(bool publish_application) {
                 status_.framing_errors++;
                 portEXIT_CRITICAL(&mux_);
 #endif
-                publish_error("fig_decode_error");
+                publish_error(as11_ble_fig_decode_state_name(state));
                 continue;
             }
             if (publish_application) publish_packet(packet);
@@ -1225,14 +1251,19 @@ void As11BleRpcLink::publish_packet(const As11BleFigPacket &packet) {
     RpcLinkEvent event;
     event.kind = RpcLinkEventKind::Payload;
     event.payload = std::move(payload);
-    if (!events_.push(std::move(event))) publish_error("event_queue_full");
+    if (!events_.push(std::move(event), AS11_BLE_HANDOFF_WAIT)) {
+        publish_error("event_queue_full");
+    }
 }
 
 void As11BleRpcLink::publish_error(const char *detail) {
+    const char *error = detail ? detail : "ble_link_error";
+    Log::logf(CAT_BLE, LOG_WARN, "link error=%s\n", error);
+
     RpcLinkEvent event;
     event.kind = RpcLinkEventKind::FramingError;
-    event.detail = detail ? detail : "ble_link_error";
-    (void)events_.push(std::move(event));
+    event.detail = error;
+    (void)events_.push(std::move(event), AS11_BLE_HANDOFF_WAIT);
 }
 
 As11BleRpcLink::Configuration As11BleRpcLink::configuration() const {

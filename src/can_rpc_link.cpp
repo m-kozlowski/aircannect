@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "board.h"
+#include "debug_log.h"
 #include "hex_util.h"
 
 namespace aircannect {
@@ -258,9 +259,12 @@ void CanRpcLink::poll_debug_log_rx_filter() {
 }
 
 void CanRpcLink::push_link_error(const char *detail) {
+    const char *error = detail ? detail : "framing_error";
+    Log::logf(CAT_CAN, LOG_WARN, "[RPC][FRAMING] %s\n", error);
+
     RpcLinkEvent event;
     event.kind = RpcLinkEventKind::FramingError;
-    event.detail = detail ? detail : "framing_error";
+    event.detail = error;
     (void)link_events_.push(std::move(event));
 }
 

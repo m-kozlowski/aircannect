@@ -34,6 +34,19 @@ void put_le32(uint8_t *data, uint32_t value) {
 
 }  // namespace
 
+const char *as11_ble_fig_decode_state_name(As11BleFigDecodeState state) {
+    switch (state) {
+        case As11BleFigDecodeState::NeedMore: return "need_more";
+        case As11BleFigDecodeState::Packet: return "packet";
+        case As11BleFigDecodeState::HeaderCrcError: return "header_crc_error";
+        case As11BleFigDecodeState::PayloadCrcError: return "payload_crc_error";
+        case As11BleFigDecodeState::PayloadTooLarge: return "payload_too_large";
+        case As11BleFigDecodeState::BufferUnavailable:
+            return "buffer_unavailable";
+    }
+    return "unknown";
+}
+
 std::unique_ptr<LargeByteBuffer> As11BleFigCodec::encode(
     uint16_t vcid,
     const uint8_t *payload,

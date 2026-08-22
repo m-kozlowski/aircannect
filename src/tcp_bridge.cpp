@@ -493,7 +493,7 @@ bool TcpBridge::accept_rpc_byte(size_t idx, uint8_t value,
 
     if (!rpc.submit_raw_payload(payload, RpcSource::Tcp)) {
         Log::logf(CAT_TCP, LOG_WARN,
-                  "[CLIENT %u] CAN queue rejected payload\n",
+                  "[CLIENT %u] RPC transport rejected payload\n",
                   static_cast<unsigned>(idx));
     } else if (raw_request_observer_) {
         raw_request_observer_(raw_request_observer_context_, payload.data(),

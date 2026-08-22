@@ -29,7 +29,8 @@ enum ConfigLogCategoryIndex : int16_t {
     CONFIG_LOG_REPORT = 11,
     CONFIG_LOG_EDF = 12,
     CONFIG_LOG_CONFIG = 13,
-    CONFIG_LOG_COUNT = 14,
+    CONFIG_LOG_BLE = 14,
+    CONFIG_LOG_COUNT = 15,
 };
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
@@ -68,6 +69,8 @@ static_assert(static_cast<int>(CONFIG_LOG_EDF) == static_cast<int>(CAT_EDF),
               "log category order drift");
 static_assert(static_cast<int>(CONFIG_LOG_CONFIG) ==
                   static_cast<int>(CAT_CONFIG),
+              "log category order drift");
+static_assert(static_cast<int>(CONFIG_LOG_BLE) == static_cast<int>(CAT_BLE),
               "log category order drift");
 #endif
 
@@ -215,18 +218,19 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CFG_OFFSET(file_log_enabled)},
     AC_LOG_FIELD("log_general", 100, "General", CONFIG_LOG_GENERAL),
     AC_LOG_FIELD("log_can", 101, "CAN", CONFIG_LOG_CAN),
-    AC_LOG_FIELD("log_rpc", 102, "RPC", CONFIG_LOG_RPC),
-    AC_LOG_FIELD("log_tcp", 103, "TCP", CONFIG_LOG_TCP),
-    AC_LOG_FIELD("log_cli", 104, "CLI", CONFIG_LOG_CLI),
-    AC_LOG_FIELD("log_wifi", 105, "Wi-Fi", CONFIG_LOG_WIFI),
-    AC_LOG_FIELD("log_stream", 106, "Stream", CONFIG_LOG_STREAM),
-    AC_LOG_FIELD("log_ota", 107, "OTA", CONFIG_LOG_OTA),
-    AC_LOG_FIELD("log_oxi", 108, "Oximetry", CONFIG_LOG_OXI),
-    AC_LOG_FIELD("log_storage", 109, "Storage", CONFIG_LOG_STORAGE),
-    AC_LOG_FIELD("log_export", 110, "Export", CONFIG_LOG_EXPORT),
-    AC_LOG_FIELD("log_report", 111, "Report", CONFIG_LOG_REPORT),
-    AC_LOG_FIELD("log_edf", 112, "EDF", CONFIG_LOG_EDF),
-    AC_LOG_FIELD("log_config", 113, "Config", CONFIG_LOG_CONFIG),
+    AC_LOG_FIELD("log_ble", 102, "BLE", CONFIG_LOG_BLE),
+    AC_LOG_FIELD("log_rpc", 103, "RPC", CONFIG_LOG_RPC),
+    AC_LOG_FIELD("log_tcp", 104, "TCP", CONFIG_LOG_TCP),
+    AC_LOG_FIELD("log_cli", 105, "CLI", CONFIG_LOG_CLI),
+    AC_LOG_FIELD("log_wifi", 106, "Wi-Fi", CONFIG_LOG_WIFI),
+    AC_LOG_FIELD("log_stream", 107, "Stream", CONFIG_LOG_STREAM),
+    AC_LOG_FIELD("log_ota", 108, "OTA", CONFIG_LOG_OTA),
+    AC_LOG_FIELD("log_oxi", 109, "Oximetry", CONFIG_LOG_OXI),
+    AC_LOG_FIELD("log_storage", 110, "Storage", CONFIG_LOG_STORAGE),
+    AC_LOG_FIELD("log_export", 111, "Export", CONFIG_LOG_EXPORT),
+    AC_LOG_FIELD("log_report", 112, "Report", CONFIG_LOG_REPORT),
+    AC_LOG_FIELD("log_edf", 113, "EDF", CONFIG_LOG_EDF),
+    AC_LOG_FIELD("log_config", 114, "Config", CONFIG_LOG_CONFIG),
 
     {"tz", AppConfigFieldId::Timezone, AppConfigGroup::Time, 10,
      AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_TIMEZONE,
