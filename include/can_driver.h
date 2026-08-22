@@ -73,6 +73,7 @@ public:
     void set_ack_gap_expected(bool expected) {
         ack_gap_expected_ = expected;
     }
+    void set_peer_absence_expected(bool expected);
     bool controller_status(CanControllerStatus &out) const;
     const CanDriverStats &stats() const { return stats_; }
     static const char *state_name(twai_state_t state);
@@ -89,6 +90,7 @@ private:
     void schedule_recovery_retry(uint32_t delay_ms);
     bool start_controller();
     void handle_alerts(uint32_t alerts);
+    bool reset_after_absence_probe();
 
     void pump_tx_queue(uint32_t alerts);
 
@@ -108,6 +110,8 @@ private:
     bool installed_ = false;
     bool debug_log_rx_enabled_ = true;
     bool ack_gap_expected_ = false;
+    bool peer_absence_expected_ = false;
+    bool peer_absence_tx_failed_ = false;
     CanDriverStats stats_ = {};
 };
 

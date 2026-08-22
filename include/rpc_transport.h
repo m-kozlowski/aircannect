@@ -155,6 +155,7 @@ private:
                                RpcCompletionCause cause =
                                    RpcCompletionCause::Cancelled);
     void cancel_all_requests(const char *reason);
+    void set_presence_probe_active(bool active);
     void remember_retired_addressed_request(
         const PendingRequest &request,
         RpcCompletionCause cause,
@@ -252,6 +253,7 @@ private:
     bool raw_rpc_forwarding_enabled_ = false;
     bool quiesce_mode_ = false;
     bool as11_unavailable_ = false;
+    bool presence_probe_active_ = false;
 
     uint32_t background_rx_pressure_until_ms_ = 0;
     uint32_t observed_rx_pressure_events_ = 0;

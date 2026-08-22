@@ -32,6 +32,10 @@ bool RpcLinkSelector::take_event(RpcLinkEvent &event) {
 
 void RpcLinkSelector::reset() { active_link().reset(); }
 
+void RpcLinkSelector::set_peer_absence_expected(bool expected) {
+    active_link().set_peer_absence_expected(expected);
+}
+
 void RpcLinkSelector::set_controlled_disconnect(bool requested) {
     active_link().set_controlled_disconnect(requested);
 }
@@ -55,6 +59,7 @@ bool RpcLinkSelector::select(As11Transport transport) {
         return transport != As11Transport::Ble || ble_started_;
     }
 
+    active_link().set_peer_absence_expected(false);
     active_link().reset();
     selected_ = transport;
     switch_event_pending_ = true;

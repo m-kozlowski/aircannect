@@ -263,6 +263,21 @@ bool CanDriver::enqueue_tx(const RawCanFrame &frame) {
     return true;
 }
 
+void CanDriver::set_peer_absence_expected(bool expected) {
+    if (expected == peer_absence_expected_) return;
+
+    if (expected) {
+        peer_absence_expected_ = true;
+        peer_absence_tx_failed_ = false;
+        return;
+    }
+
+    peer_absence_expected_ = false;
+    const bool reset_required = peer_absence_tx_failed_;
+    peer_absence_tx_failed_ = false;
+    if (reset_required) (void)reset_after_absence_probe();
+}
+
 void CanDriver::pump_tx_queue(uint32_t alerts) {
     const uint32_t now = millis();
     if (alerts & TWAI_ALERT_TX_SUCCESS) {
@@ -276,7 +291,8 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
     }
 
     if (alerts & TWAI_ALERT_TX_FAILED) {
-        if (!ack_gap_expected_) {
+        if (peer_absence_expected_) peer_absence_tx_failed_ = true;
+        if (!ack_gap_expected_ && !peer_absence_expected_) {
             stats_.tx_failures++;
             recover_or_restart("CAN TX failed");
             return;
@@ -291,7 +307,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
 
     const bool busy_before = status.msgs_to_tx > 0 || tx_queue_.count() > 0;
     if (busy_before && !last_tx_success_ms_) last_tx_success_ms_ = now;
-    if (busy_before && !ack_gap_expected_ &&
+    if (busy_before && !ack_gap_expected_ && !peer_absence_expected_ &&
         static_cast<int32_t>(now - last_tx_success_ms_) >= 100) {
         Log::logf(CAT_CAN, LOG_WARN, "TX confirmation timeout\n");
         stats_.tx_failures++;
@@ -307,6 +323,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
         msg.identifier = frame.id;
         msg.extd = frame.extended ? 1 : 0;
         msg.rtr = frame.remote ? 1 : 0;
+        msg.ss = peer_absence_expected_ ? 1 : 0;
         msg.data_length_code = frame.len;
         memcpy(msg.data, frame.data, frame.len);
 
@@ -412,11 +429,15 @@ bool CanDriver::set_debug_log_rx_enabled(bool enabled) {
 }
 
 void CanDriver::handle_alerts(uint32_t alerts) {
-    if (alerts & TWAI_ALERT_BUS_ERROR) stats_.bus_error_alerts++;
+    const bool expected_ack_gap =
+        ack_gap_expected_ || peer_absence_expected_;
+    if ((alerts & TWAI_ALERT_BUS_ERROR) && !expected_ack_gap) {
+        stats_.bus_error_alerts++;
+    }
     if (alerts & TWAI_ALERT_RX_QUEUE_FULL) stats_.rx_queue_full_alerts++;
 
     uint32_t visible_alerts = alerts & ~TWAI_ALERT_TX_SUCCESS;
-    if (ack_gap_expected_) {
+    if (expected_ack_gap) {
         visible_alerts &= ~(TWAI_ALERT_TX_FAILED |
                             TWAI_ALERT_ERR_PASS |
                             TWAI_ALERT_ERR_ACTIVE |
@@ -503,6 +524,35 @@ void CanDriver::handle_alerts(uint32_t alerts) {
                   detail);
     }
     if (visible_alerts & TWAI_ALERT_BUS_ERROR) last_bus_error_log_ms_ = millis();
+}
+
+bool CanDriver::reset_after_absence_probe() {
+    if (!installed_ || recovery_active_) return false;
+
+    twai_status_info_t status = {};
+    const esp_err_t status_error = twai_get_status_info(&status);
+    if (status_error != ESP_OK) {
+        return recover_or_restart("CAN presence probe status failed");
+    }
+    if (status.state != TWAI_STATE_RUNNING) {
+        return recover_or_restart("CAN presence probe left controller unhealthy");
+    }
+
+    tx_queue_.clear();
+    (void)twai_clear_transmit_queue();
+
+    const esp_err_t stop_error = twai_stop();
+    if (stop_error != ESP_OK) {
+        return recover_or_restart("CAN presence probe reset failed");
+    }
+    if (!start_controller()) {
+        return recover_or_restart("CAN presence probe restart failed");
+    }
+
+    last_tx_success_ms_ = 0;
+    Log::logf(CAT_CAN, LOG_DEBUG,
+              "presence probe completed without CAN ACK\n");
+    return true;
 }
 
 bool CanDriver::recover_or_restart(const char *reason) {
@@ -642,6 +692,8 @@ bool CanDriver::reinstall_controller() {
 
 void CanDriver::clear_recovery_queues() {
     ack_gap_expected_ = false;
+    peer_absence_expected_ = false;
+    peer_absence_tx_failed_ = false;
 
     if (installed_) {
         (void)twai_clear_transmit_queue();

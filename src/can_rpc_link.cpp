@@ -106,6 +106,10 @@ void CanRpcLink::reset() {
     link_events_.clear();
 }
 
+void CanRpcLink::set_peer_absence_expected(bool expected) {
+    can_.set_peer_absence_expected(expected);
+}
+
 RpcApplicationLinkStatus CanRpcLink::status() const {
     RpcApplicationLinkStatus out;
     out.ready = application_enabled_ && physical_enabled();

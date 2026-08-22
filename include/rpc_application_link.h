@@ -45,6 +45,9 @@ public:
     virtual RpcLinkSendResult send(RpcPayloadView payload) = 0;
     virtual bool take_event(RpcLinkEvent &event) = 0;
     virtual void reset() = 0;
+    virtual void set_peer_absence_expected(bool expected) {
+        (void)expected;
+    }
     virtual void set_controlled_disconnect(bool requested) {
         (void)requested;
     }

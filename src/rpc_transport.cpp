@@ -547,7 +547,15 @@ void RpcTransport::cancel_pending_request(const char *reason) {
                      RpcCompletionCause::Cancelled, RpcPayloadRef(),
                      reason ? reason : "cancelled", false,
                      request_completions_);
+    set_presence_probe_active(false);
     pending_ = {};
+}
+
+void RpcTransport::set_presence_probe_active(bool active) {
+    if (active == presence_probe_active_) return;
+
+    presence_probe_active_ = active;
+    link_.set_peer_absence_expected(active);
 }
 
 void RpcTransport::remember_retired_addressed_request(
@@ -796,8 +804,11 @@ void RpcTransport::dispatch_next_request() {
     const std::string payload = build_rpc_request(request.method,
                                                   request.params_json,
                                                   request.id);
+    set_presence_probe_active(
+        request.admission == RpcRequestAdmission::PresenceProbe);
     const RpcLinkSendResult send_result = send_payload(payload);
     if (send_result != RpcLinkSendResult::Accepted) {
+        set_presence_probe_active(false);
         if (!dispatch_retry_active_) {
             dispatch_retry_ = request;
             dispatch_retry_active_ = true;
@@ -875,6 +886,7 @@ void RpcTransport::check_pending_timeout() {
                      OperationOutcome::failed(), RpcCompletionCause::Timeout,
                      RpcPayloadRef(), "timeout", false, request_completions_);
 
+    set_presence_probe_active(false);
     pending_ = {};
 }
 
@@ -996,6 +1008,7 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
                     response_error, request_completions_,
                     pending_.dispatch_utc_ms, response_epoch_ms,
                     pending_.dispatch_ms, response_ms);
+                set_presence_probe_active(false);
                 pending_ = {};
                 if (addressed_request) break;
                 if (!emit_matched_response(response_source)) break;

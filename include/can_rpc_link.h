@@ -58,6 +58,7 @@ public:
     RpcLinkSendResult send(RpcPayloadView payload) override;
     bool take_event(RpcLinkEvent &event) override;
     void reset() override;
+    void set_peer_absence_expected(bool expected) override;
     RpcApplicationLinkStatus status() const override;
     const char *name() const override { return "can"; }
     void set_application_enabled(bool enabled);
