@@ -395,9 +395,14 @@ struct ReportTask::Runtime {
             return out;
         }
 
+        bool cached_without_pair = false;
         if (lock(0)) {
-            const bool cached =
-                payload_cache.describe_ready(out.artifact, out.descriptor);
+            const bool cached = payload_cache.describe_ready(
+                out.artifact, out.descriptor);
+            if (!cached && kind == ReportArtifactKind::RangeTile) {
+                cached_without_pair = payload_cache.describe(
+                    out.artifact, out.descriptor);
+            }
             unlock();
             if (cached) {
                 out.state = ReportArtifactQueryState::Ready;
@@ -406,9 +411,21 @@ struct ReportTask::Runtime {
         }
 
         ReportArtifactAvailability availability;
+        if (cached_without_pair && published->artifact_index) {
+            const ReportArtifactKey result = ReportArtifactKey::result(
+                sleep_day, out.artifact.source_revision);
+            ReportArtifactAvailability pair;
+            if (published->artifact_index->availability(result, pair) &&
+                pair.pair_ready()) {
+                out.state = ReportArtifactQueryState::Ready;
+                return out;
+            }
+        }
+
         if (!published->artifact_index ||
             !published->artifact_index->availability(
                 out.artifact, availability)) {
+            out.descriptor = {};
             out.state = ReportArtifactQueryState::ArtifactMissing;
             return out;
         }

@@ -50,6 +50,8 @@ public:
 
     bool can_hold(const ReportArtifactDescriptor &artifact) const;
     bool contains(const ReportArtifactDescriptor &artifact) const;
+    bool describe(const ReportArtifactKey &artifact,
+                  ReportArtifactDescriptor &out) const;
     bool describe_ready(const ReportArtifactKey &artifact,
                         ReportArtifactDescriptor &out) const;
     std::shared_ptr<const LargeByteBuffer> find(

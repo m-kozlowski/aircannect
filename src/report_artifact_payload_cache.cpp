@@ -107,7 +107,7 @@ bool ReportArtifactPayloadCache::contains(
     return find_exact(artifact) != SIZE_MAX;
 }
 
-bool ReportArtifactPayloadCache::describe_ready(
+bool ReportArtifactPayloadCache::describe(
     const ReportArtifactKey &artifact,
     ReportArtifactDescriptor &out) const {
     out = {};
@@ -115,6 +115,15 @@ bool ReportArtifactPayloadCache::describe_ready(
 
     const size_t requested = find_key(artifact);
     if (requested == SIZE_MAX) return false;
+
+    out = entries_[requested].artifact;
+    return true;
+}
+
+bool ReportArtifactPayloadCache::describe_ready(
+    const ReportArtifactKey &artifact,
+    ReportArtifactDescriptor &out) const {
+    if (!describe(artifact, out)) return false;
 
     const ReportArtifactKey result = ReportArtifactKey::result(
         artifact.sleep_day, artifact.source_revision);
@@ -124,7 +133,6 @@ bool ReportArtifactPayloadCache::describe_ready(
         return false;
     }
 
-    out = entries_[requested].artifact;
     return true;
 }
 
