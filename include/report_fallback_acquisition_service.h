@@ -94,7 +94,7 @@ private:
 
     struct SeriesCoverage {
         ReportSourceId source = ReportSourceId::Summary;
-        ReportSignalId signal = ReportSignalId::Count;
+        ReportSignalId signal = ReportSignalId::Invalid;
         NightCatalogTimeRange range;
     };
 

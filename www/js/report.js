@@ -60,6 +60,138 @@
       pickReportNight(nights[next].id);
     }
 
+    function selectLatestReportNight() {
+      const nights = reportNightsNewestFirst();
+      if (nights.length) pickReportNight(nights[0].id);
+    }
+
+    function loadReportChartPreferences() {
+      const known = reportChartDefs.map((definition) => definition.key);
+      const knownSet = new Set(known);
+      let stored = null;
+      try {
+        stored = JSON.parse(localStorage.getItem(
+          REPORT_CHART_PREFERENCES_KEY) || "null");
+      } catch (error) {
+        stored = null;
+      }
+
+      const order = [];
+      const seen = new Set();
+      if (stored && Array.isArray(stored.order)) {
+        stored.order.forEach((key) => {
+          if (!knownSet.has(key) || seen.has(key)) return;
+          seen.add(key);
+          order.push(key);
+        });
+      }
+      known.forEach((key) => {
+        if (!seen.has(key)) order.push(key);
+      });
+
+      const collapsed = new Set();
+      if (stored && Array.isArray(stored.collapsed)) {
+        stored.collapsed.forEach((key) => {
+          if (knownSet.has(key)) collapsed.add(key);
+        });
+      }
+      reportChartPreferences = {order, collapsed};
+    }
+
+    function saveReportChartPreferences() {
+      try {
+        localStorage.setItem(REPORT_CHART_PREFERENCES_KEY, JSON.stringify({
+          order: reportChartPreferences.order,
+          collapsed: Array.from(reportChartPreferences.collapsed),
+        }));
+      } catch (error) {
+        // Browser storage can be disabled; preferences remain valid in memory.
+      }
+    }
+
+    function visibleReportChartOrder() {
+      const definitions = new Map(reportChartDefs.map((definition) =>
+        [definition.key, definition]));
+      return reportChartPreferences.order.filter((key) => {
+        const definition = definitions.get(key);
+        if (!definition) return false;
+        if (definition.type === "events") {
+          return !!((reportResult && reportResult.events_available) ||
+            reportBaseEvents.length);
+        }
+        if (!definition.optional) return true;
+
+        const series = definition.series || [definition];
+        return series.some((item) =>
+          (reportSeries[item.key] || []).length > 0 ||
+          (reportBaseSeries[item.key] || []).length > 0);
+      });
+    }
+
+    function moveReportChart(key, delta) {
+      const visible = visibleReportChartOrder();
+      const visibleIndex = visible.indexOf(key);
+      const targetIndex = visibleIndex + delta;
+      if (visibleIndex < 0 || targetIndex < 0 ||
+          targetIndex >= visible.length) return;
+
+      const order = reportChartPreferences.order;
+      const index = order.indexOf(key);
+      const target = order.indexOf(visible[targetIndex]);
+      [order[index], order[target]] = [order[target], order[index]];
+      saveReportChartPreferences();
+      renderReportCharts();
+    }
+
+    function toggleReportChartCollapsed(key) {
+      if (reportChartPreferences.collapsed.has(key)) {
+        reportChartPreferences.collapsed.delete(key);
+      } else {
+        reportChartPreferences.collapsed.add(key);
+      }
+      saveReportChartPreferences();
+      renderReportCharts();
+    }
+
+    function appendReportChartActions(title, key) {
+      const actions = document.createElement("span");
+      actions.className = "report-chart-actions";
+      const visible = visibleReportChartOrder();
+      const index = visible.indexOf(key);
+
+      const up = document.createElement("button");
+      up.className = "btn report-chart-action";
+      up.type = "button";
+      up.title = "Move chart up";
+      up.textContent = "\u2191";
+      up.disabled = index <= 0;
+      up.onclick = () => moveReportChart(key, -1);
+      actions.appendChild(up);
+
+      const down = document.createElement("button");
+      down.className = "btn report-chart-action";
+      down.type = "button";
+      down.title = "Move chart down";
+      down.textContent = "\u2193";
+      down.disabled = index < 0 ||
+        index >= visible.length - 1;
+      down.onclick = () => moveReportChart(key, 1);
+      actions.appendChild(down);
+
+      const collapsed = reportChartPreferences.collapsed.has(key);
+      const toggle = document.createElement("button");
+      toggle.className = "btn report-chart-action";
+      toggle.type = "button";
+      toggle.title = collapsed ? "Expand chart" : "Collapse chart";
+      toggle.textContent = collapsed ? "\u25b8" : "\u25be";
+      toggle.onclick = () => toggleReportChartCollapsed(key);
+      actions.appendChild(toggle);
+
+      title.appendChild(actions);
+    }
+
+    loadReportChartPreferences();
+
     function toggleReportCalendar() {
       const pop = document.getElementById("reportCalPop");
       if (!pop) return;
@@ -1154,7 +1286,7 @@
       }
     }
 
-    function renderReportEventFlags(container, range, ranges) {
+    function renderReportEventFlags(container, range, ranges, definition) {
       // Stay visible if the night has events; do not vanish on an event-free zoom.
       if (!((reportResult && reportResult.events_available) ||
             reportBaseEvents.length)) {
@@ -1165,7 +1297,7 @@
       const title = document.createElement("div");
       title.className = "report-chart-title";
       const name = document.createElement("span");
-      name.textContent = "Event Flags";
+      name.textContent = definition.title;
       title.appendChild(name);
       const readout = document.createElement("span");
       readout.className = "readout";
@@ -1183,7 +1315,14 @@
         legend.appendChild(tag);
       });
       title.appendChild(legend);
+      appendReportChartActions(title, definition.key);
       card.appendChild(title);
+      if (reportChartPreferences.collapsed.has(definition.key)) {
+        card.classList.add("collapsed");
+        container.appendChild(card);
+        return;
+      }
+
       const canvas = document.createElementNS(SVG_NS, "svg");
       canvas.style.height = "120px";
       card.appendChild(canvas);
@@ -1239,9 +1378,16 @@
         if (s && s.name) lowResByName[s.name] = !!s.low_res;
       });
 
-      renderReportEventFlags(container, range, sessionRanges);
+      const chartByKey = new Map(reportChartDefs.map((definition) =>
+        [definition.key, definition]));
+      reportChartPreferences.order.forEach((key) => {
+        const def = chartByKey.get(key);
+        if (!def) return;
+        if (def.type === "events") {
+          renderReportEventFlags(container, range, sessionRanges, def);
+          return;
+        }
 
-      reportChartDefs.forEach((def) => {
         const seriesDefs = def.series || [def];
         const seriesList = seriesDefs.map((seriesDef) => ({
           label: seriesDef.label || def.title,
@@ -1250,6 +1396,8 @@
             .sort((a, b) => a.t - b.t),
         })).filter((series) => series.points.length > 0);
         if (!seriesList.length) {
+          if (def.optional) return;
+
           // Expected signal with no data: high-res aged out on the device
           // (best-effort night) or not yet backfilled. Show a labelled
           // placeholder instead of silently dropping the chart.
@@ -1267,7 +1415,11 @@
               ? "backfilling..."
               : "not retained for this night";
           ctitle.appendChild(cnote);
+          appendReportChartActions(ctitle, def.key);
           card.appendChild(ctitle);
+          if (reportChartPreferences.collapsed.has(def.key)) {
+            card.classList.add("collapsed");
+          }
           container.appendChild(card);
           return;
         }
@@ -1317,7 +1469,14 @@
           legend.appendChild(unit);
         }
         title.appendChild(legend);
+        appendReportChartActions(title, def.key);
         card.appendChild(title);
+        if (reportChartPreferences.collapsed.has(def.key)) {
+          card.classList.add("collapsed");
+          container.appendChild(card);
+          return;
+        }
+
         const canvas = document.createElementNS(SVG_NS, "svg");
         card.appendChild(canvas);
         container.appendChild(card);
@@ -1360,9 +1519,11 @@
         nights.findIndex((night) => night === selected) : -1;
       const prevBtn = document.getElementById("reportPrevNight");
       const nextBtn = document.getElementById("reportNextNight");
+      const latestBtn = document.getElementById("reportLatestNight");
       if (prevBtn) prevBtn.disabled = !(selIndex >= 0 &&
         selIndex < nights.length - 1);
       if (nextBtn) nextBtn.disabled = !(selIndex > 0);
+      if (latestBtn) latestBtn.disabled = !(selIndex > 0);
       const pop = document.getElementById("reportCalPop");
       if (pop && pop.classList.contains("open")) renderReportCalendar();
       const displayable = reportResult &&
@@ -1533,7 +1694,66 @@
       return url;
     }
 
-    async function pollReportPlot(url, active, maxAttempts, delay, signal) {
+    async function readReportPlotResponse(response, onProgress) {
+      if (!response.body || !response.body.getReader) {
+        return decodeReportPlotBinary(await response.arrayBuffer());
+      }
+
+      const expectedLength = Number(response.headers.get("Content-Length"));
+      let capacity = Number.isSafeInteger(expectedLength) && expectedLength > 0
+        ? expectedLength : 65536;
+      let bytes = new Uint8Array(capacity);
+      let received = 0;
+      let nextDecodeAt = 32768;
+      let publishedSeries = 0;
+      let publishedEvents = -1;
+      const reader = response.body.getReader();
+
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        if (!chunk.value || !chunk.value.byteLength) continue;
+
+        const needed = received + chunk.value.byteLength;
+        if (needed > bytes.byteLength) {
+          capacity = Math.max(needed, bytes.byteLength * 2);
+          const grown = new Uint8Array(capacity);
+          grown.set(bytes.subarray(0, received));
+          bytes = grown;
+        }
+        bytes.set(chunk.value, received);
+        received = needed;
+
+        if (!onProgress || received < nextDecodeAt) continue;
+        const decoded = decodeReportPlotBinary(bytes.buffer, received);
+        if (!decoded.valid) {
+          nextDecodeAt = Math.max(received + 32768, nextDecodeAt * 2);
+          continue;
+        }
+
+        const seriesCount = Object.keys(decoded.series).length;
+        if (seriesCount > publishedSeries ||
+            decoded.events.length !== publishedEvents) {
+          publishedSeries = seriesCount;
+          publishedEvents = decoded.events.length;
+          onProgress(decoded);
+          nextDecodeAt = received + 32768;
+        } else {
+          nextDecodeAt = Math.max(received + 32768, nextDecodeAt * 2);
+        }
+      }
+
+      if (Number.isSafeInteger(expectedLength) && expectedLength > 0 &&
+          received !== expectedLength) {
+        throw new Error("incomplete plot response");
+      }
+      const decoded = decodeReportPlotBinary(bytes.buffer, received);
+      if (onProgress && decoded.valid) onProgress(decoded);
+      return decoded;
+    }
+
+    async function pollReportPlot(url, active, maxAttempts, delay, signal,
+                                  onProgress) {
       return pollReportFetch({
         active,
         maxAttempts,
@@ -1549,13 +1769,17 @@
             return {done: true, value: cached};
           }
           if (response.status === 200) {
-            const decoded = decodeReportPlotBinary(
-              await response.arrayBuffer());
+            const revision = reportArtifactRevision(response);
+            const decoded = await readReportPlotResponse(
+              response,
+              onProgress
+                ? (partial) => onProgress(partial, revision)
+                : null);
             if (!decoded.valid) throw new Error("invalid plot response");
 
             const entry = {
               etag: response.headers.get("ETag") || "",
-              revision: reportArtifactRevision(response),
+              revision,
               decoded,
             };
             lruSet(reportPlotClientCache, url, entry,
@@ -1576,12 +1800,31 @@
 
     async function fetchReportPlot(token, nightId, revision, signal) {
       const url = reportPlotUrl(nightId);
+      const publishProgress = (decoded, responseRevision) => {
+        if (token !== reportLoadToken ||
+            (responseRevision && responseRevision !== revision)) {
+          return;
+        }
+        if (reportCurrentNightId !== String(nightId) ||
+            reportCurrentRevision !== String(revision)) {
+          activateReportBasePlot(nightId, revision, "",
+            decoded.series, decoded.events);
+        } else {
+          reportSeries = decoded.series;
+          reportEvents = decoded.events;
+          reportBaseSeries = reportSeries;
+          reportBaseEvents = reportEvents;
+        }
+        renderReportSummary();
+        renderReportCharts();
+      };
       const fetched = await pollReportPlot(
         url,
         () => token === reportLoadToken,
         REPORT_PLOT_POLL_MAX_ATTEMPTS,
         REPORT_POLL_DELAY_MS,
-        signal);
+        signal,
+        publishProgress);
       if (!fetched || token !== reportLoadToken) return false;
       if (fetched.revision && fetched.revision !== revision) {
         return "revision_changed";
@@ -1703,7 +1946,19 @@
               revision === reportCurrentRevision,
             REPORT_RANGE_POLL_MAX_ATTEMPTS,
             REPORT_RANGE_POLL_DELAY_MS,
-            controller.signal);
+            controller.signal,
+            (partial, responseRevision) => {
+              if (token !== reportRangeToken ||
+                  nightId !== reportCurrentNightId ||
+                  revision !== reportCurrentRevision ||
+                  (responseRevision && responseRevision !== revision)) {
+                return;
+              }
+              const merged = mergeReportPlots(plots.concat(partial));
+              reportSeries = merged.series;
+              reportEvents = merged.events;
+              renderReportCharts();
+            });
           if (!fetched || token !== reportRangeToken ||
               nightId !== reportCurrentNightId ||
               revision !== reportCurrentRevision) {
@@ -1836,9 +2091,15 @@
         "respiratory_rate",
         "ie_ratio",
         "flow_limitation",
+        null,
+        "snore",
+        "tidal_volume",
+        "spo2",
+        "pulse",
       ];
       const streamDetails = [];
       signalNames.forEach((name, index) => {
+        if (!name) return;
         const bit = 1 << index;
         if (!(requestedSignals & bit)) return;
 
@@ -1910,9 +2171,10 @@
     }
 
     // Decode PLOT_BIN v5, little-endian.
-    function decodeReportPlotBinary(buf) {
+    function decodeReportPlotBinary(buf, byteLength) {
       const decoded = {valid: false, events: [], series: {}};
-      const dv = new DataView(buf);
+      const length = byteLength == null ? buf.byteLength : byteLength;
+      const dv = new DataView(buf, 0, length);
       // Header: magic u32, version u16, flags u16, base_ms i64 (16 bytes).
       if (dv.byteLength < 16 || dv.getUint32(0, true) !== 0x42504341) {
         return decoded;

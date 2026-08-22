@@ -6,28 +6,34 @@
 namespace aircannect {
 
 enum class ReportSourceId : uint8_t {
-    Summary,
-    UsageEvents,
-    RespiratoryEvents,
-    TherapyOneMinute,
-    RespiratoryFlow6p25Hz,
-    MaskPressure6p25Hz,
-    InspiratoryPressure0p5Hz,
-    Leak0p5Hz,
+    Summary = 0,
+    UsageEvents = 1,
+    RespiratoryEvents = 2,
+    TherapyOneMinute = 3,
+    RespiratoryFlow6p25Hz = 4,
+    MaskPressure6p25Hz = 5,
+    InspiratoryPressure0p5Hz = 6,
+    Leak0p5Hz = 7,
+    OximetryOneSecond = 8,
 };
 
 enum class ReportSignalId : uint8_t {
-    Flow,
-    InspiratoryPressure,
-    ExpiratoryPressure,
-    Leak,
-    MinuteVentilation,
-    MaskPressure,
-    InspiratoryDuration,
-    RespiratoryRate,
-    IeRatio,
-    FlowLimitation,
-    Count,
+    Flow = 0,
+    InspiratoryPressure = 1,
+    ExpiratoryPressure = 2,
+    Leak = 3,
+    MinuteVentilation = 4,
+    MaskPressure = 5,
+    InspiratoryDuration = 6,
+    RespiratoryRate = 7,
+    IeRatio = 8,
+    FlowLimitation = 9,
+    Invalid = 10,
+    Snore = 11,
+    TidalVolume = 12,
+    SpO2 = 13,
+    Pulse = 14,
+    Count = 15,
 };
 
 enum ReportSourcePurpose : uint16_t {
@@ -40,6 +46,7 @@ enum ReportSourcePurpose : uint16_t {
 
 enum ReportSignalFlags : uint16_t {
     REPORT_SIGNAL_REQUIRED = 1u << 0,
+    REPORT_SIGNAL_NO_FALLBACK = 1u << 1,
 };
 
 enum ReportEventSourceFlag : uint8_t {

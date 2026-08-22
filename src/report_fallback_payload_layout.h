@@ -40,7 +40,7 @@ bool report_fallback_section_valid(const Section &section,
         if (section.record_count > SIZE_MAX / record_bytes) return false;
 
         return section.source == ReportSourceId::RespiratoryEvents &&
-               section.signal == ReportSignalId::Count &&
+               section.signal == ReportSignalId::Invalid &&
                section.event_mask != 0 &&
                section.sample_interval_ms == 0 &&
                (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&

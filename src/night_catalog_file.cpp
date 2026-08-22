@@ -110,7 +110,7 @@ bool signal_layout_valid(const NightCatalogSourceFile &file,
         static_cast<uint64_t>(layout.samples_per_record) * 2u;
     return report_signal_bit(layout.signal) != 0 &&
            static_cast<uint8_t>(layout.source) <=
-               static_cast<uint8_t>(ReportSourceId::Leak0p5Hz) &&
+               static_cast<uint8_t>(ReportSourceId::OximetryOneSecond) &&
            layout.samples_per_record > 0 &&
            layout.sample_interval_ms > 0 && signal_end <= file.record_size &&
            layout.scale.digital_max > layout.scale.digital_min &&
@@ -592,7 +592,8 @@ void encode_signal_layout(uint8_t *out,
 bool decode_signal_layout(const uint8_t *in,
                           EdfReportSignalLayout &layout) {
     if (in[0] >= static_cast<uint8_t>(ReportSignalId::Count) ||
-        in[1] > static_cast<uint8_t>(ReportSourceId::Leak0p5Hz) ||
+        in[0] == static_cast<uint8_t>(ReportSignalId::Invalid) ||
+        in[1] > static_cast<uint8_t>(ReportSourceId::OximetryOneSecond) ||
         in[2] > 1 || in[3] != 0 || get_le32(in + 28) != 0) {
         return false;
     }

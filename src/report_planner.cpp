@@ -732,6 +732,8 @@ bool fallback_signal_unavailable(const NightCatalog &catalog,
         return false;
     }
 
+    if ((definition->flags & REPORT_SIGNAL_NO_FALLBACK) != 0) return true;
+
     const ReportSourceId source = definition->fallback_source;
     return fallback_sections_complete(
         catalog,

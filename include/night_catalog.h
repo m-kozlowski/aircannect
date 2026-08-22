@@ -114,7 +114,7 @@ struct NightCatalogSourceFile {
 struct NightCatalogFallbackSection {
     ReportFallbackSectionKind kind = ReportFallbackSectionKind::Series;
     ReportSourceId source = ReportSourceId::Summary;
-    ReportSignalId signal = ReportSignalId::Count;
+    ReportSignalId signal = ReportSignalId::Invalid;
     uint8_t event_mask = 0;
     uint32_t payload_schema = 0;
     uint32_t record_count = 0;

@@ -146,7 +146,9 @@
     const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
     const REPORT_POLL_DELAY_MS = 300;
     const REPORT_RANGE_POLL_DELAY_MS = 250;
+    const REPORT_CHART_PREFERENCES_KEY = "aircannect.reportCharts.v1";
     const reportChartDefs = [
+      {key: "events", title: "Event Flags", type: "events"},
       {key: "flow", title: "Flow", color: "#8b5cf6", unit: "L/min"},
       {
         key: "pressure",
@@ -170,6 +172,13 @@
         color: "#a78bfa",
         unit: "L/min",
       },
+      {key: "snore", title: "Snore", color: "#38bdf8", unit: ""},
+      {
+        key: "tidal_volume",
+        title: "Tidal Volume",
+        color: "#c084fc",
+        unit: "L",
+      },
       {
         key: "mask_pressure",
         title: "Mask Pressure",
@@ -189,7 +198,25 @@
         unit: "/min",
       },
       {key: "ie_ratio", title: "I:E", color: "#f43f5e", unit: ""},
+      {
+        key: "spo2",
+        title: "SpO2",
+        color: "#22c55e",
+        unit: "%",
+        optional: true,
+      },
+      {
+        key: "pulse",
+        title: "Pulse",
+        color: "#ef4444",
+        unit: "bpm",
+        optional: true,
+      },
     ];
+    let reportChartPreferences = {
+      order: reportChartDefs.map((definition) => definition.key),
+      collapsed: new Set(),
+    };
     const reportEventDefs = [
       {code: 7, key: "CSR", label: "CSR", color: "#2563eb"},
       {code: 3, key: "CA", label: "Central Apnea", color: "#d946ef"},

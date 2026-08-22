@@ -42,6 +42,10 @@ const ReportSourceDef SOURCES[] = {
      "Leak0p5Hz",
      SCHEMA_RC03_SIGNAL_V1,
      REPORT_SOURCE_HIGH_RES_SERIES},
+    {ReportSourceId::OximetryOneSecond,
+     nullptr,
+     0,
+     REPORT_SOURCE_HIGH_RES_SERIES},
 };
 
 const ReportSignalDef SIGNALS[] = {
@@ -105,6 +109,30 @@ const ReportSignalDef SIGNALS[] = {
      ReportSourceId::TherapyOneMinute,
      ReportSourceId::TherapyOneMinute,
      0},
+    {ReportSignalId::Snore,
+     "snore",
+     "Snore",
+     ReportSourceId::TherapyOneMinute,
+     ReportSourceId::TherapyOneMinute,
+     REPORT_SIGNAL_NO_FALLBACK},
+    {ReportSignalId::TidalVolume,
+     "tidal_volume",
+     "Tidal Volume",
+     ReportSourceId::TherapyOneMinute,
+     ReportSourceId::TherapyOneMinute,
+     REPORT_SIGNAL_NO_FALLBACK},
+    {ReportSignalId::SpO2,
+     "spo2",
+     "SpO2",
+     ReportSourceId::OximetryOneSecond,
+     ReportSourceId::OximetryOneSecond,
+     REPORT_SIGNAL_NO_FALLBACK},
+    {ReportSignalId::Pulse,
+     "pulse",
+     "Pulse",
+     ReportSourceId::OximetryOneSecond,
+     ReportSourceId::OximetryOneSecond,
+     REPORT_SIGNAL_NO_FALLBACK},
 };
 
 }  // namespace
@@ -139,15 +167,19 @@ const char *report_signal_store_name(ReportSignalId id) {
 
 uint32_t report_signal_bit(ReportSignalId signal) {
     const uint8_t index = static_cast<uint8_t>(signal);
-    if (index >= static_cast<uint8_t>(ReportSignalId::Count) || index >= 32) {
+    if (index >= static_cast<uint8_t>(ReportSignalId::Count) || index >= 32 ||
+        signal == ReportSignalId::Invalid) {
         return 0;
     }
     return 1u << index;
 }
 
 uint32_t report_signal_mask_all() {
-    const uint8_t count = static_cast<uint8_t>(ReportSignalId::Count);
-    return count >= 32 ? UINT32_MAX : (1u << count) - 1u;
+    uint32_t mask = 0;
+    for (const ReportSignalDef &signal : SIGNALS) {
+        mask |= report_signal_bit(signal.id);
+    }
+    return mask;
 }
 
 uint32_t report_signal_required_mask() {

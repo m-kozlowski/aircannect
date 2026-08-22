@@ -110,7 +110,7 @@ bool sessions_valid(const NightCatalogTimeRange *sessions,
 
 bool valid_source(ReportSourceId source) {
     return static_cast<uint8_t>(source) <=
-        static_cast<uint8_t>(ReportSourceId::Leak0p5Hz);
+        static_cast<uint8_t>(ReportSourceId::OximetryOneSecond);
 }
 
 bool valid_series_source(ReportSourceId source) {
@@ -148,7 +148,7 @@ bool section_input_valid(const ReportFallbackSectionInput &section) {
         const size_t expected =
             static_cast<size_t>(section.record_count) * record_bytes;
         return valid_event_source(section.source) &&
-               section.signal == ReportSignalId::Count &&
+               section.signal == ReportSignalId::Invalid &&
                section.event_mask != 0 &&
                section.sample_interval_ms == 0 &&
                (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
@@ -231,7 +231,7 @@ bool decode_section(const uint8_t *in, ReportFallbackSection &section) {
     section.kind = static_cast<ReportFallbackSectionKind>(in[0]);
     section.source = static_cast<ReportSourceId>(in[1]);
     section.signal = signal == NO_SIGNAL
-        ? ReportSignalId::Count
+        ? ReportSignalId::Invalid
         : static_cast<ReportSignalId>(signal);
     section.event_mask = in[3];
     section.payload_schema = get_le32(in + 4);

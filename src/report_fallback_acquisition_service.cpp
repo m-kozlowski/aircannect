@@ -905,7 +905,7 @@ bool ReportFallbackAcquisitionService::append_event_sections() {
         ReportFallbackSectionInput section;
         section.kind = ReportFallbackSectionKind::Events;
         section.source = ReportSourceId::RespiratoryEvents;
-        section.signal = ReportSignalId::Count;
+        section.signal = ReportSignalId::Invalid;
         section.event_mask = REPORT_EVENT_ALL;
         section.payload_schema = REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1;
         section.record_count = selected;

@@ -17,7 +17,7 @@ static constexpr const char *REPORT_FALLBACK_ARTIFACT_ROOT =
 struct ReportFallbackSectionInput {
     ReportFallbackSectionKind kind = ReportFallbackSectionKind::Series;
     ReportSourceId source = ReportSourceId::Summary;
-    ReportSignalId signal = ReportSignalId::Count;
+    ReportSignalId signal = ReportSignalId::Invalid;
     uint8_t event_mask = 0;
     uint32_t payload_schema = 0;
     uint32_t record_count = 0;
@@ -30,7 +30,7 @@ struct ReportFallbackSectionInput {
 struct ReportFallbackSection {
     ReportFallbackSectionKind kind = ReportFallbackSectionKind::Series;
     ReportSourceId source = ReportSourceId::Summary;
-    ReportSignalId signal = ReportSignalId::Count;
+    ReportSignalId signal = ReportSignalId::Invalid;
     uint8_t event_mask = 0;
     uint32_t payload_schema = 0;
     uint32_t record_count = 0;

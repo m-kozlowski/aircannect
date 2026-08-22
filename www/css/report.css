@@ -191,21 +191,40 @@
 
     .report-chart-title {
       display: flex;
-      justify-content: space-between;
       gap: 12px;
-      align-items: baseline;
+      align-items: center;
+      flex-wrap: wrap;
       color: var(--muted);
       font-size: 12px;
     }
 
     .report-chart-title .value {
       color: var(--text);
+      margin-left: auto;
     }
 
     .report-chart-title .readout {
       color: var(--text);
       font-variant-numeric: tabular-nums;
       font-family: "SF Mono", Consolas, monospace;
+    }
+
+    .report-chart-actions {
+      display: inline-flex;
+      gap: 4px;
+      margin-left: 4px;
+    }
+
+    .report-chart-action {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      line-height: 1;
+    }
+
+    .report-chart.collapsed {
+      padding-top: 9px;
+      padding-bottom: 9px;
     }
 
     /* Placeholder for a signal with no data (high-res aged out, or backfilling). */
@@ -311,4 +330,3 @@
       margin-right: 4px;
       vertical-align: middle;
     }
-
