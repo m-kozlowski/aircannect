@@ -11,6 +11,7 @@
 #include "report_fallback_artifact.h"
 #include "report_night_artifact_builder.h"
 #include "report_payload_deflater.h"
+#include "report_plot_format.h"
 #include "string_util.h"
 
 #ifdef ARDUINO
@@ -54,9 +55,17 @@ enum class PayloadLoadStartResult : uint8_t {
     Rejected,
 };
 
+enum class PlotPayloadResolveResult : uint8_t {
+    Ready,
+    IndexPending,
+    SectionMissing,
+    Invalid,
+};
+
 struct ReportTaskCommand {
     ReportTaskCommandKind kind = ReportTaskCommandKind::Artifact;
     ReportArtifactKey artifact;
+    ReportArtifactPayloadDescriptor payload;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
     uint32_t generation = 0;
     bool current_offset_valid = false;
@@ -97,6 +106,13 @@ bool same_artifact_identity(const ReportArtifactKey &lhs,
     return lhs.sleep_day == rhs.sleep_day && lhs.kind == rhs.kind &&
            lhs.range_start_ms == rhs.range_start_ms &&
            lhs.range_end_ms == rhs.range_end_ms;
+}
+
+bool same_artifact_descriptor(const ReportArtifactDescriptor &lhs,
+                              const ReportArtifactDescriptor &rhs) {
+    return lhs.key == rhs.key && lhs.size == rhs.size &&
+           lhs.crc32 == rhs.crc32 &&
+           lhs.prefix_crc32 == rhs.prefix_crc32;
 }
 
 uint32_t next_background_retry_delay(uint8_t attempt,
@@ -157,12 +173,17 @@ struct ReportTask::Runtime {
 
         for (size_t i = 0; i < command_count; ++i) {
             ReportTaskCommand &queued = commands[i];
-            const bool artifact_command =
-                command.kind == ReportTaskCommandKind::Artifact ||
-                command.kind == ReportTaskCommandKind::CacheArtifact;
-            if (artifact_command &&
+            if (command.kind == ReportTaskCommandKind::Artifact &&
                 queued.kind == command.kind &&
                 same_artifact_identity(queued.artifact, command.artifact)) {
+                queued = command;
+                unlock();
+                wake();
+                return OperationAdmission::Accepted;
+            }
+            if (command.kind == ReportTaskCommandKind::CacheArtifact &&
+                queued.kind == command.kind &&
+                queued.payload == command.payload) {
                 queued = command;
                 unlock();
                 wake();
@@ -460,65 +481,122 @@ struct ReportTask::Runtime {
     }
 
     std::shared_ptr<const LargeByteBuffer> find_payload(
-        const ReportArtifactDescriptor &artifact) {
-        if (!artifact.valid() || !lock(20)) return {};
+        const ReportArtifactPayloadDescriptor &payload) {
+        if (!payload.valid() || !lock(20)) return {};
 
         std::shared_ptr<const LargeByteBuffer> out =
-            payload_cache.find(artifact);
+            payload_cache.find(payload);
         unlock();
         return out;
     }
 
     std::shared_ptr<const LargeByteBuffer> find_payload_if_present(
-        const ReportArtifactDescriptor &artifact) {
-        if (!artifact.valid() || !lock(0)) return {};
+        const ReportArtifactPayloadDescriptor &payload) {
+        if (!payload.valid() || !lock(0)) return {};
 
         std::shared_ptr<const LargeByteBuffer> out =
-            payload_cache.find_if_present(artifact);
+            payload_cache.find_if_present(payload);
         unlock();
         return out;
     }
 
     ReportArtifactPayloadSelection select_payload(
-        const ReportArtifactDescriptor &artifact,
+        const ReportArtifactPayloadDescriptor &payload,
         bool prefer_deflate) {
-        if (!artifact.valid() || !lock(20)) return {};
+        if (!payload.valid() || !lock(20)) return {};
 
         ReportArtifactPayloadSelection out =
-            payload_cache.select(artifact, prefer_deflate);
+            payload_cache.select(payload, prefer_deflate);
         unlock();
         return out;
     }
 
     ReportArtifactPayloadSelection select_payload_if_present(
-        const ReportArtifactDescriptor &artifact,
+        const ReportArtifactPayloadDescriptor &payload,
         bool prefer_deflate) {
-        if (!artifact.valid() || !lock(0)) return {};
+        if (!payload.valid() || !lock(0)) return {};
 
         ReportArtifactPayloadSelection out =
-            payload_cache.select_if_present(artifact, prefer_deflate);
+            payload_cache.select_if_present(payload, prefer_deflate);
         unlock();
         return out;
     }
 
-    bool payload_cached(const ReportArtifactDescriptor &artifact) const {
-        if (!artifact.valid() || !lock(20)) return false;
+    PlotPayloadResolveResult resolve_plot_payload(
+        const ReportArtifactDescriptor &artifact,
+        ReportPayloadKind payload_kind,
+        const char *series_name,
+        ReportArtifactPayloadDescriptor &out) {
+        out = {};
+        if (!artifact.valid() ||
+            artifact.key.kind == ReportArtifactKind::Result ||
+            artifact.size < PLOT_INDEX_PREFIX_BYTES ||
+            (payload_kind != ReportPayloadKind::PlotIndex &&
+             payload_kind != ReportPayloadKind::PlotEvents &&
+             payload_kind != ReportPayloadKind::PlotSeries) ||
+            (payload_kind == ReportPayloadKind::PlotSeries &&
+             (!series_name || !series_name[0]))) {
+            return PlotPayloadResolveResult::Invalid;
+        }
 
-        const bool cached = payload_cache.contains(artifact);
+        ReportArtifactPayloadDescriptor index;
+        index.artifact = artifact;
+        index.kind = ReportPayloadKind::PlotIndex;
+        index.size = PLOT_INDEX_PREFIX_BYTES;
+        index.crc32 = artifact.prefix_crc32;
+        if (payload_kind == ReportPayloadKind::PlotIndex) {
+            out = index;
+            return PlotPayloadResolveResult::Ready;
+        }
+
+        const std::shared_ptr<const LargeByteBuffer> prefix =
+            find_payload_if_present(index);
+        if (!prefix) {
+            out = index;
+            return PlotPayloadResolveResult::IndexPending;
+        }
+
+        ReportPlotIndexView view;
+        if (!report_plot_decode_prefix(
+                prefix->data(), prefix->size(), view) ||
+            view.total_size != artifact.size) {
+            return PlotPayloadResolveResult::Invalid;
+        }
+
+        ReportPlotSectionDescriptor section;
+        const bool found = payload_kind == ReportPayloadKind::PlotEvents
+            ? view.find_events(section)
+            : view.find_series(series_name, section);
+        if (!found) return PlotPayloadResolveResult::SectionMissing;
+
+        out.artifact = artifact;
+        out.kind = payload_kind;
+        out.offset = section.offset;
+        out.size = section.length;
+        out.crc32 = section.crc32;
+        return out.valid() ? PlotPayloadResolveResult::Ready
+                           : PlotPayloadResolveResult::Invalid;
+    }
+
+    bool payload_cached(
+        const ReportArtifactPayloadDescriptor &payload) const {
+        if (!payload.valid() || !lock(20)) return false;
+
+        const bool cached = payload_cache.contains(payload);
         unlock();
         return cached;
     }
 
     PayloadLoadStartResult prepare_payload_allocation(
-        const ReportArtifactDescriptor &artifact) {
-        if (!artifact.valid()) return PayloadLoadStartResult::Rejected;
+        const ReportArtifactPayloadDescriptor &payload) {
+        if (!payload.valid()) return PayloadLoadStartResult::Rejected;
         if (!lock(20)) return PayloadLoadStartResult::Busy;
 
-        if (payload_cache.contains(artifact)) {
+        if (payload_cache.contains(payload)) {
             unlock();
             return PayloadLoadStartResult::AlreadyCached;
         }
-        if (!payload_cache.can_hold(artifact)) {
+        if (!payload_cache.can_hold(payload)) {
             unlock();
             return PayloadLoadStartResult::TooLarge;
         }
@@ -527,14 +605,14 @@ struct ReportTask::Runtime {
         MemoryStatus memory = Memory::status();
         while (memory.psram_available &&
                memory.psram_free <
-                   artifact.size +
+                   payload.size +
                        AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE &&
                payload_cache.evict_lru()) {
             memory = Memory::status();
         }
         const bool available = memory.psram_available &&
             memory.psram_free >=
-                artifact.size + AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE;
+                payload.size + AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE;
 #else
         const bool available = true;
 #endif
@@ -544,9 +622,9 @@ struct ReportTask::Runtime {
                          : PayloadLoadStartResult::MemoryUnavailable;
     }
 
-    bool cache_payload(const ReportArtifactDescriptor &artifact,
+    bool cache_payload(const ReportArtifactPayloadDescriptor &payload,
                        std::shared_ptr<const LargeByteBuffer> bytes) {
-        if (!artifact.valid() || !bytes || !lock(20)) return false;
+        if (!payload.valid() || !bytes || !lock(20)) return false;
 
 #ifdef ARDUINO
         MemoryStatus memory = Memory::status();
@@ -563,7 +641,7 @@ struct ReportTask::Runtime {
         }
 #endif
 
-        const bool inserted = payload_cache.insert(artifact, std::move(bytes));
+        const bool inserted = payload_cache.insert(payload, std::move(bytes));
         unlock();
         return inserted;
     }
@@ -583,6 +661,7 @@ struct ReportTask::Runtime {
                 bundle->key.sleep_day, bundle->key.source_revision);
             overview.size = bundle->overview->size();
             overview.crc32 = bundle->overview_crc32;
+            overview.prefix_crc32 = bundle->overview_prefix_crc32;
             if (!lock(20)) return false;
 
 #ifdef ARDUINO
@@ -612,19 +691,50 @@ struct ReportTask::Runtime {
             tile.key = bundle->key;
             tile.size = bundle->range_tile->size();
             tile.crc32 = bundle->range_tile_crc32;
-            return cache_payload(tile, bundle->range_tile);
+            tile.prefix_crc32 = bundle->range_tile_prefix_crc32;
+            return cache_payload(
+                ReportArtifactPayloadDescriptor::whole(tile),
+                bundle->range_tile);
         }
         return false;
     }
 
     PayloadLoadStartResult start_payload_load(
-        const ReportArtifactKey &artifact,
+        const ReportArtifactPayloadDescriptor &payload,
         uint32_t generation,
         StorageReadLane lane) {
         if (payload_loader.status().active()) {
             return PayloadLoadStartResult::Busy;
         }
 
+        ReportArtifactAvailability availability;
+        ReportArtifactDescriptor current;
+        if (!artifact_index ||
+            !artifact_index->availability(
+                payload.artifact.key, availability) ||
+            !availability.descriptor(payload.artifact.key, current) ||
+            !same_artifact_descriptor(payload.artifact, current)) {
+            return PayloadLoadStartResult::Superseded;
+        }
+
+        const PayloadLoadStartResult prepared =
+            prepare_payload_allocation(payload);
+        if (prepared != PayloadLoadStartResult::Started) return prepared;
+
+        const OperationAdmission admitted =
+            payload_loader.start(payload, generation, lane);
+        if (admitted == OperationAdmission::Accepted) {
+            return PayloadLoadStartResult::Started;
+        }
+        return admitted == OperationAdmission::Busy
+            ? PayloadLoadStartResult::Busy
+            : PayloadLoadStartResult::Rejected;
+    }
+
+    PayloadLoadStartResult start_payload_load(
+        const ReportArtifactKey &artifact,
+        uint32_t generation,
+        StorageReadLane lane) {
         ReportArtifactAvailability availability;
         if (!artifact_index ||
             !artifact_index->availability(artifact, availability)) {
@@ -635,19 +745,10 @@ struct ReportTask::Runtime {
         if (!availability.descriptor(artifact, descriptor)) {
             return PayloadLoadStartResult::Superseded;
         }
-
-        const PayloadLoadStartResult prepared =
-            prepare_payload_allocation(descriptor);
-        if (prepared != PayloadLoadStartResult::Started) return prepared;
-
-        const OperationAdmission admitted =
-            payload_loader.start(descriptor, generation, lane);
-        if (admitted == OperationAdmission::Accepted) {
-            return PayloadLoadStartResult::Started;
-        }
-        return admitted == OperationAdmission::Busy
-            ? PayloadLoadStartResult::Busy
-            : PayloadLoadStartResult::Rejected;
+        return start_payload_load(
+            ReportArtifactPayloadDescriptor::whole(descriptor),
+            generation,
+            lane);
     }
 
     bool finish_payload_load(uint32_t now_ms) {
@@ -659,20 +760,27 @@ struct ReportTask::Runtime {
             std::shared_ptr<const LargeByteBuffer> bytes =
                 payload_loader.take_completed();
             const bool cached = bytes && cache_payload(
-                load_status.artifact, std::move(bytes));
+                load_status.payload, std::move(bytes));
             if (lock(20)) {
                 if (cached) {
                     payload_load_failed = {};
                     payload_load_retry_at_ms = 0;
-                    clear_artifact_failure_locked(load_status.artifact.key);
+                    payload_load_error[0] = '\0';
+                    clear_artifact_failure_locked(
+                        load_status.payload.artifact.key);
                 } else {
-                    payload_load_failed = load_status.artifact.key;
+                    payload_load_failed = load_status.payload;
                     payload_load_retry_at_ms =
                         now_ms + ARTIFACT_FAILURE_RETRY_MS;
-                    remember_artifact_failure_locked(
-                        load_status.artifact.key,
-                        "report_payload_cache_failed",
-                        now_ms);
+                    copy_cstr(payload_load_error,
+                              sizeof(payload_load_error),
+                              "report_payload_cache_failed");
+                    if (load_status.payload.is_whole()) {
+                        remember_artifact_failure_locked(
+                            load_status.payload.artifact.key,
+                            payload_load_error,
+                            now_ms);
+                    }
                 }
                 unlock();
             }
@@ -680,16 +788,21 @@ struct ReportTask::Runtime {
         }
 
         if (load_status.state == ReportArtifactPayloadLoadState::Error) {
-            payload_load_failed = load_status.artifact.key;
-            payload_load_retry_at_ms =
-                now_ms + ARTIFACT_FAILURE_RETRY_MS;
             if (lock(20)) {
-                remember_artifact_failure_locked(
-                    load_status.artifact.key,
-                    load_status.error[0]
-                        ? load_status.error
-                        : "report_payload_load_failed",
-                    now_ms);
+                payload_load_failed = load_status.payload;
+                payload_load_retry_at_ms =
+                    now_ms + ARTIFACT_FAILURE_RETRY_MS;
+                copy_cstr(payload_load_error,
+                          sizeof(payload_load_error),
+                          load_status.error[0]
+                              ? load_status.error
+                              : "report_payload_load_failed");
+                if (load_status.payload.is_whole()) {
+                    remember_artifact_failure_locked(
+                        load_status.payload.artifact.key,
+                        payload_load_error,
+                        now_ms);
+                }
                 unlock();
             }
         }
@@ -702,23 +815,23 @@ struct ReportTask::Runtime {
             return false;
         }
 
-        ReportArtifactDescriptor artifact;
+        ReportArtifactPayloadDescriptor payload;
         std::shared_ptr<const LargeByteBuffer> bytes;
         if (!lock(20)) return false;
         const bool pending =
-            payload_cache.next_deflate_candidate(artifact, bytes);
+            payload_cache.next_deflate_candidate(payload, bytes);
         unlock();
         if (!pending) return false;
 
         if (payload_deflater.start(
-                artifact,
+                payload,
                 std::move(bytes),
                 AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE)) {
             return true;
         }
 
         if (!lock(20)) return false;
-        (void)payload_cache.complete_deflate(artifact, {});
+        (void)payload_cache.complete_deflate(payload, {});
         unlock();
         return true;
     }
@@ -727,22 +840,42 @@ struct ReportTask::Runtime {
         if (!payload_deflater.finished()) return false;
         if (!lock(20)) return false;
 
-        const ReportArtifactDescriptor artifact =
-            payload_deflater.artifact();
+        const ReportArtifactPayloadDescriptor payload =
+            payload_deflater.payload();
         std::shared_ptr<const LargeByteBuffer> bytes =
             payload_deflater.take_completed();
         (void)payload_cache.complete_deflate(
-            artifact, std::move(bytes));
+            payload, std::move(bytes));
         unlock();
 
         payload_deflater.reset();
         return true;
     }
 
-    bool payload_load_suppressed(const ReportArtifactKey &artifact,
-                                 uint32_t now_ms) const {
-        return payload_load_failed == artifact &&
+    bool payload_load_suppressed(
+        const ReportArtifactPayloadDescriptor &payload,
+        uint32_t now_ms) const {
+        return payload_load_failed == payload &&
                !deadline_due(now_ms, payload_load_retry_at_ms);
+    }
+
+    bool find_payload_failure(
+        const ReportArtifactPayloadDescriptor &payload,
+        ReportArtifactFailureStatus &out,
+        uint32_t lock_timeout_ms = 20) const {
+        out = {};
+        if (!payload.valid() || !lock(lock_timeout_ms)) return false;
+
+        if (!(payload_load_failed == payload) ||
+            deadline_due(last_step_ms, payload_load_retry_at_ms)) {
+            unlock();
+            return false;
+        }
+
+        copy_cstr(out.error, sizeof(out.error), payload_load_error);
+        out.retry_after_ms = payload_load_retry_at_ms - last_step_ms;
+        unlock();
+        return out.valid();
     }
 
     bool find_failure(const ReportArtifactKey &artifact,
@@ -789,6 +922,12 @@ struct ReportTask::Runtime {
         return publish_artifact_index(std::move(updated));
     }
 
+    size_t idle_catalog_limit() const {
+        return catalog
+            ? std::min(catalog->size(), AC_REPORT_IDLE_PREBUILD_NIGHTS)
+            : 0;
+    }
+
     void observe_engine_completion(uint32_t now_ms) {
         const ReportEngineCompletion completion =
             engine.status().last_completion;
@@ -803,7 +942,7 @@ struct ReportTask::Runtime {
                 ReportRequestPriority::Foreground) {
             if (completion.outcome.disposition ==
                     OperationDisposition::Failed &&
-                catalog && idle_cursor < catalog->size()) {
+                catalog && idle_cursor < idle_catalog_limit()) {
                 const NightCatalogRecord *night = catalog->record(idle_cursor);
                 if (night &&
                     night->sleep_day ==
@@ -889,6 +1028,7 @@ struct ReportTask::Runtime {
         artifact_failure_cursor = 0;
         payload_load_failed = {};
         payload_load_retry_at_ms = 0;
+        payload_load_error[0] = '\0';
         unlock();
     }
 
@@ -901,7 +1041,7 @@ struct ReportTask::Runtime {
 
         if (payload_loader.status().active()) {
             const ReportArtifactDescriptor loading =
-                payload_loader.status().artifact;
+                payload_loader.status().payload.artifact;
             const NightCatalogRecord *loading_night =
                 catalog->find(loading.key.sleep_day);
             if (!loading_night ||
@@ -941,7 +1081,7 @@ struct ReportTask::Runtime {
 
     bool schedule_catalog_work(uint32_t now_ms) {
         if (!catalog) return false;
-        if (idle_cursor >= catalog->size()) {
+        if (idle_cursor >= idle_catalog_limit()) {
             if (!idle_pass_failed) {
                 idle_retry_at_ms = 0;
                 idle_retry_attempt = 0;
@@ -976,15 +1116,16 @@ struct ReportTask::Runtime {
             const bool payload_warm_available =
                 engine_status.state == ReportEngineState::Idle &&
                 engine_status.queued == 0;
-            if (idle_cursor < AC_REPORT_PAYLOAD_CACHE_WARM_NIGHTS &&
-                payload_warm_available) {
+            if (payload_warm_available) {
                 const ReportArtifactDescriptor candidates[] = {
                     available.result,
                     available.overview,
                 };
                 for (const ReportArtifactDescriptor &candidate : candidates) {
-                    if (!candidate.valid() || payload_cached(candidate) ||
-                        payload_load_suppressed(candidate.key, now_ms)) {
+                    const ReportArtifactPayloadDescriptor payload =
+                        ReportArtifactPayloadDescriptor::whole(candidate);
+                    if (!candidate.valid() || payload_cached(payload) ||
+                        payload_load_suppressed(payload, now_ms)) {
                         continue;
                     }
 
@@ -1034,7 +1175,7 @@ struct ReportTask::Runtime {
 
     bool schedule_legacy_cache_cleanup(uint32_t now_ms) {
         if (!legacy_cleanup_pending || !delete_port || !catalog ||
-            idle_cursor < catalog->size() ||
+            idle_cursor < idle_catalog_limit() ||
             !deadline_due(now_ms, legacy_cleanup_retry_at_ms)) {
             return false;
         }
@@ -1169,8 +1310,9 @@ struct ReportTask::Runtime {
     size_t artifact_failure_cursor = 0;
     OperationTicket observed_engine_completion;
     uint32_t last_step_ms = 0;
-    ReportArtifactKey payload_load_failed;
+    ReportArtifactPayloadDescriptor payload_load_failed;
     uint32_t payload_load_retry_at_ms = 0;
+    char payload_load_error[AC_STORAGE_ERROR_MAX] = {};
     PendingCatalogRefresh pending_refresh;
     uint32_t refresh_generation = 0;
     uint32_t catalog_refresh_retry_at_ms = 0;
@@ -1337,19 +1479,37 @@ OperationAdmission ReportTask::request_artifact(
 }
 
 OperationAdmission ReportTask::request_payload_cache(
-    const ReportArtifactKey &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
     uint32_t generation) {
-    if (!runtime_ || !runtime_->initialized || !artifact.valid() ||
+    if (!runtime_ || !runtime_->initialized || !payload.valid() ||
         generation == 0) {
         return OperationAdmission::Rejected;
     }
 
     ReportTaskCommand command;
     command.kind = ReportTaskCommandKind::CacheArtifact;
-    command.artifact = artifact;
+    command.artifact = payload.artifact.key;
+    command.payload = payload;
     command.priority = ReportRequestPriority::Foreground;
     command.generation = generation;
     return runtime_->enqueue(command);
+}
+
+OperationAdmission ReportTask::request_payload_cache(
+    const ReportArtifactKey &artifact,
+    uint32_t generation) {
+    const ReportArtifactQuery query = query_artifact(
+        artifact.sleep_day,
+        artifact.kind,
+        artifact.range_start_ms,
+        artifact.range_end_ms);
+    if (query.state != ReportArtifactQueryState::Ready ||
+        query.artifact.source_revision != artifact.source_revision) {
+        return OperationAdmission::Rejected;
+    }
+    return request_payload_cache(
+        ReportArtifactPayloadDescriptor::whole(query.descriptor),
+        generation);
 }
 
 OperationAdmission ReportTask::request_catalog_refresh(
@@ -1479,6 +1639,42 @@ ReportArtifactQuery ReportTask::query_artifact(
         sleep_day, kind, range_start_ms, range_end_ms);
 }
 
+ReportPlotPayloadQuery ReportTask::query_plot_payload(
+    SleepDayId sleep_day,
+    ReportArtifactKind kind,
+    ReportPayloadKind payload_kind,
+    const char *series_name,
+    int64_t range_start_ms,
+    int64_t range_end_ms) const {
+    ReportPlotPayloadQuery out;
+    const ReportArtifactQuery artifact = query_artifact(
+        sleep_day, kind, range_start_ms, range_end_ms);
+    out.state = artifact.state;
+    out.artifact = artifact.artifact;
+    if (artifact.state != ReportArtifactQueryState::Ready || !runtime_) {
+        return out;
+    }
+
+    const PlotPayloadResolveResult resolved =
+        runtime_->resolve_plot_payload(
+            artifact.descriptor, payload_kind, series_name, out.payload);
+    switch (resolved) {
+        case PlotPayloadResolveResult::Ready:
+            out.state = ReportArtifactQueryState::Ready;
+            break;
+        case PlotPayloadResolveResult::IndexPending:
+            out.state = ReportArtifactQueryState::PlotIndexPending;
+            break;
+        case PlotPayloadResolveResult::SectionMissing:
+            out.state = ReportArtifactQueryState::PlotSectionMissing;
+            break;
+        case PlotPayloadResolveResult::Invalid:
+            out.state = ReportArtifactQueryState::ArtifactIndexInvalid;
+            break;
+    }
+    return out;
+}
+
 #ifndef ARDUINO
 bool ReportTask::artifact_availability(
     const ReportArtifactKey &artifact,
@@ -1493,31 +1689,59 @@ bool ReportTask::artifact_availability(
 
 std::shared_ptr<const LargeByteBuffer> ReportTask::artifact_payload(
     const ReportArtifactDescriptor &artifact) const {
+    return artifact_payload(
+        ReportArtifactPayloadDescriptor::whole(artifact));
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportTask::artifact_payload(
+    const ReportArtifactPayloadDescriptor &payload) const {
     if (!runtime_) return {};
-    return runtime_->find_payload(artifact);
+    return runtime_->find_payload(payload);
 }
 
 std::shared_ptr<const LargeByteBuffer>
 ReportTask::artifact_payload_if_present(
     const ReportArtifactDescriptor &artifact) const {
+    return artifact_payload_if_present(
+        ReportArtifactPayloadDescriptor::whole(artifact));
+}
+
+std::shared_ptr<const LargeByteBuffer>
+ReportTask::artifact_payload_if_present(
+    const ReportArtifactPayloadDescriptor &payload) const {
     if (!runtime_) return {};
-    return runtime_->find_payload_if_present(artifact);
+    return runtime_->find_payload_if_present(payload);
 }
 
 ReportArtifactPayloadSelection ReportTask::select_artifact_payload(
     const ReportArtifactDescriptor &artifact,
     bool prefer_deflate) const {
+    return select_artifact_payload(
+        ReportArtifactPayloadDescriptor::whole(artifact), prefer_deflate);
+}
+
+ReportArtifactPayloadSelection ReportTask::select_artifact_payload(
+    const ReportArtifactPayloadDescriptor &payload,
+    bool prefer_deflate) const {
     if (!runtime_) return {};
-    return runtime_->select_payload(artifact, prefer_deflate);
+    return runtime_->select_payload(payload, prefer_deflate);
 }
 
 ReportArtifactPayloadSelection
 ReportTask::select_artifact_payload_if_present(
     const ReportArtifactDescriptor &artifact,
     bool prefer_deflate) const {
+    return select_artifact_payload_if_present(
+        ReportArtifactPayloadDescriptor::whole(artifact), prefer_deflate);
+}
+
+ReportArtifactPayloadSelection
+ReportTask::select_artifact_payload_if_present(
+    const ReportArtifactPayloadDescriptor &payload,
+    bool prefer_deflate) const {
     if (!runtime_) return {};
     return runtime_->select_payload_if_present(
-        artifact, prefer_deflate);
+        payload, prefer_deflate);
 }
 
 bool ReportTask::artifact_failure(
@@ -1538,6 +1762,26 @@ bool ReportTask::try_artifact_failure(
         return false;
     }
     return runtime_->find_failure(artifact, failure, 0);
+}
+
+bool ReportTask::payload_failure(
+    const ReportArtifactPayloadDescriptor &payload,
+    ReportArtifactFailureStatus &failure) const {
+    if (!runtime_) {
+        failure = {};
+        return false;
+    }
+    return runtime_->find_payload_failure(payload, failure);
+}
+
+bool ReportTask::try_payload_failure(
+    const ReportArtifactPayloadDescriptor &payload,
+    ReportArtifactFailureStatus &failure) const {
+    if (!runtime_) {
+        failure = {};
+        return false;
+    }
+    return runtime_->find_payload_failure(payload, failure, 0);
 }
 
 bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
@@ -1604,7 +1848,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 worked = runtime.preempt_background_work() || worked;
                 const PayloadLoadStartResult started =
                     runtime.start_payload_load(
-                        command.artifact,
+                        command.payload,
                         command.generation,
                         StorageReadLane::Foreground);
 
@@ -1627,8 +1871,16 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
 
                 if (runtime.lock(20)) {
-                    runtime.remember_artifact_failure_locked(
-                        command.artifact, error, now_ms);
+                    runtime.payload_load_failed = command.payload;
+                    runtime.payload_load_retry_at_ms =
+                        now_ms + ARTIFACT_FAILURE_RETRY_MS;
+                    copy_cstr(runtime.payload_load_error,
+                              sizeof(runtime.payload_load_error),
+                              error);
+                    if (command.payload.is_whole()) {
+                        runtime.remember_artifact_failure_locked(
+                            command.artifact, error, now_ms);
+                    }
                     runtime.unlock();
                 }
                 break;

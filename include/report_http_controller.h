@@ -13,7 +13,9 @@ namespace aircannect {
 
 class ReportTask;
 enum class ReportArtifactKind : uint8_t;
+enum class ReportPayloadKind : uint8_t;
 struct ReportArtifactDescriptor;
+struct ReportArtifactPayloadDescriptor;
 class SleepDayId;
 
 // Presents immutable report snapshots and artifacts over HTTP. Report policy
@@ -37,9 +39,11 @@ private:
                        ReportArtifactKind kind,
                        int64_t range_start_ms = 0,
                        int64_t range_end_ms = 0);
-    void queue_artifact_response(
+    void queue_payload_response(
         AsyncWebServerRequest *request,
-        const ReportArtifactDescriptor &artifact,
+        const ReportArtifactPayloadDescriptor &payload,
+        ReportPayloadKind requested_kind,
+        const char *series_name,
         bool prefer_deflate);
     uint32_t next_generation() const;
 

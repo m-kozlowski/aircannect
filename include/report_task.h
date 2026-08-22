@@ -9,6 +9,7 @@
 #include "report_artifact_payload_cache.h"
 #include "report_artifact_payload_loader.h"
 #include "report_engine.h"
+#include "report_plot_format.h"
 #include "report_summary_acquisition.h"
 #include "runtime_snapshots.h"
 #include "storage_delete_port.h"
@@ -114,6 +115,8 @@ enum class ReportArtifactQueryState : uint8_t {
     InvalidArtifact,
     ArtifactMissing,
     ArtifactIndexInvalid,
+    PlotIndexPending,
+    PlotSectionMissing,
     Ready,
 };
 
@@ -121,6 +124,12 @@ struct ReportArtifactQuery {
     ReportArtifactQueryState state = ReportArtifactQueryState::Unavailable;
     ReportArtifactKey artifact;
     ReportArtifactDescriptor descriptor;
+};
+
+struct ReportPlotPayloadQuery {
+    ReportArtifactQueryState state = ReportArtifactQueryState::Unavailable;
+    ReportArtifactKey artifact;
+    ReportArtifactPayloadDescriptor payload;
 };
 
 struct ReportArtifactFailureStatus {
@@ -152,6 +161,9 @@ public:
         ReportRequestPriority priority,
         uint32_t generation);
     OperationAdmission request_payload_cache(
+        const ReportArtifactPayloadDescriptor &payload,
+        uint32_t generation);
+    OperationAdmission request_payload_cache(
         const ReportArtifactKey &artifact,
         uint32_t generation);
     OperationAdmission request_catalog_refresh(
@@ -174,6 +186,13 @@ public:
         ReportArtifactKind kind,
         int64_t range_start_ms = 0,
         int64_t range_end_ms = 0) const;
+    ReportPlotPayloadQuery query_plot_payload(
+        SleepDayId sleep_day,
+        ReportArtifactKind kind,
+        ReportPayloadKind payload_kind,
+        const char *series_name = nullptr,
+        int64_t range_start_ms = 0,
+        int64_t range_end_ms = 0) const;
     std::shared_ptr<const LargeByteBuffer> artifact_payload(
         const ReportArtifactDescriptor &artifact) const;
     std::shared_ptr<const LargeByteBuffer> artifact_payload_if_present(
@@ -184,10 +203,24 @@ public:
     ReportArtifactPayloadSelection select_artifact_payload_if_present(
         const ReportArtifactDescriptor &artifact,
         bool prefer_deflate) const;
+    std::shared_ptr<const LargeByteBuffer> artifact_payload(
+        const ReportArtifactPayloadDescriptor &payload) const;
+    std::shared_ptr<const LargeByteBuffer> artifact_payload_if_present(
+        const ReportArtifactPayloadDescriptor &payload) const;
+    ReportArtifactPayloadSelection select_artifact_payload(
+        const ReportArtifactPayloadDescriptor &payload,
+        bool prefer_deflate) const;
+    ReportArtifactPayloadSelection select_artifact_payload_if_present(
+        const ReportArtifactPayloadDescriptor &payload,
+        bool prefer_deflate) const;
     bool artifact_failure(const ReportArtifactKey &artifact,
                           ReportArtifactFailureStatus &failure) const;
     bool try_artifact_failure(const ReportArtifactKey &artifact,
                               ReportArtifactFailureStatus &failure) const;
+    bool payload_failure(const ReportArtifactPayloadDescriptor &payload,
+                         ReportArtifactFailureStatus &failure) const;
+    bool try_payload_failure(const ReportArtifactPayloadDescriptor &payload,
+                             ReportArtifactFailureStatus &failure) const;
 
 private:
     struct Runtime;

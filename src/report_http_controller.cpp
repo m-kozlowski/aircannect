@@ -20,11 +20,12 @@
 #include "report_range_tile.h"
 #include "report_task.h"
 #include "runtime_clock.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
 
-static constexpr size_t REPORT_HTTP_ETAG_BYTES = 112;
+static constexpr size_t REPORT_HTTP_ETAG_BYTES = 160;
 static constexpr size_t REPORT_HTTP_PENDING_CAPACITY = 4;
 static constexpr uint32_t REPORT_HTTP_PENDING_TIMEOUT_MS = 30000;
 static constexpr const char *REPORT_SOURCE_REVISION_HEADER =
@@ -73,6 +74,12 @@ bool same_artifact_descriptor(const ReportArtifactDescriptor &lhs,
                               const ReportArtifactDescriptor &rhs) {
     return lhs.key == rhs.key && lhs.size == rhs.size &&
            lhs.crc32 == rhs.crc32;
+}
+
+bool same_payload_descriptor(
+    const ReportArtifactPayloadDescriptor &lhs,
+    const ReportArtifactPayloadDescriptor &rhs) {
+    return lhs == rhs;
 }
 
 void send_json_error(AsyncWebServerRequest *request,
@@ -209,6 +216,36 @@ bool format_artifact_etag(const ReportArtifactDescriptor &artifact,
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
+bool format_payload_etag(
+    const ReportArtifactPayloadDescriptor &payload,
+    char *out,
+    size_t out_size) {
+    if (!payload.valid() || !out || out_size == 0) return false;
+    if (payload.is_whole()) {
+        return format_artifact_etag(payload.artifact, out, out_size);
+    }
+
+    char day[9] = {};
+    if (!payload.artifact.key.sleep_day.format_yyyymmdd(
+            day, sizeof(day))) {
+        return false;
+    }
+
+    const ReportArtifactKey &key = payload.artifact.key;
+    const int written = snprintf(
+        out,
+        out_size,
+        "W/\"p-%s-%016llx-%u-%lld-%lu-%lu-%08lx\"",
+        day,
+        static_cast<unsigned long long>(key.source_revision.value()),
+        static_cast<unsigned>(payload.kind),
+        static_cast<long long>(key.range_start_ms),
+        static_cast<unsigned long>(payload.offset),
+        static_cast<unsigned long>(payload.size),
+        static_cast<unsigned long>(payload.crc32));
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
 bool request_etag_matches(AsyncWebServerRequest *request,
                           const char *etag) {
     if (!request || !etag || !etag[0] ||
@@ -269,17 +306,17 @@ void send_not_modified(AsyncWebServerRequest *request,
 
 bool send_artifact_payload(
     AsyncWebServerRequest *request,
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &descriptor,
     ReportArtifactPayloadSelection payload,
     const char *content_type) {
-    if (!request || !artifact.valid() || !payload.ready()) {
+    if (!request || !descriptor.valid() || !payload.ready()) {
         return false;
     }
 
     const bool deflated = payload.encoding ==
         ReportArtifactPayloadEncoding::Deflate;
-    if ((!deflated && payload.bytes->size() != artifact.size) ||
-        (deflated && payload.bytes->size() >= artifact.size)) {
+    if ((!deflated && payload.bytes->size() != descriptor.size) ||
+        (deflated && payload.bytes->size() >= descriptor.size)) {
         return false;
     }
 
@@ -302,8 +339,9 @@ bool send_artifact_payload(
     if (!response) return false;
 
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
-    (void)format_artifact_etag(artifact, etag, sizeof(etag));
-    add_artifact_headers(response, etag, artifact.key.source_revision);
+    (void)format_payload_etag(descriptor, etag, sizeof(etag));
+    add_artifact_headers(
+        response, etag, descriptor.artifact.key.source_revision);
     if (deflated) response->addHeader("Content-Encoding", "deflate");
     request->send(response);
     return true;
@@ -405,12 +443,19 @@ uint32_t night_duration_minutes(const NightCatalog &catalog,
 
 struct ReportHttpController::PendingResponses {
     struct Entry {
-        ReportArtifactDescriptor artifact;
+        ReportArtifactPayloadDescriptor payload;
+        ReportPayloadKind requested_kind = ReportPayloadKind::Whole;
+        char series_name[PLOT_SECTION_NAME_BYTES] = {};
         AsyncWebServerRequestPtr request;
         uint32_t deadline_ms = 0;
         bool prefer_deflate = false;
 
-        bool used() const { return artifact.valid(); }
+        bool used() const { return payload.valid(); }
+        bool needs_section_resolution() const {
+            return payload.kind == ReportPayloadKind::PlotIndex &&
+                (requested_kind == ReportPayloadKind::PlotEvents ||
+                 requested_kind == ReportPayloadKind::PlotSeries);
+        }
     };
 
     StaticSemaphore_t mutex_storage = {};
@@ -467,33 +512,78 @@ void ReportHttpController::poll() {
 
         ReportArtifactPayloadSelection payload =
             report_task_->select_artifact_payload_if_present(
-                entry.artifact, entry.prefer_deflate);
+                entry.payload, entry.prefer_deflate);
         if (payload.state ==
             ReportArtifactPayloadSelectionState::Pending) {
             continue;
         }
 
+        if (payload.ready() && entry.needs_section_resolution()) {
+            const ReportArtifactDescriptor &artifact =
+                entry.payload.artifact;
+            const ReportPlotPayloadQuery section =
+                report_task_->query_plot_payload(
+                    artifact.key.sleep_day,
+                    artifact.key.kind,
+                    entry.requested_kind,
+                    entry.series_name,
+                    artifact.key.range_start_ms,
+                    artifact.key.range_end_ms);
+            if (section.state == ReportArtifactQueryState::Ready) {
+                const OperationAdmission admitted =
+                    report_task_->request_payload_cache(
+                        section.payload, next_generation());
+                if (admitted == OperationAdmission::Accepted) {
+                    entry.payload = section.payload;
+                    continue;
+                }
+                if (admitted == OperationAdmission::Busy) continue;
+            }
+
+            const AsyncWebServerRequestPtr pending_request = entry.request;
+            const ReportArtifactQueryState state = section.state;
+            entry = {};
+            xSemaphoreGive(pending_->mutex);
+
+            std::shared_ptr<AsyncWebServerRequest> request =
+                pending_request.lock();
+            if (!request) return;
+            if (state == ReportArtifactQueryState::PlotSectionMissing) {
+                send_json_error(request.get(), 404, "plot_section_missing");
+            } else if (state == ReportArtifactQueryState::ArtifactIndexInvalid) {
+                send_json_error(request.get(), 500, "artifact_index_invalid");
+            } else {
+                send_preparing(request.get());
+            }
+            return;
+        }
+
         bool superseded = false;
         if (!payload.ready()) {
             const ReportArtifactQuery current = report_task_->query_artifact(
-                entry.artifact.key.sleep_day,
-                entry.artifact.key.kind,
-                entry.artifact.key.range_start_ms,
-                entry.artifact.key.range_end_ms);
+                entry.payload.artifact.key.sleep_day,
+                entry.payload.artifact.key.kind,
+                entry.payload.artifact.key.range_start_ms,
+                entry.payload.artifact.key.range_end_ms);
             superseded = current.state != ReportArtifactQueryState::Ready ||
-                !same_artifact_descriptor(current.descriptor, entry.artifact);
+                !same_artifact_descriptor(
+                    current.descriptor, entry.payload.artifact);
         }
 
         ReportArtifactFailureStatus failure;
-        const bool failed = !payload.ready() && !superseded &&
-            report_task_->try_artifact_failure(entry.artifact.key, failure);
+        const bool payload_failed = !payload.ready() && !superseded &&
+            report_task_->try_payload_failure(entry.payload, failure);
+        const bool artifact_failed = !payload.ready() && !superseded &&
+            !payload_failed && report_task_->try_artifact_failure(
+                entry.payload.artifact.key, failure);
+        const bool failed = payload_failed || artifact_failed;
         const bool timed_out =
             millis_deadline_reached(now_ms, entry.deadline_ms);
         if (!payload.ready() && !superseded && !failed && !timed_out) {
             continue;
         }
 
-        const ReportArtifactDescriptor artifact = entry.artifact;
+        const ReportArtifactPayloadDescriptor descriptor = entry.payload;
         const AsyncWebServerRequestPtr pending_request = entry.request;
         entry = {};
         xSemaphoreGive(pending_->mutex);
@@ -515,7 +605,7 @@ void ReportHttpController::poll() {
             return;
         }
         if (!send_artifact_payload(request.get(),
-                                   artifact,
+                                   descriptor,
                                    std::move(payload),
                                    "application/octet-stream")) {
             send_json_error(request.get(), 503, "response_alloc");
@@ -526,23 +616,33 @@ void ReportHttpController::poll() {
     xSemaphoreGive(pending_->mutex);
 }
 
-void ReportHttpController::queue_artifact_response(
+void ReportHttpController::queue_payload_response(
     AsyncWebServerRequest *request,
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
+    ReportPayloadKind requested_kind,
+    const char *series_name,
     bool prefer_deflate) {
-    if (!request || !report_task_ || !pending_ || !pending_->mutex) {
+    if (!request || !report_task_ || !pending_ || !pending_->mutex ||
+        !payload.valid() ||
+        (requested_kind != ReportPayloadKind::Whole &&
+         requested_kind != ReportPayloadKind::PlotIndex &&
+         requested_kind != ReportPayloadKind::PlotEvents &&
+         requested_kind != ReportPayloadKind::PlotSeries)) {
         send_json_error(request, 503, "report_unavailable");
         return;
     }
 
     ReportArtifactFailureStatus failure;
-    if (report_task_->artifact_failure(artifact.key, failure)) {
+    const bool failed = payload.is_whole()
+        ? report_task_->artifact_failure(payload.artifact.key, failure)
+        : report_task_->payload_failure(payload, failure);
+    if (failed) {
         send_artifact_failure(request, failure);
         return;
     }
 
     const OperationAdmission admitted = report_task_->request_payload_cache(
-        artifact.key, next_generation());
+        payload, next_generation());
     if (admitted != OperationAdmission::Accepted) {
         if (admitted == OperationAdmission::Busy) {
             send_preparing(request);
@@ -560,16 +660,12 @@ void ReportHttpController::queue_artifact_response(
     PendingResponses::Entry *free_entry = nullptr;
     for (PendingResponses::Entry &entry : pending_->entries) {
         if (entry.used() && entry.request.expired()) entry = {};
-
-        if (entry.used() &&
-            same_artifact_descriptor(entry.artifact, artifact)) {
+        if (entry.used() && same_payload_descriptor(entry.payload, payload)) {
             xSemaphoreGive(pending_->mutex);
             send_preparing(request);
             return;
         }
-        if (!entry.used() && !free_entry) {
-            free_entry = &entry;
-        }
+        if (!entry.used() && !free_entry) free_entry = &entry;
     }
     if (!free_entry) {
         xSemaphoreGive(pending_->mutex);
@@ -577,7 +673,13 @@ void ReportHttpController::queue_artifact_response(
         return;
     }
 
-    free_entry->artifact = artifact;
+    free_entry->payload = payload;
+    free_entry->requested_kind = requested_kind;
+    if (series_name) {
+        copy_cstr(free_entry->series_name,
+                  sizeof(free_entry->series_name),
+                  series_name);
+    }
     free_entry->request = request->pause();
     free_entry->deadline_ms = millis() + REPORT_HTTP_PENDING_TIMEOUT_MS;
     free_entry->prefer_deflate = prefer_deflate;
@@ -738,8 +840,127 @@ void ReportHttpController::send_plot(
         kind = ReportArtifactKind::RangeTile;
     }
 
-    send_artifact(
-        request, sleep_day, kind, range_start_ms, range_end_ms);
+    if (!request->hasArg("part")) {
+        send_artifact(
+            request, sleep_day, kind, range_start_ms, range_end_ms);
+        return;
+    }
+
+    const String part = request->arg("part");
+    ReportPayloadKind payload_kind = ReportPayloadKind::PlotIndex;
+    String series_name;
+    if (part == "events") {
+        payload_kind = ReportPayloadKind::PlotEvents;
+    } else if (part == "series") {
+        payload_kind = ReportPayloadKind::PlotSeries;
+        if (!request->hasArg("name")) {
+            send_json_error(request, 400, "missing_series_name");
+            return;
+        }
+        series_name = request->arg("name");
+        if (!series_name.length() ||
+            series_name.length() >= PLOT_SECTION_NAME_BYTES) {
+            send_json_error(request, 400, "bad_series_name");
+            return;
+        }
+    } else if (part != "index") {
+        send_json_error(request, 400, "bad_plot_part");
+        return;
+    }
+
+    const ReportPlotPayloadQuery query = report_task_->query_plot_payload(
+        sleep_day,
+        kind,
+        payload_kind,
+        series_name.length() ? series_name.c_str() : nullptr,
+        range_start_ms,
+        range_end_ms);
+    if (query.state == ReportArtifactQueryState::Unavailable) {
+        send_json_error(request, 503, "report_unavailable");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::CatalogPending) {
+        send_preparing(request);
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::NightMissing) {
+        send_json_error(request, 404, "no_such_night");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::InvalidArtifact) {
+        send_json_error(
+            request,
+            kind == ReportArtifactKind::RangeTile ? 400 : 500,
+            kind == ReportArtifactKind::RangeTile
+                ? "range_not_one_tile"
+                : "artifact_index_invalid");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::ArtifactMissing) {
+        const OperationAdmission admitted = report_task_->request_artifact(
+            query.artifact,
+            ReportRequestPriority::Foreground,
+            next_generation());
+        if (admitted == OperationAdmission::Accepted) {
+            send_preparing(request);
+        } else {
+            send_json_error(request, 503, "report_queue_busy");
+        }
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::PlotSectionMissing) {
+        send_json_error(request, 404, "plot_section_missing");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::ArtifactIndexInvalid) {
+        send_json_error(request, 500, "artifact_index_invalid");
+        return;
+    }
+    if (query.state != ReportArtifactQueryState::Ready &&
+        query.state != ReportArtifactQueryState::PlotIndexPending) {
+        send_json_error(request, 500, "artifact_query_invalid");
+        return;
+    }
+
+    ReportArtifactFailureStatus payload_failure;
+    if (report_task_->payload_failure(query.payload, payload_failure)) {
+        send_artifact_failure(request, payload_failure);
+        return;
+    }
+
+    if (query.state == ReportArtifactQueryState::Ready) {
+        char etag[REPORT_HTTP_ETAG_BYTES] = {};
+        if (format_payload_etag(query.payload, etag, sizeof(etag)) &&
+            request_etag_matches(request, etag)) {
+            send_not_modified(
+                request,
+                etag,
+                query.payload.artifact.key.source_revision);
+            return;
+        }
+    }
+
+    const bool prefer_deflate = request_accepts_deflate(request) &&
+        query.payload.size >= AC_REPORT_HTTP_DEFLATE_MIN_BYTES;
+    if (query.state == ReportArtifactQueryState::Ready) {
+        ReportArtifactPayloadSelection payload =
+            report_task_->select_artifact_payload(
+                query.payload, prefer_deflate);
+        if (payload.ready() && send_artifact_payload(
+                                   request,
+                                   query.payload,
+                                   std::move(payload),
+                                   "application/octet-stream")) {
+            return;
+        }
+    }
+
+    queue_payload_response(
+        request,
+        query.payload,
+        payload_kind,
+        series_name.length() ? series_name.c_str() : nullptr,
+        prefer_deflate);
 }
 
 void ReportHttpController::send_artifact(
@@ -813,14 +1034,19 @@ void ReportHttpController::send_artifact(
             query.descriptor, prefer_deflate);
     if (payload.ready() && send_artifact_payload(
                                request,
-                               query.descriptor,
+                               ReportArtifactPayloadDescriptor::whole(
+                                   query.descriptor),
                                std::move(payload),
                                "application/octet-stream")) {
         return;
     }
 
-    queue_artifact_response(
-        request, query.descriptor, prefer_deflate);
+    queue_payload_response(
+        request,
+        ReportArtifactPayloadDescriptor::whole(query.descriptor),
+        ReportPayloadKind::Whole,
+        nullptr,
+        prefer_deflate);
 }
 
 uint32_t ReportHttpController::next_generation() const {

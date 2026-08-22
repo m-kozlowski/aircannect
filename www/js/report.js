@@ -124,7 +124,8 @@
         const series = definition.series || [definition];
         return series.some((item) =>
           (reportSeries[item.key] || []).length > 0 ||
-          (reportBaseSeries[item.key] || []).length > 0);
+          (reportBaseSeries[item.key] || []).length > 0 ||
+          reportPlotSection(item.key));
       });
     }
 
@@ -146,6 +147,7 @@
     function toggleReportChartCollapsed(key) {
       if (reportChartPreferences.collapsed.has(key)) {
         reportChartPreferences.collapsed.delete(key);
+        ensureReportChartLoaded(key);
       } else {
         reportChartPreferences.collapsed.add(key);
       }
@@ -377,11 +379,14 @@
       reportEvents = [];
       reportBaseSeries = {};
       reportBaseEvents = [];
+      reportBasePlotIndex = null;
+      reportBaseLoadedCharts.clear();
+      reportBaseChartPromises.clear();
       reportCurrentNightId = "";
       reportCurrentRevision = "";
       reportCurrentPlotEtag = "";
       reportRangeCache.clear();
-      reportRangeInFlightKey = "";
+      reportRangeActiveKey = "";
       reportRangeToken++;
       reportDrawItems = [];
       reportDrawPending = false;
@@ -407,17 +412,20 @@
       }
     }
 
-    function activateReportBasePlot(nightId, revision, etag, series, events) {
+    function activateReportBasePlot(nightId, revision, etag, index) {
       cancelReportRangeRequest();
-      reportSeries = series || {};
-      reportEvents = events || [];
-      reportBaseSeries = reportSeries;
-      reportBaseEvents = reportEvents;
+      reportSeries = {};
+      reportEvents = [];
+      reportBaseSeries = {};
+      reportBaseEvents = [];
+      reportBasePlotIndex = index || null;
+      reportBaseLoadedCharts.clear();
+      reportBaseChartPromises.clear();
       reportCurrentNightId = String(nightId || "");
       reportCurrentRevision = String(revision || "");
       reportCurrentPlotEtag = String(etag || "");
       reportRangeCache.clear();
-      reportRangeInFlightKey = "";
+      reportRangeActiveKey = "";
       reportRangeToken++;
     }
 
@@ -1183,7 +1191,7 @@
       if (!reportZoom) return;
       cancelReportRangeRequest();
       reportZoom = null;
-      reportRangeInFlightKey = "";
+      reportRangeActiveKey = "";
       reportRangeToken++;
       reportSeries = reportBaseSeries;
       reportEvents = reportBaseEvents;
@@ -1298,6 +1306,14 @@
       title.className = "report-chart-title";
       const name = document.createElement("span");
       name.textContent = definition.title;
+      if (!reportChartPreferences.collapsed.has(definition.key) &&
+          (!reportBaseLoadedCharts.has(definition.key) ||
+           (reportZoom && !currentReportRangeChartReady(definition.key)))) {
+        const badge = document.createElement("span");
+        badge.className = "report-res-badge";
+        badge.textContent = "loading";
+        name.appendChild(badge);
+      }
       title.appendChild(name);
       const readout = document.createElement("span");
       readout.className = "readout";
@@ -1368,7 +1384,6 @@
         return;
       }
       if (reportZoom) ensureReportRangeLoaded(reportZoom.start, reportZoom.end);
-      const zoomAwaitingRange = !!reportZoom && !currentReportRangeReady();
       const sessionRanges = reportVisibleSessionRanges();
 
       // Map each signal name -> whether it fell back to the low-res 1-min trend
@@ -1389,6 +1404,7 @@
         }
 
         const seriesDefs = def.series || [def];
+        const availableParts = reportChartPartNames(def, reportBasePlotIndex);
         const seriesList = seriesDefs.map((seriesDef) => ({
           label: seriesDef.label || def.title,
           color: seriesDef.color || def.color,
@@ -1396,7 +1412,7 @@
             .sort((a, b) => a.t - b.t),
         })).filter((series) => series.points.length > 0);
         if (!seriesList.length) {
-          if (def.optional) return;
+          if (def.optional && !availableParts.length) return;
 
           // Expected signal with no data: high-res aged out on the device
           // (best-effort night) or not yet backfilled. Show a labelled
@@ -1410,10 +1426,15 @@
           ctitle.appendChild(cname);
           const cnote = document.createElement("span");
           cnote.className = "report-chart-note";
-          cnote.textContent =
-            reportResult && reportResult.missing_required > 0
-              ? "backfilling..."
-              : "not retained for this night";
+          if (availableParts.length &&
+              !reportBaseLoadedCharts.has(def.key)) {
+            cnote.textContent = "loading...";
+          } else {
+            cnote.textContent =
+              reportResult && reportResult.missing_required > 0
+                ? "backfilling..."
+                : "not retained for this night";
+          }
           ctitle.appendChild(cnote);
           appendReportChartActions(ctitle, def.key);
           card.appendChild(ctitle);
@@ -1437,6 +1458,14 @@
         title.className = "report-chart-title";
         const name = document.createElement("span");
         name.textContent = def.title;
+        const rangePending = !!reportZoom &&
+          !currentReportRangeChartReady(def.key);
+        if (rangePending) {
+          const badge = document.createElement("span");
+          badge.className = "report-res-badge";
+          badge.textContent = "loading";
+          name.appendChild(badge);
+        }
         if (seriesDefs.some((sd) => lowResByName[sd.key])) {
           const badge = document.createElement("span");
           badge.className = "report-res-badge";
@@ -1489,7 +1518,7 @@
           start: range.start,
           end: range.end,
           ranges: sessionRanges,
-          rangePending: zoomAwaitingRange,
+          rangePending,
         };
         reportDrawItems.push(item);
         canvas._item = item;
@@ -1590,7 +1619,7 @@
       cancelReportRangeRequest();
       reportLoadToken++;
       reportRangeToken++;
-      reportRangeInFlightKey = "";
+      reportRangeActiveKey = "";
     }
 
     async function pollReportFetch(options) {
@@ -1685,75 +1714,35 @@
       });
     }
 
-    function reportPlotUrl(nightId, from, to) {
+    function reportPlotUrl(nightId, from, to, part, name) {
       let url = "/api/report/plot?night=" + encodeURIComponent(nightId);
       if (Number.isFinite(from) && Number.isFinite(to)) {
         url += "&from=" + encodeURIComponent(from) +
           "&to=" + encodeURIComponent(to);
       }
+      if (part) url += "&part=" + encodeURIComponent(part);
+      if (name) url += "&name=" + encodeURIComponent(name);
       return url;
     }
 
-    async function readReportPlotResponse(response, onProgress) {
-      if (!response.body || !response.body.getReader) {
-        return decodeReportPlotBinary(await response.arrayBuffer());
+    async function runReportFetchJobs(jobs, concurrency) {
+      if (!jobs.length) return;
+      let next = 0;
+      const workers = [];
+      const workerCount = Math.min(concurrency || 2, jobs.length);
+      for (let i = 0; i < workerCount; i++) {
+        workers.push((async () => {
+          while (next < jobs.length) {
+            const job = jobs[next++];
+            await job();
+          }
+        })());
       }
-
-      const expectedLength = Number(response.headers.get("Content-Length"));
-      let capacity = Number.isSafeInteger(expectedLength) && expectedLength > 0
-        ? expectedLength : 65536;
-      let bytes = new Uint8Array(capacity);
-      let received = 0;
-      let nextDecodeAt = 32768;
-      let publishedSeries = 0;
-      let publishedEvents = -1;
-      const reader = response.body.getReader();
-
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        if (!chunk.value || !chunk.value.byteLength) continue;
-
-        const needed = received + chunk.value.byteLength;
-        if (needed > bytes.byteLength) {
-          capacity = Math.max(needed, bytes.byteLength * 2);
-          const grown = new Uint8Array(capacity);
-          grown.set(bytes.subarray(0, received));
-          bytes = grown;
-        }
-        bytes.set(chunk.value, received);
-        received = needed;
-
-        if (!onProgress || received < nextDecodeAt) continue;
-        const decoded = decodeReportPlotBinary(bytes.buffer, received);
-        if (!decoded.valid) {
-          nextDecodeAt = Math.max(received + 32768, nextDecodeAt * 2);
-          continue;
-        }
-
-        const seriesCount = Object.keys(decoded.series).length;
-        if (seriesCount > publishedSeries ||
-            decoded.events.length !== publishedEvents) {
-          publishedSeries = seriesCount;
-          publishedEvents = decoded.events.length;
-          onProgress(decoded);
-          nextDecodeAt = received + 32768;
-        } else {
-          nextDecodeAt = Math.max(received + 32768, nextDecodeAt * 2);
-        }
-      }
-
-      if (Number.isSafeInteger(expectedLength) && expectedLength > 0 &&
-          received !== expectedLength) {
-        throw new Error("incomplete plot response");
-      }
-      const decoded = decodeReportPlotBinary(bytes.buffer, received);
-      if (onProgress && decoded.valid) onProgress(decoded);
-      return decoded;
+      await Promise.all(workers);
     }
 
-    async function pollReportPlot(url, active, maxAttempts, delay, signal,
-                                  onProgress) {
+    async function pollReportPlotPart(url, active, maxAttempts, delay, signal,
+                                      decode) {
       return pollReportFetch({
         active,
         maxAttempts,
@@ -1770,11 +1759,7 @@
           }
           if (response.status === 200) {
             const revision = reportArtifactRevision(response);
-            const decoded = await readReportPlotResponse(
-              response,
-              onProgress
-                ? (partial) => onProgress(partial, revision)
-                : null);
+            const decoded = decode(await response.arrayBuffer());
             if (!decoded.valid) throw new Error("invalid plot response");
 
             const entry = {
@@ -1798,41 +1783,169 @@
       });
     }
 
-    async function fetchReportPlot(token, nightId, revision, signal) {
-      const url = reportPlotUrl(nightId);
-      const publishProgress = (decoded, responseRevision) => {
-        if (token !== reportLoadToken ||
-            (responseRevision && responseRevision !== revision)) {
-          return;
+    function reportChartDefinition(key) {
+      return reportChartDefs.find((definition) => definition.key === key) ||
+        null;
+    }
+
+    function reportPlotSection(name, index) {
+      const source = index || reportBasePlotIndex;
+      return source && source.sections ? source.sections[name] || null : null;
+    }
+
+    function reportChartPartNames(definition, index) {
+      if (!definition) return [];
+      if (definition.type === "events") {
+        return reportResult && reportResult.events_available &&
+          reportPlotSection("events", index) ? ["events"] : [];
+      }
+      return (definition.series || [definition])
+        .map((series) => series.key)
+        .filter((name) => reportPlotSection(name, index));
+    }
+
+    function reportExpandedChartKeys() {
+      return reportChartPreferences.order.filter((key) =>
+        !reportChartPreferences.collapsed.has(key));
+    }
+
+    async function fetchReportChartData(index, definition, context) {
+      const decoded = {events: [], series: {}};
+      const partNames = reportChartPartNames(definition, index);
+      for (const name of partNames) {
+        if (!context.active()) return null;
+        const section = reportPlotSection(name, index);
+        const part = name === "events" ? "events" : "series";
+        const url = reportPlotUrl(context.nightId,
+          context.from, context.to, part, part === "series" ? name : "");
+        const fetched = await pollReportPlotPart(
+          url,
+          context.active,
+          context.maxAttempts,
+          context.delay,
+          context.signal,
+          (buffer) => part === "events"
+            ? decodeReportPlotEvents(buffer, index, section)
+            : decodeReportPlotSeries(buffer, index, section));
+        if (!fetched || !context.active()) return null;
+        if (fetched.revision && fetched.revision !== context.revision) {
+          throw new Error("report_revision_changed");
         }
-        if (reportCurrentNightId !== String(nightId) ||
-            reportCurrentRevision !== String(revision)) {
-          activateReportBasePlot(nightId, revision, "",
-            decoded.series, decoded.events);
+        if (part === "events") {
+          decoded.events = fetched.decoded.events;
         } else {
-          reportSeries = decoded.series;
-          reportEvents = decoded.events;
-          reportBaseSeries = reportSeries;
-          reportBaseEvents = reportEvents;
+          decoded.series[name] = fetched.decoded.points;
         }
-        renderReportSummary();
-        renderReportCharts();
+      }
+      return decoded;
+    }
+
+    function publishReportBaseChart(key, decoded) {
+      const definition = reportChartDefinition(key);
+      if (!definition || !decoded) return;
+      if (definition.type === "events") {
+        reportBaseEvents = decoded.events || [];
+        if (!reportZoom) reportEvents = reportBaseEvents;
+      } else {
+        Object.keys(decoded.series || {}).forEach((name) => {
+          reportBaseSeries[name] = decoded.series[name];
+          if (!reportZoom) reportSeries[name] = decoded.series[name];
+        });
+      }
+      reportBaseLoadedCharts.add(key);
+      renderReportCharts();
+    }
+
+    function loadReportBaseChart(key, token, signal) {
+      if (reportBaseLoadedCharts.has(key)) return Promise.resolve(true);
+      const pending = reportBaseChartPromises.get(key);
+      if (pending) return pending;
+
+      const definition = reportChartDefinition(key);
+      const index = reportBasePlotIndex;
+      if (!definition || !index) return Promise.resolve(false);
+      const context = {
+        nightId: reportCurrentNightId,
+        revision: reportCurrentRevision,
+        from: null,
+        to: null,
+        signal,
+        maxAttempts: REPORT_PLOT_POLL_MAX_ATTEMPTS,
+        delay: REPORT_POLL_DELAY_MS,
+        active: () => token === reportLoadToken &&
+          index === reportBasePlotIndex,
       };
-      const fetched = await pollReportPlot(
-        url,
+      const promise = fetchReportChartData(index, definition, context)
+        .then((decoded) => {
+          if (!decoded || !context.active()) return false;
+          publishReportBaseChart(key, decoded);
+          return true;
+        })
+        .finally(() => {
+          if (reportBaseChartPromises.get(key) === promise) {
+            reportBaseChartPromises.delete(key);
+          }
+        });
+      reportBaseChartPromises.set(key, promise);
+      return promise;
+    }
+
+    async function fetchReportPlot(token, nightId, revision, signal) {
+      const indexUrl = reportPlotUrl(nightId, null, null, "index");
+      const fetched = await pollReportPlotPart(
+        indexUrl,
         () => token === reportLoadToken,
         REPORT_PLOT_POLL_MAX_ATTEMPTS,
         REPORT_POLL_DELAY_MS,
         signal,
-        publishProgress);
+        decodeReportPlotIndex);
       if (!fetched || token !== reportLoadToken) return false;
       if (fetched.revision && fetched.revision !== revision) {
         return "revision_changed";
       }
 
       activateReportBasePlot(nightId, revision, fetched.etag,
-        fetched.decoded.series, fetched.decoded.events);
+        fetched.decoded);
+      renderReportSummary();
+      renderReportCharts();
+
+      const jobs = reportExpandedChartKeys().map((key) =>
+        () => loadReportBaseChart(key, token, signal));
+      try {
+        await runReportFetchJobs(jobs, 2);
+      } catch (error) {
+        if (error && error.message === "report_revision_changed") {
+          return "revision_changed";
+        }
+        throw error;
+      }
       return true;
+    }
+
+    async function ensureReportChartLoaded(key) {
+      if (!reportBasePlotIndex || !reportCurrentNightId) return;
+      const token = reportLoadToken;
+      let controller = reportLoadAbortController;
+      let ownsController = false;
+      if (!controller) {
+        controller = new AbortController();
+        reportLoadAbortController = controller;
+        ownsController = true;
+      }
+      try {
+        await loadReportBaseChart(key, token, controller.signal);
+        if (reportZoom && token === reportLoadToken) {
+          ensureReportRangeLoaded(reportZoom.start, reportZoom.end, [key]);
+        }
+      } catch (error) {
+        if (error && error.message === "report_revision_changed") {
+          loadSelectedReportNight();
+        }
+      } finally {
+        if (ownsController && reportLoadAbortController === controller) {
+          reportLoadAbortController = null;
+        }
+      }
     }
 
     function reportRangeWindow(lo, hi) {
@@ -1859,27 +1972,69 @@
         reportCurrentRevision, w.from, w.to);
     }
 
-    function currentReportRangeReady() {
-      const key = currentReportRangeCacheKey();
-      return !!key && reportRangeCache.has(key);
+    function reportRangeEntry(key, from, to) {
+      let entry = lruGet(reportRangeCache, key);
+      if (entry) return entry;
+      entry = {
+        from,
+        to,
+        indexes: null,
+        series: {},
+        events: [],
+        loadedCharts: new Set(),
+        requestedCharts: new Set(),
+        promise: null,
+      };
+      lruSet(reportRangeCache, key, entry, REPORT_RANGE_CACHE_MAX);
+      return entry;
     }
 
-    function activateReportRangeCache(key) {
-      const cached = lruGet(reportRangeCache, key);
-      if (!cached) return false;
-      reportSeries = cached.series;
-      reportEvents = cached.events;
-      return true;
+    function applyReportRangeChart(entry, key) {
+      if (!entry || reportRangeActiveKey !== currentReportRangeCacheKey()) {
+        return;
+      }
+      const definition = reportChartDefinition(key);
+      if (!definition) return;
+      if (definition.type === "events") {
+        reportEvents = entry.events;
+      } else {
+        (definition.series || [definition]).forEach((series) => {
+          if (Object.prototype.hasOwnProperty.call(entry.series, series.key)) {
+            reportSeries[series.key] = entry.series[series.key];
+          }
+        });
+      }
     }
 
-    function ensureReportRangeLoaded(lo, hi) {
+    function currentReportRangeChartReady(key) {
+      const cacheKey = currentReportRangeCacheKey();
+      const entry = cacheKey ? reportRangeCache.get(cacheKey) : null;
+      return !!(entry && entry.loadedCharts.has(key));
+    }
+
+    function ensureReportRangeLoaded(lo, hi, requestedKeys) {
       if (!reportCurrentNightId || !reportCurrentRevision) return;
       const w = reportRangeWindow(lo, hi);
       if (!w) return;
       const key = reportRangeCacheKey(reportCurrentNightId,
         reportCurrentRevision, w.from, w.to);
-      if (activateReportRangeCache(key) || reportRangeInFlightKey === key) return;
-      fetchReportRange(lo, hi);
+      if (reportRangeActiveKey !== key) {
+        cancelReportRangeRequest();
+        reportRangeActiveKey = key;
+        reportSeries = {...reportBaseSeries};
+        reportEvents = reportBaseEvents;
+      }
+
+      const entry = reportRangeEntry(key, w.from, w.to);
+      const keys = requestedKeys || reportExpandedChartKeys();
+      keys.forEach((chartKey) => {
+        if (!entry.loadedCharts.has(chartKey)) {
+          entry.requestedCharts.add(chartKey);
+        } else {
+          applyReportRangeChart(entry, chartKey);
+        }
+      });
+      startReportRangeWorker(key, entry);
     }
 
     function mergeReportPlots(plots) {
@@ -1913,77 +2068,119 @@
       return merged;
     }
 
-    async function fetchReportRange(lo, hi) {
-      if (!reportCurrentNightId || !reportCurrentRevision) return;
-      const w = reportRangeWindow(lo, hi);
-      if (!w) return;
-      const nightId = reportCurrentNightId;
-      const revision = reportCurrentRevision;
-      const from = w.from;
-      const to = w.to;
-      const key = reportRangeCacheKey(nightId, revision, from, to);
-      if (activateReportRangeCache(key)) {
-        renderReportCharts();
-        return;
-      }
-      if (reportRangeInFlightKey === key) return;
-
-      cancelReportRangeRequest();
-      const controller = new AbortController();
-      reportRangeAbortController = controller;
-      reportRangeInFlightKey = key;
-      const token = ++reportRangeToken;
-      try {
-        const plots = [];
-        for (let tileStart = from; tileStart < to;
-             tileStart += REPORT_RANGE_TILE_MS) {
+    async function loadReportRangeIndexes(context, from, to) {
+      const indexes = [];
+      const jobs = [];
+      for (let tileStart = from; tileStart < to;
+           tileStart += REPORT_RANGE_TILE_MS) {
+        const tileIndex = indexes.length;
+        indexes.push(null);
+        jobs.push(async () => {
           const tileEnd = tileStart + REPORT_RANGE_TILE_MS;
-          const url = reportPlotUrl(nightId, tileStart, tileEnd);
-          const fetched = await pollReportPlot(
+          const url = reportPlotUrl(context.nightId,
+            tileStart, tileEnd, "index");
+          const fetched = await pollReportPlotPart(
             url,
-            () => token === reportRangeToken &&
-              nightId === reportCurrentNightId &&
-              revision === reportCurrentRevision,
+            context.active,
             REPORT_RANGE_POLL_MAX_ATTEMPTS,
             REPORT_RANGE_POLL_DELAY_MS,
-            controller.signal,
-            (partial, responseRevision) => {
-              if (token !== reportRangeToken ||
-                  nightId !== reportCurrentNightId ||
-                  revision !== reportCurrentRevision ||
-                  (responseRevision && responseRevision !== revision)) {
-                return;
-              }
-              const merged = mergeReportPlots(plots.concat(partial));
-              reportSeries = merged.series;
-              reportEvents = merged.events;
-              renderReportCharts();
-            });
-          if (!fetched || token !== reportRangeToken ||
-              nightId !== reportCurrentNightId ||
-              revision !== reportCurrentRevision) {
-            return;
+            context.signal,
+            decodeReportPlotIndex);
+          if (!fetched || !context.active()) return;
+          if (fetched.revision && fetched.revision !== context.revision) {
+            throw new Error("report_revision_changed");
           }
-          if (fetched.revision && fetched.revision !== revision) {
-            loadSelectedReportNight();
-            return;
-          }
-          plots.push(fetched.decoded);
+          indexes[tileIndex] = {
+            from: tileStart,
+            to: tileEnd,
+            index: fetched.decoded,
+          };
+        });
+      }
+      await runReportFetchJobs(jobs, 2);
+      return indexes.every((item) => item) ? indexes : null;
+    }
+
+    async function loadReportRangeChart(entry, key, context) {
+      const definition = reportChartDefinition(key);
+      if (!definition || !entry.indexes) return false;
+
+      const plots = [];
+      for (const tile of entry.indexes) {
+        const tileContext = {
+          ...context,
+          from: tile.from,
+          to: tile.to,
+        };
+        const decoded = await fetchReportChartData(
+          tile.index, definition, tileContext);
+        if (!decoded || !context.active()) return false;
+        plots.push(decoded);
+      }
+
+      const merged = mergeReportPlots(plots);
+      if (definition.type === "events") {
+        entry.events = merged.events;
+      } else {
+        (definition.series || [definition]).forEach((series) => {
+          entry.series[series.key] = merged.series[series.key] || [];
+        });
+      }
+      entry.loadedCharts.add(key);
+      applyReportRangeChart(entry, key);
+      renderReportCharts();
+      return true;
+    }
+
+    function startReportRangeWorker(key, entry) {
+      if (!entry || entry.promise) return;
+      const nightId = reportCurrentNightId;
+      const revision = reportCurrentRevision;
+      let controller = reportRangeAbortController;
+      if (!controller) controller = new AbortController();
+      reportRangeAbortController = controller;
+      const token = ++reportRangeToken;
+      const context = {
+        nightId,
+        revision,
+        signal: controller.signal,
+        maxAttempts: REPORT_RANGE_POLL_MAX_ATTEMPTS,
+        delay: REPORT_RANGE_POLL_DELAY_MS,
+        active: () => token === reportRangeToken &&
+          key === reportRangeActiveKey &&
+          nightId === reportCurrentNightId &&
+          revision === reportCurrentRevision,
+      };
+      const promise = (async () => {
+        if (!entry.indexes) {
+          entry.indexes = await loadReportRangeIndexes(
+            context, entry.from, entry.to);
+          if (!entry.indexes || !context.active()) return;
         }
 
-        const decoded = mergeReportPlots(plots);
-        lruSet(reportRangeCache, key,
-          {series: decoded.series, events: decoded.events},
-          REPORT_RANGE_CACHE_MAX);
-        reportSeries = decoded.series;
-        reportEvents = decoded.events;
-        renderReportCharts();
-      } finally {
+        while (context.active()) {
+          const keys = Array.from(entry.requestedCharts)
+            .filter((chartKey) => !entry.loadedCharts.has(chartKey));
+          entry.requestedCharts.clear();
+          if (!keys.length) break;
+          await runReportFetchJobs(keys.map((chartKey) =>
+            () => loadReportRangeChart(entry, chartKey, context)), 2);
+        }
+      })().catch((error) => {
+        if (error && error.message === "report_revision_changed" &&
+            context.active()) {
+          loadSelectedReportNight();
+        }
+      }).finally(() => {
+        const restart = context.active() &&
+          entry.requestedCharts.size > 0;
+        if (entry.promise === promise) entry.promise = null;
         if (reportRangeAbortController === controller) {
           reportRangeAbortController = null;
         }
-        if (reportRangeInFlightKey === key) reportRangeInFlightKey = "";
-      }
+        if (restart) startReportRangeWorker(key, entry);
+      });
+      entry.promise = promise;
     }
 
     function reportCrc32(bytes, start, length) {
@@ -2170,121 +2367,185 @@
       return result;
     }
 
-    // Decode PLOT_BIN v5, little-endian.
-    function decodeReportPlotBinary(buf, byteLength) {
-      const decoded = {valid: false, events: [], series: {}};
-      const length = byteLength == null ? buf.byteLength : byteLength;
-      const dv = new DataView(buf, 0, length);
-      // Header: magic u32, version u16, flags u16, base_ms i64 (16 bytes).
-      if (dv.byteLength < 16 || dv.getUint32(0, true) !== 0x42504341) {
-        return decoded;
+    function reportPlotSectionCrcValid(buffer, section) {
+      if (!section || buffer.byteLength !== section.length) return false;
+      return reportCrc32(new Uint8Array(buffer), 0, buffer.byteLength) ===
+        section.crc32;
+    }
+
+    // Decode the fixed PLOT v6 directory. Stable section names are the only
+    // identity consumed by WebUI; entry positions are deliberately ignored.
+    function decodeReportPlotIndex(buffer) {
+      const invalid = {valid: false, sections: {}};
+      const PREFIX_BYTES = 1600;
+      const HEADER_BYTES = 64;
+      const ENTRY_BYTES = 48;
+      const NAME_BYTES = 32;
+      if (buffer.byteLength !== PREFIX_BYTES) return invalid;
+
+      const bytes = new Uint8Array(buffer);
+      const dv = new DataView(buffer);
+      if (dv.getUint32(0, true) !== 0x42504341 ||
+          dv.getUint16(4, true) !== 6 ||
+          dv.getUint32(8, true) !== PREFIX_BYTES) {
+        return invalid;
       }
-      if (dv.getUint16(4, true) !== 5) return decoded;  // PLOT_BIN_VERSION
-      decoded.valid = true;
-      const base = Number(dv.getBigInt64(8, true));
-      const PLOT_GAP_INDEX = 0xFFFF;
-      const SERIES_COMPACT = 0;
-      const SERIES_ENVELOPE_RUNS = 1;
-      let off = 16;
-      // Every read below is bounds-checked: a truncated/corrupt blob bails
-      // cleanly (no out-of-range throw, no half-record) so a later redraw never
-      // sees partial state. Events are all-or-nothing; series stop at the last
-      // whole one decoded.
-      if (off + 4 > dv.byteLength) return decoded;
-      const eventCount = dv.getUint32(off, true); off += 4;
-      if (off + eventCount * 16 > dv.byteLength) return decoded;
-      for (let i = 0; i < eventCount; i++) {
-        decoded.events.push({
-          t: base + dv.getInt32(off, true),
-          duration: dv.getInt32(off + 4, true),
-          code: dv.getInt32(off + 8, true),
-          flags: dv.getInt32(off + 12, true),
-        });
-        off += 16;
+
+      const expectedCrc = dv.getUint32(48, true);
+      const crcBytes = bytes.slice();
+      crcBytes.fill(0, 48, 52);
+      if (reportCrc32(crcBytes, 0, crcBytes.length) !== expectedCrc) {
+        return invalid;
       }
+
+      const totalSize = dv.getUint32(12, true);
+      const base = Number(dv.getBigInt64(16, true));
+      const start = Number(dv.getBigInt64(24, true));
+      const end = Number(dv.getBigInt64(32, true));
+      const count = dv.getUint16(40, true);
+      if (totalSize < PREFIX_BYTES || !(end > start) ||
+          count < 1 || count > 32) {
+        return invalid;
+      }
+
       const decoder = new TextDecoder();
-      while (off + 6 <= dv.byteLength) {
-        const nameLen = dv.getUint16(off, true); off += 2;
-        if (off + nameLen + 4 > dv.byteLength) break;
-        const name = decoder.decode(new Uint8Array(buf, off, nameLen));
-        off += nameLen;
-        const mode = dv.getUint8(off); off += 1;
-        off += 1; // flags
-        off += 2; // reserved
-        const points = [];
-        if (mode === SERIES_COMPACT) {
-          if (off + 16 > dv.byteLength) break;
-          const seriesBaseDelta = dv.getInt32(off, true); off += 4;
-          const timeUnitMs = dv.getUint32(off, true); off += 4;
-          const valueScaleMilli = dv.getUint32(off, true); off += 4;
-          const pointCount = dv.getUint32(off, true); off += 4;
-          if (!timeUnitMs || !valueScaleMilli) break;
-          if (off + pointCount * 4 > dv.byteLength) break;
-          let lastPointT = base;
-          for (let p = 0; p < pointCount; p++) {
-            const timeIndex = dv.getUint16(off, true);
-            const rawValue = dv.getInt16(off + 2, true);
-            off += 4;
-            if (timeIndex === PLOT_GAP_INDEX) {
-              points.push({gap: true, t: lastPointT});
-              continue;
-            }
-            const t = base + seriesBaseDelta + timeIndex * timeUnitMs;
-            const value = rawValue * valueScaleMilli / 1000;
-            if (t > 0 && Number.isFinite(value)) {
-              lastPointT = t;
-              points.push({t, value});
-            }
-          }
-        } else if (mode === SERIES_ENVELOPE_RUNS) {
-          if (off + 16 > dv.byteLength) break;
-          const axisBaseDelta = dv.getInt32(off, true); off += 4;
-          const bucketMs = dv.getUint32(off, true); off += 4;
-          const valueScaleMilli = dv.getUint32(off, true); off += 4;
-          const runCount = dv.getUint32(off, true); off += 4;
-          if (!bucketMs || !valueScaleMilli) break;
-          let firstRun = true;
-          for (let r = 0; r < runCount; r++) {
-            if (off + 6 > dv.byteLength) break;
-            const startBucket = dv.getUint32(off, true); off += 4;
-            const bucketCount = dv.getUint16(off, true); off += 2;
-            if (off + bucketCount * 4 > dv.byteLength) {
-              off = dv.byteLength + 1;
-              break;
-            }
-            const runStartT =
-              base + axisBaseDelta + startBucket * bucketMs;
-            if (!firstRun) points.push({gap: true, t: runStartT});
-            firstRun = false;
-            for (let b = 0; b < bucketCount; b++) {
-              const minValue = dv.getInt16(off, true) *
-                valueScaleMilli / 1000;
-              const maxValue = dv.getInt16(off + 2, true) *
-                valueScaleMilli / 1000;
-              off += 4;
-              const t = runStartT + b * bucketMs;
-              if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
-                continue;
-              }
-              points.push({
-                t,
-                end: t + bucketMs,
-                min: Math.min(minValue, maxValue),
-                max: Math.max(minValue, maxValue),
-                value: (minValue + maxValue) / 2,
-                envelope: true,
-              });
-            }
-          }
-          if (off > dv.byteLength) break;
-        } else {
-          break;
+      const sections = {};
+      const order = [];
+      let expectedOffset = PREFIX_BYTES;
+      for (let i = 0; i < count; i++) {
+        const offset = HEADER_BYTES + i * ENTRY_BYTES;
+        const nameBytes = bytes.subarray(offset + 4, offset + 4 + NAME_BYTES);
+        const nul = nameBytes.indexOf(0);
+        if (nul <= 0) return invalid;
+        const name = decoder.decode(nameBytes.subarray(0, nul));
+        if (!/^[a-z0-9_]+$/.test(name) || sections[name]) return invalid;
+
+        const section = {
+          kind: dv.getUint8(offset),
+          encoding: dv.getUint8(offset + 1),
+          flags: dv.getUint16(offset + 2, true),
+          name,
+          offset: dv.getUint32(offset + 36, true),
+          length: dv.getUint32(offset + 40, true),
+          crc32: dv.getUint32(offset + 44, true),
+        };
+        if (!section.length || section.offset !== expectedOffset ||
+            section.length > totalSize - section.offset ||
+            (i === 0 && (section.kind !== 0 || name !== "events")) ||
+            (i > 0 && (section.kind !== 1 || section.encoding > 1))) {
+          return invalid;
         }
-        if (points.length) {
-          decoded.series[name] = points;
-        }
+        expectedOffset += section.length;
+        sections[name] = section;
+        order.push(name);
       }
-      return decoded;
+      if (expectedOffset !== totalSize) return invalid;
+
+      return {
+        valid: true,
+        base,
+        start,
+        end,
+        totalSize,
+        prefixCrc32: expectedCrc,
+        sections,
+        order,
+      };
+    }
+
+    function decodeReportPlotEvents(buffer, index, section) {
+      const invalid = {valid: false, events: []};
+      if (!index || !reportPlotSectionCrcValid(buffer, section) ||
+          buffer.byteLength < 4) {
+        return invalid;
+      }
+
+      const dv = new DataView(buffer);
+      const count = dv.getUint32(0, true);
+      if (buffer.byteLength !== 4 + count * 16) return invalid;
+      const events = [];
+      let offset = 4;
+      for (let i = 0; i < count; i++, offset += 16) {
+        events.push({
+          t: index.base + dv.getInt32(offset, true),
+          duration: dv.getInt32(offset + 4, true),
+          code: dv.getInt32(offset + 8, true),
+          flags: dv.getInt32(offset + 12, true),
+        });
+      }
+      return {valid: true, events};
+    }
+
+    function decodeReportPlotSeries(buffer, index, section) {
+      const invalid = {valid: false, points: []};
+      if (!index || !reportPlotSectionCrcValid(buffer, section) ||
+          buffer.byteLength < 16) {
+        return invalid;
+      }
+
+      const dv = new DataView(buffer);
+      const points = [];
+      let offset = 0;
+      if (section.encoding === 0) {
+        const seriesBaseDelta = dv.getInt32(offset, true); offset += 4;
+        const timeUnitMs = dv.getUint32(offset, true); offset += 4;
+        const valueScaleMilli = dv.getUint32(offset, true); offset += 4;
+        const pointCount = dv.getUint32(offset, true); offset += 4;
+        if (!timeUnitMs || !valueScaleMilli ||
+            buffer.byteLength !== offset + pointCount * 4) {
+          return invalid;
+        }
+
+        let lastPointT = index.base;
+        for (let i = 0; i < pointCount; i++, offset += 4) {
+          const timeIndex = dv.getUint16(offset, true);
+          if (timeIndex === 0xFFFF) {
+            points.push({gap: true, t: lastPointT});
+            continue;
+          }
+          const t = index.base + seriesBaseDelta + timeIndex * timeUnitMs;
+          const value = dv.getInt16(offset + 2, true) *
+            valueScaleMilli / 1000;
+          lastPointT = t;
+          points.push({t, value});
+        }
+      } else if (section.encoding === 1) {
+        const axisBaseDelta = dv.getInt32(offset, true); offset += 4;
+        const bucketMs = dv.getUint32(offset, true); offset += 4;
+        const valueScaleMilli = dv.getUint32(offset, true); offset += 4;
+        const runCount = dv.getUint32(offset, true); offset += 4;
+        if (!bucketMs || !valueScaleMilli) return invalid;
+
+        for (let run = 0; run < runCount; run++) {
+          if (offset + 6 > buffer.byteLength) return invalid;
+          const startBucket = dv.getUint32(offset, true); offset += 4;
+          const bucketCount = dv.getUint16(offset, true); offset += 2;
+          if (offset + bucketCount * 4 > buffer.byteLength) return invalid;
+          const runStart = index.base + axisBaseDelta +
+            startBucket * bucketMs;
+          if (run > 0) points.push({gap: true, t: runStart});
+          for (let bucket = 0; bucket < bucketCount;
+               bucket++, offset += 4) {
+            const minimum = dv.getInt16(offset, true) *
+              valueScaleMilli / 1000;
+            const maximum = dv.getInt16(offset + 2, true) *
+              valueScaleMilli / 1000;
+            const t = runStart + bucket * bucketMs;
+            points.push({
+              t,
+              end: t + bucketMs,
+              min: Math.min(minimum, maximum),
+              max: Math.max(minimum, maximum),
+              value: (minimum + maximum) / 2,
+              envelope: true,
+            });
+          }
+        }
+        if (offset !== buffer.byteLength) return invalid;
+      } else {
+        return invalid;
+      }
+      return {valid: true, points};
     }
 
     async function loadSelectedReportNight() {

@@ -98,11 +98,14 @@
     // Zoom: exact 15-minute tiles composed into the selected window.
     let reportBaseSeries = {};
     let reportBaseEvents = [];
+    let reportBasePlotIndex = null;
+    const reportBaseLoadedCharts = new Set();
+    const reportBaseChartPromises = new Map();
     let reportCurrentNightId = "";
     let reportCurrentRevision = "";
     let reportCurrentPlotEtag = "";
     const reportRangeCache = new Map();
-    let reportRangeInFlightKey = "";
+    let reportRangeActiveKey = "";
     let reportRangeToken = 0;
     let reportRangeAbortController = null;
     let reportHoverTime = null;   // cursor time shared across all charts
