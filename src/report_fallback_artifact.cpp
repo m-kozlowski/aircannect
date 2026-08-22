@@ -1,5 +1,6 @@
 #include "report_fallback_artifact.h"
 
+#include <algorithm>
 #include <stdio.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ constexpr size_t TIMEZONE_OFFSET = 28;
 constexpr size_t IDENTITY_OFFSET = 56;
 constexpr size_t METADATA_CRC_OFFSET = 64;
 constexpr size_t HEADER_CRC_OFFSET = 68;
+constexpr size_t BUILDER_GROWTH_BYTES = 64 * 1024;
 constexpr int32_t TIMEZONE_BIAS = 2048;
 constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
@@ -512,7 +514,7 @@ bool ReportFallbackArtifactBuilder::begin(
     }
 
     output_ = LargeByteBuffer::allocate(
-        ReportFallbackArtifactCodec::MaxFileBytes);
+        ReportFallbackArtifactCodec::MaxMetadataBytes);
     if (!output_) return false;
 
     memset(output_->data(),
@@ -584,6 +586,11 @@ bool ReportFallbackArtifactBuilder::reserve_section(
         return false;
     }
 
+    const size_t required_size =
+        ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_ +
+        section.payload_size;
+    if (!ensure_output_size(required_size)) return false;
+
     reserved_section_ = section;
     reserved_section_.payload = nullptr;
     reserved_payload_offset_ =
@@ -591,6 +598,23 @@ bool ReportFallbackArtifactBuilder::reserve_section(
     section_reserved_ = true;
     payload = output_->data() + reserved_payload_offset_;
     return true;
+}
+
+bool ReportFallbackArtifactBuilder::ensure_output_size(
+    size_t required_size) {
+    if (!output_ ||
+        required_size > ReportFallbackArtifactCodec::MaxFileBytes) {
+        return false;
+    }
+    if (required_size <= output_->size()) return true;
+
+    const size_t remaining =
+        ReportFallbackArtifactCodec::MaxFileBytes - required_size;
+    const size_t rounding = std::min(remaining, BUILDER_GROWTH_BYTES - 1);
+    const size_t target =
+        ((required_size + rounding) / BUILDER_GROWTH_BYTES) *
+        BUILDER_GROWTH_BYTES;
+    return output_->grow(target);
 }
 
 bool ReportFallbackArtifactBuilder::commit_reserved_section(

@@ -21,6 +21,7 @@ public:
     uint8_t *data() { return data_; }
     const uint8_t *data() const { return data_; }
     size_t size() const { return size_; }
+    bool grow(size_t size);
     bool truncate(size_t size);
 
 private:

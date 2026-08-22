@@ -1558,6 +1558,12 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
                 !source.path[0] || !file_kind(kind, source.kind)) {
                 continue;
             }
+            if ((kind == NightCatalogFileKind::Brp ||
+                 kind == NightCatalogFileKind::Pld ||
+                 kind == NightCatalogFileKind::Sa2) &&
+                source.complete_records == 0) {
+                continue;
+            }
 
             NightCatalogSourceFileInput &file = files[output_files++];
             file.kind = kind;

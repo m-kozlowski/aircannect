@@ -117,6 +117,35 @@ void *alloc_large(size_t size, bool allow_internal_fallback) {
 #endif
 }
 
+void *realloc_large(void *ptr,
+                    size_t size,
+                    bool allow_internal_fallback) {
+#ifdef ARDUINO
+    ensure_begin();
+    if (!ptr) return alloc_large(size, allow_internal_fallback);
+    if (size == 0) {
+        ::free(ptr);
+        return nullptr;
+    }
+
+    if (psram_detected && detect_psram()) {
+        void *next = heap_caps_realloc(ptr,
+                                       size,
+                                       MALLOC_CAP_SPIRAM |
+                                           MALLOC_CAP_8BIT);
+        if (next) return next;
+    }
+
+    if (!allow_internal_fallback) return nullptr;
+    return heap_caps_realloc(ptr,
+                             size,
+                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
+    (void)allow_internal_fallback;
+    return realloc(ptr, size);
+#endif
+}
+
 void *calloc_large(size_t count,
                    size_t size,
                    bool allow_internal_fallback) {

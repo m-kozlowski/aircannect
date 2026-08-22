@@ -116,6 +116,7 @@ public:
     std::shared_ptr<const LargeByteBuffer> finish();
 
 private:
+    bool ensure_output_size(size_t required_size);
     uint8_t *temporary_section_record(size_t index) const;
     bool sort_sections();
 

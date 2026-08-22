@@ -38,6 +38,18 @@ std::shared_ptr<const LargeByteBuffer> LargeByteBuffer::freeze(
     return std::shared_ptr<const LargeByteBuffer>(buffer.release());
 }
 
+bool LargeByteBuffer::grow(size_t size) {
+    if (size <= size_) return true;
+
+    uint8_t *next = static_cast<uint8_t *>(
+        Memory::realloc_large(data_, size, false));
+    if (!next) return false;
+
+    data_ = next;
+    size_ = size;
+    return true;
+}
+
 bool LargeByteBuffer::truncate(size_t size) {
     if (size == 0 || size > size_) return false;
 

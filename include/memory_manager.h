@@ -41,6 +41,9 @@ MemoryDetailStatus detail_status();
 bool psram_available();
 
 void *alloc_large(size_t size, bool allow_internal_fallback = true);
+void *realloc_large(void *ptr,
+                    size_t size,
+                    bool allow_internal_fallback = true);
 void *calloc_large(size_t count,
                    size_t size,
                    bool allow_internal_fallback = true);
