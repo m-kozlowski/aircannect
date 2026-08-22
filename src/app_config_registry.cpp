@@ -91,6 +91,10 @@ static constexpr AppConfigFieldFlags PROVISIONABLE =
 static constexpr AppConfigFieldFlags SECRET_PROVISIONABLE =
     static_cast<AppConfigFieldFlags>(AC_CONFIG_FIELD_SECRET |
                                      AC_CONFIG_FIELD_PROVISIONABLE);
+static constexpr AppConfigFieldFlags INTERNAL = AC_CONFIG_FIELD_INTERNAL;
+static constexpr AppConfigFieldFlags SECRET_INTERNAL =
+    static_cast<AppConfigFieldFlags>(AC_CONFIG_FIELD_SECRET |
+                                     AC_CONFIG_FIELD_INTERNAL);
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
 #define AC_CFG_OFFSET(member) offsetof(AppConfigData, member)
@@ -122,19 +126,19 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      sizeof(AS11_TRANSPORT_VALUES) / sizeof(AS11_TRANSPORT_VALUES[0]), -1,
      AC_CFG_OFFSET(as11_transport)},
     {"as11_ble_addr", AppConfigFieldId::As11BleAddress,
-     AppConfigGroup::As11, 20, AppConfigFieldType::String, PROVISIONABLE,
+     AppConfigGroup::As11, 20, AppConfigFieldType::String, INTERNAL,
      AC_CONFIG_DIRTY_AS11_TRANSPORT, "BLE address",
-     "Bluetooth address of the AS11.", nullptr, 0, -1,
+     "Address learned while pairing the AS11.", nullptr, 0, -1,
      AC_CFG_OFFSET(as11_ble_address)},
     {"as11_ble_id", AppConfigFieldId::As11BleClientId,
-     AppConfigGroup::As11, 30, AppConfigFieldType::String, PROVISIONABLE,
+     AppConfigGroup::As11, 30, AppConfigFieldType::String, INTERNAL,
      AC_CONFIG_DIRTY_AS11_TRANSPORT, "BLE client ID",
-     "Client ID issued by the AS11 during BLE pairing.", nullptr, 0, -1,
+     "Client ID issued while pairing the AS11.", nullptr, 0, -1,
      AC_CFG_OFFSET(as11_ble_client_id)},
     {"as11_ble_key", AppConfigFieldId::As11BleMasterKey,
      AppConfigGroup::As11, 40, AppConfigFieldType::Secret,
-     SECRET_PROVISIONABLE, AC_CONFIG_DIRTY_AS11_TRANSPORT,
-     "BLE pairing key", "Master pairing key issued during BLE pairing.",
+     SECRET_INTERNAL, AC_CONFIG_DIRTY_AS11_TRANSPORT,
+     "BLE pairing key", "Master key issued while pairing the AS11.",
      nullptr, 0, -1, AC_CFG_OFFSET(as11_ble_master_key)},
     {"as11_ota_key", AppConfigFieldId::As11OtaKey,
      AppConfigGroup::As11, 50, AppConfigFieldType::Secret,
@@ -519,6 +523,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::Oximetry: return "oximetry";
         case AppConfigGroup::Smb: return "smb";
         case AppConfigGroup::SleepHq: return "sleephq";
+        case AppConfigGroup::Count: break;
     }
     return "unknown";
 }
@@ -535,6 +540,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::Oximetry: return "Oximetry";
         case AppConfigGroup::Smb: return "SMB";
         case AppConfigGroup::SleepHq: return "SleepHQ";
+        case AppConfigGroup::Count: break;
     }
     return "Unknown";
 }
@@ -542,6 +548,11 @@ const char *app_config_group_label(AppConfigGroup group) {
 bool app_config_field_is_secret(const AppConfigFieldDescriptor &field) {
     return (field.flags & AC_CONFIG_FIELD_SECRET) != 0 ||
            field.type == AppConfigFieldType::Secret;
+}
+
+bool app_config_field_is_user_visible(
+    const AppConfigFieldDescriptor &field) {
+    return (field.flags & AC_CONFIG_FIELD_INTERNAL) == 0;
 }
 
 bool app_config_secret_sentinel_should_preserve(const char *current_value,

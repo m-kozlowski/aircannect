@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string>
 
+#include "app_config_registry.h"
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
@@ -29,7 +30,7 @@ private:
         std::string body;
     };
 
-    static constexpr size_t SectionCount = 9;
+    static constexpr size_t SectionCount = AC_CONFIG_GROUP_COUNT;
     static constexpr size_t CommandQueueDepth = 4;
     static constexpr size_t CommandsPerPoll = 2;
 

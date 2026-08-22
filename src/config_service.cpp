@@ -125,6 +125,36 @@ ConfigFieldUpdate ConfigService::set_value(
     return update;
 }
 
+bool ConfigService::replace_as11_ble_credentials(
+    const char *address,
+    const char *client_id,
+    const char *master_key_hex) {
+    if (!address || !client_id || !master_key_hex || !begin_transaction()) {
+        return false;
+    }
+
+    const String before_address =
+        transaction_store_->data().as11_ble_address;
+    const String before_client_id =
+        transaction_store_->data().as11_ble_client_id;
+    const String before_master_key =
+        transaction_store_->data().as11_ble_master_key;
+    if (!transaction_store_->set_as11_ble_credentials(
+            address, client_id, master_key_hex)) {
+        clear_transaction();
+        return false;
+    }
+
+    const AppConfigData &after = transaction_store_->data();
+    const bool changed = before_address != after.as11_ble_address ||
+                         before_client_id != after.as11_ble_client_id ||
+                         before_master_key != after.as11_ble_master_key;
+    transaction_accepted_ = 1;
+    transaction_changed_ = changed ? 1 : 0;
+    transaction_dirty_ = changed ? AC_CONFIG_DIRTY_AS11_TRANSPORT : 0;
+    return commit_transaction().persisted;
+}
+
 ConfigTransactionResult ConfigService::reset() {
     ConfigTransactionResult result;
     if (transaction_active_) return result;

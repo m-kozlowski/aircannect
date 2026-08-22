@@ -2088,6 +2088,174 @@
       root.appendChild(row(field.label || field.key, rendered, field.key));
     }
 
+    function as11BleStateLabel(data) {
+      const labels = {
+        idle: data.paired ? "Paired" : "Not paired",
+        scanning: "Scanning",
+        select_device: "Select a device",
+        connecting: "Connecting",
+        awaiting_passkey: "Enter the code shown on the AS11",
+        verifying: "Verifying",
+        saving: "Saving pairing",
+        complete: data.paired ? "Paired" : "Pairing removed",
+        failed: "Pairing failed",
+      };
+      return labels[data.state] || data.state || "Unknown";
+    }
+
+    function scheduleAs11BlePairingPoll(data) {
+      if (as11BlePairTimer) {
+        clearTimeout(as11BlePairTimer);
+        as11BlePairTimer = null;
+      }
+
+      if (data && data.active) as11BlePairStartDeadline = 0;
+      const waitingForStart = Date.now() < as11BlePairStartDeadline;
+      if (!data || (!data.active && !waitingForStart)) {
+        as11BlePairStartDeadline = 0;
+        return;
+      }
+
+      as11BlePairTimer = setTimeout(
+        () => loadAs11BlePairing(false), data.active ? 700 : 500);
+    }
+
+    function renderAs11BlePairing(data) {
+      const panel = document.getElementById("as11BlePairing");
+      if (!panel) return;
+
+      const snapshot = JSON.stringify(data || {});
+      if (panel.dataset.snapshot === snapshot) {
+        scheduleAs11BlePairingPoll(data);
+        return;
+      }
+
+      panel.dataset.snapshot = snapshot;
+      panel.innerHTML = "";
+
+      const state = valueSpan(as11BleStateLabel(data));
+      panel.appendChild(row("BLE pairing", state));
+
+      if (data.selected_name || data.selected_address) {
+        const selected = [data.selected_name, data.selected_address]
+          .filter(Boolean).join(" / ");
+        panel.appendChild(row("AS11", valueSpan(selected)));
+      }
+
+      if (data.state === "select_device") {
+        const instruction = document.createElement("p");
+        instruction.className = "as11-pairing-instruction";
+        instruction.textContent =
+          "Before continuing, on the AirSense open More > myAir App, " +
+          "then select OK, Downloaded.";
+        panel.appendChild(instruction);
+
+        const select = document.createElement("select");
+        (data.devices || []).forEach((device) => {
+          const option = document.createElement("option");
+          option.value = device.address;
+          option.textContent = (device.name || "AS11") + " / " +
+            device.address + " / " + device.rssi + " dBm";
+          select.appendChild(option);
+        });
+        select.id = "as11BleDevice";
+        panel.appendChild(row("Device", select));
+      }
+
+      if (data.passkey_required) {
+        const passkey = document.createElement("input");
+        passkey.id = "as11BlePasskey";
+        passkey.type = "text";
+        passkey.inputMode = "numeric";
+        passkey.autocomplete = "one-time-code";
+        passkey.maxLength = 4;
+        passkey.placeholder = "0000";
+        panel.appendChild(row("Pairing code", passkey));
+      }
+
+      const buttons = document.createElement("div");
+      buttons.className = "btns";
+      if (data.state === "select_device") {
+        const selectButton = document.createElement("button");
+        selectButton.className = "btn primary";
+        selectButton.textContent = "Continue";
+        selectButton.onclick = as11BleSelectDevice;
+        buttons.appendChild(selectButton);
+      } else if (data.passkey_required) {
+        const confirmButton = document.createElement("button");
+        confirmButton.className = "btn primary";
+        confirmButton.textContent = "Pair";
+        confirmButton.onclick = as11BleSubmitPasskey;
+        buttons.appendChild(confirmButton);
+      } else if (!data.active) {
+        const pairButton = document.createElement("button");
+        pairButton.className = "btn primary";
+        pairButton.textContent = data.paired ? "Pair another" : "Pair";
+        pairButton.disabled = !data.enabled;
+        pairButton.onclick = () => as11BleAction("pair");
+        buttons.appendChild(pairButton);
+      }
+
+      if (data.active) {
+        const cancelButton = document.createElement("button");
+        cancelButton.className = "btn";
+        cancelButton.textContent = "Cancel";
+        cancelButton.onclick = () => as11BleAction("cancel");
+        buttons.appendChild(cancelButton);
+      }
+      if (data.paired && !data.active) {
+        const forgetButton = document.createElement("button");
+        forgetButton.className = "btn danger";
+        forgetButton.textContent = "Forget";
+        forgetButton.onclick = as11BleForget;
+        buttons.appendChild(forgetButton);
+      }
+      panel.appendChild(buttons);
+
+      const message = document.createElement("div");
+      message.className = "msg" + (data.error ? " err" : "");
+      message.id = "as11BleMsg";
+      message.textContent = data.error ||
+        (!data.enabled ? "Select BLE transport and save first." : "");
+      panel.appendChild(message);
+      scheduleAs11BlePairingPoll(data);
+    }
+
+    async function loadAs11BlePairing(showError) {
+      try {
+        const response = await api("/api/as11/ble");
+        renderAs11BlePairing(await response.json());
+      } catch (error) {
+        if (showError) msg("as11BleMsg", error.message, false);
+      }
+    }
+
+    async function as11BleAction(action, values) {
+      try {
+        await api("/api/as11/ble", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(Object.assign({action}, values || {})),
+        });
+        if (action === "pair") {
+          as11BlePairStartDeadline = Date.now() + 10000;
+        }
+        setTimeout(() => loadAs11BlePairing(true), 150);
+      } catch (error) {
+        msg("as11BleMsg", error.message, false);
+      }
+    }
+
+    function startAs11PairingFromDashboard() {
+      showTab("config");
+      as11BleAction("pair");
+    }
+
+    function as11BleForget() {
+      if (!confirm("Forget the paired AS11?")) return;
+      as11BleAction("forget");
+    }
+
     async function loadConfig() {
       try {
         await ensureConfigSchema();
@@ -2112,7 +2280,14 @@
 
           section.fields.forEach((field) =>
             renderConfigField(fields, section, field));
+          if (section.id === "as11") {
+            const pairing = document.createElement("div");
+            pairing.className = "endpoint-config";
+            pairing.id = "as11BlePairing";
+            fields.appendChild(pairing);
+          }
         });
+        await loadAs11BlePairing(true);
       } catch (error) {
         msg("configMsg", error.message, false);
       }

@@ -95,6 +95,11 @@
         flex-direction: column;
       }
 
+      .connection-control {
+        width: 100%;
+        justify-content: space-between;
+      }
+
       input,
       select {
         width: 100%;

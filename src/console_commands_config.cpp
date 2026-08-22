@@ -21,6 +21,7 @@ void print_config(Print &out, const AppConfigData &config) {
     bool have_group = false;
     for (size_t i = 0; i < count; ++i) {
         const AppConfigFieldDescriptor &field = fields[i];
+        if (!app_config_field_is_user_visible(field)) continue;
         if (!have_group || field.group != last_group) {
             out.print("  [");
             out.print(app_config_group_label(field.group));
@@ -48,7 +49,7 @@ bool print_config_value(Print &out,
 
     const AppConfigFieldDescriptor *field =
         app_config_find_field(key.c_str());
-    if (!field) return false;
+    if (!field || !app_config_field_is_user_visible(*field)) return false;
 
     String value;
     if (!app_config_field_get_console_value(config, *field, value)) {
@@ -117,7 +118,7 @@ bool handle_config_key(Print &out,
 
     const AppConfigFieldDescriptor *field =
         app_config_find_field(key.c_str());
-    if (!field) return false;
+    if (!field || !app_config_field_is_user_visible(*field)) return false;
 
     ConfigTransactionResult transaction;
     const ConfigFieldUpdate update = config.set_value(

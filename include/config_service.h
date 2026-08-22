@@ -69,6 +69,9 @@ public:
                                 const String &value,
                                 bool preserve_secret_sentinel,
                                 ConfigTransactionResult *transaction = nullptr);
+    bool replace_as11_ble_credentials(const char *address,
+                                      const char *client_id,
+                                      const char *master_key_hex);
     ConfigTransactionResult reset();
 
 private:

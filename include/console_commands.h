@@ -10,6 +10,7 @@ static constexpr size_t AC_CONSOLE_COMMAND_SESSION_CAPACITY =
     AC_MAX_TELNET_CLIENTS + 2;
 
 class As11DeviceService;
+class As11BleRpcLink;
 class As11SettingsManager;
 class CanDriver;
 class ConfigService;
@@ -45,7 +46,8 @@ public:
     As11DeviceConsoleCommands(RpcRequestPort &rpc,
                               RpcPassthroughPort &passthrough,
                               As11DeviceService &device,
-                              TimeSyncService &time_sync);
+                              TimeSyncService &time_sync,
+                              As11BleRpcLink &ble_link);
 
     bool execute(const String &command,
                  const String &rest,
@@ -58,6 +60,7 @@ private:
     RpcPassthroughPort &passthrough_;
     As11DeviceService &device_;
     TimeSyncService &time_sync_;
+    As11BleRpcLink &ble_link_;
 };
 
 class RpcConsoleCommands final : public ConsoleCommandGroup {

@@ -24,26 +24,6 @@ static constexpr size_t CONFIG_JSON_RESERVE_SYNC_SECTION = 640;
 static constexpr size_t CONFIG_JSON_RESERVE_SMALL_SECTION = 384;
 static constexpr size_t CONFIG_SCHEMA_JSON_RESERVE = 12 * 1024;
 
-struct ConfigSection {
-    const char *path;
-    const char *id;
-};
-
-static constexpr ConfigSection CONFIG_SECTIONS[] = {
-    {"/api/config/device", "device"},
-    {"/api/config/network", "network"},
-    {"/api/config/access", "access"},
-    {"/api/config/ota", "ota"},
-    {"/api/config/logging", "logging"},
-    {"/api/config/time", "time"},
-    {"/api/config/oximetry", "oximetry"},
-    {"/api/config/smb", "smb"},
-    {"/api/config/sleephq", "sleephq"},
-};
-
-static_assert(sizeof(CONFIG_SECTIONS) / sizeof(CONFIG_SECTIONS[0]) == 9,
-              "ConfigHttpController section count mismatch");
-
 static constexpr AppConfigEnumValue WEB_LOG_LEVEL_VALUES[] = {
     {"ERROR", "Error"},
     {"WARN", "Warn"},
@@ -52,14 +32,14 @@ static constexpr AppConfigEnumValue WEB_LOG_LEVEL_VALUES[] = {
 };
 
 size_t section_index(const char *section) {
-    constexpr size_t count =
-        sizeof(CONFIG_SECTIONS) / sizeof(CONFIG_SECTIONS[0]);
+    constexpr size_t count = AC_CONFIG_GROUP_COUNT;
     if (!section || !section[0] || strcmp(section, "all") == 0) {
         return count;
     }
 
     for (size_t i = 0; i < count; ++i) {
-        if (strcmp(section, CONFIG_SECTIONS[i].id) == 0) return i;
+        const AppConfigGroup group = static_cast<AppConfigGroup>(i);
+        if (strcmp(section, app_config_group_id(group)) == 0) return i;
     }
     return count + 1;
 }
@@ -168,7 +148,10 @@ void build_config_json(LargeTextBuffer &json,
     const AppConfigFieldDescriptor *fields = app_config_fields(count);
     for (size_t i = 0; i < count; ++i) {
         const AppConfigFieldDescriptor &field = fields[i];
-        if (!section_includes(section, field.group)) continue;
+        if (!app_config_field_is_user_visible(field) ||
+            !section_includes(section, field.group)) {
+            continue;
+        }
 
         String value;
         if (!app_config_field_get_raw_value(config, field, value)) continue;
@@ -221,6 +204,7 @@ void build_schema_json(LargeTextBuffer &json) {
 
     for (size_t i = 0; i < count; ++i) {
         const AppConfigFieldDescriptor &field = fields[i];
+        if (!app_config_field_is_user_visible(field)) continue;
         if (!group_open || field.group != current_group) {
             if (group_open) json += "]}";
             if (!first_group) json += ',';
@@ -290,14 +274,19 @@ void ConfigHttpController::register_routes(AsyncWebServer &server) {
         [this](AsyncWebServerRequest *request) { send_update(request); },
         nullptr, http_request_body_handler);
 
-    for (const ConfigSection &section : CONFIG_SECTIONS) {
-        server.on(AsyncURIMatcher::exact(section.path), HTTP_GET,
-                  [this, id = section.id](AsyncWebServerRequest *request) {
-            send_config(request, id);
-        });
+    for (size_t i = 0; i < SectionCount; ++i) {
+        const AppConfigGroup group = static_cast<AppConfigGroup>(i);
+        String path = "/api/config/";
+        path += app_config_group_id(group);
 
         server.on(
-            AsyncURIMatcher::exact(section.path), HTTP_POST,
+            AsyncURIMatcher::exact(path), HTTP_GET,
+            [this, group](AsyncWebServerRequest *request) {
+                send_config(request, app_config_group_id(group));
+            });
+
+        server.on(
+            AsyncURIMatcher::exact(path), HTTP_POST,
             [this](AsyncWebServerRequest *request) { send_update(request); },
             nullptr, http_request_body_handler);
     }
@@ -336,7 +325,7 @@ void ConfigHttpController::execute(Command &command) {
     for (JsonPairConst pair : root) {
         const char *key = pair.key().c_str();
         const AppConfigFieldDescriptor *field = app_config_find_field(key);
-        if (!field) {
+        if (!field || !app_config_field_is_user_visible(*field)) {
             Log::logf(CAT_CONFIG, LOG_WARN,
                       "rejected web config key=%s reason=unknown\n",
                       key ? key : "<null>");
@@ -377,9 +366,11 @@ bool ConfigHttpController::publish_snapshots() {
     if (next_all.overflowed()) return false;
 
     for (size_t i = 0; i < SectionCount; ++i) {
-        next_sections[i].reserve(config_json_reserve(CONFIG_SECTIONS[i].id));
-        build_config_json(next_sections[i], config_->data(),
-                          CONFIG_SECTIONS[i].id);
+        const AppConfigGroup group = static_cast<AppConfigGroup>(i);
+        const char *section = app_config_group_id(group);
+
+        next_sections[i].reserve(config_json_reserve(section));
+        build_config_json(next_sections[i], config_->data(), section);
         if (next_sections[i].overflowed()) return false;
     }
 

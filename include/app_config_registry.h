@@ -27,7 +27,11 @@ enum class AppConfigGroup : uint8_t {
     Oximetry,
     Smb,
     SleepHq,
+    Count,
 };
+
+static constexpr size_t AC_CONFIG_GROUP_COUNT =
+    static_cast<size_t>(AppConfigGroup::Count);
 
 enum class AppConfigFieldType : uint8_t {
     Bool,
@@ -42,6 +46,7 @@ enum AppConfigFieldFlags : uint16_t {
     AC_CONFIG_FIELD_NONE = 0,
     AC_CONFIG_FIELD_SECRET = 1u << 0,
     AC_CONFIG_FIELD_PROVISIONABLE = 1u << 1,
+    AC_CONFIG_FIELD_INTERNAL = 1u << 2,
 };
 
 enum AppConfigDirty : uint32_t {
@@ -143,6 +148,8 @@ const AppConfigFieldDescriptor *app_config_find_field(const char *key);
 const char *app_config_group_id(AppConfigGroup group);
 const char *app_config_group_label(AppConfigGroup group);
 bool app_config_field_is_secret(const AppConfigFieldDescriptor &field);
+bool app_config_field_is_user_visible(
+    const AppConfigFieldDescriptor &field);
 bool app_config_secret_sentinel_should_preserve(const char *current_value,
                                                 const char *incoming_value,
                                                 bool keep_secret_sentinel);

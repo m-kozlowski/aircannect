@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "as11_device_service.h"
+#include "as11_ble_rpc_link.h"
 #include "as11_rpc.h"
 #include "as11_settings.h"
 #include "as11_settings_manager.h"
@@ -351,17 +352,84 @@ void handle_time(Print &out,
     print_unknown_command(out, "TIME", "time, get, push, pull, ntp");
 }
 
+void print_as11_ble_status(Print &out, const As11BleRpcLink &link) {
+    const As11BleLinkStatus link_status = link.ble_status();
+    const As11BlePairingStatus pairing = link.pairing_status();
+
+    out.print("[AS11 BLE] link=");
+    out.print(as11_ble_link_state_name(link_status.state));
+    out.print(" pairing=");
+    out.print(as11_ble_pairing_state_name(pairing.state));
+    out.print(" paired=");
+    out.print(pairing.paired ? "yes" : "no");
+    out.print(" connected=");
+    out.print(link_status.connected ? "yes" : "no");
+    if (pairing.selected_address[0]) {
+        out.print(" selected=");
+        out.print(pairing.selected_address);
+    }
+    if (pairing.error[0]) {
+        out.print(" error=");
+        out.print(pairing.error);
+    }
+    out.println();
+
+    for (size_t i = 0; i < pairing.device_count; ++i) {
+        out.print("[AS11 BLE device] address=");
+        out.print(pairing.devices[i].address);
+        out.print(" name=\"");
+        out.print(pairing.devices[i].name);
+        out.print("\" rssi=");
+        out.println(pairing.devices[i].rssi);
+    }
+}
+
+void handle_as11_ble(Print &out, String rest, As11BleRpcLink &link) {
+    rest.trim();
+    if (!rest.length() || rest == "status") {
+        print_as11_ble_status(out, link);
+        return;
+    }
+
+    bool accepted = false;
+    if (rest == "pair" || rest == "scan") {
+        accepted = link.request_pairing_scan();
+    } else if (rest == "cancel") {
+        accepted = link.cancel_pairing();
+    } else if (rest == "forget") {
+        accepted = link.forget_pairing();
+    } else if (rest.startsWith("select ")) {
+        String address = rest.substring(7);
+        address.trim();
+        accepted = link.request_pairing_device(address.c_str());
+    } else if (rest.startsWith("passkey ")) {
+        String passkey = rest.substring(8);
+        passkey.trim();
+        accepted = link.submit_pairing_passkey(passkey.c_str());
+    } else {
+        print_unknown_command(
+            out, "AS11 BLE",
+            "as11 ble status, pair, select ADDRESS, passkey CODE, cancel, forget");
+        return;
+    }
+
+    out.println(accepted ? "[AS11 BLE] command queued"
+                         : "[AS11 BLE] command rejected");
+}
+
 }  // namespace
 
 As11DeviceConsoleCommands::As11DeviceConsoleCommands(
     RpcRequestPort &rpc,
     RpcPassthroughPort &passthrough,
     As11DeviceService &device,
-    TimeSyncService &time_sync)
+    TimeSyncService &time_sync,
+    As11BleRpcLink &ble_link)
     : rpc_(rpc),
       passthrough_(passthrough),
       device_(device),
-      time_sync_(time_sync) {}
+      time_sync_(time_sync),
+      ble_link_(ble_link) {}
 
 bool As11DeviceConsoleCommands::execute(
     const String &command,
@@ -378,6 +446,8 @@ bool As11DeviceConsoleCommands::execute(
         rest.trim();
         if (!rest.length() || rest == "status") {
             ConsoleFormat::print_as11_status(out, device_.state());
+        } else if (rest == "ble" || rest.startsWith("ble ")) {
+            handle_as11_ble(out, rest.substring(3), ble_link_);
         } else if (rest == "poll" || rest == "refresh") {
             device_.request_healthcheck(rpc_, RpcSource::Console, millis());
             out.println("[AS11] healthcheck scheduled");
@@ -389,7 +459,8 @@ bool As11DeviceConsoleCommands::execute(
                                           RpcSource::Console);
             }
         } else {
-            print_unknown_command(out, "AS11", "as11 status, poll, version");
+            print_unknown_command(
+                out, "AS11", "as11 status, poll, version, ble");
         }
         return true;
     }

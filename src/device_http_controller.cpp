@@ -9,8 +9,12 @@
 #include <utility>
 
 #include "as11_device_service.h"
+#include "as11_ble_rpc_link.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
+#include "json_util.h"
+#include "large_text_buffer.h"
 #include "rpc_request_port.h"
 #include "time_sync_service.h"
 
@@ -18,10 +22,12 @@ namespace aircannect {
 
 bool DeviceHttpController::begin(RpcRequestPort &rpc,
                                  As11DeviceService &device,
-                                 TimeSyncService &time_sync) {
+                                 TimeSyncService &time_sync,
+                                 As11BleRpcLink &ble_link) {
     rpc_ = &rpc;
     device_ = &device;
     time_sync_ = &time_sync;
+    ble_link_ = &ble_link;
     return commands_.begin();
 }
 
@@ -37,10 +43,20 @@ void DeviceHttpController::register_routes(AsyncWebServer &server) {
             send_therapy_action(request);
         },
         nullptr, http_request_body_handler);
+
+    server.on(AsyncURIMatcher::exact("/api/as11/ble"), HTTP_GET,
+              [this](AsyncWebServerRequest *request) {
+        send_ble_status(request);
+    });
+
+    server.on(
+        AsyncURIMatcher::exact("/api/as11/ble"), HTTP_POST,
+        [this](AsyncWebServerRequest *request) { send_ble_action(request); },
+        nullptr, http_request_body_handler);
 }
 
 void DeviceHttpController::poll() {
-    if (!rpc_ || !device_ || !time_sync_) return;
+    if (!rpc_ || !device_ || !time_sync_ || !ble_link_) return;
 
     as11_unavailable_.store(device_->unavailable(),
                             std::memory_order_release);
@@ -84,6 +100,21 @@ void DeviceHttpController::execute(Command command) {
             (void)device_->request_therapy(
                 *rpc_, As11TherapyTarget::Standby, RpcSource::HttpApi,
                 millis());
+            break;
+        case CommandKind::BlePairScan:
+            (void)ble_link_->request_pairing_scan();
+            break;
+        case CommandKind::BlePairSelect:
+            (void)ble_link_->request_pairing_device(command.value.c_str());
+            break;
+        case CommandKind::BlePairPasskey:
+            (void)ble_link_->submit_pairing_passkey(command.value.c_str());
+            break;
+        case CommandKind::BlePairCancel:
+            (void)ble_link_->cancel_pairing();
+            break;
+        case CommandKind::BlePairForget:
+            (void)ble_link_->forget_pairing();
             break;
     }
 }
@@ -159,6 +190,94 @@ void DeviceHttpController::send_therapy_action(
     }
 
     const bool queued = enqueue(command);
+    request->send(queued ? 202 : 503, "application/json",
+                  queued ? "{\"ok\":true,\"result\":\"queued\"}"
+                         : "{\"ok\":false,\"error\":\"queue_full\"}");
+}
+
+void DeviceHttpController::send_ble_status(
+    AsyncWebServerRequest *request) const {
+    if (!ble_link_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"ble_unavailable\"}");
+        return;
+    }
+
+    const As11BlePairingStatus pairing = ble_link_->pairing_status();
+    const As11BleLinkStatus link = ble_link_->ble_status();
+    LargeTextBuffer json;
+    json.reserve(1024);
+    json = "{";
+    json_add_bool(json, "ok", true, false);
+    json_add_bool(json, "enabled", link.enabled);
+    json_add_bool(json, "paired", pairing.paired);
+    json_add_string(json, "state",
+                    as11_ble_pairing_state_name(pairing.state));
+    json_add_bool(json, "active", pairing.active);
+    json_add_bool(json, "passkey_required", pairing.passkey_required);
+    json_add_string(json, "selected_address", pairing.selected_address);
+    json_add_string(json, "selected_name", pairing.selected_name);
+    json_add_string(json, "error", pairing.error);
+    json += ",\"devices\":[";
+    for (size_t i = 0; i < pairing.device_count; ++i) {
+        if (i) json += ',';
+        json += '{';
+        json_add_string(json, "address", pairing.devices[i].address, false);
+        json_add_string(json, "name", pairing.devices[i].name);
+        json_add_int(json, "rssi", pairing.devices[i].rssi);
+        json += '}';
+    }
+    json += "]}";
+
+    AsyncResponseStream *response = nullptr;
+    if (json.overflowed() ||
+        !http_prepare_json_response(request, json, response)) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    request->send(response);
+}
+
+void DeviceHttpController::send_ble_action(
+    AsyncWebServerRequest *request) {
+    JsonDocument doc;
+    std::string body;
+    if (!http_parse_json_body(request, doc, body)) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_json\"}");
+        return;
+    }
+
+    const char *action = doc["action"] | "";
+    Command command;
+    if (strcmp(action, "pair") == 0 || strcmp(action, "scan") == 0) {
+        command.kind = CommandKind::BlePairScan;
+    } else if (strcmp(action, "select") == 0) {
+        command.kind = CommandKind::BlePairSelect;
+        command.value = doc["address"] | "";
+    } else if (strcmp(action, "passkey") == 0) {
+        command.kind = CommandKind::BlePairPasskey;
+        command.value = doc["passkey"] | "";
+    } else if (strcmp(action, "cancel") == 0) {
+        command.kind = CommandKind::BlePairCancel;
+    } else if (strcmp(action, "forget") == 0) {
+        command.kind = CommandKind::BlePairForget;
+    } else {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"unknown_action\"}");
+        return;
+    }
+
+    if ((command.kind == CommandKind::BlePairSelect ||
+         command.kind == CommandKind::BlePairPasskey) &&
+        command.value.empty()) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"value_required\"}");
+        return;
+    }
+
+    const bool queued = enqueue(std::move(command));
     request->send(queued ? 202 : 503, "application/json",
                   queued ? "{\"ok\":true,\"result\":\"queued\"}"
                          : "{\"ok\":false,\"error\":\"queue_full\"}");

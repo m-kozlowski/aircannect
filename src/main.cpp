@@ -143,7 +143,8 @@ static ExportCoordinator export_coordinator;
 static CanConsoleCommands can_console_commands(
     rpc_transport, can_rpc_link, can_driver, event_broker, stream_broker);
 static As11DeviceConsoleCommands as11_device_console_commands(
-    rpc_transport, rpc_transport, as11_device_service, time_sync_service);
+    rpc_transport, rpc_transport, as11_device_service, time_sync_service,
+    as11_ble_rpc_link);
 static RpcConsoleCommands rpc_console_commands(
     rpc_transport, rpc_transport, as11_device_service, as11_settings_manager);
 static StreamConsoleCommands stream_console_commands(stream_broker);
@@ -510,6 +511,15 @@ static void poll_oximetry(bool network_available, uint32_t now_ms) {
     plx_peripheral.poll(after, now_ms);
 }
 
+static bool store_as11_ble_credentials(void *context,
+                                       const char *address,
+                                       const char *client_id,
+                                       const char *master_key_hex) {
+    auto *config = static_cast<ConfigService *>(context);
+    return config && config->replace_as11_ble_credentials(
+                         address, client_id, master_key_hex);
+}
+
 static bool configure_as11_transport(const AppConfigData &config) {
     const bool use_ble = config.as11_transport == As11Transport::Ble;
 
@@ -818,6 +828,8 @@ void setup() {
               tls_mem.install_result);
 
     config_service.begin();
+    as11_ble_rpc_link.set_credential_store(
+        store_as11_ble_credentials, &config_service);
     time_sync_service.initialize_timezone(config_service.data());
 
     if (!ble_runtime.begin()) {
@@ -1047,7 +1059,8 @@ void setup() {
     }
     if (!device_http_controller.begin(rpc_transport,
                                       as11_device_service,
-                                      time_sync_service)) {
+                                      time_sync_service,
+                                      as11_ble_rpc_link)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] device HTTP controller failed to start\n");
     }

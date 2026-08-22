@@ -99,6 +99,12 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  as11 status               show cached AS11 state");
         out.println("  as11 poll                 queue status and clock refresh");
         out.println("  as11 version              request AS11 GetVersion");
+        out.println("  as11 ble status           show BLE link and pairing state");
+        out.println("  as11 ble pair             scan for an AS11 to pair");
+        out.println("  as11 ble select ADDRESS   select a scanned AS11");
+        out.println("  as11 ble passkey CODE     finish pairing with its code");
+        out.println("  as11 ble cancel           cancel pairing");
+        out.println("  as11 ble forget           remove paired credentials");
         return;
     }
 

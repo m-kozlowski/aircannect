@@ -353,6 +353,17 @@
       white-space: normal;
     }
 
+    .connection-control {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .connection-control .btn {
+      padding: 5px 10px;
+    }
+
     input,
     select {
       background: var(--bg);
@@ -448,6 +459,13 @@
 
     .endpoint-config .row:last-child {
       border-bottom: 1px solid #30364166;
+    }
+
+    .as11-pairing-instruction {
+      margin: 10px 0 4px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
     }
 
     .config-helper {
