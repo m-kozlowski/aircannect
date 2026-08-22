@@ -46,10 +46,12 @@ For a longer walkthrough see the [quickstart](docs/quickstart.md).
 
 ## Build profiles
 
-Supported release profiles require a XIAO ESP32-S3 Plus with PSRAM and microSD:
+Supported release profiles require an ESP32-S3 with PSRAM and microSD:
 
 - `xiao-esp32s3-plus-sdmmc4` *(default)* - 4-bit microSD on the exposed non-strapping GPIOs.
 - `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules.
+- `waveshare-esp32s3-touch-lcd-1-54` - onboard SDMMC and BLE transport on the
+  Waveshare ESP32-S3-Touch-LCD-1.54; the display remains off.
 
 <!--
 ## Related tools

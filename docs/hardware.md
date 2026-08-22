@@ -1,16 +1,24 @@
 # AirCANnect Hardware
 
-Build notes for the supported XIAO ESP32-S3 Plus targets. AirCANnect assumes
-an ESP32-S3 with PSRAM and microSD storage.
+Build notes for supported ESP32-S3 targets. AirCANnect assumes PSRAM and
+microSD storage. CAN and BLE are independent build capabilities; a board may
+provide either or both.
 
 ## What you need
 
-- **Mating connector** for the AirSense 11 / AirCurve 11 power input ([see below](#airsense-11-power-and-can-connector)).
-- **XIAO ESP32-S3 Plus** with PSRAM.
-- **3.3 V CAN transceiver** - SN65HVD230D-class.
-- **24 V to 3.3 V buck regulator** - the AirSense 11 power line is 24 V; the ESP32 and transceiver both run on 3.3 V.
+- **Supported ESP32-S3 board** with PSRAM.
 - **microSD card** - provides first-boot provisioning, EDF capture, reports,
   file logging, and the ResMed firmware repository for raw and `.abc` images.
+- **CAN builds only:** a mating AS11 power connector, 3.3 V CAN transceiver,
+  and suitable power supply as described below.
+
+## Supported boards
+
+- **XIAO ESP32-S3 Plus:** external microSD, CAN enabled by default, BLE also
+  available.
+- **[Waveshare ESP32-S3-Touch-LCD-1.54](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54):**
+  onboard microSD, BLE enabled, CAN disabled by default. The LCD and touch
+  controller are not initialized and the backlight remains off.
 
 ## Bare minimum hardware diagram
 
@@ -115,6 +123,31 @@ microSD (4-bit SDMMC)
 Supported storage profiles:
 
 - `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules: `CS` GPIO 10, `SCK` GPIO 13, `MISO` GPIO 12, `MOSI` GPIO 11.
+
+## Waveshare ESP32-S3-Touch-LCD-1.54
+
+The `waveshare-esp32s3-touch-lcd-1-54` profile uses the board's 16 MB flash,
+8 MB PSRAM, native USB CDC, and onboard microSD slot:
+
+```text
+microSD (4-bit SDMMC)
+  CLK     GPIO 16
+  CMD     GPIO 15
+  D0      GPIO 17
+  D1      GPIO 18
+  D2      GPIO 13
+  D3      GPIO 14
+```
+
+It defaults to `as11_transport=ble`, so pairing is completed from onboarding
+or the Config tab. The profile does not pull in LCD or touch libraries.
+
+CAN is a build capability rather than a board identity. A custom environment
+may extend this profile, remove its inherited `-DAC_CAN_ENABLED=0` with
+`build_unflags`, then set `AC_CAN_ENABLED=1`, `AC_CAN_TX_GPIO`,
+`AC_CAN_RX_GPIO`, and the appropriate timing after an external transceiver
+has been wired. Likewise, any XIAO environment can set `AC_CAN_ENABLED=0` for
+a BLE-only build.
 
 ## Wiring tips
 

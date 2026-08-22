@@ -848,6 +848,12 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
 }
 
 void setup() {
+    // Board hardware
+#if AC_DISPLAY_BACKLIGHT_GPIO >= 0
+    pinMode(AC_DISPLAY_BACKLIGHT_GPIO, OUTPUT);
+    digitalWrite(AC_DISPLAY_BACKLIGHT_GPIO, LOW);
+#endif
+
     // Serial bootstrap
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);

@@ -1,7 +1,7 @@
 # AirCANnect Quickstart
 
-From a freshly-built XIAO ESP32-S3 Plus to a working web UI in a few
-minutes. Assumes the [hardware](hardware.md) is wired up.
+From a supported ESP32-S3 board to a working web UI in a few minutes. Assumes
+the [hardware](hardware.md) is wired up.
 
 ## 1. Flash
 
@@ -9,8 +9,13 @@ minutes. Assumes the [hardware](hardware.md) is wired up.
 pio run -e xiao-esp32s3-plus-sdmmc4 -t upload
 ```
 
-The SPI-mode SD alternative is listed in
-[hardware.md](hardware.md#xiao-esp32-s3-plus-pin-assignments).
+For the Waveshare ESP32-S3-Touch-LCD-1.54 use:
+
+```bash
+pio run -e waveshare-esp32s3-touch-lcd-1-54 -t upload
+```
+
+Other storage variants are listed in [hardware.md](hardware.md).
 
 ## 2. First boot
 
@@ -21,10 +26,9 @@ chip, PSRAM, and storage state. Look for:
 [BOOT] version=
 ```
 
-near the start. If you see repeated `[CAN] alert:` lines with `bus_error` or
-`tx_failed` right after boot, re-check transceiver pin labels,
-`CANH` / `CANL` polarity, and ground connections (see
-[hardware.md](hardware.md#can-transceiver)).
+near the start. On CAN-enabled builds, repeated `[CAN] alert:` lines with
+`bus_error` or `tx_failed` indicate that the transceiver wiring, `CANH` /
+`CANL` polarity, and grounds need checking.
 
 ## 3. Get on Wi-Fi
 
@@ -65,13 +69,15 @@ Default login: `admin` / `aircannect`. Change it from the Config tab.
 If `aircannect` does not resolve on your network, find the IP from your
 router or use the SoftAP URL.
 
-## 5. Test the CAN link
+## 5. Connect the AS11
 
-From the serial, web, or telnet management console:
+The XIAO release profiles default to CAN. The Waveshare profile defaults to
+BLE and must be paired from the onboarding wizard or Config tab. After the
+selected link is ready, run this from the serial, web, or telnet console:
 
 ```
 get SerialNumber
 ```
 
-A matched JSON-RPC response containing the AirSense serial number means
-CAN is working end-to-end.
+A matched JSON-RPC response containing the AirSense serial number means the
+selected transport is working end-to-end.

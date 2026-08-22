@@ -18,6 +18,7 @@ PROJECT_DIR = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_ENVIRONMENTS = (
     "xiao-esp32s3-plus-sdmmc4",
     "xiao-esp32s3-plus-spisd",
+    "waveshare-esp32s3-touch-lcd-1-54",
 )
 MANIFEST_FILENAME = "aircannect-release.json"
 RELEASE_NOTES_FILENAME = "RELEASE_NOTES.md"
