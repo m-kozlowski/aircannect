@@ -167,6 +167,7 @@ bool ReportArtifactStoreService::finish_manifest_read() {
     tile.end_ms = bundle_->key.range_end_ms;
     tile.size = bundle_->range_tile->size();
     tile.crc32 = bundle_->range_tile_crc32;
+    tile.prefix_crc32 = bundle_->range_tile_prefix_crc32;
     manifest_bytes_ = ReportArtifactManifestCodec::add_tile(manifest, tile);
     if (!manifest_bytes_) {
         fail("report_artifact_manifest_update_failed");

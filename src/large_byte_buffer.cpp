@@ -38,7 +38,21 @@ std::shared_ptr<const LargeByteBuffer> LargeByteBuffer::freeze(
     return std::shared_ptr<const LargeByteBuffer>(buffer.release());
 }
 
+std::shared_ptr<const LargeByteBuffer> LargeByteBuffer::slice(
+    const std::shared_ptr<const LargeByteBuffer> &parent,
+    size_t offset,
+    size_t size) {
+    if (!parent || size == 0 || offset > parent->size() ||
+        size > parent->size() - offset) {
+        return {};
+    }
+
+    return std::shared_ptr<const LargeByteBuffer>(
+        new (std::nothrow) LargeByteBuffer(parent, offset, size));
+}
+
 bool LargeByteBuffer::grow(size_t size) {
+    if (parent_) return false;
     if (size <= size_) return true;
 
     uint8_t *next = static_cast<uint8_t *>(
@@ -58,7 +72,7 @@ bool LargeByteBuffer::truncate(size_t size) {
 }
 
 LargeByteBuffer::~LargeByteBuffer() {
-    Memory::free(data_);
+    if (!parent_) Memory::free(data_);
 }
 
 }  // namespace aircannect

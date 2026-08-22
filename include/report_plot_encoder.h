@@ -17,10 +17,10 @@ bool bin_put_i64(ReportSpoolBuffer &out, int64_t value);
 uint32_t read_u32_le(const uint8_t *data);
 int32_t read_i32_le(const uint8_t *data);
 
-bool append_plot_series_envelope_runs(ReportSpoolBuffer &out,
-                                      const char *name,
-                                      const ReportSpoolBuffer &raw_buckets,
-                                      int64_t bucket_ms,
-                                      bool &ok);
+bool append_plot_series_envelope_payload(
+    ReportSpoolBuffer &out,
+    const ReportSpoolBuffer &raw_buckets,
+    int64_t bucket_ms,
+    bool &ok);
 
 }  // namespace aircannect

@@ -11,30 +11,37 @@ bool ReportArtifactPayloadCache::same_descriptor(
     const ReportArtifactDescriptor &lhs,
     const ReportArtifactDescriptor &rhs) {
     return lhs.key == rhs.key && lhs.size == rhs.size &&
-           lhs.crc32 == rhs.crc32;
+           lhs.crc32 == rhs.crc32 &&
+           lhs.prefix_crc32 == rhs.prefix_crc32;
 }
 
-bool ReportArtifactPayloadCache::same_key(
-    const ReportArtifactDescriptor &lhs,
-    const ReportArtifactDescriptor &rhs) {
-    return lhs.key == rhs.key;
+bool ReportArtifactPayloadCache::same_payload_identity(
+    const ReportArtifactPayloadDescriptor &lhs,
+    const ReportArtifactPayloadDescriptor &rhs) {
+    return lhs.artifact.key == rhs.artifact.key &&
+           lhs.kind == rhs.kind && lhs.offset == rhs.offset;
 }
 
 size_t ReportArtifactPayloadCache::find_exact(
-    const ReportArtifactDescriptor &artifact) const {
+    const ReportArtifactPayloadDescriptor &payload) const {
     for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
-        if (entries_[i].valid() &&
-            same_descriptor(entries_[i].artifact, artifact)) {
-            return i;
-        }
+        if (entries_[i].valid() && entries_[i].payload == payload) return i;
     }
     return SIZE_MAX;
+}
+
+size_t ReportArtifactPayloadCache::find_whole(
+    const ReportArtifactPayloadDescriptor &payload) const {
+    if (payload.is_whole()) return SIZE_MAX;
+    return find_exact(ReportArtifactPayloadDescriptor::whole(
+        payload.artifact));
 }
 
 size_t ReportArtifactPayloadCache::find_key(
     const ReportArtifactKey &artifact) const {
     for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
-        if (entries_[i].valid() && entries_[i].artifact.key == artifact) {
+        if (entries_[i].valid() && entries_[i].payload.is_whole() &&
+            entries_[i].payload.artifact.key == artifact) {
             return i;
         }
     }
@@ -97,14 +104,13 @@ uint64_t ReportArtifactPayloadCache::next_use() {
 }
 
 bool ReportArtifactPayloadCache::can_hold(
-    const ReportArtifactDescriptor &artifact) const {
-    return artifact.valid() && artifact.size <= SIZE_MAX &&
-           artifact.size <= byte_budget_;
+    const ReportArtifactPayloadDescriptor &payload) const {
+    return payload.valid() && payload.size <= byte_budget_;
 }
 
 bool ReportArtifactPayloadCache::contains(
-    const ReportArtifactDescriptor &artifact) const {
-    return find_exact(artifact) != SIZE_MAX;
+    const ReportArtifactPayloadDescriptor &payload) const {
+    return find_exact(payload) != SIZE_MAX || find_whole(payload) != SIZE_MAX;
 }
 
 bool ReportArtifactPayloadCache::describe(
@@ -116,7 +122,7 @@ bool ReportArtifactPayloadCache::describe(
     const size_t requested = find_key(artifact);
     if (requested == SIZE_MAX) return false;
 
-    out = entries_[requested].artifact;
+    out = entries_[requested].payload.artifact;
     return true;
 }
 
@@ -129,35 +135,58 @@ bool ReportArtifactPayloadCache::describe_ready(
         artifact.sleep_day, artifact.source_revision);
     const ReportArtifactKey overview = ReportArtifactKey::overview(
         artifact.sleep_day, artifact.source_revision);
-    if (find_key(result) == SIZE_MAX || find_key(overview) == SIZE_MAX) {
-        return false;
+    return find_key(result) != SIZE_MAX && find_key(overview) != SIZE_MAX;
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportArtifactPayloadCache::find(
+    const ReportArtifactPayloadDescriptor &payload) {
+    size_t index = find_exact(payload);
+    if (index != SIZE_MAX) {
+        entries_[index].last_used = next_use();
+        hits_++;
+        return entries_[index].bytes;
     }
 
-    return true;
+    index = find_whole(payload);
+    if (index != SIZE_MAX) {
+        entries_[index].last_used = next_use();
+        hits_++;
+        return LargeByteBuffer::slice(
+            entries_[index].bytes, payload.offset, payload.size);
+    }
+
+    misses_++;
+    return {};
+}
+
+std::shared_ptr<const LargeByteBuffer>
+ReportArtifactPayloadCache::find_if_present(
+    const ReportArtifactPayloadDescriptor &payload) {
+    size_t index = find_exact(payload);
+    if (index != SIZE_MAX) {
+        entries_[index].last_used = next_use();
+        hits_++;
+        return entries_[index].bytes;
+    }
+
+    index = find_whole(payload);
+    if (index == SIZE_MAX) return {};
+
+    entries_[index].last_used = next_use();
+    hits_++;
+    return LargeByteBuffer::slice(
+        entries_[index].bytes, payload.offset, payload.size);
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportArtifactPayloadCache::find(
     const ReportArtifactDescriptor &artifact) {
-    const size_t index = find_exact(artifact);
-    if (index == SIZE_MAX) {
-        misses_++;
-        return {};
-    }
-
-    entries_[index].last_used = next_use();
-    hits_++;
-    return entries_[index].bytes;
+    return find(ReportArtifactPayloadDescriptor::whole(artifact));
 }
 
 std::shared_ptr<const LargeByteBuffer>
 ReportArtifactPayloadCache::find_if_present(
     const ReportArtifactDescriptor &artifact) {
-    const size_t index = find_exact(artifact);
-    if (index == SIZE_MAX) return {};
-
-    entries_[index].last_used = next_use();
-    hits_++;
-    return entries_[index].bytes;
+    return find_if_present(ReportArtifactPayloadDescriptor::whole(artifact));
 }
 
 ReportArtifactPayloadSelection ReportArtifactPayloadCache::select_at(
@@ -192,40 +221,82 @@ ReportArtifactPayloadSelection ReportArtifactPayloadCache::select_at(
     return out;
 }
 
+ReportArtifactPayloadSelection ReportArtifactPayloadCache::select_payload(
+    const ReportArtifactPayloadDescriptor &payload,
+    bool prefer_deflate,
+    bool count_miss) {
+    const size_t exact = find_exact(payload);
+    if (exact != SIZE_MAX) {
+        return select_at(exact, prefer_deflate, count_miss);
+    }
+
+    const size_t whole = find_whole(payload);
+    if (whole == SIZE_MAX) {
+        if (count_miss) misses_++;
+        return {};
+    }
+
+    ReportArtifactPayloadSelection out;
+    out.state = ReportArtifactPayloadSelectionState::Ready;
+    out.encoding = ReportArtifactPayloadEncoding::Identity;
+    out.bytes = LargeByteBuffer::slice(
+        entries_[whole].bytes, payload.offset, payload.size);
+    if (!out.bytes) return {};
+
+    entries_[whole].last_used = next_use();
+    hits_++;
+    return out;
+}
+
+ReportArtifactPayloadSelection ReportArtifactPayloadCache::select(
+    const ReportArtifactPayloadDescriptor &payload,
+    bool prefer_deflate) {
+    return select_payload(payload, prefer_deflate, true);
+}
+
+ReportArtifactPayloadSelection
+ReportArtifactPayloadCache::select_if_present(
+    const ReportArtifactPayloadDescriptor &payload,
+    bool prefer_deflate) {
+    return select_payload(payload, prefer_deflate, false);
+}
+
 ReportArtifactPayloadSelection ReportArtifactPayloadCache::select(
     const ReportArtifactDescriptor &artifact,
     bool prefer_deflate) {
-    return select_at(find_exact(artifact), prefer_deflate, true);
+    return select(
+        ReportArtifactPayloadDescriptor::whole(artifact), prefer_deflate);
 }
 
 ReportArtifactPayloadSelection
 ReportArtifactPayloadCache::select_if_present(
     const ReportArtifactDescriptor &artifact,
     bool prefer_deflate) {
-    return select_at(find_exact(artifact), prefer_deflate, false);
+    return select_if_present(
+        ReportArtifactPayloadDescriptor::whole(artifact), prefer_deflate);
 }
 
 void ReportArtifactPayloadCache::prepare_entry(
     Entry &entry,
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
     std::shared_ptr<const LargeByteBuffer> bytes) {
-    entry.artifact = artifact;
+    entry.payload = payload;
     entry.bytes = std::move(bytes);
     entry.deflated.reset();
-    entry.deflate_state = artifact.size >= AC_REPORT_HTTP_DEFLATE_MIN_BYTES
+    entry.deflate_state = payload.size >= AC_REPORT_HTTP_DEFLATE_MIN_BYTES
         ? DeflateState::Pending
         : DeflateState::Unavailable;
     entry.last_used = next_use();
 }
 
 bool ReportArtifactPayloadCache::insert(
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
     std::shared_ptr<const LargeByteBuffer> bytes) {
-    if (!can_hold(artifact) || !bytes || bytes->size() != artifact.size) {
+    if (!can_hold(payload) || !bytes || bytes->size() != payload.size) {
         return false;
     }
 
-    const size_t exact = find_exact(artifact);
+    const size_t exact = find_exact(payload);
     if (exact != SIZE_MAX) {
         entries_[exact].last_used = next_use();
         return true;
@@ -233,7 +304,7 @@ bool ReportArtifactPayloadCache::insert(
 
     for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
         if (entries_[i].valid() &&
-            same_key(entries_[i].artifact, artifact)) {
+            same_payload_identity(entries_[i].payload, payload)) {
             erase(i, false);
         }
     }
@@ -246,7 +317,7 @@ bool ReportArtifactPayloadCache::insert(
     const size_t index = find_free();
     if (index == SIZE_MAX) return false;
 
-    prepare_entry(entries_[index], artifact, std::move(bytes));
+    prepare_entry(entries_[index], payload, std::move(bytes));
     bytes_ += entries_[index].bytes->size();
     return true;
 }
@@ -269,8 +340,8 @@ bool ReportArtifactPayloadCache::insert_pair(
 
     for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
         if (!entries_[i].valid()) continue;
-        if (entries_[i].artifact.key == result.key ||
-            entries_[i].artifact.key == overview.key) {
+        if (entries_[i].payload.artifact.key == result.key ||
+            entries_[i].payload.artifact.key == overview.key) {
             erase(i, false);
         }
     }
@@ -282,7 +353,9 @@ bool ReportArtifactPayloadCache::insert_pair(
 
     const size_t result_index = find_free();
     if (result_index == SIZE_MAX) return false;
-    prepare_entry(entries_[result_index], result, std::move(result_bytes));
+    prepare_entry(entries_[result_index],
+                  ReportArtifactPayloadDescriptor::whole(result),
+                  std::move(result_bytes));
     bytes_ += entries_[result_index].bytes->size();
 
     const size_t overview_index = find_free();
@@ -291,16 +364,16 @@ bool ReportArtifactPayloadCache::insert_pair(
         return false;
     }
     prepare_entry(entries_[overview_index],
-                  overview,
+                  ReportArtifactPayloadDescriptor::whole(overview),
                   std::move(overview_bytes));
     bytes_ += entries_[overview_index].bytes->size();
     return true;
 }
 
 bool ReportArtifactPayloadCache::next_deflate_candidate(
-    ReportArtifactDescriptor &artifact,
+    ReportArtifactPayloadDescriptor &payload,
     std::shared_ptr<const LargeByteBuffer> &bytes) const {
-    artifact = {};
+    payload = {};
     bytes.reset();
 
     size_t selected = SIZE_MAX;
@@ -318,15 +391,29 @@ bool ReportArtifactPayloadCache::next_deflate_candidate(
     }
     if (selected == SIZE_MAX) return false;
 
-    artifact = entries_[selected].artifact;
+    payload = entries_[selected].payload;
     bytes = entries_[selected].bytes;
     return true;
 }
 
+bool ReportArtifactPayloadCache::next_deflate_candidate(
+    ReportArtifactDescriptor &artifact,
+    std::shared_ptr<const LargeByteBuffer> &bytes) const {
+    ReportArtifactPayloadDescriptor payload;
+    if (!next_deflate_candidate(payload, bytes) || !payload.is_whole()) {
+        artifact = {};
+        bytes.reset();
+        return false;
+    }
+
+    artifact = payload.artifact;
+    return true;
+}
+
 bool ReportArtifactPayloadCache::complete_deflate(
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
     std::shared_ptr<const LargeByteBuffer> bytes) {
-    const size_t index = find_exact(artifact);
+    const size_t index = find_exact(payload);
     if (index == SIZE_MAX) return false;
 
     Entry &entry = entries_[index];
@@ -365,10 +452,10 @@ void ReportArtifactPayloadCache::reconcile(const NightCatalog &catalog) {
     for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
         if (!entries_[i].valid()) continue;
 
-        const NightCatalogRecord *night =
-            catalog.find(entries_[i].artifact.key.sleep_day);
+        const NightCatalogRecord *night = catalog.find(
+            entries_[i].payload.artifact.key.sleep_day);
         if (!night || night->source_revision !=
-                          entries_[i].artifact.key.source_revision) {
+                          entries_[i].payload.artifact.key.source_revision) {
             erase(i, false);
         }
     }

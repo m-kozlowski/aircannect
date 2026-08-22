@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 #include "large_byte_buffer.h"
-#include "report_artifacts.h"
+#include "report_artifact_payload.h"
 
 namespace aircannect {
 
@@ -16,7 +16,7 @@ public:
     ReportPayloadDeflater(const ReportPayloadDeflater &) = delete;
     ReportPayloadDeflater &operator=(const ReportPayloadDeflater &) = delete;
 
-    bool start(const ReportArtifactDescriptor &artifact,
+    bool start(const ReportArtifactPayloadDescriptor &payload,
                std::shared_ptr<const LargeByteBuffer> source,
                size_t psram_reserve);
     bool poll(size_t input_budget);
@@ -24,7 +24,9 @@ public:
 
     bool active() const { return state_ == State::Compressing; }
     bool finished() const { return state_ == State::Finished; }
-    const ReportArtifactDescriptor &artifact() const { return artifact_; }
+    const ReportArtifactPayloadDescriptor &payload() const {
+        return payload_;
+    }
     std::shared_ptr<const LargeByteBuffer> take_completed();
 
 private:
@@ -39,7 +41,7 @@ private:
     void release_compressor();
 
     State state_ = State::Idle;
-    ReportArtifactDescriptor artifact_;
+    ReportArtifactPayloadDescriptor payload_;
     std::shared_ptr<const LargeByteBuffer> source_;
     std::unique_ptr<LargeByteBuffer> output_;
     std::shared_ptr<const LargeByteBuffer> completed_;

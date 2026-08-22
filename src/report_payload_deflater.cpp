@@ -54,11 +54,11 @@ ReportPayloadDeflater::~ReportPayloadDeflater() {
 }
 
 bool ReportPayloadDeflater::start(
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
     std::shared_ptr<const LargeByteBuffer> source,
     size_t psram_reserve) {
     reset();
-    if (!artifact.valid() || !source || source->size() != artifact.size ||
+    if (!payload.valid() || !source || source->size() != payload.size ||
         source->size() < AC_REPORT_HTTP_DEFLATE_MIN_BYTES) {
         return false;
     }
@@ -102,7 +102,7 @@ bool ReportPayloadDeflater::start(
     output_->data()[1] = 0x01;
     zlib_start_block(compressor);
 
-    artifact_ = artifact;
+    payload_ = payload;
     source_ = std::move(source);
     output_offset_ = 2;
     state_ = State::Compressing;
@@ -207,7 +207,7 @@ void ReportPayloadDeflater::reset() {
     output_.reset();
     completed_.reset();
     release_compressor();
-    artifact_ = {};
+    payload_ = {};
     source_offset_ = 0;
     output_offset_ = 0;
     state_ = State::Idle;

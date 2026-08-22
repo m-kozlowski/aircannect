@@ -305,6 +305,7 @@ bool ReportNightArtifactBuilder::finish_build() {
         bundle->range_tile = std::move(plot);
         bundle->range_tile_crc32 = crc32_ieee(
             bundle->range_tile->data(), bundle->range_tile->size());
+        bundle->range_tile_prefix_crc32 = plot_summary.prefix_crc32;
     } else {
         ReportResultArtifactData result;
         result.key = bundle->key;
@@ -360,6 +361,7 @@ bool ReportNightArtifactBuilder::finish_build() {
             bundle->result->data(), bundle->result->size());
         bundle->overview_crc32 = crc32_ieee(
             bundle->overview->data(), bundle->overview->size());
+        bundle->overview_prefix_crc32 = plot_summary.prefix_crc32;
         bundle->manifest = ReportArtifactManifestCodec::encode(*bundle);
         if (!bundle->manifest) {
             failure_reason_ = "report_builder_manifest_encode_failed";

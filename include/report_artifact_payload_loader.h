@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "large_byte_buffer.h"
-#include "report_artifacts.h"
+#include "report_artifact_payload.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -23,7 +23,7 @@ enum class ReportArtifactPayloadLoadState : uint8_t {
 struct ReportArtifactPayloadLoadStatus {
     ReportArtifactPayloadLoadState state =
         ReportArtifactPayloadLoadState::Idle;
-    ReportArtifactDescriptor artifact;
+    ReportArtifactPayloadDescriptor payload;
     StorageReadLane lane = StorageReadLane::Maintenance;
     size_t bytes_loaded = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
@@ -42,9 +42,17 @@ public:
         const ReportArtifactPayloadLoader &) = delete;
 
     void begin(StorageReadPort &read_port);
-    OperationAdmission start(const ReportArtifactDescriptor &artifact,
+    OperationAdmission start(const ReportArtifactPayloadDescriptor &payload,
                              uint32_t generation,
                              StorageReadLane lane);
+    OperationAdmission start(const ReportArtifactDescriptor &artifact,
+                             uint32_t generation,
+                             StorageReadLane lane) {
+        return start(
+            ReportArtifactPayloadDescriptor::whole(artifact),
+            generation,
+            lane);
+    }
     bool poll();
     void cancel();
     void reset();

@@ -11,6 +11,7 @@ namespace aircannect {
 
 struct ReportPlotAccumulatorSummary {
     ReportArtifactEventCounts events;
+    uint32_t prefix_crc32 = 0;
     int64_t pressure_sum_milli = 0;
     int64_t leak_sum_milli = 0;
     uint64_t pressure_samples = 0;

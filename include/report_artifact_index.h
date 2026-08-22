@@ -18,6 +18,7 @@ struct ReportArtifactIndexRecord {
     uint32_t overview_crc32 = 0;
     uint32_t tile_offset = 0;
     uint16_t tile_count = 0;
+    uint32_t overview_prefix_crc32 = 0;
 };
 
 struct ReportArtifactIndexInput {
@@ -28,6 +29,7 @@ struct ReportArtifactIndexInput {
     uint32_t overview_crc32 = 0;
     const ReportRangeTileArtifact *tiles = nullptr;
     size_t tile_count = 0;
+    uint32_t overview_prefix_crc32 = 0;
 };
 
 class ReportArtifactIndexBuilder;

@@ -13,6 +13,10 @@ public:
         const void *data, size_t size);
     static std::shared_ptr<const LargeByteBuffer> freeze(
         std::unique_ptr<LargeByteBuffer> buffer);
+    static std::shared_ptr<const LargeByteBuffer> slice(
+        const std::shared_ptr<const LargeByteBuffer> &parent,
+        size_t offset,
+        size_t size);
 
     ~LargeByteBuffer();
     LargeByteBuffer(const LargeByteBuffer &) = delete;
@@ -26,9 +30,16 @@ public:
 
 private:
     LargeByteBuffer(uint8_t *data, size_t size) : data_(data), size_(size) {}
+    LargeByteBuffer(const std::shared_ptr<const LargeByteBuffer> &parent,
+                    size_t offset,
+                    size_t size) :
+        data_(const_cast<uint8_t *>(parent->data()) + offset),
+        size_(size),
+        parent_(parent) {}
 
     uint8_t *data_ = nullptr;
     size_t size_ = 0;
+    std::shared_ptr<const LargeByteBuffer> parent_;
 };
 
 }  // namespace aircannect

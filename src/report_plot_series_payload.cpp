@@ -33,11 +33,11 @@ int16_t quantize_plot_value(int32_t value_milli,
 
 }  // namespace
 
-bool append_plot_series_envelope_runs(ReportSpoolBuffer &out,
-                                      const char *name,
-                                      const ReportSpoolBuffer &raw_buckets,
-                                      int64_t bucket_ms,
-                                      bool &ok) {
+bool append_plot_series_envelope_payload(
+    ReportSpoolBuffer &out,
+    const ReportSpoolBuffer &raw_buckets,
+    int64_t bucket_ms,
+    bool &ok) {
     if (!ok) return false;
     if (raw_buckets.size() == 0) return true;
     if (bucket_ms <= 0 || bucket_ms > UINT32_MAX ||
@@ -47,12 +47,6 @@ bool append_plot_series_envelope_runs(ReportSpoolBuffer &out,
     }
 
     const size_t record_count = raw_buckets.size() / 12;
-    const size_t name_len = name ? strlen(name) : 0;
-    if (name_len > UINT16_MAX) {
-        ok = false;
-        return false;
-    }
-
     const uint8_t *raw = raw_buckets.data();
     bool have_real_bucket = false;
     int64_t max_abs_value = 0;
@@ -107,13 +101,6 @@ bool append_plot_series_envelope_runs(ReportSpoolBuffer &out,
         std::max<uint32_t>(1, ceil_div_u64(static_cast<uint64_t>(max_abs_value),
                                           static_cast<uint64_t>(INT16_MAX)));
 
-    ok &= bin_put_u16(out, static_cast<uint16_t>(name_len));
-    if (name_len) {
-        ok &= out.append(reinterpret_cast<const uint8_t *>(name), name_len);
-    }
-    ok &= bin_put_u8(out, PLOT_SERIES_MODE_ENVELOPE_RUNS);
-    ok &= bin_put_u8(out, 0);
-    ok &= bin_put_u16(out, 0);
     ok &= bin_put_i32(out, 0);
     ok &= bin_put_u32(out, static_cast<uint32_t>(bucket_ms));
     ok &= bin_put_u32(out, value_scale_milli);

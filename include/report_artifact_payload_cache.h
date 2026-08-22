@@ -3,10 +3,11 @@
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
+#include <utility>
 
 #include "board_report.h"
 #include "night_catalog.h"
-#include "report_artifacts.h"
+#include "report_artifact_payload.h"
 
 namespace aircannect {
 
@@ -48,34 +49,65 @@ class ReportArtifactPayloadCache {
 public:
     explicit ReportArtifactPayloadCache(size_t byte_budget);
 
-    bool can_hold(const ReportArtifactDescriptor &artifact) const;
-    bool contains(const ReportArtifactDescriptor &artifact) const;
+    bool can_hold(const ReportArtifactPayloadDescriptor &payload) const;
+    bool contains(const ReportArtifactPayloadDescriptor &payload) const;
+    bool can_hold(const ReportArtifactDescriptor &artifact) const {
+        return can_hold(ReportArtifactPayloadDescriptor::whole(artifact));
+    }
+    bool contains(const ReportArtifactDescriptor &artifact) const {
+        return contains(ReportArtifactPayloadDescriptor::whole(artifact));
+    }
     bool describe(const ReportArtifactKey &artifact,
                   ReportArtifactDescriptor &out) const;
     bool describe_ready(const ReportArtifactKey &artifact,
                         ReportArtifactDescriptor &out) const;
     std::shared_ptr<const LargeByteBuffer> find(
+        const ReportArtifactPayloadDescriptor &payload);
+    std::shared_ptr<const LargeByteBuffer> find_if_present(
+        const ReportArtifactPayloadDescriptor &payload);
+    std::shared_ptr<const LargeByteBuffer> find(
         const ReportArtifactDescriptor &artifact);
     std::shared_ptr<const LargeByteBuffer> find_if_present(
         const ReportArtifactDescriptor &artifact);
+    ReportArtifactPayloadSelection select(
+        const ReportArtifactPayloadDescriptor &payload,
+        bool prefer_deflate);
+    ReportArtifactPayloadSelection select_if_present(
+        const ReportArtifactPayloadDescriptor &payload,
+        bool prefer_deflate);
     ReportArtifactPayloadSelection select(
         const ReportArtifactDescriptor &artifact,
         bool prefer_deflate);
     ReportArtifactPayloadSelection select_if_present(
         const ReportArtifactDescriptor &artifact,
         bool prefer_deflate);
-    bool insert(const ReportArtifactDescriptor &artifact,
+    bool insert(const ReportArtifactPayloadDescriptor &payload,
                 std::shared_ptr<const LargeByteBuffer> bytes);
+    bool insert(const ReportArtifactDescriptor &artifact,
+                std::shared_ptr<const LargeByteBuffer> bytes) {
+        return insert(ReportArtifactPayloadDescriptor::whole(artifact),
+                      std::move(bytes));
+    }
     bool insert_pair(const ReportArtifactDescriptor &result,
                      std::shared_ptr<const LargeByteBuffer> result_bytes,
                      const ReportArtifactDescriptor &overview,
                      std::shared_ptr<const LargeByteBuffer> overview_bytes);
     bool next_deflate_candidate(
+        ReportArtifactPayloadDescriptor &payload,
+        std::shared_ptr<const LargeByteBuffer> &bytes) const;
+    bool next_deflate_candidate(
         ReportArtifactDescriptor &artifact,
         std::shared_ptr<const LargeByteBuffer> &bytes) const;
     bool complete_deflate(
-        const ReportArtifactDescriptor &artifact,
+        const ReportArtifactPayloadDescriptor &payload,
         std::shared_ptr<const LargeByteBuffer> bytes);
+    bool complete_deflate(
+        const ReportArtifactDescriptor &artifact,
+        std::shared_ptr<const LargeByteBuffer> bytes) {
+        return complete_deflate(
+            ReportArtifactPayloadDescriptor::whole(artifact),
+            std::move(bytes));
+    }
 
     bool evict_lru();
     void reconcile(const NightCatalog &catalog);
@@ -91,31 +123,39 @@ private:
     };
 
     struct Entry {
-        ReportArtifactDescriptor artifact;
+        ReportArtifactPayloadDescriptor payload;
         std::shared_ptr<const LargeByteBuffer> bytes;
         std::shared_ptr<const LargeByteBuffer> deflated;
         DeflateState deflate_state = DeflateState::Unavailable;
         uint64_t last_used = 0;
 
-        bool valid() const { return artifact.valid() && bytes != nullptr; }
+        bool valid() const { return payload.valid() && bytes != nullptr; }
     };
 
     static bool same_descriptor(const ReportArtifactDescriptor &lhs,
                                 const ReportArtifactDescriptor &rhs);
-    static bool same_key(const ReportArtifactDescriptor &lhs,
-                         const ReportArtifactDescriptor &rhs);
+    static bool same_payload_identity(
+        const ReportArtifactPayloadDescriptor &lhs,
+        const ReportArtifactPayloadDescriptor &rhs);
 
-    size_t find_exact(const ReportArtifactDescriptor &artifact) const;
+    size_t find_exact(
+        const ReportArtifactPayloadDescriptor &payload) const;
+    size_t find_whole(
+        const ReportArtifactPayloadDescriptor &payload) const;
     size_t find_key(const ReportArtifactKey &artifact) const;
     size_t find_free() const;
     size_t free_count() const;
     size_t find_lru(size_t excluded = SIZE_MAX) const;
+    ReportArtifactPayloadSelection select_payload(
+        const ReportArtifactPayloadDescriptor &payload,
+        bool prefer_deflate,
+        bool count_miss);
     ReportArtifactPayloadSelection select_at(size_t index,
                                               bool prefer_deflate,
                                               bool count_miss);
     void erase(size_t index, bool eviction);
     void prepare_entry(Entry &entry,
-                       const ReportArtifactDescriptor &artifact,
+                       const ReportArtifactPayloadDescriptor &payload,
                        std::shared_ptr<const LargeByteBuffer> bytes);
     uint64_t next_use();
 

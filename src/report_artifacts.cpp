@@ -92,6 +92,7 @@ struct ManifestHeaderFields {
     uint64_t overview_size = 0;
     uint32_t result_crc32 = 0;
     uint32_t overview_crc32 = 0;
+    uint32_t overview_prefix_crc32 = 0;
 };
 
 template <typename TileReader>
@@ -133,7 +134,8 @@ std::shared_ptr<const LargeByteBuffer> encode_manifest(
     put_le64(bytes + 32, fields.overview_size);
     put_le32(bytes + 40, fields.result_crc32);
     put_le32(bytes + 44, fields.overview_crc32);
-    put_le16(bytes + 48, static_cast<uint16_t>(tile_count));
+    put_le32(bytes + 48, fields.overview_prefix_crc32);
+    put_le16(bytes + 52, static_cast<uint16_t>(tile_count));
 
     uint8_t *body = bytes + ReportArtifactManifestCodec::HeaderBytes;
     ReportRangeTileArtifact previous;
@@ -150,6 +152,7 @@ std::shared_ptr<const LargeByteBuffer> encode_manifest(
         put_i64(record + 8, tile.end_ms);
         put_le32(record + 16, static_cast<uint32_t>(tile.size));
         put_le32(record + 20, tile.crc32);
+        put_le32(record + 24, tile.prefix_crc32);
         previous = tile;
     }
 
@@ -254,6 +257,7 @@ bool ReportArtifactManifestView::tile(
     tile_out.end_ms = get_i64(record + 8);
     tile_out.size = get_le32(record + 16);
     tile_out.crc32 = get_le32(record + 20);
+    tile_out.prefix_crc32 = get_le32(record + 24);
     return tile_out.end_ms > tile_out.start_ms && tile_out.size > 0;
 }
 
@@ -344,6 +348,7 @@ bool ReportArtifactAvailability::load(
         manifest.key.sleep_day, manifest.key.source_revision);
     overview.size = manifest.overview_size;
     overview.crc32 = manifest.overview_crc32;
+    overview.prefix_crc32 = manifest.overview_prefix_crc32;
     if (!pair_ready()) {
         *this = {};
         return false;
@@ -364,6 +369,7 @@ bool ReportArtifactAvailability::load(
         range_tile.key = requested;
         range_tile.size = tile.size;
         range_tile.crc32 = tile.crc32;
+        range_tile.prefix_crc32 = tile.prefix_crc32;
         break;
     }
     return true;
@@ -385,6 +391,7 @@ bool ReportArtifactAvailability::merge(
             bundle.key.sleep_day, bundle.key.source_revision);
         overview.size = bundle.overview->size();
         overview.crc32 = bundle.overview_crc32;
+        overview.prefix_crc32 = bundle.overview_prefix_crc32;
         return pair_ready();
     }
     if (bundle.key.kind != ReportArtifactKind::RangeTile ||
@@ -395,6 +402,7 @@ bool ReportArtifactAvailability::merge(
     range_tile.key = bundle.key;
     range_tile.size = bundle.range_tile->size();
     range_tile.crc32 = bundle.range_tile_crc32;
+    range_tile.prefix_crc32 = bundle.range_tile_prefix_crc32;
     return range_tile.valid();
 }
 
@@ -549,6 +557,7 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
     fields.overview_size = bundle.overview->size();
     fields.result_crc32 = bundle.result_crc32;
     fields.overview_crc32 = bundle.overview_crc32;
+    fields.overview_prefix_crc32 = bundle.overview_prefix_crc32;
 
     return encode_manifest(fields, tile_count,
                            [tiles](size_t index,
@@ -595,6 +604,7 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
     fields.overview_size = manifest.overview_size;
     fields.result_crc32 = manifest.result_crc32;
     fields.overview_crc32 = manifest.overview_crc32;
+    fields.overview_prefix_crc32 = manifest.overview_prefix_crc32;
 
     size_t source_index = 0;
     return encode_manifest(
@@ -625,7 +635,7 @@ bool ReportArtifactManifestCodec::decode(
         return false;
     }
 
-    const size_t tile_count = get_le16(bytes + 48);
+    const size_t tile_count = get_le16(bytes + 52);
     size_t body_bytes = 0;
     size_t expected = 0;
     if (!CheckedSize::multiply(tile_count, TileBytes, body_bytes) ||
@@ -647,6 +657,7 @@ bool ReportArtifactManifestCodec::decode(
     view.overview_size = get_le64(bytes + 32);
     view.result_crc32 = get_le32(bytes + 40);
     view.overview_crc32 = get_le32(bytes + 44);
+    view.overview_prefix_crc32 = get_le32(bytes + 48);
     view.tile_count = tile_count;
     view.tile_bytes = bytes + HeaderBytes;
     if (!view.key.valid() || view.result_size == 0 ||

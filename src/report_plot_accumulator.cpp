@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "board_report.h"
+#include "crc32.h"
 #include "large_object.h"
 #include "memory_manager.h"
 #include "report_plot_encoder.h"
@@ -126,7 +127,20 @@ bool append_events(ReportSpoolBuffer &plot,
     return true;
 }
 
-bool append_series(ReportSpoolBuffer &plot, const SeriesState *series) {
+bool copy_section_name(ReportPlotSectionDescriptor &section,
+                       const char *name) {
+    const size_t length = name ? strlen(name) : 0;
+    if (length == 0 || length >= sizeof(section.name)) return false;
+
+    memcpy(section.name, name, length);
+    section.name[length] = '\0';
+    return true;
+}
+
+bool append_series(ReportSpoolBuffer &plot,
+                   const SeriesState *series,
+                   ReportPlotSectionDescriptor *sections,
+                   size_t &section_count) {
     size_t definition_count = 0;
     const ReportSignalDef *definitions = report_signal_defs(definition_count);
     if (!definitions) return false;
@@ -160,11 +174,26 @@ bool append_series(ReportSpoolBuffer &plot, const SeriesState *series) {
             }
         }
 
+        const size_t section_offset = plot.size();
         bool ok = true;
-        if (!append_plot_series_envelope_runs(
-                plot, name, raw, state.bucket_ms, ok) || !ok) {
+        if (!append_plot_series_envelope_payload(
+                plot, raw, state.bucket_ms, ok) || !ok) {
             return false;
         }
+        if (plot.size() == section_offset) continue;
+        if (section_count >= PLOT_INDEX_MAX_ENTRIES ||
+            plot.size() > UINT32_MAX || section_offset > UINT32_MAX) {
+            return false;
+        }
+
+        ReportPlotSectionDescriptor &section = sections[section_count++];
+        section.kind = PLOT_SECTION_KIND_SERIES;
+        section.encoding = PLOT_SERIES_MODE_ENVELOPE_RUNS;
+        section.offset = static_cast<uint32_t>(section_offset);
+        section.length = static_cast<uint32_t>(plot.size() - section_offset);
+        section.crc32 = crc32_ieee(
+            plot.data() + section_offset, section.length);
+        if (!copy_section_name(section, name)) return false;
     }
     return true;
 }
@@ -176,6 +205,8 @@ struct ReportPlotAccumulator::Runtime {
     SeriesState series[SIGNAL_COUNT];
     EnvelopeCell *cell_storage = nullptr;
     ReportSpoolBuffer event_slots;
+    ReportPlotSectionDescriptor sections[PLOT_INDEX_MAX_ENTRIES];
+    size_t section_count = 0;
     int64_t plot_start_ms = 0;
     int64_t plot_end_ms = 0;
     int64_t pressure_sum_milli = 0;
@@ -188,6 +219,8 @@ struct ReportPlotAccumulator::Runtime {
         Memory::free(cell_storage);
         cell_storage = nullptr;
         event_slots.clear();
+        for (ReportPlotSectionDescriptor &section : sections) section = {};
+        section_count = 0;
         plan = nullptr;
         for (SeriesState &state : series) state = {};
         plot_start_ms = 0;
@@ -419,15 +452,21 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
 
     ReportSpoolBuffer plot;
     plot.set_max_size(AC_REPORT_PLOT_MAX_BYTES);
-    if (!plot.reserve_capacity(AC_REPORT_PLOT_INITIAL_RESERVE) ||
-        !bin_put_u32(plot, PLOT_BIN_MAGIC) ||
-        !bin_put_u16(plot, PLOT_BIN_VERSION) ||
-        !bin_put_u16(plot, 0) ||
-        !bin_put_i64(plot, runtime_->plot_start_ms)) {
+    if (!plot.reserve_capacity(AC_REPORT_PLOT_INITIAL_RESERVE)) {
         failure_reason_ = "report_plot_output_allocation_failed";
         return {};
     }
 
+    size_t prefix_offset = 0;
+    uint8_t *prefix = plot.append_uninitialized(
+        PLOT_INDEX_PREFIX_BYTES, prefix_offset);
+    if (!prefix || prefix_offset != 0) {
+        failure_reason_ = "report_plot_output_allocation_failed";
+        return {};
+    }
+    memset(prefix, 0, PLOT_INDEX_PREFIX_BYTES);
+
+    const size_t events_offset = plot.size();
     size_t event_count_offset = 0;
     uint8_t *event_count_bytes =
         plot.append_uninitialized(sizeof(uint32_t), event_count_offset);
@@ -443,8 +482,7 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
                        event_count,
                        runtime_->plot_start_ms,
                        summary.events,
-                       unique_events) ||
-        !append_series(plot, runtime_->series)) {
+                       unique_events)) {
         failure_reason_ = "report_plot_encode_failed";
         return {};
     }
@@ -458,6 +496,35 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
     plot_bytes[event_count_offset + 3] =
         static_cast<uint8_t>(unique_events >> 24);
 
+    ReportPlotSectionDescriptor &events_section =
+        runtime_->sections[runtime_->section_count++];
+    events_section.kind = PLOT_SECTION_KIND_EVENTS;
+    events_section.offset = static_cast<uint32_t>(events_offset);
+    events_section.length = static_cast<uint32_t>(
+        plot.size() - events_offset);
+    events_section.crc32 = crc32_ieee(
+        plot.data() + events_offset, events_section.length);
+    if (!copy_section_name(events_section, "events") ||
+        !append_series(plot,
+                       runtime_->series,
+                       runtime_->sections,
+                       runtime_->section_count) ||
+        plot.size() > UINT32_MAX ||
+        !report_plot_encode_prefix(
+            plot.mutable_data(),
+            PLOT_INDEX_PREFIX_BYTES,
+            runtime_->plot_start_ms,
+            runtime_->plot_start_ms,
+            runtime_->plot_end_ms,
+            static_cast<uint32_t>(plot.size()),
+            runtime_->sections,
+            runtime_->section_count)) {
+        failure_reason_ = "report_plot_encode_failed";
+        return {};
+    }
+
+    summary.prefix_crc32 = report_plot_prefix_crc32(
+        plot.data(), plot.size());
     summary.pressure_sum_milli = runtime_->pressure_sum_milli;
     summary.leak_sum_milli = runtime_->leak_sum_milli;
     summary.pressure_samples = runtime_->pressure_samples;

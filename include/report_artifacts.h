@@ -74,6 +74,7 @@ struct ReportRangeTileArtifact {
     int64_t end_ms = 0;
     uint64_t size = 0;
     uint32_t crc32 = 0;
+    uint32_t prefix_crc32 = 0;
 };
 
 bool report_range_tile_artifact_valid(const ReportRangeTileArtifact &tile);
@@ -84,6 +85,7 @@ struct ReportArtifactManifestView {
     uint64_t overview_size = 0;
     uint32_t result_crc32 = 0;
     uint32_t overview_crc32 = 0;
+    uint32_t overview_prefix_crc32 = 0;
     const uint8_t *tile_bytes = nullptr;
     size_t tile_count = 0;
 
@@ -94,6 +96,7 @@ struct ReportArtifactDescriptor {
     ReportArtifactKey key;
     uint64_t size = 0;
     uint32_t crc32 = 0;
+    uint32_t prefix_crc32 = 0;
 
     bool valid() const;
     bool path(char *out, size_t out_size) const;
@@ -108,6 +111,8 @@ struct ReportArtifactBundle {
     uint32_t result_crc32 = 0;
     uint32_t overview_crc32 = 0;
     uint32_t range_tile_crc32 = 0;
+    uint32_t overview_prefix_crc32 = 0;
+    uint32_t range_tile_prefix_crc32 = 0;
 
     bool valid() const;
 };
@@ -142,9 +147,9 @@ public:
 
 class ReportArtifactManifestCodec {
 public:
-    static constexpr uint16_t Version = 1;
+    static constexpr uint16_t Version = 2;
     static constexpr size_t HeaderBytes = 72;
-    static constexpr size_t TileBytes = 24;
+    static constexpr size_t TileBytes = 28;
     static constexpr size_t MaxTiles = 128;
     static constexpr size_t MaxBytes = HeaderBytes + MaxTiles * TileBytes;
 

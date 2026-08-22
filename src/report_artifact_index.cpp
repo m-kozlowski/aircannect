@@ -50,6 +50,7 @@ void fill_availability(const ReportArtifactIndexRecord &record,
                                                     record.source_revision);
     out.overview.size = record.overview_size;
     out.overview.crc32 = record.overview_crc32;
+    out.overview.prefix_crc32 = record.overview_prefix_crc32;
 }
 
 }  // namespace
@@ -152,6 +153,7 @@ bool ReportArtifactIndex::availability(
             out.range_tile.key = request;
             out.range_tile.size = tile.size;
             out.range_tile.crc32 = tile.crc32;
+            out.range_tile.prefix_crc32 = tile.prefix_crc32;
             break;
         }
     }
@@ -207,6 +209,7 @@ std::shared_ptr<const ReportArtifactIndex> ReportArtifactIndexBuilder::build(
         record.overview_size = input.overview_size;
         record.result_crc32 = input.result_crc32;
         record.overview_crc32 = input.overview_crc32;
+        record.overview_prefix_crc32 = input.overview_prefix_crc32;
         record.tile_offset = static_cast<uint32_t>(next_tile);
         record.tile_count = static_cast<uint16_t>(input.tile_count);
         if (input.tile_count > 0) {
@@ -266,6 +269,7 @@ ReportArtifactIndexBuilder::replace_input(
             out.overview_size = input.overview_size;
             out.result_crc32 = input.result_crc32;
             out.overview_crc32 = input.overview_crc32;
+            out.overview_prefix_crc32 = input.overview_prefix_crc32;
             out.tile_count = static_cast<uint16_t>(input.tile_count);
             if (input.tile_count > 0) {
                 memcpy(index->tiles_ + output_tile,
@@ -344,6 +348,7 @@ ReportArtifactIndexBuilder::merge_availability(
             availability.request.range_end_ms,
             availability.range_tile.size,
             availability.range_tile.crc32,
+            availability.range_tile.prefix_crc32,
         };
         size_t source_tile = 0;
         bool inserted = false;
@@ -374,6 +379,7 @@ ReportArtifactIndexBuilder::merge_availability(
     input.overview_size = availability.overview.size;
     input.result_crc32 = availability.result.crc32;
     input.overview_crc32 = availability.overview.crc32;
+    input.overview_prefix_crc32 = availability.overview.prefix_crc32;
     input.tiles = merged_tiles ? merged_tiles : existing_tiles;
     input.tile_count = merged_tile_count;
     std::shared_ptr<const ReportArtifactIndex> merged =

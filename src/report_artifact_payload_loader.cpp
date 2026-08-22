@@ -4,6 +4,7 @@
 
 #include "board_report.h"
 #include "crc32.h"
+#include "report_plot_format.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -29,24 +30,23 @@ void ReportArtifactPayloadLoader::begin(StorageReadPort &read_port) {
 }
 
 OperationAdmission ReportArtifactPayloadLoader::start(
-    const ReportArtifactDescriptor &artifact,
+    const ReportArtifactPayloadDescriptor &payload,
     uint32_t generation,
     StorageReadLane lane) {
     if (!read_port_) return OperationAdmission::Rejected;
     if (status_.active()) return OperationAdmission::Busy;
-    if (!artifact.valid() || artifact.size == 0 ||
-        artifact.size > SIZE_MAX || generation == 0) {
+    if (!payload.valid() || generation == 0) {
         return OperationAdmission::Rejected;
     }
 
     reset();
-    buffer_ = LargeByteBuffer::allocate(static_cast<size_t>(artifact.size));
+    buffer_ = LargeByteBuffer::allocate(payload.size);
     if (!buffer_) return OperationAdmission::Rejected;
 
     generation_ = generation;
     lane_ = lane;
     crc_state_ = crc32_ieee_initial_state();
-    status_.artifact = artifact;
+    status_.payload = payload;
     status_.lane = lane;
     status_.state = ReportArtifactPayloadLoadState::Submitting;
     return OperationAdmission::Accepted;
@@ -59,7 +59,7 @@ bool ReportArtifactPayloadLoader::submit_chunk() {
     }
 
     char path[AC_STORAGE_PATH_MAX] = {};
-    if (!status_.artifact.path(path, sizeof(path))) {
+    if (!status_.payload.artifact.path(path, sizeof(path))) {
         fail("report_payload_path_invalid");
         return true;
     }
@@ -70,7 +70,7 @@ bool ReportArtifactPayloadLoader::submit_chunk() {
 
     StorageReadCommand command;
     command.path = path;
-    command.offset = offset_;
+    command.offset = status_.payload.offset + offset_;
     command.length = chunk_length_;
     command.lane = lane_;
     command.generation = generation_;
@@ -155,8 +155,18 @@ bool ReportArtifactPayloadLoader::copy_chunk() {
 }
 
 void ReportArtifactPayloadLoader::finish() {
-    const uint32_t crc = crc32_ieee_finish_state(crc_state_);
-    if (crc != status_.artifact.crc32) {
+    bool valid = false;
+    if (status_.payload.kind == ReportPayloadKind::PlotIndex) {
+        ReportPlotIndexView index;
+        valid = report_plot_decode_prefix(
+                    buffer_->data(), buffer_->size(), index) &&
+                index.total_size == status_.payload.artifact.size &&
+                index.prefix_crc32 == status_.payload.crc32;
+    } else {
+        valid = crc32_ieee_finish_state(crc_state_) ==
+                status_.payload.crc32;
+    }
+    if (!valid) {
         fail("report_payload_crc_mismatch");
         return;
     }
