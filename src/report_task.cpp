@@ -1694,8 +1694,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!background_work_blocked &&
-        runtime.catalog_load_pending &&
+    if (runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
         const OperationAdmission admitted =
