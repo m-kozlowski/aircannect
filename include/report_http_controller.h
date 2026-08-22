@@ -39,7 +39,8 @@ private:
                        int64_t range_end_ms = 0);
     void queue_artifact_response(
         AsyncWebServerRequest *request,
-        const ReportArtifactDescriptor &artifact);
+        const ReportArtifactDescriptor &artifact,
+        bool prefer_deflate);
     uint32_t next_generation() const;
 
     struct PendingResponses;

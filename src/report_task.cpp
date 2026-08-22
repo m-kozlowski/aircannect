@@ -10,6 +10,7 @@
 #include "report_artifact_index.h"
 #include "report_fallback_artifact.h"
 #include "report_night_artifact_builder.h"
+#include "report_payload_deflater.h"
 #include "string_util.h"
 
 #ifdef ARDUINO
@@ -461,6 +462,28 @@ struct ReportTask::Runtime {
         return out;
     }
 
+    ReportArtifactPayloadSelection select_payload(
+        const ReportArtifactDescriptor &artifact,
+        bool prefer_deflate) {
+        if (!artifact.valid() || !lock(20)) return {};
+
+        ReportArtifactPayloadSelection out =
+            payload_cache.select(artifact, prefer_deflate);
+        unlock();
+        return out;
+    }
+
+    ReportArtifactPayloadSelection select_payload_if_present(
+        const ReportArtifactDescriptor &artifact,
+        bool prefer_deflate) {
+        if (!artifact.valid() || !lock(0)) return {};
+
+        ReportArtifactPayloadSelection out =
+            payload_cache.select_if_present(artifact, prefer_deflate);
+        unlock();
+        return out;
+    }
+
     bool payload_cached(const ReportArtifactDescriptor &artifact) const {
         if (!artifact.valid() || !lock(20)) return false;
 
@@ -654,6 +677,48 @@ struct ReportTask::Runtime {
             }
         }
         payload_loader.reset();
+        return true;
+    }
+
+    bool start_pending_deflate() {
+        if (payload_deflater.active() || payload_deflater.finished()) {
+            return false;
+        }
+
+        ReportArtifactDescriptor artifact;
+        std::shared_ptr<const LargeByteBuffer> bytes;
+        if (!lock(20)) return false;
+        const bool pending =
+            payload_cache.next_deflate_candidate(artifact, bytes);
+        unlock();
+        if (!pending) return false;
+
+        if (payload_deflater.start(
+                artifact,
+                std::move(bytes),
+                AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE)) {
+            return true;
+        }
+
+        if (!lock(20)) return false;
+        (void)payload_cache.complete_deflate(artifact, {});
+        unlock();
+        return true;
+    }
+
+    bool finish_payload_deflate() {
+        if (!payload_deflater.finished()) return false;
+        if (!lock(20)) return false;
+
+        const ReportArtifactDescriptor artifact =
+            payload_deflater.artifact();
+        std::shared_ptr<const LargeByteBuffer> bytes =
+            payload_deflater.take_completed();
+        (void)payload_cache.complete_deflate(
+            artifact, std::move(bytes));
+        unlock();
+
+        payload_deflater.reset();
         return true;
     }
 
@@ -1058,7 +1123,7 @@ struct ReportTask::Runtime {
             static_cast<bool>(pending_catalog_save);
         next.background_active =
             queued > 0 || catalog_commit_pending ||
-            next.payload_load.active() ||
+            next.payload_load.active() || payload_deflater.active() ||
             (next.state != ReportTaskState::Stopped &&
              next.state != ReportTaskState::Idle);
 
@@ -1071,6 +1136,7 @@ struct ReportTask::Runtime {
     ReportEngine engine;
     ReportArtifactPayloadCache payload_cache;
     ReportArtifactPayloadLoader payload_loader;
+    ReportPayloadDeflater payload_deflater;
     ReportNightArtifactBuilder builder;
     ReportSummaryAcquisition summary_acquisition;
     NightCatalogRefreshService catalog_refresh;
@@ -1421,6 +1487,22 @@ ReportTask::artifact_payload_if_present(
     return runtime_->find_payload_if_present(artifact);
 }
 
+ReportArtifactPayloadSelection ReportTask::select_artifact_payload(
+    const ReportArtifactDescriptor &artifact,
+    bool prefer_deflate) const {
+    if (!runtime_) return {};
+    return runtime_->select_payload(artifact, prefer_deflate);
+}
+
+ReportArtifactPayloadSelection
+ReportTask::select_artifact_payload_if_present(
+    const ReportArtifactDescriptor &artifact,
+    bool prefer_deflate) const {
+    if (!runtime_) return {};
+    return runtime_->select_payload_if_present(
+        artifact, prefer_deflate);
+}
+
 bool ReportTask::artifact_failure(
     const ReportArtifactKey &artifact,
     ReportArtifactFailureStatus &failure) const {
@@ -1457,6 +1539,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = runtime.payload_loader.poll() || worked;
     }
     worked = runtime.finish_payload_load(now_ms) || worked;
+
+    if (runtime.payload_deflater.active()) {
+        worked = runtime.payload_deflater.poll(
+            AC_REPORT_DEFLATE_INPUT_CHUNK_BYTES) || worked;
+    }
+    worked = runtime.finish_payload_deflate() || worked;
+    worked = runtime.start_pending_deflate() || worked;
 
     ReportTaskCommand command;
     const ReportEngineStatus command_engine_status = runtime.engine.status();

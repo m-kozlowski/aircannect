@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "async_prepared_response.h"
+#include "board_report.h"
 #include "json_util.h"
 #include "large_text_buffer.h"
 #include "night_catalog.h"
@@ -28,6 +29,45 @@ static constexpr size_t REPORT_HTTP_PENDING_CAPACITY = 4;
 static constexpr uint32_t REPORT_HTTP_PENDING_TIMEOUT_MS = 30000;
 static constexpr const char *REPORT_SOURCE_REVISION_HEADER =
     "X-Report-Source-Revision";
+
+bool request_accepts_deflate(AsyncWebServerRequest *request) {
+    if (!request || !request->hasHeader("Accept-Encoding")) return false;
+
+    String value = request->getHeader("Accept-Encoding")->value();
+    value.toLowerCase();
+
+    bool wildcard_seen = false;
+    bool wildcard_enabled = false;
+    int start = 0;
+    while (start < static_cast<int>(value.length())) {
+        int end = value.indexOf(',', start);
+        if (end < 0) end = value.length();
+
+        String item = value.substring(start, end);
+        item.trim();
+        const int separator = item.indexOf(';');
+        String coding = separator < 0
+            ? item
+            : item.substring(0, separator);
+        coding.trim();
+        bool enabled = true;
+        if (separator >= 0) {
+            String parameters = item.substring(separator + 1);
+            parameters.replace(" ", "");
+            const int quality = parameters.indexOf("q=");
+            enabled = quality < 0 ||
+                parameters.substring(quality + 2).toFloat() > 0.0f;
+        }
+
+        if (coding == "deflate") return enabled;
+        if (coding == "*") {
+            wildcard_seen = true;
+            wildcard_enabled = enabled;
+        }
+        start = end + 1;
+    }
+    return wildcard_seen && wildcard_enabled;
+}
 
 bool same_artifact_descriptor(const ReportArtifactDescriptor &lhs,
                               const ReportArtifactDescriptor &rhs) {
@@ -146,7 +186,7 @@ bool format_artifact_etag(const ReportArtifactDescriptor &artifact,
         written = snprintf(
             out,
             out_size,
-            "\"%c-%s-%016llx-%lld-%llu-%08lx\"",
+            "W/\"%c-%s-%016llx-%lld-%llu-%08lx\"",
             kind,
             day,
             static_cast<unsigned long long>(
@@ -158,7 +198,7 @@ bool format_artifact_etag(const ReportArtifactDescriptor &artifact,
         written = snprintf(
             out,
             out_size,
-            "\"%c-%s-%016llx-%llu-%08lx\"",
+            "W/\"%c-%s-%016llx-%llu-%08lx\"",
             kind,
             day,
             static_cast<unsigned long long>(
@@ -201,6 +241,7 @@ void add_artifact_headers(AsyncWebServerResponse *response,
 
     response->addHeader("Cache-Control", "no-cache");
     response->addHeader("Accept-Ranges", "none");
+    response->addHeader("Vary", "Accept-Encoding");
     if (etag && etag[0]) response->addHeader("ETag", etag);
 
     if (source_revision.valid()) {
@@ -229,13 +270,21 @@ void send_not_modified(AsyncWebServerRequest *request,
 bool send_artifact_payload(
     AsyncWebServerRequest *request,
     const ReportArtifactDescriptor &artifact,
-    std::shared_ptr<const LargeByteBuffer> bytes,
+    ReportArtifactPayloadSelection payload,
     const char *content_type) {
-    if (!request || !artifact.valid() || !bytes ||
-        bytes->size() != artifact.size) {
+    if (!request || !artifact.valid() || !payload.ready()) {
         return false;
     }
 
+    const bool deflated = payload.encoding ==
+        ReportArtifactPayloadEncoding::Deflate;
+    if ((!deflated && payload.bytes->size() != artifact.size) ||
+        (deflated && payload.bytes->size() >= artifact.size)) {
+        return false;
+    }
+
+    std::shared_ptr<const LargeByteBuffer> bytes =
+        std::move(payload.bytes);
     AsyncWebServerResponse *response = new (std::nothrow)
         AsyncPreparedResponse(
             content_type,
@@ -255,6 +304,7 @@ bool send_artifact_payload(
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
     (void)format_artifact_etag(artifact, etag, sizeof(etag));
     add_artifact_headers(response, etag, artifact.key.source_revision);
+    if (deflated) response->addHeader("Content-Encoding", "deflate");
     request->send(response);
     return true;
 }
@@ -358,6 +408,7 @@ struct ReportHttpController::PendingResponses {
         ReportArtifactDescriptor artifact;
         AsyncWebServerRequestPtr request;
         uint32_t deadline_ms = 0;
+        bool prefer_deflate = false;
 
         bool used() const { return artifact.valid(); }
     };
@@ -414,10 +465,16 @@ void ReportHttpController::poll() {
             continue;
         }
 
-        std::shared_ptr<const LargeByteBuffer> payload =
-            report_task_->artifact_payload_if_present(entry.artifact);
+        ReportArtifactPayloadSelection payload =
+            report_task_->select_artifact_payload_if_present(
+                entry.artifact, entry.prefer_deflate);
+        if (payload.state ==
+            ReportArtifactPayloadSelectionState::Pending) {
+            continue;
+        }
+
         bool superseded = false;
-        if (!payload) {
+        if (!payload.ready()) {
             const ReportArtifactQuery current = report_task_->query_artifact(
                 entry.artifact.key.sleep_day,
                 entry.artifact.key.kind,
@@ -428,11 +485,13 @@ void ReportHttpController::poll() {
         }
 
         ReportArtifactFailureStatus failure;
-        const bool failed = !payload && !superseded &&
+        const bool failed = !payload.ready() && !superseded &&
             report_task_->try_artifact_failure(entry.artifact.key, failure);
         const bool timed_out =
             millis_deadline_reached(now_ms, entry.deadline_ms);
-        if (!payload && !superseded && !failed && !timed_out) continue;
+        if (!payload.ready() && !superseded && !failed && !timed_out) {
+            continue;
+        }
 
         const ReportArtifactDescriptor artifact = entry.artifact;
         const AsyncWebServerRequestPtr pending_request = entry.request;
@@ -451,7 +510,7 @@ void ReportHttpController::poll() {
             send_preparing(request.get());
             return;
         }
-        if (!payload) {
+        if (!payload.ready()) {
             send_json_error(request.get(), 503, "artifact_payload_timeout");
             return;
         }
@@ -469,7 +528,8 @@ void ReportHttpController::poll() {
 
 void ReportHttpController::queue_artifact_response(
     AsyncWebServerRequest *request,
-    const ReportArtifactDescriptor &artifact) {
+    const ReportArtifactDescriptor &artifact,
+    bool prefer_deflate) {
     if (!request || !report_task_ || !pending_ || !pending_->mutex) {
         send_json_error(request, 503, "report_unavailable");
         return;
@@ -520,6 +580,7 @@ void ReportHttpController::queue_artifact_response(
     free_entry->artifact = artifact;
     free_entry->request = request->pause();
     free_entry->deadline_ms = millis() + REPORT_HTTP_PENDING_TIMEOUT_MS;
+    free_entry->prefer_deflate = prefer_deflate;
     xSemaphoreGive(pending_->mutex);
 }
 
@@ -745,17 +806,21 @@ void ReportHttpController::send_artifact(
         return;
     }
 
-    std::shared_ptr<const LargeByteBuffer> payload =
-        report_task_->artifact_payload(query.descriptor);
-    if (payload && send_artifact_payload(
-                       request,
-                       query.descriptor,
-                       std::move(payload),
-                       "application/octet-stream")) {
+    const bool prefer_deflate = request_accepts_deflate(request) &&
+        query.descriptor.size >= AC_REPORT_HTTP_DEFLATE_MIN_BYTES;
+    ReportArtifactPayloadSelection payload =
+        report_task_->select_artifact_payload(
+            query.descriptor, prefer_deflate);
+    if (payload.ready() && send_artifact_payload(
+                               request,
+                               query.descriptor,
+                               std::move(payload),
+                               "application/octet-stream")) {
         return;
     }
 
-    queue_artifact_response(request, query.descriptor);
+    queue_artifact_response(
+        request, query.descriptor, prefer_deflate);
 }
 
 uint32_t ReportHttpController::next_generation() const {

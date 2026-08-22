@@ -28,6 +28,9 @@ static constexpr size_t AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE =
     3 * 1024 * 1024;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_WARM_NIGHTS = 4;
 static constexpr size_t AC_REPORT_PAYLOAD_LOAD_COPY_BYTES = 16 * 1024;
+static constexpr size_t AC_REPORT_HTTP_DEFLATE_MIN_BYTES = 4 * 1024;
+static constexpr size_t AC_REPORT_DEFLATE_INPUT_CHUNK_BYTES = 16 * 1024;
+static constexpr uint8_t AC_REPORT_DEFLATE_MIN_SAVINGS_PERCENT = 10;
 
 // SMB and SleepHQ share one background task so their network and storage
 // phases cannot overlap. It runs at idle priority: export code crosses TLS,
