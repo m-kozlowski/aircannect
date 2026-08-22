@@ -93,7 +93,8 @@ public:
                ResmedFirmwarePreparer &preparer,
                StorageStreamPort &stream_port,
                StoragePathPort &path_port,
-               StorageUploadPort &upload_port);
+               StorageUploadPort &upload_port,
+               const String &ota_key);
     void poll();
 
     void set_can_available(bool available);
@@ -160,7 +161,9 @@ private:
     bool begin_protocol(size_t total_size,
                         const String &expected_sha256,
                         const String &filename);
-    bool queue_plain_apply(bool reset_settings);
+    bool queue_plain_apply(bool reset_settings, bool allow_auth_fallback);
+    bool queue_authenticated_apply(const String &authentication);
+    bool queue_configured_authenticated_apply();
     bool queue_request(const char *method,
                        const std::string &params,
                        uint32_t timeout_ms);
@@ -234,6 +237,7 @@ private:
     StorageStreamPort *stream_port_ = nullptr;
     StoragePathPort *path_port_ = nullptr;
     StorageUploadPort *upload_port_ = nullptr;
+    const String *ota_key_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
     ColdState *cold_ = nullptr;
     bool can_available_ = true;
@@ -246,6 +250,7 @@ private:
     size_t pending_block_bytes_ = 0;
     bool sha_started_ = false;
     bool sha_finished_ = false;
+    bool apply_auth_fallback_pending_ = false;
     uint32_t last_activity_ms_ = 0;
     mbedtls_sha256_context sha_ctx_;
 

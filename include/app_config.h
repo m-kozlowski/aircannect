@@ -24,6 +24,7 @@ struct AppConfigData {
     String as11_ble_address;
     String as11_ble_client_id;
     String as11_ble_master_key;
+    String as11_ota_key;
 
     bool tcp_bridge_enabled = AC_DEFAULT_TCP_BRIDGE_ENABLED != 0;
     uint16_t tcp_bridge_port = AC_TCP_BRIDGE_PORT;
@@ -98,6 +99,7 @@ private:
     bool set_as11_ble_credentials(const String &address,
                                   const String &client_id,
                                   const String &master_key);
+    bool set_as11_ota_key(const String &key);
     bool set_tcp_bridge(bool enabled, uint16_t port);
     bool set_softap_mode(SoftApMode mode);
     bool set_wifi_country(const String &country);

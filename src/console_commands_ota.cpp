@@ -369,11 +369,6 @@ void handle_resmed_ota(Print &out,
         install_prefix = "install ";
     }
     if (install_prefix) {
-        if (!resmed_ota.status().can_available) {
-            out.println("[RESMED OTA] unavailable without CAN");
-            return;
-        }
-
         String path = rest.substring(strlen(install_prefix));
         trim_inplace(path);
 
@@ -400,6 +395,12 @@ void handle_resmed_ota(Print &out,
             target = parsed_target;
             path = path.substring(target_pos);
             trim_inplace(path);
+        }
+
+        if (transport == ResmedFirmwareInstallTransport::Service &&
+            !resmed_ota.status().can_available) {
+            out.println("[RESMED OTA] patched bootloader requires CAN");
+            return;
         }
 
         if (!path.length()) {

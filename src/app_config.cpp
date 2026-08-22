@@ -66,6 +66,10 @@ bool valid_ble_master_key(const String &master_key) {
                             AC_AS11_BLE_MASTER_KEY_HEX_LENGTH);
 }
 
+bool valid_resmed_ota_key(const String &key) {
+    return !key.length() || valid_hex_string(key, 64);
+}
+
 const char *printable_ascii_reject_reason(const String &value,
                                           size_t max_len,
                                           const char *too_long,
@@ -539,6 +543,8 @@ bool AppConfig::normalize() {
     data_.as11_ble_client_id.trim();
     data_.as11_ble_master_key.trim();
     data_.as11_ble_master_key.toLowerCase();
+    data_.as11_ota_key.trim();
+    data_.as11_ota_key.toUpperCase();
     if (!valid_ble_address(data_.as11_ble_address)) {
         data_.as11_ble_address = "";
         unchanged = false;
@@ -549,6 +555,10 @@ bool AppConfig::normalize() {
     }
     if (!valid_ble_master_key(data_.as11_ble_master_key)) {
         data_.as11_ble_master_key = "";
+        unchanged = false;
+    }
+    if (!valid_resmed_ota_key(data_.as11_ota_key)) {
+        data_.as11_ota_key = "";
         unchanged = false;
     }
     if (data_.tcp_bridge_port == 0) {
@@ -704,6 +714,17 @@ bool AppConfig::set_as11_ble_credentials(const String &address,
     data_.as11_ble_client_id = parsed_client_id;
     data_.as11_ble_master_key = parsed_master_key;
     return mark_dirty(AC_CONFIG_DIRTY_AS11_TRANSPORT);
+}
+
+bool AppConfig::set_as11_ota_key(const String &key) {
+    String value = key;
+    value.trim();
+    value.toUpperCase();
+    if (!valid_resmed_ota_key(value)) return false;
+    if (data_.as11_ota_key == value) return true;
+
+    data_.as11_ota_key = value;
+    return mark_dirty(AC_CONFIG_DIRTY_AS11_OTA_KEY);
 }
 
 bool AppConfig::set_tcp_bridge(bool enabled, uint16_t port) {

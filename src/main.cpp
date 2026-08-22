@@ -994,7 +994,8 @@ void setup() {
                                   resmed_firmware_preparer,
                                   StorageService::stream_port(),
                                   StorageService::path_port(),
-                                  StorageService::upload_port())) {
+                                  StorageService::upload_port(),
+                                  config.as11_ota_key)) {
         Log::logf(CAT_OTA, LOG_ERROR,
                   "ResMed OTA manager failed to start\n");
     }

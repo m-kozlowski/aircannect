@@ -39,6 +39,41 @@ bool seek_top_member(JsonCursor &json, const char *member) {
     return false;
 }
 
+bool parse_int32(JsonCursor &json, int32_t &value) {
+    json.skip_ws();
+
+    bool negative = false;
+    if (json.pos < json.end && *json.pos == '-') {
+        negative = true;
+        json.pos++;
+    }
+    if (json.pos >= json.end ||
+        !isdigit(static_cast<unsigned char>(*json.pos))) {
+        return false;
+    }
+
+    const uint32_t limit = negative
+        ? static_cast<uint32_t>(INT32_MAX) + 1u
+        : static_cast<uint32_t>(INT32_MAX);
+    uint32_t magnitude = 0;
+    while (json.pos < json.end &&
+           isdigit(static_cast<unsigned char>(*json.pos))) {
+        const uint32_t digit = static_cast<uint32_t>(*json.pos - '0');
+        if (magnitude > (limit - digit) / 10u) return false;
+
+        magnitude = magnitude * 10u + digit;
+        json.pos++;
+    }
+
+    if (negative && magnitude == static_cast<uint32_t>(INT32_MAX) + 1u) {
+        value = INT32_MIN;
+    } else {
+        value = negative ? -static_cast<int32_t>(magnitude)
+                         : static_cast<int32_t>(magnitude);
+    }
+    return true;
+}
+
 bool parse_rpc_envelope(JsonCursor &json, RpcEnvelope &envelope) {
     envelope = {};
     if (!json.consume('{')) return false;
@@ -215,6 +250,15 @@ bool json_extract_uint_member(const std::string &json,
                               const char *member,
                               uint32_t &value) {
     return json_extract_uint_member(json.data(), json.size(), member, value);
+}
+
+bool json_extract_rpc_error_code(const char *json,
+                                 size_t len,
+                                 int32_t &code) {
+    JsonCursor cursor(json, len);
+    return seek_top_member(cursor, "error") &&
+           seek_top_member(cursor, "code") &&
+           parse_int32(cursor, code);
 }
 
 bool inspect_rpc_envelope(const char *json,

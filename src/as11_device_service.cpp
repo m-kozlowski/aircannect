@@ -4,8 +4,6 @@
 #include <stdio.h>
 #include <time.h>
 
-#include <ArduinoJson.h>
-
 #include "as11_rpc.h"
 #include "board.h"
 #ifdef ARDUINO
@@ -16,17 +14,6 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t ValidUtcMinMs = 1609459200000LL;
-
-int32_t rpc_error_code(RpcPayloadView payload) {
-    if (payload.empty()) return 0;
-
-    JsonDocument doc;
-    const DeserializationError error = deserializeJson(
-        doc, payload.data(), payload.size());
-    if (error || !doc["error"]["code"].is<int32_t>()) return 0;
-
-    return doc["error"]["code"].as<int32_t>();
-}
 
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||
@@ -642,9 +629,13 @@ void As11DeviceService::complete_therapy(
 void As11DeviceService::complete_clock_write(
     const RpcRequestCompletion &completion) {
     clock_write_result_.succeeded = completion_succeeded(completion);
-    clock_write_result_.rpc_error_code = completion.response_error
-        ? rpc_error_code(rpc_payload_view(completion.payload))
-        : 0;
+    clock_write_result_.rpc_error_code = 0;
+    const RpcPayloadView payload = rpc_payload_view(completion.payload);
+    if (completion.response_error) {
+        (void)json_extract_rpc_error_code(
+            payload.data(), payload.size(),
+            clock_write_result_.rpc_error_code);
+    }
     clock_write_result_pending_ = true;
 
     if (clock_write_result_.succeeded) return;

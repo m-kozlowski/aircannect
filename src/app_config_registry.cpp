@@ -136,6 +136,12 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      SECRET_PROVISIONABLE, AC_CONFIG_DIRTY_AS11_TRANSPORT,
      "BLE pairing key", "Master pairing key issued during BLE pairing.",
      nullptr, 0, -1, AC_CFG_OFFSET(as11_ble_master_key)},
+    {"as11_ota_key", AppConfigFieldId::As11OtaKey,
+     AppConfigGroup::As11, 50, AppConfigFieldType::Secret,
+     SECRET_PROVISIONABLE, AC_CONFIG_DIRTY_AS11_OTA_KEY,
+     "ResMed OTA key",
+     "Device-specific key used for authenticated firmware installation.",
+     nullptr, 0, -1, AC_CFG_OFFSET(as11_ota_key)},
 
     {"softap_mode", AppConfigFieldId::SoftApMode, AppConfigGroup::Network, 10,
      AppConfigFieldType::Enum, PROVISIONABLE, AC_CONFIG_DIRTY_SOFTAP,
@@ -383,6 +389,8 @@ bool AppConfigFieldWriter::set_value(
         case AppConfigFieldId::As11BleMasterKey:
             return config.set_as11_ble_credentials(
                 cfg.as11_ble_address, cfg.as11_ble_client_id, value);
+        case AppConfigFieldId::As11OtaKey:
+            return config.set_as11_ota_key(value);
         case AppConfigFieldId::TcpEnabled:
             if (!parse_bool_yesno(value, parsed_bool)) return false;
             return config.set_tcp_bridge(parsed_bool, cfg.tcp_bridge_port);

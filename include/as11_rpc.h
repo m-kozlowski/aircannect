@@ -45,6 +45,9 @@ bool json_extract_uint_member(const char *json,
 bool json_extract_uint_member(const std::string &json,
                               const char *member,
                               uint32_t &value);
+bool json_extract_rpc_error_code(const char *json,
+                                 size_t len,
+                                 int32_t &code);
 bool json_member_present(const char *json, size_t len, const char *member);
 bool json_member_present(const std::string &json, const char *member);
 

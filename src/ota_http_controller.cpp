@@ -373,13 +373,6 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
     server.on(
         AsyncURIMatcher::exact("/api/resmed-ota/install"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
-            if (!resmed_ota_->status().can_available) {
-                request->send(
-                    409, "application/json",
-                    "{\"ok\":false,\"error\":\"can_transport_required\"}");
-                return;
-            }
-
             if (resmed_ota_->active() || resmed_preparer_->active()) {
                 request->send(
                     409, "application/json",
@@ -427,6 +420,14 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
                 request->send(
                     400, "application/json",
                     "{\"ok\":false,\"error\":\"invalid transport\"}");
+                return;
+            }
+
+            if (transport == ResmedFirmwareInstallTransport::Service &&
+                !resmed_ota_->status().can_available) {
+                request->send(
+                    409, "application/json",
+                    "{\"ok\":false,\"error\":\"can_transport_required\"}");
                 return;
             }
 
@@ -635,7 +636,9 @@ void OtaHttpController::execute(Command &command) {
             break;
 
         case CommandKind::ResmedInstall:
-            if (!resmed_ota_->status().can_available ||
+            if ((command.resmed_transport ==
+                     ResmedFirmwareInstallTransport::Service &&
+                 !resmed_ota_->status().can_available) ||
                 !resmed_ota_->reset_terminal_state() ||
                 !resmed_preparer_->request(
                     command.path.c_str(), command.filename.c_str(),

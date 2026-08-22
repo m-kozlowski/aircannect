@@ -686,7 +686,7 @@
             </div>
             <div class="row">
               <label>Installation method</label>
-              <select id="resmedOtaTransport">
+              <select id="resmedOtaTransport" onchange="loadOta()">
                 <option value="rpc" selected>Native RPC</option>
                 <option value="service">Patched Bootloader</option>
               </select>
