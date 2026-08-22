@@ -1440,6 +1440,11 @@
           card.appendChild(ctitle);
           if (reportChartPreferences.collapsed.has(def.key)) {
             card.classList.add("collapsed");
+          } else if (availableParts.length &&
+                     !reportBaseLoadedCharts.has(def.key)) {
+            const placeholder = document.createElement("div");
+            placeholder.className = "report-chart-placeholder";
+            card.appendChild(placeholder);
           }
           container.appendChild(card);
           return;

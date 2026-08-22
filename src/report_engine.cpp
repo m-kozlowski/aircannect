@@ -215,7 +215,6 @@ ReportRequestEnqueueResult ReportEngine::request(
         queued.status != ReportRequestEnqueueStatus::Invalid;
     const bool can_preempt =
         accepted && phase_ != ActivePhase::Idle &&
-        phase_ != ActivePhase::Publishing &&
         report_request_priority_higher(priority, active_request_.priority) &&
         artifact_current(active_request_.artifact);
     if (!can_preempt) return queued;

@@ -699,7 +699,7 @@ struct ReportTask::Runtime {
         return false;
     }
 
-    PayloadLoadStartResult start_payload_load(
+    PayloadLoadStartResult start_exact_payload_load(
         const ReportArtifactPayloadDescriptor &payload,
         uint32_t generation,
         StorageReadLane lane) {
@@ -732,6 +732,25 @@ struct ReportTask::Runtime {
     }
 
     PayloadLoadStartResult start_payload_load(
+        const ReportArtifactPayloadDescriptor &payload,
+        uint32_t generation,
+        StorageReadLane lane) {
+        if (payload.kind == ReportPayloadKind::PlotIndex) {
+            const ReportArtifactPayloadDescriptor whole =
+                ReportArtifactPayloadDescriptor::whole(payload.artifact);
+            const PayloadLoadStartResult promoted =
+                start_exact_payload_load(whole, generation, lane);
+            if (promoted != PayloadLoadStartResult::TooLarge &&
+                promoted != PayloadLoadStartResult::MemoryUnavailable &&
+                promoted != PayloadLoadStartResult::Rejected) {
+                return promoted;
+            }
+        }
+
+        return start_exact_payload_load(payload, generation, lane);
+    }
+
+    PayloadLoadStartResult start_payload_load(
         const ReportArtifactKey &artifact,
         uint32_t generation,
         StorageReadLane lane) {
@@ -745,7 +764,7 @@ struct ReportTask::Runtime {
         if (!availability.descriptor(artifact, descriptor)) {
             return PayloadLoadStartResult::Superseded;
         }
-        return start_payload_load(
+        return start_exact_payload_load(
             ReportArtifactPayloadDescriptor::whole(descriptor),
             generation,
             lane);

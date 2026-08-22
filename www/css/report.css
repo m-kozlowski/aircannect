@@ -179,7 +179,8 @@
     }
 
     .report-chart canvas,
-    .report-chart svg {
+    .report-chart svg,
+    .report-chart-placeholder {
       width: 100%;
       height: 210px;
       display: block;
@@ -187,6 +188,11 @@
       border: 1px solid #202837;
       margin-top: 8px;
       cursor: crosshair;
+    }
+
+    .report-chart-placeholder {
+      box-sizing: border-box;
+      cursor: default;
     }
 
     .report-chart-title {
