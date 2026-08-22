@@ -3,12 +3,13 @@
 namespace aircannect {
 
 bool RpcLinkSelector::begin() {
+#if AC_CAN_ENABLED
     if (!can_started_) can_started_ = can_link_.begin();
+#endif
     if (selected_ == As11Transport::Ble && !ble_started_) {
         ble_started_ = ble_link_.begin();
     }
-    return can_started_ &&
-           (selected_ != As11Transport::Ble || ble_started_);
+    return selected_ == As11Transport::Ble ? ble_started_ : can_started_;
 }
 
 void RpcLinkSelector::poll(uint32_t now_ms) {
@@ -51,7 +52,7 @@ RpcApplicationLinkStatus RpcLinkSelector::status() const {
 const char *RpcLinkSelector::name() const { return active_link().name(); }
 
 bool RpcLinkSelector::select(As11Transport transport) {
-    if (!as11_transport_valid(transport)) return false;
+    if (!as11_transport_supported(transport)) return false;
     if (transport == As11Transport::Ble && !ble_started_) {
         ble_started_ = ble_link_.begin();
     }

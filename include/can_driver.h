@@ -94,7 +94,8 @@ private:
 
     void pump_tx_queue(uint32_t alerts);
 
-    FixedQueue<RawCanFrame, AC_CAN_TX_QUEUE_DEPTH> tx_queue_;
+    FixedQueue<RawCanFrame, AC_CAN_ENABLED ? AC_CAN_TX_QUEUE_DEPTH : 1>
+        tx_queue_;
     uint32_t last_tx_success_ms_ = 0;
 
     uint32_t last_bus_error_log_ms_ = 0;

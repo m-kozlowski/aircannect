@@ -539,8 +539,8 @@ bool AppConfig::normalize() {
         data_.hostname = defaults.hostname;
         unchanged = false;
     }
-    if (!as11_transport_valid(data_.as11_transport)) {
-        data_.as11_transport = As11Transport::Can;
+    if (!as11_transport_supported(data_.as11_transport)) {
+        data_.as11_transport = defaults.as11_transport;
         unchanged = false;
     }
     data_.as11_ble_address.trim();
@@ -692,7 +692,7 @@ bool AppConfig::set_hostname(const String &hostname) {
 }
 
 bool AppConfig::set_as11_transport(As11Transport transport) {
-    if (!as11_transport_valid(transport)) return false;
+    if (!as11_transport_supported(transport)) return false;
     if (data_.as11_transport == transport) return true;
 
     data_.as11_transport = transport;

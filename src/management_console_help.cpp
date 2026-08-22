@@ -17,7 +17,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  memory            heap and PSRAM status");
         out.println("  version           AirCANnect firmware version");
         out.println("  restart           restart AirCANnect or the AS11");
+#if AC_CAN_ENABLED
         out.println("  can               CAN controller recovery helpers");
+#endif
         out.println("  config            persistent app configuration");
         out.println("  wifi              Wi-Fi profiles, scan, and reconnect");
         out.println("  log               log levels and sink status");
@@ -290,9 +292,13 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "can") {
         out.println("[HELP can]");
+#if AC_CAN_ENABLED
         out.println("  can                       show CAN controller state");
         out.println("  can status                show CAN controller state");
         out.println("  can restart               restart CAN and clear pending RPC work");
+#else
+        out.println("  CAN is unavailable in this build");
+#endif
         return;
     }
 

@@ -33,7 +33,7 @@ private:
 
     RpcApplicationLink &can_link_;
     RpcApplicationLink &ble_link_;
-    As11Transport selected_ = As11Transport::Can;
+    As11Transport selected_ = default_as11_transport();
     bool can_started_ = false;
     bool ble_started_ = false;
     bool switch_event_pending_ = false;

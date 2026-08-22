@@ -1,5 +1,8 @@
 #include "app_config_registry.h"
 
+#include "board_ble.h"
+#include "board_can.h"
+
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
 #include "app_config_internal.h"
 #endif
@@ -85,8 +88,12 @@ static constexpr AppConfigEnumValue OXIMETRY_ADVERTISE_VALUES[] = {
 };
 
 static constexpr AppConfigEnumValue AS11_TRANSPORT_VALUES[] = {
+#if AC_CAN_ENABLED
     {"can", "CAN"},
+#endif
+#if AC_BLE_ENABLED
     {"ble", "BLE"},
+#endif
 };
 
 static constexpr AppConfigFieldFlags PROVISIONABLE =

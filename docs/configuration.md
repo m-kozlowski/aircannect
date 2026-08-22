@@ -16,7 +16,7 @@ Boolean values accept `on`/`off`, `yes`/`no`, `true`/`false`, `1`/`0`, and
 
 | Key | Values | Default | Description |
 | --- | --- | --- | --- |
-| `as11_transport` | `can`, `ble` | `can` | Application RPC transport. Selection is explicit; there is no automatic failover. |
+| `as11_transport` | available build transports | CAN when present, otherwise BLE | Application RPC transport. Selection is explicit; there is no automatic failover. |
 | `as11_ble_addr` | Bluetooth address, or empty | empty | AS11 Bluetooth address used by the BLE transport. |
 | `as11_ble_id` | ASCII string, max 64 chars, or empty | empty | Client ID from an existing AS11 BLE pairing. |
 | `as11_ble_key` | 64 hexadecimal characters, or empty | empty | Secret master key from the same AS11 BLE pairing. |

@@ -87,8 +87,10 @@ private:
     CanDriver &can_;
     DatagramRx rpc_rx_{AC_STREAM_FRAME_RAW_MAX};
     DatagramRx log_rx_;
-    FixedQueue<RpcLinkEvent, AC_RPC_PAYLOAD_QUEUE_DEPTH> link_events_;
-    FixedQueue<CanSideEvent, AC_RPC_EVENT_QUEUE_DEPTH> side_events_;
+    FixedQueue<RpcLinkEvent, AC_CAN_ENABLED ? AC_RPC_PAYLOAD_QUEUE_DEPTH : 1>
+        link_events_;
+    FixedQueue<CanSideEvent, AC_CAN_ENABLED ? AC_RPC_EVENT_QUEUE_DEPTH : 1>
+        side_events_;
 
     As11ServiceFrameObserver service_frame_observer_ = nullptr;
     void *service_frame_context_ = nullptr;

@@ -50,7 +50,7 @@ struct As11StatusSnapshot {
     As11TherapyTarget pending_therapy_target = As11TherapyTarget::None;
     bool clock_valid = false;
     uint32_t clock_sample_ms = 0;
-    As11Transport transport = As11Transport::Can;
+    As11Transport transport = default_as11_transport();
     const char *link_state = "ready";
     bool link_connected = true;
     bool link_authenticated = true;

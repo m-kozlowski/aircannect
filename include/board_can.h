@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef AC_CAN_ENABLED
+#define AC_CAN_ENABLED 1
+#endif
+
 #ifndef AC_CAN_TX_GPIO
 #define AC_CAN_TX_GPIO 26
 #endif

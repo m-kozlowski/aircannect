@@ -21,7 +21,7 @@ struct AppConfigData {
 
     String hostname = AC_HOSTNAME;
 
-    As11Transport as11_transport = As11Transport::Can;
+    As11Transport as11_transport = default_as11_transport();
     String as11_ble_address;
     String as11_ble_client_id;
     String as11_ble_master_key;

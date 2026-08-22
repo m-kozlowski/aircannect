@@ -130,6 +130,10 @@ const char *CanDriver::error_name(esp_err_t err) {
 }
 
 bool CanDriver::begin() {
+#if !AC_CAN_ENABLED
+    return false;
+#endif
+
     if (installed_) return true;
     if (!install_controller()) return false;
     if (!start_controller()) {

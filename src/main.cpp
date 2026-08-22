@@ -533,6 +533,8 @@ static bool store_as11_ble_credentials(void *context,
 }
 
 static bool configure_as11_transport(const AppConfigData &config) {
+    if (!as11_transport_supported(config.as11_transport)) return false;
+
     const bool use_ble = config.as11_transport == As11Transport::Ble;
 
     as11_ble_rpc_link.configure(

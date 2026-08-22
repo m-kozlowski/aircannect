@@ -714,6 +714,11 @@ bool CanConsoleCommands::execute(const String &command,
                                  ConsoleCommandSession &) {
     if (command != "can") return false;
 
+#if !AC_CAN_ENABLED
+    out.println("[CAN] unavailable in this build");
+    return true;
+#endif
+
     String rest = rest_arg;
 
     rest.trim();
@@ -735,6 +740,11 @@ bool CanConsoleCommands::execute(const String &command,
 }
 
 void CanConsoleCommands::print_status(Print &out) {
+#if !AC_CAN_ENABLED
+    out.println("[CAN] unavailable in this build");
+    return;
+#endif
+
     if (!can_control_.can_available()) {
         out.println("[CAN] unavailable for selected AS11 transport");
         return;
