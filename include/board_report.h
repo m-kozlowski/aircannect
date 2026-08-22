@@ -26,9 +26,10 @@ static constexpr size_t AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY = 16;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE =
     3 * 1024 * 1024;
-// Idle work discovers, builds, and warms only the nights that fit the LRU.
-// Older nights remain available through direct foreground lookup.
-static constexpr size_t AC_REPORT_IDLE_PREBUILD_NIGHTS = 4;
+// Idle work builds missing artifacts for the complete catalog. Keep only the
+// newest result/overview pairs warm because the PSRAM LRU is an accelerator,
+// not the durable backfill boundary.
+static constexpr size_t AC_REPORT_IDLE_WARM_NIGHTS = 4;
 static constexpr size_t AC_REPORT_PAYLOAD_LOAD_COPY_BYTES = 16 * 1024;
 static constexpr size_t AC_REPORT_HTTP_DEFLATE_MIN_BYTES = 4 * 1024;
 static constexpr size_t AC_REPORT_DEFLATE_INPUT_CHUNK_BYTES = 16 * 1024;

@@ -923,8 +923,12 @@ struct ReportTask::Runtime {
     }
 
     size_t idle_catalog_limit() const {
+        return catalog ? catalog->size() : 0;
+    }
+
+    size_t idle_warm_limit() const {
         return catalog
-            ? std::min(catalog->size(), AC_REPORT_IDLE_PREBUILD_NIGHTS)
+            ? std::min(catalog->size(), AC_REPORT_IDLE_WARM_NIGHTS)
             : 0;
     }
 
@@ -1116,7 +1120,8 @@ struct ReportTask::Runtime {
             const bool payload_warm_available =
                 engine_status.state == ReportEngineState::Idle &&
                 engine_status.queued == 0;
-            if (payload_warm_available) {
+            if (idle_cursor < idle_warm_limit() &&
+                payload_warm_available) {
                 const ReportArtifactDescriptor candidates[] = {
                     available.result,
                     available.overview,
