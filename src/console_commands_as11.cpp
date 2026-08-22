@@ -9,6 +9,7 @@
 #include "as11_settings.h"
 #include "as11_settings_manager.h"
 #include "can_driver.h"
+#include "can_rpc_link.h"
 #include "edf_stream_signal_table.h"
 #include "event_broker.h"
 #include "management_console_format.h"
@@ -626,10 +627,12 @@ void StreamConsoleCommands::print_memory_detail(Print &out) {
 
 CanConsoleCommands::CanConsoleCommands(
     RpcDiagnosticsPort &diagnostics,
+    CanControlPort &can_control,
     CanDriver &can,
     EventBroker &events,
     StreamBroker &stream)
     : diagnostics_(diagnostics),
+      can_control_(can_control),
       can_(can),
       events_(events),
       stream_(stream) {}
@@ -647,7 +650,7 @@ bool CanConsoleCommands::execute(const String &command,
     if (!rest.length() || rest == "status") {
         ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
     } else if (rest == "restart") {
-        diagnostics_.recover_can("console CAN restart command");
+        can_control_.recover_can("console CAN restart command");
     } else {
         print_unknown_command(out, "CAN", "can status, can restart");
     }
@@ -664,6 +667,7 @@ void CanConsoleCommands::print_stats(Print &out) {
 
 void CanConsoleCommands::reset_stats() {
     diagnostics_.reset_stats();
+    can_.reset_stats();
     events_.reset_counters();
     stream_.reset_counters();
 }

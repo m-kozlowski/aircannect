@@ -62,8 +62,6 @@ struct RpcQuiesceStatus {
     bool idle = false;
     bool pending_request = false;
     bool dispatch_retry = false;
-    bool debug_log_rx_enabled = true;
-    bool debug_log_filter_pending = false;
     size_t request_queue_depth = 0;
     size_t payload_queue_depth = 0;
     size_t tx_queue_depth = 0;
@@ -88,7 +86,6 @@ public:
     virtual RpcTransportStatus runtime_status() const = 0;
     virtual RpcTransportStats stats() const = 0;
     virtual void reset_stats() = 0;
-    virtual bool recover_can(const char *reason) = 0;
 };
 
 class RpcQuiescePort {
@@ -98,7 +95,6 @@ public:
     virtual void set_quiesce_mode(bool requested) = 0;
     virtual bool send_quiesce_request(const std::string &method,
                                       const std::string &params_json) = 0;
-    virtual void request_debug_log_rx(bool enabled) = 0;
     virtual RpcQuiesceStatus quiesce_status() const = 0;
 };
 

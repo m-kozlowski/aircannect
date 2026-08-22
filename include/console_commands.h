@@ -27,6 +27,7 @@ class ResmedFirmwareRepository;
 class ResmedFirmwarePreparer;
 class ResmedOtaManager;
 class RpcDiagnosticsPort;
+class CanControlPort;
 class RpcPassthroughPort;
 class RpcRequestPort;
 class SessionManager;
@@ -104,6 +105,7 @@ private:
 class CanConsoleCommands final : public ConsoleCommandGroup {
 public:
     CanConsoleCommands(RpcDiagnosticsPort &diagnostics,
+                       CanControlPort &can_control,
                        CanDriver &can,
                        EventBroker &events,
                        StreamBroker &stream);
@@ -118,6 +120,7 @@ public:
 
 private:
     RpcDiagnosticsPort &diagnostics_;
+    CanControlPort &can_control_;
     CanDriver &can_;
     EventBroker &events_;
     StreamBroker &stream_;

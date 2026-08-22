@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "can_rpc_link.h"
 #include "rpc_transport_ports.h"
 
 namespace aircannect {
@@ -12,6 +13,7 @@ class StreamBroker;
 class RpcQuiesceCoordinator {
 public:
     RpcQuiesceCoordinator(RpcQuiescePort &transport,
+                          CanControlPort &can,
                           EventBroker &events,
                           StreamBroker &streams);
 
@@ -28,6 +30,7 @@ private:
     bool push_traffic_quiesced(const RpcQuiesceStatus &transport) const;
 
     RpcQuiescePort &transport_;
+    CanControlPort &can_;
     EventBroker &events_;
     StreamBroker &streams_;
 

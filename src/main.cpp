@@ -12,6 +12,7 @@
 #include "ble_sensor_source.h"
 #include "board.h"
 #include "can_driver.h"
+#include "can_rpc_link.h"
 #include "config_http_controller.h"
 #include "config_service.h"
 #include "console_command_router.h"
@@ -72,12 +73,13 @@
 using namespace aircannect;
 
 static CanDriver can_driver;
+static CanRpcLink can_rpc_link(can_driver);
 static EventBroker event_broker;
 static StreamBroker stream_broker;
-static RpcTransport rpc_transport(can_driver);
+static RpcTransport rpc_transport(can_rpc_link);
 static As11ServiceManager as11_service_manager(can_driver);
 static RpcQuiesceCoordinator rpc_quiesce_coordinator(
-    rpc_transport, event_broker, stream_broker);
+    rpc_transport, can_rpc_link, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
@@ -135,7 +137,7 @@ static HttpRouteModule *web_route_modules[] = {
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
 static CanConsoleCommands can_console_commands(
-    rpc_transport, can_driver, event_broker, stream_broker);
+    rpc_transport, can_rpc_link, can_driver, event_broker, stream_broker);
 static As11DeviceConsoleCommands as11_device_console_commands(
     rpc_transport, rpc_transport, as11_device_service, time_sync_service);
 static RpcConsoleCommands rpc_console_commands(
@@ -642,6 +644,26 @@ static bool main_loop_drain_timing_active() {
                As11TherapyState::Running;
 }
 
+static void drain_can_side_events() {
+    CanSideEvent event;
+    while (can_rpc_link.take_side_event(event)) {
+        switch (event.kind) {
+            case CanSideEventKind::DebugPayload:
+                rpc_transport.accept_debug_payload(event.payload);
+                break;
+            case CanSideEventKind::DebugFramingError:
+                rpc_transport.accept_debug_framing_error(event.detail.c_str());
+                break;
+            case CanSideEventKind::BootNotification:
+                rpc_transport.accept_boot_notification(event.detail.c_str());
+                break;
+            case CanSideEventKind::ApplicationReset:
+                rpc_transport.accept_link_reset(event.detail.c_str());
+                break;
+        }
+    }
+}
+
 static void drain_can_rx_after(const char *section) {
     static uint32_t last_checkpoint_ms = 0;
     static uint32_t last_warn_ms = 0;
@@ -650,7 +672,8 @@ static void drain_can_rx_after(const char *section) {
     const uint32_t gap_ms = last_checkpoint_ms == 0
                                 ? 0
                                 : before_ms - last_checkpoint_ms;
-    const size_t drained = rpc_transport.drain_can_rx();
+    const size_t drained = can_rpc_link.drain_rx();
+    drain_can_side_events();
     const uint32_t after_drain_ms = millis();
     const uint32_t drain_ms = after_drain_ms - before_ms;
 
@@ -863,7 +886,7 @@ void setup() {
                                                    &stream_broker);
     rpc_transport.set_spool_notification_observer(route_spool_notification,
                                                   &report_spool_service);
-    rpc_transport.set_as11_service_frame_observer(
+    can_rpc_link.set_service_frame_observer(
         route_as11_service_frame, &as11_service_manager);
     tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
                                         &stream_broker);
@@ -1020,6 +1043,7 @@ void loop() {
                                                    now_ms);
 
     rpc_transport.poll();
+    drain_can_side_events();
     as11_service_manager.poll_entry(
         rpc_transport, rpc_quiesce_coordinator.complete(),
         rpc_quiesce_coordinator.timed_out(), now_ms);

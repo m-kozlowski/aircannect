@@ -6,9 +6,8 @@
 #include <string>
 
 #include "board.h"
-#include "can_datagram.h"
-#include "can_driver.h"
 #include "fixed_queue.h"
+#include "rpc_application_link.h"
 #include "rpc_request_port.h"
 #include "rpc_transport_ports.h"
 
@@ -21,21 +20,16 @@ using RpcRetainedNotificationObserver = void (*)(
     void *context,
     const RpcPayloadRef &payload,
     uint32_t now_ms);
-using As11ServiceFrameObserver = void (*)(void *context,
-                                          const RawCanFrame &frame,
-                                          uint32_t now_ms);
-
 class RpcTransport final : public RpcRequestPort,
                            public RpcPassthroughPort,
                            public RpcDiagnosticsPort,
                            public RpcQuiescePort {
 public:
-    explicit RpcTransport(CanDriver &can);
+    explicit RpcTransport(RpcApplicationLink &link);
 
-    // Lifecycle and CAN pump
+    // Lifecycle and link pump
     bool reserve_reassembly_buffers();
     void poll();
-    size_t drain_can_rx();
 
     // RPC submission
     bool submit_raw_payload(const std::string &payload,
@@ -61,21 +55,20 @@ public:
     void set_spool_notification_observer(
         RpcRetainedNotificationObserver observer,
         void *context);
-    void set_as11_service_frame_observer(
-        As11ServiceFrameObserver observer,
-        void *context);
+
+    void accept_debug_payload(const RpcPayloadRef &payload);
+    void accept_debug_framing_error(const char *detail);
+    void accept_boot_notification(const char *detail);
+    void accept_link_reset(const char *reason);
 
     // Transport maintenance
     void reset_stats() override;
-
-    bool recover_can(const char *reason) override;
 
     bool background_backpressure_active() const;
     void set_as11_unavailable(bool unavailable);
     void set_quiesce_mode(bool requested) override;
     bool send_quiesce_request(const std::string &method,
                               const std::string &params_json) override;
-    void request_debug_log_rx(bool enabled) override;
     RpcQuiesceStatus quiesce_status() const override;
 
     // Status snapshots
@@ -151,9 +144,7 @@ private:
                          uint32_t id = 0);
     void report_framing_error(const char *channel, const std::string &error);
     bool enqueue_request(QueuedRequest &request);
-    bool enqueue_payload_frames(const std::string &payload, RpcSource source);
-    static bool enqueue_datagram_frame(void *context,
-                                       const DatagramFrame &frame);
+    RpcLinkSendResult send_payload(const std::string &payload);
 
     // Request lifecycle
     void cancel_pending_request(const char *reason);
@@ -189,38 +180,34 @@ private:
                                uint32_t now);
 
     bool background_rx_pressure_active(uint32_t now) const;
-    bool can_rx_queue_pressure_active() const;
-    void note_can_rx_pressure(uint32_t now);
+    void note_link_rx_pressure(uint32_t now);
     bool request_allowed_during_quiesce(const QueuedRequest &request) const;
     bool request_allowed_while_unavailable(
         const QueuedRequest &request) const;
     void cancel_requests_while_unavailable();
     bool quiesce_idle() const;
-    void poll_debug_log_rx_filter();
-
     void dispatch_next_request();
     void check_pending_timeout();
     void process_deferred_payloads(size_t budget);
+    void process_link_events(size_t budget);
 
     // Payload handling
     void handle_event_notification(const RpcPayloadRef &payload);
     void handle_stream_notification(const RpcPayloadRef &payload);
     void handle_spool_notification(const RpcPayloadRef &payload);
     void note_transport_reset();
-    void handle_frame(const RawCanFrame &frame);
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
                                   RpcPayloadView payload);
+    void enqueue_deferred_payload(DeferredPayload::Kind kind,
+                                  const RpcPayloadRef &payload);
 
     void handle_rpc_payload(const RpcPayloadRef &payload);
     void handle_debug_payload(const RpcPayloadRef &payload);
 
-    std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
-    // CAN/RPC queues
-    CanDriver &can_;
-    DatagramRx rpc_rx_{AC_STREAM_FRAME_RAW_MAX};
-    DatagramRx log_rx_;
+    // Application link and RPC queues
+    RpcApplicationLink &link_;
     FixedQueue<DeferredPayload, AC_RPC_PAYLOAD_QUEUE_DEPTH>
         deferred_payloads_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
@@ -256,18 +243,15 @@ private:
     void *stream_notification_context_ = nullptr;
     RpcRetainedNotificationObserver spool_notification_observer_ = nullptr;
     void *spool_notification_context_ = nullptr;
-    As11ServiceFrameObserver as11_service_frame_observer_ = nullptr;
-    void *as11_service_frame_context_ = nullptr;
     uint32_t transport_generation_ = 1;
 
     // Backpressure and transport admission
     bool raw_rpc_forwarding_enabled_ = false;
     bool quiesce_mode_ = false;
-    bool debug_log_rx_requested_ = true;
     bool as11_unavailable_ = false;
 
     uint32_t background_rx_pressure_until_ms_ = 0;
-    uint32_t observed_rx_queue_full_alerts_ = 0;
+    uint32_t observed_rx_pressure_events_ = 0;
 };
 
 }  // namespace aircannect

@@ -8,9 +8,10 @@
 namespace aircannect {
 
 RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcQuiescePort &transport,
+                                             CanControlPort &can,
                                              EventBroker &events,
                                              StreamBroker &streams)
-    : transport_(transport), events_(events), streams_(streams) {}
+    : transport_(transport), can_(can), events_(events), streams_(streams) {}
 
 void RpcQuiesceCoordinator::update(bool requested, uint32_t now_ms) {
     if (requested != requested_) {
@@ -25,13 +26,15 @@ void RpcQuiesceCoordinator::update(bool requested, uint32_t now_ms) {
 
     RpcQuiesceStatus transport = transport_.quiesce_status();
     if (push_traffic_quiesced(transport)) {
-        transport_.request_debug_log_rx(false);
+        can_.request_debug_log_rx(false);
         transport = transport_.quiesce_status();
     }
 
+    const CanQuiesceStatus can = can_.can_quiesce_status();
+
     if (push_traffic_quiesced(transport) &&
-        !transport.debug_log_rx_enabled &&
-        !transport.debug_log_filter_pending) {
+        !can.debug_log_rx_enabled &&
+        !can.debug_log_filter_pending) {
         complete_ = true;
         deadline_ms_ = 0;
         return;
@@ -79,7 +82,7 @@ void RpcQuiesceCoordinator::end(uint32_t now_ms) {
     timed_out_ = false;
     deadline_ms_ = 0;
 
-    transport_.request_debug_log_rx(true);
+    can_.request_debug_log_rx(true);
     transport_.set_quiesce_mode(false);
     streams_.clear_quiesce();
     events_.clear_quiesce(now_ms);
@@ -92,6 +95,7 @@ bool RpcQuiesceCoordinator::push_traffic_quiesced(
 
 void RpcQuiesceCoordinator::log_timeout() {
     const RpcQuiesceStatus transport = transport_.quiesce_status();
+    const CanQuiesceStatus can = can_.can_quiesce_status();
     const EventBrokerStatus events = events_.status();
 
     Log::logf(CAT_RPC, LOG_WARN,
@@ -105,8 +109,8 @@ void RpcQuiesceCoordinator::log_timeout() {
               static_cast<unsigned>(transport.request_queue_depth),
               static_cast<unsigned>(transport.payload_queue_depth),
               static_cast<unsigned>(transport.tx_queue_depth),
-              transport.debug_log_rx_enabled ? 1u : 0u,
-              transport.debug_log_filter_pending ? 1u : 0u,
+              can.debug_log_rx_enabled ? 1u : 0u,
+              can.debug_log_filter_pending ? 1u : 0u,
               events.subscription_active ? 1u : 0u,
               events.subscribe_pending ? 1u : 0u);
 }

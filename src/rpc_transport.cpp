@@ -43,65 +43,24 @@ bool current_epoch_ms(int64_t &epoch_ms) {
 
 }  // namespace
 
-RpcTransport::RpcTransport(CanDriver &can) : can_(can) {
+RpcTransport::RpcTransport(RpcApplicationLink &link) : link_(link) {
     stats_started_ms_ = millis();
 }
 
 bool RpcTransport::reserve_reassembly_buffers() {
-    const bool rpc_ok = rpc_rx_.reserve_initial();
-    const bool log_ok = log_rx_.reserve_initial();
-    return rpc_ok && log_ok;
+    return link_.begin();
 }
 
 void RpcTransport::poll() {
-    can_.poll();
     const uint32_t now = millis();
-    note_can_rx_pressure(now);
+    link_.poll(now);
+    note_link_rx_pressure(now);
 
-    DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
-    if (rpc_timeout.status == DatagramStatus::Error) {
-        stats_.rpc_framing_errors++;
-        report_framing_error("RPC", rpc_timeout.error);
-    }
-
-    if (!quiesce_mode_ && debug_log_rx_requested_) {
-        DatagramFeedResult log_timeout = log_rx_.poll(now);
-        if (log_timeout.status == DatagramStatus::Error) {
-            stats_.log_framing_errors++;
-            report_framing_error("LOG", log_timeout.error);
-        }
-    }
-
-    drain_can_rx();
+    process_link_events(AC_RPC_PAYLOAD_DRAIN_BUDGET);
     process_deferred_payloads(AC_RPC_PAYLOAD_DRAIN_BUDGET);
 
     check_pending_timeout();
     dispatch_next_request();
-
-    // Dispatch may enqueue CAN frames after RX-driven work above. Poll again so
-    // the CAN driver can start TX in the same main-loop turn.
-    can_.poll();
-    poll_debug_log_rx_filter();
-}
-
-size_t RpcTransport::drain_can_rx() {
-    size_t drained = 0;
-    const uint32_t start_ms = millis();
-    for (; drained < AC_CAN_RX_DRAIN_PRESSURE_BUDGET; ++drained) {
-        RawCanFrame frame;
-        if (!can_.receive(frame, 0)) break;
-        handle_frame(frame);
-        if (drained + 1 < AC_CAN_RX_DRAIN_BASE_BUDGET) continue;
-        if (!can_rx_queue_pressure_active()) break;
-        if (millis() - start_ms >= AC_CAN_RX_DRAIN_PRESSURE_MAX_MS) break;
-    }
-
-    // RX observers can enqueue an ISO-TP flow-control response or the next
-    // request block. Start that TX before returning to unrelated main-loop
-    // work instead of delaying every block until the next transport poll.
-    if (can_.tx_queue_depth() > 0) can_.poll();
-
-    return drained;
 }
 
 void RpcTransport::process_deferred_payloads(size_t budget) {
@@ -115,7 +74,27 @@ void RpcTransport::process_deferred_payloads(size_t budget) {
         } else {
             handle_debug_payload(payload_ref);
         }
-        drain_can_rx();
+    }
+}
+
+void RpcTransport::process_link_events(size_t budget) {
+    for (size_t i = 0; i < budget; ++i) {
+        RpcLinkEvent event;
+        if (!link_.take_event(event)) return;
+
+        switch (event.kind) {
+            case RpcLinkEventKind::Payload:
+                enqueue_deferred_payload(DeferredPayload::Kind::Rpc,
+                                         event.payload);
+                break;
+            case RpcLinkEventKind::FramingError:
+                stats_.rpc_framing_errors++;
+                report_framing_error(link_.name(), event.detail);
+                break;
+            case RpcLinkEventKind::Disconnected:
+                accept_link_reset(event.detail.c_str());
+                break;
+        }
     }
 }
 
@@ -142,7 +121,19 @@ bool RpcTransport::submit_raw_payload(const std::string &payload, RpcSource sour
                  source_name(source));
         Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
     }
-    if (!enqueue_payload_frames(payload, source)) return false;
+    const RpcLinkSendResult send_result = send_payload(payload);
+    if (send_result != RpcLinkSendResult::Accepted) {
+        const char *message = "RPC link rejected payload";
+        if (send_result == RpcLinkSendResult::Busy) {
+            message = "RPC link busy; payload rejected";
+        } else if (send_result == RpcLinkSendResult::Unavailable) {
+            message = "RPC link unavailable; payload rejected";
+        }
+        if (interactive_source(source)) {
+            push_text_event(RpcEventKind::Info, message, strlen(message));
+        }
+        return false;
+    }
 
     uint32_t id = 0;
     if ((source == RpcSource::Console || source == RpcSource::Tcp) &&
@@ -152,37 +143,8 @@ bool RpcTransport::submit_raw_payload(const std::string &payload, RpcSource sour
     return true;
 }
 
-bool RpcTransport::enqueue_payload_frames(const std::string &payload,
-                                        RpcSource source) {
-    (void)source;
-    const size_t frame_count = datagram_frame_count(payload.size());
-    if (frame_count > can_.tx_queue_free()) {
-        push_text_event(RpcEventKind::Info,
-                        "CAN TX queue full; payload rejected",
-                        sizeof("CAN TX queue full; payload rejected") - 1);
-        return false;
-    }
-
-    return visit_encoded_datagram(payload, enqueue_datagram_frame, this);
-}
-
-bool RpcTransport::enqueue_datagram_frame(void *context,
-                                        const DatagramFrame &frame) {
-    RpcTransport *transport = static_cast<RpcTransport *>(context);
-    if (!transport) return false;
-
-    RawCanFrame raw;
-    raw.id = AC_CAN_TX_ID;
-    raw.len = frame.len;
-    for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
-    if (!transport->can_.enqueue_tx(raw)) {
-        transport->push_text_event(RpcEventKind::Info,
-                                    "CAN TX enqueue failed",
-                                    sizeof("CAN TX enqueue failed") - 1);
-        return false;
-    }
-
-    return true;
+RpcLinkSendResult RpcTransport::send_payload(const std::string &payload) {
+    return link_.send(RpcPayloadView(payload.data(), payload.size()));
 }
 
 bool RpcTransport::send_request(const std::string &method,
@@ -309,7 +271,7 @@ bool RpcTransport::next_event(RpcEvent &event) {
 bool RpcTransport::background_backpressure_active() const {
     if (background_rx_pressure_active(millis())) return true;
 
-    if (can_rx_queue_pressure_active()) return true;
+    if (link_.status().rx_pressure) return true;
     if (deferred_payloads_.count() >=
         AC_RPC_PAYLOAD_BACKPRESSURE_WATERMARK) {
         return true;
@@ -322,12 +284,6 @@ void RpcTransport::set_as11_unavailable(bool unavailable) {
 
     as11_unavailable_ = unavailable;
     if (unavailable) cancel_requests_while_unavailable();
-}
-
-bool RpcTransport::can_rx_queue_pressure_active() const {
-    CanControllerStatus can_status;
-    return can_.controller_status(can_status) && can_status.valid &&
-           can_status.msgs_to_rx >= AC_CAN_RX_BACKPRESSURE_WATERMARK;
 }
 
 void RpcTransport::set_raw_rpc_forwarding_enabled(bool enabled) {
@@ -355,17 +311,38 @@ void RpcTransport::set_spool_notification_observer(
     spool_notification_context_ = observer ? context : nullptr;
 }
 
-void RpcTransport::set_as11_service_frame_observer(
-    As11ServiceFrameObserver observer,
-    void *context) {
-    as11_service_frame_observer_ = observer;
-    as11_service_frame_context_ = observer ? context : nullptr;
+void RpcTransport::accept_debug_payload(const RpcPayloadRef &payload) {
+    enqueue_deferred_payload(DeferredPayload::Kind::DebugLog, payload);
+}
+
+void RpcTransport::accept_debug_framing_error(const char *detail) {
+    stats_.log_framing_errors++;
+    report_framing_error("can-log", detail ? detail : "framing_error");
+}
+
+void RpcTransport::accept_boot_notification(const char *detail) {
+    last_boot_notification_ = detail ? detail : "device_boot";
+    last_boot_notification_ms_ = millis();
+    boot_notifications_seen_++;
+
+    deferred_payloads_.clear();
+    cancel_all_requests("device_boot");
+    note_transport_reset();
+    push_text_event(RpcEventKind::BootNotification,
+                    last_boot_notification_.data(),
+                    last_boot_notification_.size());
+}
+
+void RpcTransport::accept_link_reset(const char *reason) {
+    link_.reset();
+    deferred_payloads_.clear();
+    cancel_all_requests(reason ? reason : "link_reset");
+    note_transport_reset();
 }
 
 void RpcTransport::reset_stats() {
     stats_ = {};
-    can_.reset_stats();
-    observed_rx_queue_full_alerts_ = 0;
+    observed_rx_pressure_events_ = 0;
     stats_started_ms_ = millis();
 }
 
@@ -389,21 +366,11 @@ RpcTransportStatus RpcTransport::runtime_status() const {
     return out;
 }
 
-bool RpcTransport::recover_can(const char *reason) {
-    rpc_rx_.reset();
-    log_rx_.reset();
-    deferred_payloads_.clear();
-    cancel_all_requests(reason ? reason : "can_recovery");
-    note_transport_reset();
-    return can_.recover_or_restart(reason);
-}
-
 void RpcTransport::set_quiesce_mode(bool requested) {
     if (requested == quiesce_mode_) return;
 
     quiesce_mode_ = requested;
     if (requested) {
-        log_rx_.reset();
         cancel_all_requests("rpc_quiesce");
     }
 }
@@ -415,7 +382,10 @@ bool RpcTransport::send_quiesce_request(
 
     const uint32_t id = ++next_rpc_id_;
     const std::string payload = build_rpc_request(method, params_json, id);
-    if (!enqueue_payload_frames(payload, RpcSource::Internal)) return false;
+    if (send_payload(payload) !=
+        RpcLinkSendResult::Accepted) {
+        return false;
+    }
 
     Log::logf(CAT_RPC, LOG_DEBUG,
               "quiesce request dispatched id=%lu method=%s\n",
@@ -423,16 +393,10 @@ bool RpcTransport::send_quiesce_request(
     return true;
 }
 
-void RpcTransport::request_debug_log_rx(bool enabled) {
-    if (enabled == debug_log_rx_requested_) return;
-
-    debug_log_rx_requested_ = enabled;
-    log_rx_.reset();
-}
-
 bool RpcTransport::quiesce_idle() const {
+    const RpcApplicationLinkStatus link_status = link_.status();
     return !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
-           deferred_payloads_.empty() && can_.tx_idle();
+           deferred_payloads_.empty() && link_status.tx_idle;
 }
 
 RpcQuiesceStatus RpcTransport::quiesce_status() const {
@@ -440,24 +404,10 @@ RpcQuiesceStatus RpcTransport::quiesce_status() const {
     out.idle = quiesce_idle();
     out.pending_request = pending_.active;
     out.dispatch_retry = dispatch_retry_active_;
-    out.debug_log_rx_enabled = can_.debug_log_rx_enabled();
-    out.debug_log_filter_pending =
-        debug_log_rx_requested_ != out.debug_log_rx_enabled;
     out.request_queue_depth = requests_.count();
     out.payload_queue_depth = deferred_payloads_.count();
-    out.tx_queue_depth = can_.tx_queue_depth();
-    CanControllerStatus can_status;
-    if (can_.controller_status(can_status)) {
-        out.tx_queue_depth += can_status.msgs_to_tx;
-    }
+    out.tx_queue_depth = link_.status().tx_queue_depth;
     return out;
-}
-
-void RpcTransport::poll_debug_log_rx_filter() {
-    if (can_.debug_log_rx_enabled() == debug_log_rx_requested_) return;
-    if (!can_.set_debug_log_rx_enabled(debug_log_rx_requested_)) return;
-
-    log_rx_.reset();
 }
 
 bool RpcTransport::background_rx_pressure_active(uint32_t now) const {
@@ -465,10 +415,10 @@ bool RpcTransport::background_rx_pressure_active(uint32_t now) const {
            static_cast<int32_t>(background_rx_pressure_until_ms_ - now) > 0;
 }
 
-void RpcTransport::note_can_rx_pressure(uint32_t now) {
-    const uint32_t alerts = can_.stats().rx_queue_full_alerts;
-    if (alerts == observed_rx_queue_full_alerts_) return;
-    observed_rx_queue_full_alerts_ = alerts;
+void RpcTransport::note_link_rx_pressure(uint32_t now) {
+    const uint32_t events = link_.status().rx_pressure_events;
+    if (events == observed_rx_pressure_events_) return;
+    observed_rx_pressure_events_ = events;
 
     const uint32_t until =
         now + AC_RPC_BACKGROUND_RX_PRESSURE_BACKOFF_MS;
@@ -545,23 +495,8 @@ void RpcTransport::push_text_event(RpcEventKind kind,
 
 void RpcTransport::report_framing_error(const char *channel, const std::string &error) {
     const char *name = channel ? channel : "?";
-    CanControllerStatus can_status;
-    if (can_.controller_status(can_status)) {
-        Log::logf(
-            CAT_RPC,
-            LOG_WARN,
-            "[FRAMING] [%s] %s can_rx_q=%lu can_rx_missed=%lu "
-            "can_rx_overrun=%lu rx_full_alerts=%lu\n",
-            name,
-            error.c_str(),
-            static_cast<unsigned long>(can_status.msgs_to_rx),
-            static_cast<unsigned long>(can_status.rx_missed_count),
-            static_cast<unsigned long>(can_status.rx_overrun_count),
-            static_cast<unsigned long>(can_.stats().rx_queue_full_alerts));
-    } else {
-        Log::logf(CAT_RPC, LOG_WARN, "[FRAMING] [%s] %s\n",
-                  name, error.c_str());
-    }
+    Log::logf(CAT_RPC, LOG_WARN, "[FRAMING] [%s] %s\n",
+              name, error.c_str());
 
     const std::string event_payload = std::string("[") + name + "] " + error;
     push_text_event(RpcEventKind::FramingError,
@@ -841,8 +776,8 @@ void RpcTransport::dispatch_next_request() {
     const std::string payload = build_rpc_request(request.method,
                                                   request.params_json,
                                                   request.id);
-    const size_t frame_count = datagram_frame_count(payload.size());
-    if (frame_count > can_.tx_queue_free()) {
+    const RpcLinkSendResult send_result = send_payload(payload);
+    if (send_result != RpcLinkSendResult::Accepted) {
         if (!dispatch_retry_active_) {
             dispatch_retry_ = request;
             dispatch_retry_active_ = true;
@@ -851,26 +786,10 @@ void RpcTransport::dispatch_next_request() {
         next_dispatch_retry_ms_ = now + AC_RPC_MIN_TX_INTERVAL_MS;
         stats_.request_dispatch_retries++;
         if (static_cast<int32_t>(now - dispatch_retry_deadline_ms_) >= 0) {
-            cancel_queued_request(dispatch_retry_, "dispatch_tx_full",
-                                  RpcCompletionCause::DispatchFailure);
-            dispatch_retry_ = {};
-            dispatch_retry_active_ = false;
-            dispatch_retry_deadline_ms_ = 0;
-            next_dispatch_retry_ms_ = 0;
-        }
-        return;
-    }
-
-    if (!visit_encoded_datagram(payload, enqueue_datagram_frame, this)) {
-        if (!dispatch_retry_active_) {
-            dispatch_retry_ = request;
-            dispatch_retry_active_ = true;
-            dispatch_retry_deadline_ms_ = now + request.timeout_ms;
-        }
-        next_dispatch_retry_ms_ = now + AC_RPC_MIN_TX_INTERVAL_MS;
-        stats_.request_dispatch_retries++;
-        if (static_cast<int32_t>(now - dispatch_retry_deadline_ms_) >= 0) {
-            cancel_queued_request(dispatch_retry_, "dispatch_enqueue_failed",
+            const char *reason = send_result == RpcLinkSendResult::Unavailable
+                ? "dispatch_link_unavailable"
+                : "dispatch_link_busy";
+            cancel_queued_request(dispatch_retry_, reason,
                                   RpcCompletionCause::DispatchFailure);
             dispatch_retry_ = {};
             dispatch_retry_active_ = false;
@@ -979,56 +898,14 @@ void RpcTransport::enqueue_deferred_payload(DeferredPayload::Kind kind,
     }
 }
 
-void RpcTransport::handle_frame(const RawCanFrame &frame) {
-    if (frame.extended || frame.remote) return;
-    const uint32_t now = millis();
-
-    if (frame.id == AC_CAN_RX_ID) {
-        DatagramFeedResult result = rpc_rx_.feed(frame.data, frame.len, now);
-        if (result.status == DatagramStatus::Complete) {
-            enqueue_deferred_payload(DeferredPayload::Kind::Rpc,
-                                     RpcPayloadView(result.payload_data,
-                                                    result.payload_len));
-            rpc_rx_.reset();
-        } else if (result.status == DatagramStatus::Error) {
-            stats_.rpc_framing_errors++;
-            report_framing_error("RPC", result.error);
-        }
-        return;
-    }
-
-    if (frame.id == AC_CAN_LOG_ID) {
-        if (quiesce_mode_ || !debug_log_rx_requested_) return;
-
-        DatagramFeedResult result = log_rx_.feed(frame.data, frame.len, now);
-        if (result.status == DatagramStatus::Complete) {
-            enqueue_deferred_payload(DeferredPayload::Kind::DebugLog,
-                                     RpcPayloadView(result.payload_data,
-                                                    result.payload_len));
-            log_rx_.reset();
-        } else if (result.status == DatagramStatus::Error) {
-            stats_.log_framing_errors++;
-            report_framing_error("LOG", result.error);
-        }
-        return;
-    }
-
-    if (frame.id == AC_CAN_BOOT_ID) {
-        boot_notifications_seen_++;
-        last_boot_notification_ = format_boot_frame(frame);
-        last_boot_notification_ms_ = millis();
-        deferred_payloads_.clear();
-        cancel_all_requests("device_boot");
-        note_transport_reset();
-        push_text_event(RpcEventKind::BootNotification,
-                        last_boot_notification_.data(),
-                        last_boot_notification_.size());
-        return;
-    }
-
-    if (frame.id == AC_AS11_SERVICE_RX_ID &&
-        as11_service_frame_observer_) {
-        as11_service_frame_observer_(as11_service_frame_context_, frame, now);
+void RpcTransport::enqueue_deferred_payload(
+    DeferredPayload::Kind kind,
+    const RpcPayloadRef &payload) {
+    DeferredPayload deferred;
+    deferred.kind = kind;
+    deferred.payload = payload;
+    if (!deferred_payloads_.push(std::move(deferred))) {
+        stats_.deferred_payload_drops++;
     }
 }
 
@@ -1154,18 +1031,6 @@ void RpcTransport::handle_debug_payload(const RpcPayloadRef &payload) {
     if (raw_rpc_forwarding_enabled_) {
         push_event(RpcEventKind::DebugLog, payload);
     }
-}
-
-std::string RpcTransport::format_boot_frame(const RawCanFrame &frame) const {
-    std::string out = "FgPowerup 0x";
-    char id[8];
-    snprintf(id, sizeof(id), "%03lX", static_cast<unsigned long>(frame.id));
-    out += id;
-    out += " [";
-    out += std::to_string(frame.len);
-    out += "] ";
-    out += hex_bytes(frame.data, frame.len);
-    return out;
 }
 
 const char *RpcTransport::source_name(RpcSource source) const {
