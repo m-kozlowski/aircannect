@@ -36,6 +36,22 @@ class As11BleClientCallbacks : public NimBLEClientCallbacks {
 public:
     explicit As11BleClientCallbacks(As11BleRpcLink *owner) : owner_(owner) {}
 
+    bool onConnParamsUpdateRequest(
+        NimBLEClient *client,
+        const ble_gap_upd_params *params) override {
+        (void)client;
+        if (!params) return true;
+
+        Log::logf(
+            CAT_BLE, LOG_DEBUG,
+            "AS11 conn params request min=%u max=%u latency=%u timeout=%u\n",
+            static_cast<unsigned>(params->itvl_min),
+            static_cast<unsigned>(params->itvl_max),
+            static_cast<unsigned>(params->latency),
+            static_cast<unsigned>(params->supervision_timeout));
+        return true;
+    }
+
     void onDisconnect(NimBLEClient *client, int reason) override {
         (void)client;
         if (owner_) owner_->note_disconnected(reason);
@@ -484,9 +500,18 @@ void As11BleRpcLink::task_loop() {
             set_status(As11BleLinkState::Ready);
             set_connected(true, client_->getRssi());
             set_authenticated(true);
+
+            const NimBLEConnInfo connection = client_->getConnInfo();
             Log::logf(CAT_BLE, LOG_INFO,
-                      "AS11 session ready address=%s rssi=%d write=%s\n",
+                      "AS11 session ready address=%s rssi=%d interval_ms=%u "
+                      "latency=%u supervision_ms=%u mtu=%u write=%s\n",
                       config.address, client_->getRssi(),
+                      static_cast<unsigned>(
+                          connection.getConnInterval() * 5 / 4),
+                      static_cast<unsigned>(connection.getConnLatency()),
+                      static_cast<unsigned>(
+                          connection.getConnTimeout() * 10),
+                      static_cast<unsigned>(connection.getMTU()),
                       tx_write_without_response_ ? "command" : "request");
         }
 

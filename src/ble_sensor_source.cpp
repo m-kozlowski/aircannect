@@ -827,6 +827,8 @@ void BleSensorSource::task_loop() {
     SensorBleScanCallbacks scan_callbacks(this);
     SensorBleClientCallbacks client_callbacks(this);
     uint32_t next_auto_scan_ms = 0;
+    uint32_t auto_scan_idle_ms =
+        AC_OXIMETRY_SENSOR_SCAN_IDLE_MIN_MS;
 
     while (true) {
         bool enabled = false;
@@ -1000,16 +1002,23 @@ void BleSensorSource::task_loop() {
                   manual_scan ? "yes" : "no",
                   manual_connect ? "yes" : "no",
                   auto_scan ? "yes" : "no");
+
+        const bool background_scan =
+            auto_scan && !manual_scan && !manual_connect;
         scan->clearResults();
         scan->setScanCallbacks(&scan_callbacks, false);
         scan->setMaxResults(0);
-        scan->setActiveScan(true);
-        scan->setInterval(100);
-        scan->setWindow(99);
+        scan->setActiveScan(!background_scan);
+        scan->setInterval(
+            background_scan
+                ? AC_OXIMETRY_SENSOR_AUTO_SCAN_INTERVAL_MS
+                : 100);
+        scan->setWindow(
+            background_scan
+                ? AC_OXIMETRY_SENSOR_AUTO_SCAN_WINDOW_MS
+                : 99);
         (void)scan->getResults(AC_OXIMETRY_SENSOR_SCAN_MS, false);
         scan->clearResults();
-        next_auto_scan_ms =
-            millis() + AC_OXIMETRY_SENSOR_SCAN_IDLE_MS;
 
         OximetrySensorDevice scan_log[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
         size_t scan_log_count = 0;
@@ -1052,6 +1061,22 @@ void BleSensorSource::task_loop() {
 #endif
         } else if (auto_scan && auto_allowed) {
             have_target = pick_autoconnect_target(target, now_ms);
+        }
+
+        if (auto_scan) {
+            next_auto_scan_ms = millis() + auto_scan_idle_ms;
+            if (have_target) {
+                auto_scan_idle_ms =
+                    AC_OXIMETRY_SENSOR_SCAN_IDLE_MIN_MS;
+            } else if (auto_scan_idle_ms <
+                       AC_OXIMETRY_SENSOR_SCAN_IDLE_MAX_MS) {
+                auto_scan_idle_ms *= 2;
+                if (auto_scan_idle_ms >
+                    AC_OXIMETRY_SENSOR_SCAN_IDLE_MAX_MS) {
+                    auto_scan_idle_ms =
+                        AC_OXIMETRY_SENSOR_SCAN_IDLE_MAX_MS;
+                }
+            }
         }
 
         if (have_target) {
