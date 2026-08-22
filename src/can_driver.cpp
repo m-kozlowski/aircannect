@@ -130,6 +130,7 @@ const char *CanDriver::error_name(esp_err_t err) {
 }
 
 bool CanDriver::begin() {
+    if (installed_) return true;
     if (!install_controller()) return false;
     if (!start_controller()) {
         (void)twai_driver_uninstall();
@@ -142,6 +143,38 @@ bool CanDriver::begin() {
               "tx_id=0x%03X rx_id=0x%03X\n",
               AC_CAN_BITRATE, can_timing_name(), AC_CAN_TX_GPIO,
               AC_CAN_RX_GPIO, AC_CAN_TX_ID, AC_CAN_RX_ID);
+    return true;
+}
+
+bool CanDriver::end() {
+    clear_recovery_queues();
+    recovery_active_ = false;
+    recovery_started_ms_ = 0;
+    recovery_deadline_ms_ = 0;
+    recovery_attempts_ = 0;
+    restart_attempts_ = 0;
+
+    if (!installed_) {
+        debug_log_rx_enabled_ = true;
+        return true;
+    }
+
+    const esp_err_t stop_error = twai_stop();
+    if (stop_error != ESP_OK && stop_error != ESP_ERR_INVALID_STATE) {
+        Log::logf(CAT_CAN, LOG_WARN, "stop failed: %s\n",
+                  esp_err_name_short(stop_error));
+    }
+
+    const esp_err_t uninstall_error = twai_driver_uninstall();
+    if (uninstall_error != ESP_OK) {
+        Log::logf(CAT_CAN, LOG_ERROR, "driver uninstall failed: %s\n",
+                  esp_err_name_short(uninstall_error));
+        return false;
+    }
+
+    installed_ = false;
+    debug_log_rx_enabled_ = true;
+    Log::logf(CAT_CAN, LOG_INFO, "stopped\n");
     return true;
 }
 
@@ -221,6 +254,7 @@ void CanDriver::poll() {
 
 bool CanDriver::enqueue_tx(const RawCanFrame &frame) {
     if (frame.len > 8) return false;
+    if (!installed_) return false;
     if (recovery_active_) return false;
     if (!tx_queue_.push(frame)) {
         stats_.tx_queue_drops++;
@@ -741,7 +775,7 @@ void CanDriver::reset_stats() {
 }
 
 size_t CanDriver::tx_queue_free() const {
-    if (recovery_active_) return 0;
+    if (!installed_ || recovery_active_) return 0;
     return tx_queue_.free();
 }
 

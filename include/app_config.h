@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "app_config_schema.h"
+#include "as11_transport.h"
 #include "board.h"
 #include "debug_log.h"
 #include "oximetry_types.h"
@@ -18,6 +19,11 @@ struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
 
     String hostname = AC_HOSTNAME;
+
+    As11Transport as11_transport = As11Transport::Can;
+    String as11_ble_address;
+    String as11_ble_client_id;
+    String as11_ble_master_key;
 
     bool tcp_bridge_enabled = AC_DEFAULT_TCP_BRIDGE_ENABLED != 0;
     uint16_t tcp_bridge_port = AC_TCP_BRIDGE_PORT;
@@ -88,6 +94,10 @@ private:
     const AppConfigData &data() const { return data_; }
 
     bool set_hostname(const String &hostname);
+    bool set_as11_transport(As11Transport transport);
+    bool set_as11_ble_credentials(const String &address,
+                                  const String &client_id,
+                                  const String &master_key);
     bool set_tcp_bridge(bool enabled, uint16_t port);
     bool set_softap_mode(SoftApMode mode);
     bool set_wifi_country(const String &country);

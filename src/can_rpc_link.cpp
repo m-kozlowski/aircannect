@@ -12,12 +12,35 @@ bool CanRpcLink::begin() {
 }
 
 void CanRpcLink::poll(uint32_t now_ms) {
-    can_.poll();
-
+    if (!application_enabled_) return;
     const DatagramFeedResult rpc_timeout = rpc_rx_.poll(now_ms);
     if (rpc_timeout.status == DatagramStatus::Error) {
         push_link_error(rpc_timeout.error.c_str());
     }
+}
+
+bool CanRpcLink::set_physical_enabled(bool enabled) {
+    if (enabled == physical_enabled_) return true;
+
+    rpc_rx_.reset();
+    log_rx_.reset();
+    link_events_.clear();
+    side_events_.clear();
+
+    if (enabled) {
+        physical_enabled_ = can_.begin();
+        return physical_enabled_;
+    }
+
+    physical_enabled_ = false;
+    debug_log_rx_requested_ = true;
+    return can_.end();
+}
+
+void CanRpcLink::poll_physical(uint32_t now_ms) {
+    if (!physical_enabled()) return;
+
+    can_.poll();
 
     if (debug_log_rx_requested_) {
         const DatagramFeedResult log_timeout = log_rx_.poll(now_ms);
@@ -32,6 +55,8 @@ void CanRpcLink::poll(uint32_t now_ms) {
 }
 
 size_t CanRpcLink::drain_rx() {
+    if (!physical_enabled()) return 0;
+
     size_t drained = 0;
     const uint32_t start_ms = millis();
 
@@ -55,6 +80,10 @@ size_t CanRpcLink::drain_rx() {
 }
 
 RpcLinkSendResult CanRpcLink::send(RpcPayloadView payload) {
+    if (!application_enabled_ || !physical_enabled()) {
+        return RpcLinkSendResult::Unavailable;
+    }
+
     const size_t frame_count = datagram_frame_count(payload.size());
     if (frame_count > can_.tx_queue_free()) return RpcLinkSendResult::Busy;
 
@@ -78,8 +107,8 @@ void CanRpcLink::reset() {
 
 RpcApplicationLinkStatus CanRpcLink::status() const {
     RpcApplicationLinkStatus out;
-    out.ready = true;
-    out.tx_idle = can_.tx_idle();
+    out.ready = application_enabled_ && physical_enabled();
+    out.tx_idle = !physical_enabled() || can_.tx_idle();
     out.tx_queue_depth = can_.tx_queue_depth();
     out.rx_pressure_events = can_.stats().rx_queue_full_alerts;
 
@@ -91,6 +120,14 @@ RpcApplicationLinkStatus CanRpcLink::status() const {
     }
 
     return out;
+}
+
+void CanRpcLink::set_application_enabled(bool enabled) {
+    if (enabled == application_enabled_) return;
+
+    application_enabled_ = enabled;
+    rpc_rx_.reset();
+    link_events_.clear();
 }
 
 bool CanRpcLink::take_side_event(CanSideEvent &event) {
@@ -105,6 +142,8 @@ void CanRpcLink::set_service_frame_observer(
 }
 
 bool CanRpcLink::recover_can(const char *reason) {
+    if (!physical_enabled()) return false;
+
     rpc_rx_.reset();
     log_rx_.reset();
     link_events_.clear();
@@ -118,6 +157,7 @@ bool CanRpcLink::recover_can(const char *reason) {
 }
 
 void CanRpcLink::request_debug_log_rx(bool enabled) {
+    if (!physical_enabled()) return;
     if (enabled == debug_log_rx_requested_) return;
 
     debug_log_rx_requested_ = enabled;
@@ -126,6 +166,11 @@ void CanRpcLink::request_debug_log_rx(bool enabled) {
 
 CanQuiesceStatus CanRpcLink::can_quiesce_status() const {
     CanQuiesceStatus out;
+    if (!physical_enabled()) {
+        out.debug_log_rx_enabled = false;
+        return out;
+    }
+
     out.debug_log_rx_enabled = can_.debug_log_rx_enabled();
     out.debug_log_filter_pending =
         debug_log_rx_requested_ != out.debug_log_rx_enabled;
@@ -148,7 +193,7 @@ void CanRpcLink::handle_frame(const RawCanFrame &frame, uint32_t now_ms) {
     if (frame.extended || frame.remote) return;
 
     if (frame.id == AC_CAN_RX_ID) {
-        handle_application_frame(frame, now_ms);
+        if (application_enabled_) handle_application_frame(frame, now_ms);
         return;
     }
 

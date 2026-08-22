@@ -21,6 +21,7 @@ static constexpr uint32_t AC_STACK_PROFILE_SUMMARY_MS = 600000;
 // Board configuration is split by subsystem; this keeps every
 // #include "board.h" working unchanged.
 #include "board_can.h"
+#include "board_ble.h"
 #include "board_net.h"
 #include "board_oximetry.h"
 #include "board_report.h"

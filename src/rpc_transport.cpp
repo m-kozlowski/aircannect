@@ -94,6 +94,13 @@ void RpcTransport::process_link_events(size_t budget) {
             case RpcLinkEventKind::Disconnected:
                 accept_link_reset(event.detail.c_str());
                 break;
+            case RpcLinkEventKind::TransportChanged:
+                deferred_payloads_.clear();
+                cancel_all_requests(event.detail.empty()
+                                        ? "transport_changed"
+                                        : event.detail.c_str());
+                note_transport_reset();
+                break;
         }
     }
 }

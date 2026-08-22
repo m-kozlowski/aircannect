@@ -81,6 +81,11 @@ static constexpr AppConfigEnumValue OXIMETRY_ADVERTISE_VALUES[] = {
     {"manual", "Manual"},
 };
 
+static constexpr AppConfigEnumValue AS11_TRANSPORT_VALUES[] = {
+    {"can", "CAN"},
+    {"ble", "BLE"},
+};
+
 static constexpr AppConfigFieldFlags PROVISIONABLE =
     AC_CONFIG_FIELD_PROVISIONABLE;
 static constexpr AppConfigFieldFlags SECRET_PROVISIONABLE =
@@ -108,6 +113,29 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      20, AppConfigFieldType::Bool, PROVISIONABLE,
      AC_CONFIG_DIRTY_EDF_CAPTURE, "EDF capture", "Enable EDF capture.",
      nullptr, 0, -1, AC_CFG_OFFSET(edf_capture_enabled)},
+
+    {"as11_transport", AppConfigFieldId::As11Transport, AppConfigGroup::As11,
+     10, AppConfigFieldType::Enum, PROVISIONABLE,
+     AC_CONFIG_DIRTY_AS11_TRANSPORT, "Transport",
+     "Application RPC transport used to communicate with the AS11.",
+     AS11_TRANSPORT_VALUES,
+     sizeof(AS11_TRANSPORT_VALUES) / sizeof(AS11_TRANSPORT_VALUES[0]), -1,
+     AC_CFG_OFFSET(as11_transport)},
+    {"as11_ble_addr", AppConfigFieldId::As11BleAddress,
+     AppConfigGroup::As11, 20, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_AS11_TRANSPORT, "BLE address",
+     "Bluetooth address of the AS11.", nullptr, 0, -1,
+     AC_CFG_OFFSET(as11_ble_address)},
+    {"as11_ble_id", AppConfigFieldId::As11BleClientId,
+     AppConfigGroup::As11, 30, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_AS11_TRANSPORT, "BLE client ID",
+     "Client ID issued by the AS11 during BLE pairing.", nullptr, 0, -1,
+     AC_CFG_OFFSET(as11_ble_client_id)},
+    {"as11_ble_key", AppConfigFieldId::As11BleMasterKey,
+     AppConfigGroup::As11, 40, AppConfigFieldType::Secret,
+     SECRET_PROVISIONABLE, AC_CONFIG_DIRTY_AS11_TRANSPORT,
+     "BLE pairing key", "Master pairing key issued during BLE pairing.",
+     nullptr, 0, -1, AC_CFG_OFFSET(as11_ble_master_key)},
 
     {"softap_mode", AppConfigFieldId::SoftApMode, AppConfigGroup::Network, 10,
      AppConfigFieldType::Enum, PROVISIONABLE, AC_CONFIG_DIRTY_SOFTAP,
@@ -297,6 +325,10 @@ bool raw_value(const AppConfigData &cfg,
                     out = softap_mode_name(
                         config_field_ref<SoftApMode>(cfg, field));
                     return true;
+                case AppConfigFieldId::As11Transport:
+                    out = as11_transport_name(
+                        config_field_ref<As11Transport>(cfg, field));
+                    return true;
                 case AppConfigFieldId::OximetryAdvertiseMode:
                     out = oximetry_advertise_mode_name(
                         config_field_ref<OximetryAdvertiseMode>(cfg, field));
@@ -335,6 +367,22 @@ bool AppConfigFieldWriter::set_value(
     switch (field.id) {
         case AppConfigFieldId::Hostname:
             return config.set_hostname(value);
+        case AppConfigFieldId::As11Transport: {
+            As11Transport transport = As11Transport::Can;
+            String parsed = value;
+            parsed.trim();
+            if (!parse_as11_transport(parsed.c_str(), transport)) return false;
+            return config.set_as11_transport(transport);
+        }
+        case AppConfigFieldId::As11BleAddress:
+            return config.set_as11_ble_credentials(
+                value, cfg.as11_ble_client_id, cfg.as11_ble_master_key);
+        case AppConfigFieldId::As11BleClientId:
+            return config.set_as11_ble_credentials(
+                cfg.as11_ble_address, value, cfg.as11_ble_master_key);
+        case AppConfigFieldId::As11BleMasterKey:
+            return config.set_as11_ble_credentials(
+                cfg.as11_ble_address, cfg.as11_ble_client_id, value);
         case AppConfigFieldId::TcpEnabled:
             if (!parse_bool_yesno(value, parsed_bool)) return false;
             return config.set_tcp_bridge(parsed_bool, cfg.tcp_bridge_port);
@@ -454,6 +502,7 @@ const AppConfigFieldDescriptor *app_config_find_field(const char *key) {
 const char *app_config_group_id(AppConfigGroup group) {
     switch (group) {
         case AppConfigGroup::Device: return "device";
+        case AppConfigGroup::As11: return "as11";
         case AppConfigGroup::Network: return "network";
         case AppConfigGroup::Access: return "access";
         case AppConfigGroup::Ota: return "ota";
@@ -469,6 +518,7 @@ const char *app_config_group_id(AppConfigGroup group) {
 const char *app_config_group_label(AppConfigGroup group) {
     switch (group) {
         case AppConfigGroup::Device: return "Device";
+        case AppConfigGroup::As11: return "AS11 connection";
         case AppConfigGroup::Network: return "Network";
         case AppConfigGroup::Access: return "Access";
         case AppConfigGroup::Ota: return "Updates";

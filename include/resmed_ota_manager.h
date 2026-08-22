@@ -65,6 +65,7 @@ struct ResmedOtaStatus {
     bool waiting = false;
     bool confirmation_required = false;
     bool recovery_available = false;
+    bool can_available = false;
     size_t total_size = 0;
     size_t uploaded_bytes = 0;
     size_t xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
@@ -94,6 +95,8 @@ public:
                StoragePathPort &path_port,
                StorageUploadPort &upload_port);
     void poll();
+
+    void set_can_available(bool available);
 
     bool begin_upload(size_t total_size,
                       const String &expected_sha256,
@@ -233,6 +236,7 @@ private:
     StorageUploadPort *upload_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
     ColdState *cold_ = nullptr;
+    bool can_available_ = true;
 
     // RPC protocol
     WaitingFor waiting_for_ = WaitingFor::None;

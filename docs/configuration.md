@@ -12,6 +12,21 @@ Boolean values accept `on`/`off`, `yes`/`no`, `true`/`false`, `1`/`0`, and
 | `host` | Hostname, 1-63 alnum/hyphen chars, not starting or ending with hyphen | `aircannect` | Device hostname and SoftAP SSID prefix. |
 | `edf_cap` | boolean | on when the build has SD storage | Enable AS11-style EDF capture on SD card. |
 
+## AS11 Connection
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `as11_transport` | `can`, `ble` | `can` | Application RPC transport. Selection is explicit; there is no automatic failover. |
+| `as11_ble_addr` | Bluetooth address, or empty | empty | AS11 Bluetooth address used by the BLE transport. |
+| `as11_ble_id` | ASCII string, max 64 chars, or empty | empty | Client ID from an existing AS11 BLE pairing. |
+| `as11_ble_key` | 64 hexadecimal characters, or empty | empty | Secret master key from the same AS11 BLE pairing. |
+
+BLE currently reconnects with credentials established by an external pairing
+tool. Selecting it stops the physical CAN interface, so CAN diagnostics and
+ResMed firmware install or dump operations are unavailable. Normal device RPC,
+settings, streaming, EDF capture, and reports continue over BLE. Oximetry
+behavior is unchanged.
+
 ## Wi-Fi Profiles
 
 | Key | Values | Default | Description |

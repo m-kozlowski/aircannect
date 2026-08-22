@@ -39,6 +39,33 @@ bool valid_timezone(const String &timezone) {
     return true;
 }
 
+bool valid_hex_string(const String &value, size_t length) {
+    if (value.length() != length) return false;
+    for (size_t i = 0; i < value.length(); ++i) {
+        if (!isxdigit(static_cast<unsigned char>(value[i]))) return false;
+    }
+    return true;
+}
+
+bool valid_ble_address(const String &address) {
+    if (!address.length()) return true;
+    if (address.length() != AC_AS11_BLE_ADDRESS_MAX) return false;
+    for (size_t i = 0; i < address.length(); ++i) {
+        if (i % 3 == 2) {
+            if (address[i] != ':') return false;
+        } else if (!isxdigit(static_cast<unsigned char>(address[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_ble_master_key(const String &master_key) {
+    return !master_key.length() ||
+           valid_hex_string(master_key,
+                            AC_AS11_BLE_MASTER_KEY_HEX_LENGTH);
+}
+
 const char *printable_ascii_reject_reason(const String &value,
                                           size_t max_len,
                                           const char *too_long,
@@ -49,6 +76,12 @@ const char *printable_ascii_reject_reason(const String &value,
         if (c < 0x20 || c >= 0x7F) return bad_char;
     }
     return nullptr;
+}
+
+bool valid_ble_client_id(const String &client_id) {
+    return printable_ascii_reject_reason(
+               client_id, AC_AS11_BLE_CLIENT_ID_MAX, "too_long", "bad_char") ==
+           nullptr;
 }
 
 bool valid_optional_secret(const String &secret) {
@@ -219,6 +252,14 @@ bool assign_enum_field(AppConfigData &data,
             SoftApMode mode = SoftApMode::Auto;
             if (!parse_softap_mode(value, mode)) return false;
             config_field_ref<SoftApMode>(data, field) = mode;
+            return true;
+        }
+        case AppConfigFieldId::As11Transport: {
+            As11Transport transport = As11Transport::Can;
+            String parsed = value;
+            parsed.trim();
+            if (!parse_as11_transport(parsed.c_str(), transport)) return false;
+            config_field_ref<As11Transport>(data, field) = transport;
             return true;
         }
         case AppConfigFieldId::OximetryAdvertiseMode: {
@@ -489,6 +530,27 @@ bool AppConfig::normalize() {
         data_.hostname = defaults.hostname;
         unchanged = false;
     }
+    if (!as11_transport_valid(data_.as11_transport)) {
+        data_.as11_transport = As11Transport::Can;
+        unchanged = false;
+    }
+    data_.as11_ble_address.trim();
+    data_.as11_ble_address.toLowerCase();
+    data_.as11_ble_client_id.trim();
+    data_.as11_ble_master_key.trim();
+    data_.as11_ble_master_key.toLowerCase();
+    if (!valid_ble_address(data_.as11_ble_address)) {
+        data_.as11_ble_address = "";
+        unchanged = false;
+    }
+    if (!valid_ble_client_id(data_.as11_ble_client_id)) {
+        data_.as11_ble_client_id = "";
+        unchanged = false;
+    }
+    if (!valid_ble_master_key(data_.as11_ble_master_key)) {
+        data_.as11_ble_master_key = "";
+        unchanged = false;
+    }
     if (data_.tcp_bridge_port == 0) {
         data_.tcp_bridge_port = defaults.tcp_bridge_port;
         unchanged = false;
@@ -605,6 +667,43 @@ bool AppConfig::set_hostname(const String &hostname) {
     if (data_.hostname == value) return true;
     data_.hostname = value;
     return mark_dirty(AC_CONFIG_DIRTY_HOSTNAME);
+}
+
+bool AppConfig::set_as11_transport(As11Transport transport) {
+    if (!as11_transport_valid(transport)) return false;
+    if (data_.as11_transport == transport) return true;
+
+    data_.as11_transport = transport;
+    return mark_dirty(AC_CONFIG_DIRTY_AS11_TRANSPORT);
+}
+
+bool AppConfig::set_as11_ble_credentials(const String &address,
+                                         const String &client_id,
+                                         const String &master_key) {
+    String parsed_address = address;
+    String parsed_client_id = client_id;
+    String parsed_master_key = master_key;
+    parsed_address.trim();
+    parsed_address.toLowerCase();
+    parsed_client_id.trim();
+    parsed_master_key.trim();
+    parsed_master_key.toLowerCase();
+
+    if (!valid_ble_address(parsed_address) ||
+        !valid_ble_client_id(parsed_client_id) ||
+        !valid_ble_master_key(parsed_master_key)) {
+        return false;
+    }
+    if (data_.as11_ble_address == parsed_address &&
+        data_.as11_ble_client_id == parsed_client_id &&
+        data_.as11_ble_master_key == parsed_master_key) {
+        return true;
+    }
+
+    data_.as11_ble_address = parsed_address;
+    data_.as11_ble_client_id = parsed_client_id;
+    data_.as11_ble_master_key = parsed_master_key;
+    return mark_dirty(AC_CONFIG_DIRTY_AS11_TRANSPORT);
 }
 
 bool AppConfig::set_tcp_bridge(bool enabled, uint16_t port) {

@@ -1317,6 +1317,14 @@
     }
 
     function renderResmedOta(data) {
+      resmedCanAvailable = data.can_available !== false;
+      document.querySelectorAll(".resmed-repository-actions .primary")
+        .forEach((button) => {
+          button.disabled = !resmedCanAvailable;
+          button.title = resmedCanAvailable ? "" :
+            "ResMed firmware operations require CAN";
+        });
+
       const rateText = resmedOtaRateText(data);
       const displayPhase = resmedOtaDisplayPhase(data);
       const stateText = resmedOtaStatusText(data) +
@@ -1339,10 +1347,16 @@
       }
 
       const install = document.getElementById("resmedOtaInstallBtn");
-      if (install) install.disabled = data.active || resmedDirectUploadBusy;
+      if (install) {
+        install.disabled = !resmedCanAvailable || data.active ||
+          resmedDirectUploadBusy;
+      }
 
       const dump = document.getElementById("resmedOtaDumpBtn");
-      if (dump) dump.disabled = data.active || resmedDirectUploadBusy;
+      if (dump) {
+        dump.disabled = !resmedCanAvailable || data.active ||
+          resmedDirectUploadBusy;
+      }
 
       const dumpConfirm = document.getElementById("resmedOtaDumpConfirmBtn");
       if (dumpConfirm) {
@@ -1351,11 +1365,15 @@
           !data.recovery_available;
       }
       const target = document.getElementById("resmedOtaTarget");
-      if (target) target.disabled = data.active || resmedDirectUploadBusy;
+      if (target) {
+        target.disabled = !resmedCanAvailable || data.active ||
+          resmedDirectUploadBusy;
+      }
 
       const transport = document.getElementById("resmedOtaTransport");
       if (transport) {
-        transport.disabled = data.active || resmedDirectUploadBusy;
+        transport.disabled = !resmedCanAvailable || data.active ||
+          resmedDirectUploadBusy;
       }
 
       const progress = document.getElementById("resmedOtaUploadProgress");
@@ -1369,6 +1387,9 @@
         msg("resmedOtaMsg", "Matching patched bootloader found", false, true);
       } else if (data.prepare_error || data.last_error) {
         msg("resmedOtaMsg", data.prepare_error || data.last_error,
+          false, true);
+      } else if (!resmedCanAvailable) {
+        msg("resmedOtaMsg", "ResMed firmware operations require CAN",
           false, true);
       } else if (data.phase === "verified") {
         msg("resmedOtaMsg", "Firmware verified", true, true);
@@ -1464,6 +1485,9 @@
         const install = document.createElement("button");
         install.className = "btn primary";
         install.textContent = "Install";
+        install.disabled = !resmedCanAvailable;
+        install.title = resmedCanAvailable ? "" :
+          "ResMed firmware operations require CAN";
         install.onclick = () => resmedRepositoryInstall(
           entry.path, entry.name || entry.path);
         actions.appendChild(install);
@@ -1667,6 +1691,12 @@
     }
 
     async function resmedRepositoryInstall(path, name) {
+      if (!resmedCanAvailable) {
+        msg("resmedRepositoryMsg",
+          "ResMed firmware operations require CAN", false, true);
+        return;
+      }
+
       const target = selectedResmedOtaTarget();
       const transport = selectedResmedOtaTransport();
       if (!confirmResmedOtaTarget(target, name)) return;

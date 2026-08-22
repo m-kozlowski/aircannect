@@ -319,6 +319,14 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc,
 }
 
 bool TcpBridge::begin_service_client(size_t idx, uint32_t now_ms) {
+    if (!service_.available()) {
+        Log::logf(CAT_TCP, LOG_INFO,
+                  "[CLIENT %u SERVICE] unavailable without CAN\n",
+                  static_cast<unsigned>(idx));
+        disconnect_slot(idx);
+        return false;
+    }
+
     if (service_owner_ < AC_MAX_TCP_CLIENTS && service_owner_ != idx) {
         Log::logf(CAT_TCP, LOG_WARN,
                   "[CLIENT %u SERVICE] rejected; client %u owns service\n",

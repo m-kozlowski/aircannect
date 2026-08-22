@@ -2,13 +2,13 @@
 
 #include "board.h"
 
-#if AC_OXIMETRY_BLE_ENABLED
+#if AC_BLE_ENABLED
 #include <NimBLEDevice.h>
 #endif
 
 namespace aircannect {
 
-#if AC_OXIMETRY_BLE_ENABLED
+#if AC_BLE_ENABLED
 BleRuntime::ScanLease::ScanLease(ScanLease &&other) noexcept
     : runtime_(other.runtime_) {
     other.runtime_ = nullptr;
@@ -52,7 +52,7 @@ bool BleRuntime::ensure_started(const char *name) {
 #if defined(CONFIG_BTDM_BLE_SCAN_DUPL) || defined(CONFIG_BT_LE_SCAN_DUPL) || \
     defined(CONFIG_BT_CTRL_BLE_SCAN_DUPL)
         NimBLEDevice::setScanDuplicateCacheSize(
-            AC_OXIMETRY_BLE_SCAN_DUP_CACHE);
+            AC_BLE_SCAN_DUP_CACHE);
 #endif
         ready = NimBLEDevice::init(name);
         if (ready) {

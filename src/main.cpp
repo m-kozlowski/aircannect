@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "as11_device_service.h"
+#include "as11_ble_rpc_link.h"
 #include "as11_service_manager.h"
 #include "as11_settings_manager.h"
 #include "arduino_ota_source.h"
@@ -45,6 +46,7 @@
 #include "resmed_firmware_repository.h"
 #include "resmed_ota_manager.h"
 #include "rpc_transport.h"
+#include "rpc_link_selector.h"
 #include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
 #include "sink_manager.h"
@@ -74,9 +76,12 @@ using namespace aircannect;
 
 static CanDriver can_driver;
 static CanRpcLink can_rpc_link(can_driver);
+static BleRuntime ble_runtime;
+static As11BleRpcLink as11_ble_rpc_link(ble_runtime);
+static RpcLinkSelector rpc_link_selector(can_rpc_link, as11_ble_rpc_link);
 static EventBroker event_broker;
 static StreamBroker stream_broker;
-static RpcTransport rpc_transport(can_rpc_link);
+static RpcTransport rpc_transport(rpc_link_selector);
 static As11ServiceManager as11_service_manager(can_driver);
 static RpcQuiesceCoordinator rpc_quiesce_coordinator(
     rpc_transport, can_rpc_link, event_broker, stream_broker);
@@ -98,7 +103,6 @@ static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
-static BleRuntime ble_runtime;
 static OximetryHub oximetry_hub;
 static UdpOximeterSource oximetry_udp_source;
 static BleSensorSource oximetry_sensor_source(ble_runtime);
@@ -492,6 +496,30 @@ static void poll_oximetry(bool network_available, uint32_t now_ms) {
     plx_peripheral.poll(after, now_ms);
 }
 
+static bool configure_as11_transport(const AppConfigData &config) {
+    const bool use_ble = config.as11_transport == As11Transport::Ble;
+
+    as11_ble_rpc_link.configure(
+        use_ble, config.hostname.c_str(), config.as11_ble_address.c_str(),
+        config.as11_ble_client_id.c_str(),
+        config.as11_ble_master_key.c_str());
+
+    const bool selected = rpc_link_selector.select(config.as11_transport);
+    if (use_ble) {
+        resmed_ota_manager.set_can_available(false);
+        as11_service_manager.set_available(false);
+        can_rpc_link.set_application_enabled(false);
+        const bool stopped = can_rpc_link.set_physical_enabled(false);
+        return selected && stopped;
+    }
+
+    const bool started = can_rpc_link.set_physical_enabled(true);
+    can_rpc_link.set_application_enabled(started);
+    as11_service_manager.set_available(started);
+    resmed_ota_manager.set_can_available(started);
+    return selected && started;
+}
+
 static void apply_config_runtime_effects(void *,
                                          const AppConfigData &config,
                                          uint32_t dirty) {
@@ -517,6 +545,14 @@ static void apply_config_runtime_effects(void *,
     }
     if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
         edf_recorder_manager.set_enabled(config.edf_capture_enabled);
+    }
+    if (dirty & (AC_CONFIG_DIRTY_AS11_TRANSPORT |
+                 AC_CONFIG_DIRTY_HOSTNAME)) {
+        if (!configure_as11_transport(config)) {
+            Log::logf(CAT_RPC, LOG_ERROR,
+                      "AS11 transport failed to start mode=%s\n",
+                      as11_transport_name(config.as11_transport));
+        }
     }
     if (dirty & (AC_CONFIG_DIRTY_HOSTNAME |
                  AC_CONFIG_DIRTY_OXIMETRY)) {
@@ -658,7 +694,9 @@ static void drain_can_side_events() {
                 rpc_transport.accept_boot_notification(event.detail.c_str());
                 break;
             case CanSideEventKind::ApplicationReset:
-                rpc_transport.accept_link_reset(event.detail.c_str());
+                if (rpc_link_selector.can_selected()) {
+                    rpc_transport.accept_link_reset(event.detail.c_str());
+                }
                 break;
         }
     }
@@ -667,6 +705,11 @@ static void drain_can_side_events() {
 static void drain_can_rx_after(const char *section) {
     static uint32_t last_checkpoint_ms = 0;
     static uint32_t last_warn_ms = 0;
+
+    if (!can_rpc_link.physical_enabled()) {
+        last_checkpoint_ms = 0;
+        return;
+    }
 
     const uint32_t before_ms = millis();
     const uint32_t gap_ms = last_checkpoint_ms == 0
@@ -705,7 +748,7 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
     }
 
     const AppConfigData &config = config_service.data();
-    const SystemStatusSnapshot snapshot = collect_system_status(
+    SystemStatusSnapshot snapshot = collect_system_status(
         {
             as11_device_service,
             wifi_manager,
@@ -718,6 +761,17 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
             plx_peripheral,
         },
         drain_can_rx_after);
+
+    snapshot.as11.transport = rpc_link_selector.selected();
+    if (snapshot.as11.transport == As11Transport::Ble) {
+        const As11BleLinkStatus link = as11_ble_rpc_link.ble_status();
+        snapshot.as11.link_state = as11_ble_link_state_name(link.state);
+        snapshot.as11.link_connected = link.connected;
+        snapshot.as11.link_authenticated = link.authenticated;
+        snapshot.as11.link_rssi = link.rssi;
+        strncpy(snapshot.as11.link_error, link.error,
+                sizeof(snapshot.as11.link_error) - 1);
+    }
 
     (void)status_http_controller.publish_snapshot(
         snapshot, config.hostname.c_str(), device_revision, config_revision);
@@ -748,6 +802,10 @@ void setup() {
 
     config_service.begin();
     time_sync_service.initialize_timezone(config_service.data());
+
+    if (!ble_runtime.begin()) {
+        Log::logf(CAT_RPC, LOG_ERROR, "[BLE] runtime init failed\n");
+    }
 
     // Boot diagnostics
     const MemoryStatus mem = Memory::status();
@@ -903,9 +961,6 @@ void setup() {
         config_service.data().edf_capture_enabled);
 
     const AppConfigData &config = config_service.data();
-    if (!ble_runtime.begin()) {
-        Log::logf(CAT_OXI, LOG_ERROR, "BLE runtime mutex init failed\n");
-    }
     oximetry_hub.set_enabled(config.oximetry_enabled);
     oximetry_udp_source.configure(config.oximetry_enabled,
                                   config.oximetry_udp_port);
@@ -983,11 +1038,11 @@ void setup() {
     wifi_manager.set_softap_mode(config_service.data().softap_mode);
     wifi_manager.set_country_code(config_service.data().wifi_country);
 
-    // CAN and network frontends
-    if (!can_driver.begin()) {
+    // AS11 transport and network frontends
+    if (!configure_as11_transport(config_service.data())) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[INIT] CAN failed to start; management CLI still active "
-                  "on serial\n");
+                  "[INIT] AS11 transport failed to start; management CLI "
+                  "still active on serial\n");
     }
 
     wifi_manager.begin();
@@ -1042,6 +1097,7 @@ void loop() {
     stream_broker.set_external_transport_connected(raw_tcp_connected,
                                                    now_ms);
 
+    can_rpc_link.poll_physical(now_ms);
     rpc_transport.poll();
     drain_can_side_events();
     as11_service_manager.poll_entry(

@@ -35,6 +35,7 @@ class CanControlPort {
 public:
     virtual ~CanControlPort() = default;
 
+    virtual bool can_available() const = 0;
     virtual bool recover_can(const char *reason) = 0;
     virtual void request_debug_log_rx(bool enabled) = 0;
     virtual CanQuiesceStatus can_quiesce_status() const = 0;
@@ -48,6 +49,9 @@ public:
     // Physical CAN lifecycle
     bool begin() override;
     void poll(uint32_t now_ms) override;
+    bool set_physical_enabled(bool enabled);
+    bool physical_enabled() const { return physical_enabled_; }
+    void poll_physical(uint32_t now_ms);
     size_t drain_rx();
 
     // Application RPC link
@@ -56,11 +60,13 @@ public:
     void reset() override;
     RpcApplicationLinkStatus status() const override;
     const char *name() const override { return "can"; }
+    void set_application_enabled(bool enabled);
 
     // CAN side channels and maintenance
     bool take_side_event(CanSideEvent &event);
     void set_service_frame_observer(As11ServiceFrameObserver observer,
                                     void *context);
+    bool can_available() const override { return physical_enabled(); }
     bool recover_can(const char *reason) override;
     void request_debug_log_rx(bool enabled) override;
     CanQuiesceStatus can_quiesce_status() const override;
@@ -85,6 +91,8 @@ private:
 
     As11ServiceFrameObserver service_frame_observer_ = nullptr;
     void *service_frame_context_ = nullptr;
+    bool physical_enabled_ = false;
+    bool application_enabled_ = true;
     bool debug_log_rx_requested_ = true;
 };
 

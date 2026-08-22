@@ -12,6 +12,8 @@ const char *as11_service_transaction_error_name(
     As11ServiceTransactionError error) {
     switch (error) {
         case As11ServiceTransactionError::None: return "none";
+        case As11ServiceTransactionError::Unavailable:
+            return "unavailable";
         case As11ServiceTransactionError::InvalidRequest:
             return "invalid_request";
         case As11ServiceTransactionError::RequestStatus:
@@ -41,6 +43,24 @@ const char *as11_service_transaction_error_name(
     return "unknown";
 }
 
+void As11ServiceManager::set_available(bool available) {
+    if (available == available_) return;
+
+    available_ = available;
+    if (available) {
+        if (owner_ == As11ServiceOwner::None && state_ == State::Failed) {
+            clear_transaction();
+        }
+        return;
+    }
+
+    if (owner_ != As11ServiceOwner::None) {
+        fail(As11ServiceTransactionError::Unavailable);
+    } else {
+        cancel();
+    }
+}
+
 const char *As11ServiceManager::state_name(State state) {
     switch (state) {
         case State::Idle: return "idle";
@@ -60,6 +80,10 @@ const char *As11ServiceManager::state_name(State state) {
 }
 
 bool As11ServiceManager::acquire(As11ServiceOwner owner) {
+    if (!available_) {
+        error_ = As11ServiceTransactionError::Unavailable;
+        return false;
+    }
     if (owner == As11ServiceOwner::None) return false;
     if (tcp_reset_boot_wait_) return false;
     if (owner_ == owner) return true;
@@ -83,6 +107,10 @@ bool As11ServiceManager::submit_packet(
     std::unique_ptr<LargeByteBuffer> request,
     bool enter_allowed,
     uint32_t now_ms) {
+    if (!available_) {
+        error_ = As11ServiceTransactionError::Unavailable;
+        return false;
+    }
     if (owner == As11ServiceOwner::None || owner_ != owner) {
         error_ = As11ServiceTransactionError::Busy;
         return false;
@@ -308,6 +336,8 @@ bool As11ServiceManager::send_entry_info_probe(uint32_t now_ms) {
 
 void As11ServiceManager::accept_can_frame(const RawCanFrame &frame,
                                           uint32_t now_ms) {
+    if (!available_) return;
+
     if (frame.id != AC_AS11_SERVICE_RX_ID || frame.extended || frame.remote ||
         !pending() || !reassembly_buffer_) {
         return;
@@ -432,6 +462,8 @@ void As11ServiceManager::poll_entry(RpcQuiescePort &rpc,
                                     bool quiesce_ready,
                                     bool quiesce_failed,
                                     uint32_t now_ms) {
+    if (!available_) return;
+
     if (state_ == State::EntryWaitingQuiesce) {
         if (quiesce_failed) {
             fail(As11ServiceTransactionError::Busy);
@@ -772,6 +804,8 @@ void As11ServiceManager::note_device_boot(uint32_t now_ms) {
 }
 
 void As11ServiceManager::poll(uint32_t now_ms) {
+    if (!available_ && state_ != State::Failed) return;
+
     if (tcp_reset_boot_wait_ &&
         static_cast<int32_t>(now_ms - tcp_reset_deadline_ms_) >= 0) {
         const uint32_t elapsed_ms = now_ms - tcp_reset_started_ms_;

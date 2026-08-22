@@ -648,9 +648,15 @@ bool CanConsoleCommands::execute(const String &command,
     rest.trim();
     rest.toLowerCase();
     if (!rest.length() || rest == "status") {
+        if (!can_control_.can_available()) {
+            out.println("[CAN] unavailable for selected AS11 transport");
+            return true;
+        }
         ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
     } else if (rest == "restart") {
-        can_control_.recover_can("console CAN restart command");
+        if (!can_control_.recover_can("console CAN restart command")) {
+            out.println("[CAN] restart unavailable");
+        }
     } else {
         print_unknown_command(out, "CAN", "can status, can restart");
     }
@@ -658,6 +664,10 @@ bool CanConsoleCommands::execute(const String &command,
 }
 
 void CanConsoleCommands::print_status(Print &out) {
+    if (!can_control_.can_available()) {
+        out.println("[CAN] unavailable for selected AS11 transport");
+        return;
+    }
     ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
 }
 

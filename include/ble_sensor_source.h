@@ -132,7 +132,7 @@ private:
     bool auto_holdoff_until_absent_ = false;
     bool auto_allowed_ = false;
     bool enabled_ = false;
-    char runtime_name_[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
+    char runtime_name_[AC_BLE_DEVICE_NAME_MAX + 1] = {};
 
     bool sample_pending_ = false;
     OximetrySample pending_sample_;

@@ -18,6 +18,7 @@ static constexpr size_t AC_CONFIG_LOG_FIELD_COUNT = 14;
 
 enum class AppConfigGroup : uint8_t {
     Device,
+    As11,
     Network,
     Access,
     Ota,
@@ -62,6 +63,7 @@ enum AppConfigDirty : uint32_t {
     AC_CONFIG_DIRTY_SLEEPHQ_SYNC = 1UL << 15,
     AC_CONFIG_DIRTY_FILE_LOG = 1UL << 16,
     AC_CONFIG_DIRTY_UPDATE_URL = 1UL << 17,
+    AC_CONFIG_DIRTY_AS11_TRANSPORT = 1UL << 18,
 };
 
 static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
@@ -73,10 +75,15 @@ static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
     AC_CONFIG_DIRTY_OXIMETRY | AC_CONFIG_DIRTY_EDF_CAPTURE |
     AC_CONFIG_DIRTY_LOG_LEVELS | AC_CONFIG_DIRTY_SYSLOG |
     AC_CONFIG_DIRTY_SMB_SYNC | AC_CONFIG_DIRTY_SLEEPHQ_SYNC |
-    AC_CONFIG_DIRTY_FILE_LOG | AC_CONFIG_DIRTY_UPDATE_URL;
+    AC_CONFIG_DIRTY_FILE_LOG | AC_CONFIG_DIRTY_UPDATE_URL |
+    AC_CONFIG_DIRTY_AS11_TRANSPORT;
 
 enum class AppConfigFieldId : uint8_t {
     Hostname,
+    As11Transport,
+    As11BleAddress,
+    As11BleClientId,
+    As11BleMasterKey,
     TcpEnabled,
     TcpPort,
     SoftApMode,

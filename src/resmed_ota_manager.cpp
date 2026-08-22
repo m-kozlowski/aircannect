@@ -242,7 +242,25 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
 
     clear_session();
     cold_->status.operation = ResmedOtaOperation::Install;
+    if (!can_available_) {
+        set_error("can_transport_required");
+        return false;
+    }
     return begin_protocol(total_size, expected_sha256, filename);
+}
+
+void ResmedOtaManager::set_can_available(bool available) {
+    ScopedLock lock(*this, 1000);
+    if (!lock) return;
+
+    can_available_ = available;
+    if (available || !cold_) return;
+
+    const ResmedOtaPhase phase = cold_->status.phase;
+    const bool terminal = phase == ResmedOtaPhase::Idle ||
+                          phase == ResmedOtaPhase::Complete ||
+                          phase == ResmedOtaPhase::Error;
+    if (!terminal) finish_error("can_transport_changed");
 }
 
 bool ResmedOtaManager::begin_prepared_install(
@@ -268,6 +286,10 @@ bool ResmedOtaManager::begin_prepared_install(
 
     clear_session();
     cold_->status.operation = ResmedOtaOperation::Install;
+    if (!can_available_) {
+        set_error("can_transport_required");
+        return false;
+    }
     cold_->prepared = firmware;
     if (!guard_device_idle_for_upgrade()) return false;
     if (service_install) {
@@ -304,6 +326,11 @@ bool ResmedOtaManager::request_firmware_dump() {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_ || !rpc_ || !device_ || !service_ ||
         !path_port_ || !upload_port_) {
+        return false;
+    }
+    if (!can_available_) {
+        clear_session();
+        set_error("can_transport_required");
         return false;
     }
     if (active() || transport_active() || (preparer_ && preparer_->active())) {
@@ -669,7 +696,11 @@ bool ResmedOtaManager::storage_upload_active() const {
 
 ResmedOtaStatus ResmedOtaManager::status() const {
     ScopedLock lock(*this, 50);
-    return lock && cold_ ? cold_->status : ResmedOtaStatus{};
+    if (!lock) return {};
+
+    ResmedOtaStatus status = cold_ ? cold_->status : ResmedOtaStatus{};
+    status.can_available = can_available_;
+    return status;
 }
 
 const char *ResmedOtaManager::phase_name() const {
@@ -869,6 +900,10 @@ bool ResmedOtaManager::begin_recovery_install(
         strcmp(firmware.image.target, "FGBL") != 0 ||
         cold_->status.operation != ResmedOtaOperation::Dump ||
         cold_->status.phase != ResmedOtaPhase::PreparingBootloader) {
+        return false;
+    }
+    if (!can_available_) {
+        set_error("can_transport_required");
         return false;
     }
     if (!guard_device_idle_for_upgrade()) return false;

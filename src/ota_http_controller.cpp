@@ -151,6 +151,7 @@ void build_resmed_ota_json(JsonOut &json,
     json_add_bool(json, "confirmation_required",
                   status.confirmation_required);
     json_add_bool(json, "recovery_available", status.recovery_available);
+    json_add_bool(json, "can_available", status.can_available);
     json_add_string(json, "prepare_state",
                     resmed_firmware_prepare_state_name(prepare.state));
     json_add_bool(json, "prepare_active", prepare.active());
@@ -372,6 +373,13 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
     server.on(
         AsyncURIMatcher::exact("/api/resmed-ota/install"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
+            if (!resmed_ota_->status().can_available) {
+                request->send(
+                    409, "application/json",
+                    "{\"ok\":false,\"error\":\"can_transport_required\"}");
+                return;
+            }
+
             if (resmed_ota_->active() || resmed_preparer_->active()) {
                 request->send(
                     409, "application/json",
@@ -627,7 +635,8 @@ void OtaHttpController::execute(Command &command) {
             break;
 
         case CommandKind::ResmedInstall:
-            if (!resmed_ota_->reset_terminal_state() ||
+            if (!resmed_ota_->status().can_available ||
+                !resmed_ota_->reset_terminal_state() ||
                 !resmed_preparer_->request(
                     command.path.c_str(), command.filename.c_str(),
                     command.flag, command.resmed_target,

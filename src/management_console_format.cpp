@@ -54,6 +54,11 @@ void print_can_stats(Print &out,
 }  // namespace
 
 void print_can_status(Print &out, const CanDriver &can_driver) {
+    if (!can_driver.started()) {
+        out.println("[CAN] state=disabled");
+        return;
+    }
+
     CanControllerStatus status;
     if (!can_driver.controller_status(status)) {
         out.print("[CAN] status failed: ");

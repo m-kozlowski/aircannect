@@ -12,6 +12,7 @@ namespace aircannect {
 
 enum class As11ServiceTransactionError : uint8_t {
     None,
+    Unavailable,
     InvalidRequest,
     RequestStatus,
     Busy,
@@ -41,6 +42,8 @@ public:
     explicit As11ServiceManager(CanDriver &can) : can_(can) {}
 
     // Session ownership
+    void set_available(bool available);
+    bool available() const { return available_; }
     bool acquire(As11ServiceOwner owner);
     void release(As11ServiceOwner owner);
     bool owned_by(As11ServiceOwner owner) const { return owner_ == owner; }
@@ -154,6 +157,7 @@ private:
     bool entry_info_pending_ = false;
     bool tcp_reset_boot_wait_ = false;
     bool close_after_response_ = false;
+    bool available_ = true;
     As11ServiceOwner owner_ = As11ServiceOwner::None;
     State state_ = State::Idle;
 };

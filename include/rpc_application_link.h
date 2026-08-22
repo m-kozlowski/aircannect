@@ -19,6 +19,7 @@ enum class RpcLinkEventKind : uint8_t {
     Payload,
     FramingError,
     Disconnected,
+    TransportChanged,
 };
 
 struct RpcLinkEvent {

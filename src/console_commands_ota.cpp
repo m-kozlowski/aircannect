@@ -369,6 +369,11 @@ void handle_resmed_ota(Print &out,
         install_prefix = "install ";
     }
     if (install_prefix) {
+        if (!resmed_ota.status().can_available) {
+            out.println("[RESMED OTA] unavailable without CAN");
+            return;
+        }
+
         String path = rest.substring(strlen(install_prefix));
         trim_inplace(path);
 

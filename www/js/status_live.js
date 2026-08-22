@@ -809,6 +809,16 @@
       up("productName", data.device_name || "ResMed device");
       up("serial", data.serial);
       up("firmware", fmtFirmware(data.software_id || data.application));
+      let as11Connection = (data.as11_transport || "can").toUpperCase();
+      if (data.as11_transport === "ble") {
+        as11Connection += " / " + (data.as11_link_state || "unknown");
+        if (data.as11_link_connected && data.as11_link_rssi) {
+          as11Connection += " / " + data.as11_link_rssi + " dBm";
+        } else if (data.as11_link_error) {
+          as11Connection += " / " + data.as11_link_error;
+        }
+      }
+      up("as11Connection", as11Connection);
       up("profile", fmtProfile(data.profile));
       up("motorHours", data.motor_hours ?
         Number(data.motor_hours).toLocaleString() + " hrs" : "--");

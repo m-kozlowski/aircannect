@@ -52,7 +52,10 @@ struct CanControllerStatus {
 class CanDriver {
 public:
     bool begin();
+    bool end();
     void poll();
+
+    bool started() const { return installed_; }
 
     bool enqueue_tx(const RawCanFrame &frame);
     bool receive(RawCanFrame &frame, uint32_t wait_ms = 0);
