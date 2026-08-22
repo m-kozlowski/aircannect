@@ -136,6 +136,10 @@ void print_sensor_status(Print &out, const BleSensorSource &sensor) {
     out.print(status.notifications);
     out.print(" invalid=");
     out.print(status.invalid_notifications);
+    if (status.sample_queue_drops) {
+        out.print(" queue_drops=");
+        out.print(status.sample_queue_drops);
+    }
     out.print(" connects=");
     out.print(status.connects);
     out.print(" disconnects=");
@@ -228,6 +232,11 @@ bool OximetryConsoleCommands::execute(const String &command,
 
     if (lower == "cpap pair" || lower == "cpap pairing" ||
         lower == "cpap pair start" || lower == "cpap pairing start") {
+        if (!peripheral_.status(millis()).integration_available) {
+            out.println("[OXI] AirSense integration unavailable");
+            return true;
+        }
+
         ConfigTransactionResult transaction;
         const ConfigFieldUpdate update = config_.set_value(
             "oxi_en", "1", false, &transaction);
@@ -235,7 +244,11 @@ bool OximetryConsoleCommands::execute(const String &command,
             out.println("[OXI] failed to enable");
             return true;
         }
-        peripheral_.request_pairing(true);
+        if (!peripheral_.request_pairing(true)) {
+            out.println("[OXI] AirSense integration unavailable");
+            return true;
+        }
+
         out.println("[OXI] CPAP pairing window started");
         print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
         return true;
@@ -336,9 +349,13 @@ bool OximetryConsoleCommands::execute(const String &command,
         if (mode == "start" || mode == "on" ||
             mode == "stop" || mode == "off") {
             const bool enabled = mode == "start" || mode == "on";
-            peripheral_.request_advertising(enabled);
-            out.println(enabled ? "[OXI] manual advertising requested"
-                                : "[OXI] manual advertising stopped");
+            const bool accepted = peripheral_.request_advertising(enabled);
+            if (!accepted) {
+                out.println("[OXI] AirSense integration unavailable");
+            } else {
+                out.println(enabled ? "[OXI] manual advertising requested"
+                                    : "[OXI] manual advertising stopped");
+            }
             print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
             return true;
         }

@@ -14,6 +14,7 @@ enum class PlxCentralAdmission : uint8_t {
 PlxCentralAdmission plx_central_admission(bool saved_peer_present,
                                           bool saved_peer_matches,
                                           bool pairing_active,
-                                          bool connection_bonded);
+                                          bool connection_bonded,
+                                          bool role_enabled);
 
 }  // namespace aircannect

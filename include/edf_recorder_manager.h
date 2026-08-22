@@ -14,6 +14,7 @@
 #include "edf_stream_assembler.h"
 #include "event_broker.h"
 #include "fixed_queue.h"
+#include "oximetry_hub.h"
 #include "rpc_request_port.h"
 #include "session_manager.h"
 #include "storage_service.h"
@@ -28,6 +29,12 @@ static constexpr size_t AC_EDF_STREAM_FRAME_BUDGET = 8;
 static constexpr uint32_t AC_EDF_ATTACH_RETRY_MS = 1000;
 static constexpr uint32_t AC_EDF_SESSION_RETRY_MS = 5000;
 static constexpr size_t AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH = 32;
+static constexpr size_t AC_EDF_LOCAL_SA2_QUEUE_DEPTH = 64;
+
+enum class EdfSa2Input : uint8_t {
+    As11Stream,
+    LocalOximetry,
+};
 
 struct EdfRecorderStatus {
     // capture state
@@ -79,6 +86,8 @@ struct EdfRecorderStatus {
     uint32_t file_open_failures = 0;
     uint32_t numeric_record_drops = 0;
     uint32_t numeric_open_buffer_drops = 0;
+    uint32_t local_sa2_queue_drops = 0;
+    bool local_sa2_active = false;
 
     // recording gate and mask faults
     uint32_t recording_gate_recoveries = 0;
@@ -125,6 +134,8 @@ public:
 
     // control/status
     void set_enabled(bool enabled);
+    void set_sa2_input(EdfSa2Input input);
+    void accept_oximetry_sample(const OximetrySample &sample);
     const EdfRecorderStatus &status() const;
     uint32_t sessions_ended() const { return status_.sessions_ended; }
     const EdfStreamAssemblerStatus &assembler_status() const {
@@ -157,6 +168,19 @@ private:
 
         OperationTicket ticket;
         uint32_t generation = 0;
+    };
+
+    struct LocalSa2Sample {
+        uint32_t observed_ms = 0;
+        int16_t spo2 = -1;
+        int16_t pulse_bpm = -1;
+        bool valid = false;
+    };
+
+    struct LocalSa2ClockAnchor {
+        bool valid = false;
+        uint32_t observed_ms = 0;
+        int64_t epoch_ms = 0;
     };
 
     static void event_frame_observer(void *context,
@@ -277,6 +301,8 @@ private:
     void release_stream();
     void update_stream_queue_drops();
     void drain_stream(uint32_t now_ms);
+    void drain_local_sa2();
+    bool local_sa2_epoch_ms(uint32_t observed_ms, int64_t &epoch_ms) const;
 
     // record assembly/output
     bool roll_segment_if_needed(const StreamFrameData &frame,
@@ -336,6 +362,9 @@ private:
     bool session_clock_frozen_ = false;
     int32_t session_timezone_offset_minutes_ = 0;
     bool session_timezone_frozen_ = false;
+    EdfSa2Input desired_sa2_input_ = EdfSa2Input::As11Stream;
+    EdfSa2Input active_sa2_input_ = EdfSa2Input::As11Stream;
+    LocalSa2ClockAnchor local_sa2_clock_;
 
     // session metadata and numeric schemas
     ColdState *cold_ = nullptr;
@@ -354,6 +383,8 @@ private:
     StreamFrameRef pending_stream_frame_;
     FixedQueue<StreamFrameRef, AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH>
         numeric_open_frame_buffer_;
+    FixedQueue<LocalSa2Sample, AC_EDF_LOCAL_SA2_QUEUE_DEPTH>
+        local_sa2_queue_;
 };
 
 }  // namespace aircannect

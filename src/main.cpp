@@ -233,6 +233,15 @@ static void note_as11_settings_history(void *context, uint32_t now_ms) {
     static_cast<As11SettingsManager *>(context)->note_history_change();
 }
 
+static void route_oximetry_sample(void *context,
+                                  const OximetrySample &sample) {
+    EdfRecorderManager *recorder =
+        static_cast<EdfRecorderManager *>(context);
+    if (!recorder) return;
+
+    recorder->accept_oximetry_sample(sample);
+}
+
 static void route_event_notification(void *context,
                                      RpcPayloadView payload,
                                      uint32_t now_ms) {
@@ -445,12 +454,17 @@ static void sync_network_services() {
 }
 
 static void configure_oximetry(const AppConfigData &config) {
+    const bool local_sa2 = config.as11_transport == As11Transport::Ble;
+
+    edf_recorder_manager.set_sa2_input(
+        local_sa2 ? EdfSa2Input::LocalOximetry
+                  : EdfSa2Input::As11Stream);
     oximetry_hub.set_enabled(config.oximetry_enabled);
     oximetry_udp_source.configure(config.oximetry_enabled,
                                   config.oximetry_udp_port);
     oximetry_sensor_source.configure(config.oximetry_enabled,
                                      config.hostname.c_str());
-    plx_peripheral.configure(config.oximetry_enabled,
+    plx_peripheral.configure(config.oximetry_enabled, !local_sa2,
                              config.oximetry_advertise_mode,
                              config.hostname.c_str());
 }
@@ -556,7 +570,8 @@ static void apply_config_runtime_effects(void *,
         }
     }
     if (dirty & (AC_CONFIG_DIRTY_HOSTNAME |
-                 AC_CONFIG_DIRTY_OXIMETRY)) {
+                 AC_CONFIG_DIRTY_OXIMETRY |
+                 AC_CONFIG_DIRTY_AS11_TRANSPORT)) {
         configure_oximetry(config);
     }
     if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
@@ -959,16 +974,23 @@ void setup() {
                                as11_device_service.state(), session_manager,
                                time_sync_service,
                                StorageService::atomic_write_port());
+    oximetry_hub.set_sample_observer(route_oximetry_sample,
+                                     &edf_recorder_manager);
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);
 
     const AppConfigData &config = config_service.data();
+    const bool local_sa2 = config.as11_transport == As11Transport::Ble;
+
+    edf_recorder_manager.set_sa2_input(
+        local_sa2 ? EdfSa2Input::LocalOximetry
+                  : EdfSa2Input::As11Stream);
     oximetry_hub.set_enabled(config.oximetry_enabled);
     oximetry_udp_source.configure(config.oximetry_enabled,
                                   config.oximetry_udp_port);
     (void)oximetry_sensor_source.begin(config.oximetry_enabled,
                                        config.hostname.c_str());
-    if (!plx_peripheral.begin(config.oximetry_enabled,
+    if (!plx_peripheral.begin(config.oximetry_enabled, !local_sa2,
                               config.oximetry_advertise_mode,
                               config.hostname.c_str())) {
         Log::logf(CAT_OXI, LOG_ERROR,
@@ -1151,6 +1173,10 @@ void loop() {
     resmed_ota_manager.poll();
     drain_can_rx_after("resmed_ota");
 
+    // Oximetry samples must reach the recorder before a closing ZLE event.
+    poll_oximetry(wifi_manager.network_available(), now_ms);
+    drain_can_rx_after("oximetry");
+
     // RPC event fanout before services that depend on fresh state.
     drain_rpc_events();
     drain_can_rx_after("rpc_events_pre_state");
@@ -1165,10 +1191,8 @@ void loop() {
     poll_report_catalog_refresh(now_ms);
     drain_can_rx_after("report_catalog");
 
-    // Live sinks and oximetry
+    // Live sinks
     sink_manager.poll();
-    poll_oximetry(wifi_manager.network_available(), now_ms);
-    drain_can_rx_after("oximetry");
 
     // Wi-Fi and network services
     const bool stream_activity_active = stream_broker.activity_active(

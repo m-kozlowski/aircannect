@@ -6,6 +6,7 @@
 #include "ble_sensor_protocols.h"
 #include "board.h"
 #include "ble_runtime.h"
+#include "fixed_queue.h"
 #include "oximetry_hub.h"
 #include "oximetry_status.h"
 
@@ -134,8 +135,8 @@ private:
     bool enabled_ = false;
     char runtime_name_[AC_BLE_DEVICE_NAME_MAX + 1] = {};
 
-    bool sample_pending_ = false;
-    OximetrySample pending_sample_;
+    FixedQueue<OximetrySample, AC_OXIMETRY_SENSOR_SAMPLE_QUEUE_DEPTH>
+        pending_samples_;
     bool disconnect_pending_ = false;
     int pending_disconnect_reason_ = 0;
     char pending_disconnect_addr_[18] = {};

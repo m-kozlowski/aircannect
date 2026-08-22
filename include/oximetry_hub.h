@@ -28,8 +28,12 @@ struct OximetrySample {
     bool valid = false;
     bool contact_known = false;
     bool contact_present = false;
+    uint32_t observed_ms = 0;
     char detail[48] = {};
 };
+
+using OximetrySampleObserver = void (*)(void *context,
+                                        const OximetrySample &sample);
 
 enum class OximetryHubAction : uint8_t {
     None = 0,
@@ -62,6 +66,8 @@ struct OximetryHubSnapshot {
 class OximetryHub {
 public:
     void set_enabled(bool enabled);
+    void set_sample_observer(OximetrySampleObserver observer,
+                             void *context);
     bool ingest(const OximetrySample &sample,
                 uint32_t now_ms,
                 OximetryHubAction &actions);
@@ -82,6 +88,9 @@ private:
     char source_detail_[48] = {};
     uint32_t last_source_ms_ = 0;
     uint32_t ble_invalid_since_ms_ = 0;
+
+    OximetrySampleObserver sample_observer_ = nullptr;
+    void *sample_observer_context_ = nullptr;
 };
 
 }  // namespace aircannect

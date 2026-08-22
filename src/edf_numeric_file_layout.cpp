@@ -94,4 +94,27 @@ bool edf_build_numeric_file_layout(EdfFileKind kind,
     return true;
 }
 
+bool edf_build_full_numeric_file_layout(EdfFileKind kind,
+                                        EdfNumericFileLayout &layout) {
+    edf_reset_numeric_file_layout(layout);
+
+    const EdfFileSchema &base = edf_numeric_schema(kind);
+    if (!base.signals || base.source_signal_count == 0 ||
+        base.source_signal_count > AC_EDF_NUMERIC_SIGNAL_MAX) {
+        return false;
+    }
+
+    for (size_t i = 0; i < base.source_signal_count; ++i) {
+        layout.signals[i] = base.signals[i];
+        layout.source_indices[i] = static_cast<uint8_t>(i);
+    }
+    layout.signals[base.source_signal_count] =
+        base.signals[base.source_signal_count];
+    layout.schema = base;
+    layout.schema.signals = layout.signals;
+    layout.schema.source_signal_indices = layout.source_indices;
+    layout.enabled = true;
+    return true;
+}
+
 }  // namespace aircannect

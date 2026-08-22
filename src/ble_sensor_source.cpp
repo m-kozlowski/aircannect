@@ -113,6 +113,7 @@ void BleSensorSource::configure(bool enabled, const char *runtime_name) {
         disconnect_requested_ = true;
         disconnect_hold_until_absent_ = false;
         auto_allowed_ = false;
+        pending_samples_.clear();
         status_.state = OximetrySensorState::Off;
         status_.scanning = false;
     }
@@ -1220,10 +1221,8 @@ bool BleSensorSource::take_event(BleSensorEvent &event) {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    if (sample_pending_) {
+    if (pending_samples_.pop(event.sample)) {
         event.kind = BleSensorEventKind::Sample;
-        event.sample = pending_sample_;
-        sample_pending_ = false;
     } else if (disconnect_pending_) {
         event.kind = BleSensorEventKind::Disconnected;
         event.disconnect_reason = pending_disconnect_reason_;
@@ -1274,21 +1273,21 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    pending_sample_ = OximetrySample{};
-    pending_sample_.source = OximetrySource::Ble;
-    pending_sample_.spo2 = valid ? spo2 : -1;
-    pending_sample_.pulse_bpm = valid ? pulse : -1;
-    pending_sample_.valid = valid;
-    pending_sample_.contact_known = contact_known;
-    pending_sample_.contact_present = contact_present;
+    OximetrySample sample;
+    sample.source = OximetrySource::Ble;
+    sample.spo2 = valid ? spo2 : -1;
+    sample.pulse_bpm = valid ? pulse : -1;
+    sample.valid = valid;
+    sample.contact_known = contact_known;
+    sample.contact_present = contact_present;
+    sample.observed_ms = millis();
     if (connected_name_[0]) {
-        snprintf(pending_sample_.detail, sizeof(pending_sample_.detail),
+        snprintf(sample.detail, sizeof(sample.detail),
                  "%s %s", connected_addr_, connected_name_);
     } else {
-        strncpy(pending_sample_.detail, connected_addr_,
-                sizeof(pending_sample_.detail) - 1);
+        strncpy(sample.detail, connected_addr_, sizeof(sample.detail) - 1);
     }
-    sample_pending_ = true;
+    if (!pending_samples_.push(sample)) status_.sample_queue_drops++;
     status_.notifications++;
     if (!valid) status_.invalid_notifications++;
     status_.state = OximetrySensorState::Streaming;

@@ -539,13 +539,18 @@
       up("oxiTabSource", sourceIdentity);
       up("oxiTabStatus", sourceStatus);
 
-      const as11 = oxi.subscribed ? "subscribed" :
-        oxi.connected ? "connected" : "not connected";
+      const integrationAvailable =
+        oxi.airsense_integration_available !== false;
+      const as11 = !integrationAvailable ? "local SA2" :
+        oxi.subscribed ? "subscribed" :
+          oxi.connected ? "connected" : "not connected";
       up("oxiAs11", as11);
       up("oxiTabAs11", as11);
 
       let advertiseState = "idle";
-      if (!oxi.enabled) {
+      if (!integrationAvailable) {
+        advertiseState = "disabled";
+      } else if (!oxi.enabled) {
         advertiseState = "off";
       } else if (oxi.subscribed || oxi.connected) {
         advertiseState = "connected";
@@ -568,21 +573,26 @@
       setControlValue("oxiAdvertiseMode", oxi.advertise_mode || "auto");
 
       const pair = document.getElementById("oxiPairBtn");
+      const advertiseMode = document.getElementById("oxiAdvertiseMode");
       const advStart = document.getElementById("oxiAdvStartBtn");
       const advStop = document.getElementById("oxiAdvStopBtn");
+      const forget = document.getElementById("oxiForgetBtn");
       if (pair) {
         pair.textContent = oxi.pairing_active ? "Stop Pairing" : "Pair AirSense";
-        pair.disabled = !oxi.ble_available;
+        pair.disabled = !oxi.ble_available || !integrationAvailable;
       }
+      if (advertiseMode) advertiseMode.disabled = !integrationAvailable;
+      if (forget) forget.disabled = !integrationAvailable;
       const manual = oxi.advertise_mode === "manual";
       if (advStart) {
         advStart.style.display = manual ? "" : "none";
-        advStart.disabled = !oxi.enabled || oxi.advertising;
+        advStart.disabled = !integrationAvailable || !oxi.enabled ||
+          oxi.advertising;
       }
       if (advStop) {
         advStop.style.display = manual ? "" : "none";
-        advStop.disabled = !oxi.advertising &&
-          !oxi.manual_advertising_requested;
+        advStop.disabled = !integrationAvailable ||
+          (!oxi.advertising && !oxi.manual_advertising_requested);
       }
 
     }

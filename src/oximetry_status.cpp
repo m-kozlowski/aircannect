@@ -10,6 +10,8 @@ OximetryRuntimeStatus compose_oximetry_status(
     const PlxPeripheralStatus &peripheral) {
     OximetryRuntimeStatus out;
     out.enabled = hub.enabled;
+    out.airsense_integration_available =
+        peripheral.integration_available;
     out.advertise_mode = peripheral.advertise_mode;
     out.source_present = hub.source_present;
     out.source_fresh = hub.source_fresh;

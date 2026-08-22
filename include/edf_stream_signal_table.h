@@ -22,5 +22,7 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptors(
 const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
     StreamSignalId id);
 std::string edf_stream_ids_csv(bool required_only = false);
+std::string edf_stream_ids_csv_excluding(EdfSeriesId excluded_series,
+                                         bool required_only = false);
 
 }  // namespace aircannect

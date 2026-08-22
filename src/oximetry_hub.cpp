@@ -20,6 +20,12 @@ void OximetryHub::set_enabled(bool enabled) {
     if (!enabled_) clear_source();
 }
 
+void OximetryHub::set_sample_observer(OximetrySampleObserver observer,
+                                      void *context) {
+    sample_observer_ = observer;
+    sample_observer_context_ = context;
+}
+
 bool OximetryHub::ingest(const OximetrySample &sample,
                          uint32_t now_ms,
                          OximetryHubAction &actions) {
@@ -33,7 +39,10 @@ bool OximetryHub::ingest(const OximetrySample &sample,
 
     source_present_ = true;
     source_ = sample.source;
-    last_source_ms_ = now_ms;
+    const uint32_t observed_ms = sample.observed_ms
+        ? sample.observed_ms
+        : now_ms;
+    last_source_ms_ = observed_ms;
     strncpy(source_detail_, sample.detail, sizeof(source_detail_) - 1);
     source_detail_[sizeof(source_detail_) - 1] = 0;
 
@@ -42,7 +51,13 @@ bool OximetryHub::ingest(const OximetrySample &sample,
     reading_.valid = sample.valid;
     reading_.contact_known = sample.contact_known;
     reading_.contact_present = sample.contact_present;
-    reading_.timestamp_ms = now_ms;
+    reading_.timestamp_ms = observed_ms;
+
+    if (sample_observer_) {
+        OximetrySample accepted = sample;
+        accepted.observed_ms = observed_ms;
+        sample_observer_(sample_observer_context_, accepted);
+    }
 
     if (sample.source != OximetrySource::Ble || sample.valid) {
         ble_invalid_since_ms_ = 0;

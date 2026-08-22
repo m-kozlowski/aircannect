@@ -32,6 +32,7 @@ static constexpr size_t AC_OXIMETRY_UDP_READ_BUDGET = 8;
 static constexpr size_t AC_OXIMETRY_SENSOR_MAX_KNOWN = 4;
 static constexpr size_t AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS = 8;
 static constexpr size_t AC_OXIMETRY_SENSOR_NAME_MAX = 24;
+static constexpr size_t AC_OXIMETRY_SENSOR_SAMPLE_QUEUE_DEPTH = 8;
 static constexpr uint32_t AC_OXIMETRY_SENSOR_TASK_STACK = 6144;
 static constexpr uint8_t AC_OXIMETRY_SENSOR_TASK_PRIO = 3;
 static constexpr uint32_t AC_OXIMETRY_SENSOR_SCAN_MS = 5000;

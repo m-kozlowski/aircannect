@@ -24,10 +24,10 @@ public:
     explicit PlxPeripheral(BleRuntime &runtime)
         : runtime_(runtime) {}
 
-    bool begin(bool enabled, OximetryAdvertiseMode advertise_mode,
-               const char *name);
-    void configure(bool enabled, OximetryAdvertiseMode advertise_mode,
-                   const char *name);
+    bool begin(bool enabled, bool integration_allowed,
+               OximetryAdvertiseMode advertise_mode, const char *name);
+    void configure(bool enabled, bool integration_allowed,
+                   OximetryAdvertiseMode advertise_mode, const char *name);
     void poll(const OximetryHubSnapshot &source, uint32_t now_ms);
 
     bool request_advertising(bool enabled);
@@ -84,6 +84,7 @@ private:
     bool initialized_ = false;
     bool advertising_data_dirty_ = true;
     bool advertising_wanted_ = false;
+    std::atomic<bool> role_enabled_{false};
     std::atomic<bool> pairing_admission_open_{false};
     uint32_t pairing_until_ms_ = 0;
     uint32_t last_notify_ms_ = 0;

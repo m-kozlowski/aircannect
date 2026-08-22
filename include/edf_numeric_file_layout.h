@@ -22,5 +22,7 @@ bool edf_short_tag_is_accepted(const char *accepted_data_ids_csv,
 bool edf_build_numeric_file_layout(EdfFileKind kind,
                                    const char *accepted_data_ids_csv,
                                    EdfNumericFileLayout &layout);
+bool edf_build_full_numeric_file_layout(EdfFileKind kind,
+                                        EdfNumericFileLayout &layout);
 
 }  // namespace aircannect

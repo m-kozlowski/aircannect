@@ -237,6 +237,40 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
     }
 }
 
+EdfSa2IngestStatus EdfStreamAssembler::ingest_sa2_sample(
+    const EdfSa2Sample &sample,
+    size_t max_records_to_publish) {
+    if (!status_.active || status_.session_start_epoch_ms <= 0 ||
+        sample.epoch_ms < status_.session_start_epoch_ms) {
+        return EdfSa2IngestStatus::Rejected;
+    }
+
+    const uint64_t relative_ms = static_cast<uint64_t>(
+        sample.epoch_ms - status_.session_start_epoch_ms);
+    const uint64_t record_index = relative_ms / AC_EDF_RECORD_MS;
+    const uint32_t record_ms = static_cast<uint32_t>(
+        relative_ms % AC_EDF_RECORD_MS);
+    const uint32_t sample_index = record_ms / AC_EDF_SA2_SAMPLE_MS;
+    if (record_index > UINT32_MAX ||
+        sample_index >= AC_EDF_SA2_SAMPLES_PER_RECORD) {
+        return EdfSa2IngestStatus::Rejected;
+    }
+
+    SeriesBuffer buffer = series(EdfSeriesId::Sa2);
+    size_t budget = max_records_to_publish;
+    if (!advance_to_record(buffer, static_cast<uint32_t>(record_index),
+                           &budget)) {
+        return EdfSa2IngestStatus::Deferred;
+    }
+
+    const uint16_t slot = static_cast<uint16_t>(sample_index);
+    store_sample(buffer, 0, static_cast<uint32_t>(record_index), slot,
+                 sample.valid, sample.pulse_bpm, true);
+    store_sample(buffer, 1, static_cast<uint32_t>(record_index), slot,
+                 sample.valid, sample.spo2, true);
+    return EdfSa2IngestStatus::Stored;
+}
+
 bool EdfStreamAssembler::allocate_buffers() {
     if (status_.buffers_ready) return true;
 

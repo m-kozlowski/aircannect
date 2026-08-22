@@ -95,6 +95,7 @@ UdpOximeterSource::ReadResult UdpOximeterSource::read_sample(
     sample.spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
     sample.pulse_bpm = decode_sfloat_int_value(pulse_raw, pulse_valid);
     sample.valid = spo2_valid && pulse_valid;
+    sample.observed_ms = millis();
     snprintf(sample.detail, sizeof(sample.detail), "%u.%u.%u.%u",
              remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3]);
     return ReadResult::Sample;

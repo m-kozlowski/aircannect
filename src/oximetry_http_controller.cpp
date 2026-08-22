@@ -64,6 +64,8 @@ bool build_sensor_json(LargeTextBuffer &json,
     json = "{";
     json_add_bool(json, "enabled", source.enabled, false);
     json_add_bool(json, "ble_available", plx.ble_available);
+    json_add_bool(json, "airsense_integration_available",
+                  plx.integration_available);
     json_add_string(json, "sensor_state",
                     sensor_state_name(sensor.state));
     json_add_bool(json, "sensor_task_started", sensor.task_started);
@@ -169,20 +171,25 @@ void OximetryHttpController::execute(Command &command) {
             (void)config_->set_value("oxi_en", "0", false);
             break;
         case CommandKind::PairStart:
+            if (!peripheral_->status(millis()).integration_available) {
+                Log::logf(CAT_OXI, LOG_DEBUG,
+                          "AirSense pairing unavailable with BLE transport\n");
+                break;
+            }
             (void)config_->set_value("oxi_en", "1", false);
-            peripheral_->request_pairing(true);
+            (void)peripheral_->request_pairing(true);
             break;
         case CommandKind::PairStop:
             peripheral_->request_pairing(false);
             break;
         case CommandKind::ForgetBonds:
-            peripheral_->forget_bonds();
+            (void)peripheral_->forget_bonds();
             break;
         case CommandKind::AdvertiseStart:
-            peripheral_->request_advertising(true);
+            (void)peripheral_->request_advertising(true);
             break;
         case CommandKind::AdvertiseStop:
-            peripheral_->request_advertising(false);
+            (void)peripheral_->request_advertising(false);
             break;
         case CommandKind::SensorScan:
             sensor_->request_scan();

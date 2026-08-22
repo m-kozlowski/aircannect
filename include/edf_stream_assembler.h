@@ -53,6 +53,19 @@ enum class EdfFramePrepareStatus : uint8_t {
     Rejected,
 };
 
+enum class EdfSa2IngestStatus : uint8_t {
+    Stored,
+    Deferred,
+    Rejected,
+};
+
+struct EdfSa2Sample {
+    int64_t epoch_ms = 0;
+    float pulse_bpm = 0.0f;
+    float spo2 = 0.0f;
+    bool valid = false;
+};
+
 class EdfStreamAssembler {
 public:
     bool begin();
@@ -70,6 +83,9 @@ public:
     EdfFramePrepareStatus prepare_frame(const StreamFrameData &frame,
                                         size_t max_records_to_publish);
     void ingest_frame(const StreamFrameData &frame);
+    EdfSa2IngestStatus ingest_sa2_sample(
+        const EdfSa2Sample &sample,
+        size_t max_records_to_publish);
 
     const EdfStreamAssemblerStatus &status() const { return status_; }
 

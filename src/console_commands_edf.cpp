@@ -51,6 +51,8 @@ void print_edf_recorder_status(Print &out,
         out.print(" clock_offset_ms=");
         out.print(static_cast<long long>(status.clock_correction_ms));
     }
+    out.print(" sa2_input=");
+    out.print(status.local_sa2_active ? "local" : "as11");
     out.println();
 
     out.print("[EDF input] events=");
@@ -85,6 +87,7 @@ void print_edf_recorder_status(Print &out,
 
     const bool has_drops = status.frame_drops ||
         status.numeric_record_drops || status.numeric_open_buffer_drops ||
+        status.local_sa2_queue_drops ||
         storage.queue_drops;
     const bool has_faults = status.event_coverage_session_gaps() ||
         status.recording_gate_bad_events || status.mask_bad_events ||
@@ -163,7 +166,12 @@ void print_edf_recorder_stats(Print &out,
     out.print(" mask_bad=");
     out.print(static_cast<unsigned long>(status.mask_bad_events));
     out.print(" open_buffer_drops=");
-    out.println(static_cast<unsigned long>(status.numeric_open_buffer_drops));
+    out.print(static_cast<unsigned long>(status.numeric_open_buffer_drops));
+    if (status.local_sa2_active || status.local_sa2_queue_drops) {
+        out.print(" local_sa2_drops=");
+        out.print(static_cast<unsigned long>(status.local_sa2_queue_drops));
+    }
+    out.println();
 
     out.print("[EDF queues] record_failures=");
     out.print(static_cast<unsigned long>(status.record_enqueue_failures));

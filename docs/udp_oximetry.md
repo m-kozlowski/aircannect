@@ -34,6 +34,10 @@ dropped.
 `oxi_adv` - default auto. Auto advertises to AS11 only while source data is
 fresh.
 
+When AS11 RPC uses BLE, AirCANnect disables AirSense pairing and PLX
+advertising. Accepted oximetry samples are written directly to local SA2 EDF
+records instead.
+
 ## Source arbitration
 
 Only one source feeds at a time.

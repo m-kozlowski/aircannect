@@ -200,6 +200,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     }
     if (!sync_numeric_open_status(now_ms)) return;
     drain_stream(now_ms);
+    drain_local_sa2();
 }
 
 void EdfRecorderManager::set_enabled(bool enabled) {
@@ -226,6 +227,30 @@ void EdfRecorderManager::set_enabled(bool enabled) {
     }
 }
 
+void EdfRecorderManager::set_sa2_input(EdfSa2Input input) {
+    desired_sa2_input_ = input;
+    if (!recording_gate_open_) active_sa2_input_ = input;
+}
+
+void EdfRecorderManager::accept_oximetry_sample(
+    const OximetrySample &sample) {
+    if (!status_.enabled || !status_.active || !recording_gate_open_ ||
+        active_sa2_input_ != EdfSa2Input::LocalOximetry ||
+        !local_sa2_clock_.valid) {
+        return;
+    }
+
+    LocalSa2Sample queued;
+    queued.observed_ms = sample.observed_ms;
+    queued.spo2 = sample.spo2;
+    queued.pulse_bpm = sample.pulse_bpm;
+    queued.valid = sample.valid &&
+        (!sample.contact_known || sample.contact_present);
+    if (!local_sa2_queue_.push(queued)) {
+        status_.local_sa2_queue_drops++;
+    }
+}
+
 const EdfRecorderStatus &EdfRecorderManager::status() const {
     status_.annotation_files_open = files_open_;
     status_.numeric_files_open = numeric_files_open_;
@@ -234,6 +259,8 @@ const EdfRecorderStatus &EdfRecorderManager::status() const {
     status_.recording_gate_recovery_is_pending =
         recording_gate_recovery_pending_;
     status_.annotation_open_is_pending = annotation_open_pending_;
+    status_.local_sa2_active =
+        active_sa2_input_ == EdfSa2Input::LocalOximetry;
     status_.event_coverage_session_gap_count =
         event_coverage_session_gaps();
     return status_;
@@ -430,6 +457,21 @@ void EdfRecorderManager::begin_recording_gate(const char *start_time,
     if (str_start_pending_) (void)ensure_str_session_started(now_ms);
     apply_pending_mask_event(now_ms);
 
+    active_sa2_input_ = desired_sa2_input_;
+    local_sa2_queue_.clear();
+    local_sa2_clock_ = {};
+    if (active_sa2_input_ == EdfSa2Input::LocalOximetry) {
+        int64_t start_epoch_ms = 0;
+        if (!parse_session_utc_time(start_time, start_epoch_ms)) {
+            status_.recording_gate_bad_events++;
+            set_error("local_sa2_clock_failed");
+        } else {
+            local_sa2_clock_.valid = true;
+            local_sa2_clock_.observed_ms = now_ms;
+            local_sa2_clock_.epoch_ms = start_epoch_ms;
+        }
+    }
+
     recording_gate_open_ = true;
     recording_gate_closed_ = false;
     copy_cstr(status_.recording_start_time,
@@ -459,6 +501,7 @@ void EdfRecorderManager::close_recording_gate(const char *end_time,
               sizeof(status_.recording_end_time),
               end_time);
 
+    drain_local_sa2();
     close_recording_segment();
 }
 
@@ -470,6 +513,8 @@ void EdfRecorderManager::close_recording_segment() {
     next_annotation_open_ms_ = 0;
     annotation_open_pending_ = false;
     numeric_open_frame_buffer_.clear();
+    local_sa2_queue_.clear();
+    local_sa2_clock_ = {};
 }
 
 bool EdfRecorderManager::ensure_segment_metadata_published(
@@ -691,6 +736,9 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     session_clock_frozen_ = false;
     session_timezone_offset_minutes_ = 0;
     session_timezone_frozen_ = false;
+    active_sa2_input_ = desired_sa2_input_;
+    local_sa2_clock_ = {};
+    local_sa2_queue_.clear();
     status_.clock_correction_applied = false;
     status_.clock_correction_ms = 0;
     annotation_start_epoch_ms_ = 0;
@@ -785,15 +833,19 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
               static_cast<unsigned long>(status_.event_records));
 
     if (status_.frame_drops || status_.numeric_open_buffer_drops ||
-        status_.numeric_record_drops || enqueue_failures) {
+        status_.numeric_record_drops || status_.local_sa2_queue_drops ||
+        enqueue_failures) {
         Log::logf(CAT_EDF, LOG_WARN,
                   "recorder data loss id=%lu queue_drops=%lu "
-                  "open_buffer_drops=%lu numeric_drops=%lu "
+                  "open_buffer_drops=%lu sa2_queue_drops=%lu "
+                  "numeric_drops=%lu "
                   "enqueue_failures=%lu\n",
                   static_cast<unsigned long>(status_.session_id),
                   static_cast<unsigned long>(stream_queue_drops),
                   static_cast<unsigned long>(
                       status_.numeric_open_buffer_drops),
+                  static_cast<unsigned long>(
+                      status_.local_sa2_queue_drops),
                   static_cast<unsigned long>(status_.numeric_record_drops),
                   static_cast<unsigned long>(enqueue_failures));
     }
@@ -970,8 +1022,16 @@ bool EdfRecorderManager::build_numeric_schemas() {
     const EdfFileSchema *schemas = edf_numeric_schemas(count);
     for (size_t i = 0; i < count; ++i) {
         NumericSchemaState &state = cold_->numeric_schemas[i];
-        if (!edf_build_numeric_file_layout(
-                schemas[i].kind, accepted, state.layout)) {
+        const bool local_sa2 =
+            schemas[i].series == EdfSeriesId::Sa2 &&
+            active_sa2_input_ == EdfSa2Input::LocalOximetry;
+        const bool built = local_sa2
+            ? edf_build_full_numeric_file_layout(schemas[i].kind,
+                                                 state.layout)
+            : edf_build_numeric_file_layout(schemas[i].kind,
+                                            accepted,
+                                            state.layout);
+        if (!built) {
             set_error("numeric_schema_failed");
             return false;
         }
@@ -998,6 +1058,11 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     const EdfStreamSignalDescriptor *signals =
         edf_stream_signal_descriptors(signal_count);
     for (size_t i = 0; i < signal_count; ++i) {
+        if (active_sa2_input_ == EdfSa2Input::LocalOximetry &&
+            signals[i].series == EdfSeriesId::Sa2) {
+            continue;
+        }
+
         const EdfFileSchema *schema =
             edf_numeric_schema_for_series(signals[i].series);
         if (schema && schema->required &&
@@ -1924,8 +1989,11 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
 
     next_attach_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
 
-    const std::string params = build_stream_params(
-        edf_stream_ids_csv(), 40, 200);
+    const std::string data_ids =
+        active_sa2_input_ == EdfSa2Input::LocalOximetry
+            ? edf_stream_ids_csv_excluding(EdfSeriesId::Sa2)
+            : edf_stream_ids_csv();
+    const std::string params = build_stream_params(data_ids, 40, 200);
     StreamAcquireResult result =
         stream_->acquire(params, RpcSource::EdfRecorder);
     if (result.status == StreamAcquireStatus::Acquired ||
@@ -2045,6 +2113,52 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
         }
         assembler_.ingest_frame(*frame);
     }
+}
+
+void EdfRecorderManager::drain_local_sa2() {
+    if (active_sa2_input_ != EdfSa2Input::LocalOximetry ||
+        !numeric_files_open_ || !numeric_open_synced_ ||
+        !local_sa2_clock_.valid) {
+        return;
+    }
+
+    for (size_t i = 0; i < AC_EDF_LOCAL_SA2_QUEUE_DEPTH; ++i) {
+        LocalSa2Sample queued;
+        if (!local_sa2_queue_.pop(queued)) break;
+
+        EdfSa2Sample sample;
+        sample.pulse_bpm = static_cast<float>(queued.pulse_bpm);
+        sample.spo2 = static_cast<float>(queued.spo2);
+        sample.valid = queued.valid;
+        if (!local_sa2_epoch_ms(queued.observed_ms, sample.epoch_ms)) {
+            continue;
+        }
+
+        const EdfSa2IngestStatus ingested = assembler_.ingest_sa2_sample(
+            sample, AC_EDF_GAP_RECORD_BUDGET);
+        if (ingested == EdfSa2IngestStatus::Deferred) {
+            (void)local_sa2_queue_.push_front(queued);
+            break;
+        }
+    }
+}
+
+bool EdfRecorderManager::local_sa2_epoch_ms(uint32_t observed_ms,
+                                            int64_t &epoch_ms) const {
+    if (!local_sa2_clock_.valid) return false;
+
+    const int32_t elapsed_ms = static_cast<int32_t>(
+        observed_ms - local_sa2_clock_.observed_ms);
+    if (elapsed_ms < 0 &&
+        local_sa2_clock_.epoch_ms < INT64_MIN - elapsed_ms) {
+        return false;
+    }
+    if (elapsed_ms > 0 &&
+        local_sa2_clock_.epoch_ms > INT64_MAX - elapsed_ms) {
+        return false;
+    }
+    epoch_ms = local_sa2_clock_.epoch_ms + elapsed_ms;
+    return true;
 }
 
 bool EdfRecorderManager::frame_sleep_day(const StreamFrameData &frame,

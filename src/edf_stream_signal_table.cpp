@@ -45,12 +45,15 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
     return nullptr;
 }
 
-std::string edf_stream_ids_csv(bool required_only) {
+static std::string stream_ids_csv(EdfSeriesId excluded_series,
+                                  bool required_only) {
     std::string out;
     size_t count = 0;
     const EdfStreamSignalDescriptor *signals =
         edf_stream_signal_descriptors(count);
     for (size_t i = 0; i < count; ++i) {
+        if (signals[i].series == excluded_series) continue;
+
         const EdfFileSchema *schema =
             edf_numeric_schema_for_series(signals[i].series);
         if (!schema || (required_only && !schema->required)) continue;
@@ -59,6 +62,15 @@ std::string edf_stream_ids_csv(bool required_only) {
         out += signals[i].short_tag;
     }
     return out;
+}
+
+std::string edf_stream_ids_csv(bool required_only) {
+    return stream_ids_csv(EdfSeriesId::Count, required_only);
+}
+
+std::string edf_stream_ids_csv_excluding(EdfSeriesId excluded_series,
+                                         bool required_only) {
+    return stream_ids_csv(excluded_series, required_only);
 }
 
 }  // namespace aircannect
