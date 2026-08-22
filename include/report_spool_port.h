@@ -9,7 +9,16 @@
 
 namespace aircannect {
 
+inline constexpr char AC_SYSTEM_ACTIVITY_SPOOL_TYPE[] =
+    "SystemActivityEvents-FrequentActivityEvents";
+
+enum class ReportSpoolFetchKind : uint8_t {
+    ReportSource,
+    SystemActivity,
+};
+
 struct ReportSpoolFetchCommand {
+    ReportSpoolFetchKind kind = ReportSpoolFetchKind::ReportSource;
     ReportSourceId source = ReportSourceId::Summary;
     int64_t from_ms = 0;
     uint32_t generation = 0;

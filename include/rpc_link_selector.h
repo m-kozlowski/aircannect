@@ -16,6 +16,8 @@ public:
     RpcLinkSendResult send(RpcPayloadView payload) override;
     bool take_event(RpcLinkEvent &event) override;
     void reset() override;
+    void set_controlled_disconnect(bool requested) override;
+    bool controlled_disconnect_complete() const override;
 
     RpcApplicationLinkStatus status() const override;
     const char *name() const override;

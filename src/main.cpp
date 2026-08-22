@@ -5,8 +5,9 @@
 #include <new>
 #include <string.h>
 
-#include "as11_device_service.h"
+#include "as11_ble_recovery.h"
 #include "as11_ble_rpc_link.h"
+#include "as11_device_service.h"
 #include "as11_service_manager.h"
 #include "as11_settings_manager.h"
 #include "arduino_ota_source.h"
@@ -86,6 +87,7 @@ static As11ServiceManager as11_service_manager(can_driver);
 static RpcQuiesceCoordinator rpc_quiesce_coordinator(
     rpc_transport, can_rpc_link, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
+static As11BleRecovery as11_ble_recovery;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
@@ -229,6 +231,13 @@ static void note_as11_device_event(void *context,
         frame, now_ms);
 }
 
+static void note_as11_ble_recovery_event(void *context,
+                                         const As11EventFrame &frame,
+                                         uint32_t now_ms) {
+    (void)now_ms;
+    static_cast<As11BleRecovery *>(context)->observe_event(frame);
+}
+
 static void note_as11_settings_history(void *context, uint32_t now_ms) {
     (void)now_ms;
     static_cast<As11SettingsManager *>(context)->note_history_change();
@@ -338,7 +347,8 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      bool export_work_claimed,
                                      bool ota_install_active,
                                      bool ota_storage_upload_active,
-                                     bool therapy_active) {
+                                     bool therapy_active,
+                                     bool as11_rpc_available) {
     const bool changed =
         !runtime_activity_published ||
         storage_activity.foreground_report_demand != foreground_report_demand ||
@@ -346,7 +356,8 @@ static void publish_runtime_activity(bool foreground_report_demand,
         storage_activity.export_work_claimed != export_work_claimed ||
         storage_activity.ota_install_active != ota_install_active ||
         ota_storage_upload_active_published != ota_storage_upload_active ||
-        storage_activity.therapy_active != therapy_active;
+        storage_activity.therapy_active != therapy_active ||
+        storage_activity.as11_rpc_available != as11_rpc_available;
     if (!changed) return;
 
     storage_activity.foreground_report_demand = foreground_report_demand;
@@ -354,6 +365,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.export_work_claimed = export_work_claimed;
     storage_activity.ota_install_active = ota_install_active;
     storage_activity.therapy_active = therapy_active;
+    storage_activity.as11_rpc_available = as11_rpc_available;
     ota_storage_upload_active_published = ota_storage_upload_active;
     storage_activity.generation++;
     if (storage_activity.generation == 0) storage_activity.generation++;
@@ -701,6 +713,35 @@ static void drain_rpc_events() {
     }
 }
 
+static void poll_as11_ble_recovery(uint32_t now_ms) {
+    const bool ble_selected =
+        rpc_link_selector.selected() == As11Transport::Ble;
+    const bool authenticated =
+        ble_selected && as11_ble_rpc_link.ble_status().authenticated;
+
+    as11_ble_recovery.observe_link(
+        ble_selected, authenticated, as11_device_service.state(), now_ms);
+    if (rpc_quiesce_coordinator.requested()) return;
+
+    as11_ble_recovery.poll(now_ms);
+
+    const As11BleRecoveryActions actions =
+        as11_ble_recovery.take_actions();
+    if (actions.boot_confirmed) {
+        rpc_transport.accept_boot_notification(
+            "AS11 PowerUp after BLE reconnect");
+        return;
+    }
+    if (!actions.refresh) return;
+
+    rpc_transport.set_as11_unavailable(false);
+    time_sync_service.note_as11_connection_reset();
+    (void)as11_device_service.request_healthcheck(
+        rpc_transport, RpcSource::Scheduler, now_ms);
+    as11_settings_manager.invalidate(
+        rpc_transport, RpcSource::Scheduler, now_ms);
+}
+
 static bool main_loop_drain_timing_active() {
     return session_manager.status().state == SessionState::Active ||
            as11_device_service.state().therapy_state() ==
@@ -965,6 +1006,8 @@ void setup() {
                                      &session_manager);
     (void)event_broker.add_frame_observer(note_as11_device_event,
                                           &as11_device_service);
+    (void)event_broker.add_frame_observer(
+        note_as11_ble_recovery_event, &as11_ble_recovery);
     event_broker.set_settings_history_observer(
         note_as11_settings_history, &as11_settings_manager);
     rpc_transport.set_event_notification_observer(route_event_notification,
@@ -1012,6 +1055,10 @@ void setup() {
     if (!report_spool_service.begin()) {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report spool service failed to start\n");
+    }
+    if (!as11_ble_recovery.begin(report_spool_service)) {
+        Log::logf(CAT_BLE, LOG_ERROR,
+                  "AS11 reconnect recovery failed to start\n");
     }
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
@@ -1122,10 +1169,13 @@ void loop() {
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
         firmware_installer.as11_quiesce_required();
+    const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
     rpc_quiesce_coordinator.update(
-        esp_ota_quiesce_requested || as11_service_exclusive, now_ms);
+        esp_ota_quiesce_requested || as11_service_exclusive,
+        esp_reboot_pending,
+        now_ms);
 
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
@@ -1137,6 +1187,8 @@ void loop() {
 
     can_rpc_link.poll_physical(now_ms);
     rpc_transport.poll();
+    const bool as11_link_ready = rpc_link_selector.status().ready;
+    poll_as11_ble_recovery(now_ms);
     drain_can_side_events();
     as11_service_manager.poll_entry(
         rpc_transport, rpc_quiesce_coordinator.complete(),
@@ -1146,20 +1198,24 @@ void loop() {
     stream_broker.poll(rpc_transport, now_ms);
     event_broker.poll(rpc_transport, now_ms,
                       resmed_ota_transport_active ||
+                          !as11_link_ready ||
                           as11_device_service.unavailable());
     as11_device_service.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active ||
-            as11_service_exclusive);
-    const bool as11_unavailable = as11_device_service.unavailable();
-    rpc_transport.set_as11_unavailable(as11_unavailable);
+            as11_service_exclusive || !as11_link_ready);
+    const bool as11_device_unavailable =
+        as11_device_service.unavailable();
+    const bool as11_rpc_available =
+        as11_link_ready && !as11_device_unavailable;
+    rpc_transport.set_as11_unavailable(!as11_rpc_available);
 
     resmed_firmware_preparer.publish_device_identifier(
         as11_device_service.state().software_identifier().c_str());
     as11_settings_manager.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active ||
-            as11_service_exclusive || as11_unavailable);
+            as11_service_exclusive || !as11_rpc_available);
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();
@@ -1179,8 +1235,10 @@ void loop() {
 
     // Report RPC adapter and ResMed OTA
     report_spool_service.poll(
+        as11_rpc_available,
         rpc_transport.background_backpressure_active(),
         can_driver.stats().rx_queue_full_alerts);
+    poll_as11_ble_recovery(now_ms);
     drain_can_rx_after("report");
 
     resmed_ota_manager.poll();
@@ -1292,7 +1350,8 @@ void loop() {
                              export_work_claimed,
                              storage_ota_active,
                              ota_storage_upload_active,
-                             therapy_active);
+                             therapy_active,
+                             as11_rpc_available);
 
     publish_export_config(now_ms);
 

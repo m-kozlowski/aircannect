@@ -81,6 +81,7 @@ public:
     void schedule_reboot(uint32_t delay_ms = 750);
     bool active() const;
     bool as11_quiesce_required() const;
+    bool reboot_pending() const;
     FirmwareInstallStatus status() const;
 
 private:

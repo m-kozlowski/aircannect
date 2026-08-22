@@ -96,6 +96,8 @@ public:
     virtual bool send_quiesce_request(const std::string &method,
                                       const std::string &params_json) = 0;
     virtual RpcQuiesceStatus quiesce_status() const = 0;
+    virtual void set_controlled_disconnect(bool requested) = 0;
+    virtual bool controlled_disconnect_complete() const = 0;
 };
 
 }  // namespace aircannect

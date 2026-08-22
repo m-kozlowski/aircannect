@@ -1,9 +1,8 @@
 #include "report_parser.h"
 
 #include <stdio.h>
-#include <string.h>
 
-#include <string>
+#include "spool_event_parser.h"
 
 namespace aircannect {
 namespace {
@@ -11,10 +10,6 @@ namespace {
 void set_error(char *error, size_t error_len, const char *message) {
     if (!error || error_len == 0) return;
     snprintf(error, error_len, "%s", message ? message : "");
-}
-
-bool strings_match(const std::string &left, const char *right) {
-    return right && strcmp(left.c_str(), right) == 0;
 }
 
 }  // namespace
@@ -28,28 +23,8 @@ bool report_validate_spool_for_source(const ReportSpoolResult &result,
         set_error(error, error_len, "unknown_report_source");
         return false;
     }
-    if (!strings_match(result.spool_type, def->spool_type)) {
-        set_error(error, error_len, "wrong_report_source");
-        return false;
-    }
-    if (!result.complete) {
-        set_error(error, error_len, "spool_incomplete");
-        return false;
-    }
-    if (result.truncated) {
-        set_error(error, error_len, "spool_truncated");
-        return false;
-    }
-    if (!result.sha_ok) {
-        set_error(error, error_len, "spool_hash_failed");
-        return false;
-    }
-    if (!result.payload.data() || result.payload.size() == 0) {
-        set_error(error, error_len, "spool_empty");
-        return false;
-    }
-    set_error(error, error_len, "");
-    return true;
+    return spool_result_valid_for_type(result, def->spool_type,
+                                       error, error_len);
 }
 
 bool report_parse_summary_spool(const ReportSpoolResult &result,

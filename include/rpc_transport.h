@@ -70,6 +70,8 @@ public:
     bool send_quiesce_request(const std::string &method,
                               const std::string &params_json) override;
     RpcQuiesceStatus quiesce_status() const override;
+    void set_controlled_disconnect(bool requested) override;
+    bool controlled_disconnect_complete() const override;
 
     // Status snapshots
     RpcTransportStats stats() const override { return stats_; }
@@ -195,6 +197,7 @@ private:
     void handle_event_notification(const RpcPayloadRef &payload);
     void handle_stream_notification(const RpcPayloadRef &payload);
     void handle_spool_notification(const RpcPayloadRef &payload);
+    void invalidate_link_state(const char *reason);
     void note_transport_reset();
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
                                   RpcPayloadView payload);

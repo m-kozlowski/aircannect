@@ -32,6 +32,14 @@ bool RpcLinkSelector::take_event(RpcLinkEvent &event) {
 
 void RpcLinkSelector::reset() { active_link().reset(); }
 
+void RpcLinkSelector::set_controlled_disconnect(bool requested) {
+    active_link().set_controlled_disconnect(requested);
+}
+
+bool RpcLinkSelector::controlled_disconnect_complete() const {
+    return active_link().controlled_disconnect_complete();
+}
+
 RpcApplicationLinkStatus RpcLinkSelector::status() const {
     return active_link().status();
 }

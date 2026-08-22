@@ -413,12 +413,16 @@ void StreamBroker::mark_command_response(StreamCommandType type,
 }
 
 void StreamBroker::mark_reattach(uint32_t now_ms) {
+    const bool stop_required = quiesce_requested_ &&
+        (actual_active_ || accepted_subscription_.data_id_count > 0 ||
+         pending_ != StreamCommandType::None);
+
     pending_ = StreamCommandType::None;
-    actual_active_ = false;
+    actual_active_ = stop_required;
     last_command_ms_ = 0;
     if (desired_active()) last_owned_activity_ms_ = now_ms;
     clear_subscription(accepted_subscription_);
-    quiesced_ = false;
+    quiesced_ = quiesce_requested_ && !stop_required;
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         consumers_[i].queue.clear();
     }
@@ -428,9 +432,12 @@ void StreamBroker::mark_reattach(uint32_t now_ms) {
 void StreamBroker::request_quiesce(uint32_t now_ms) {
     last_owned_activity_ms_ = now_ms;
     quiesce_requested_ = true;
+    if (pending_ == StreamCommandType::Start) {
+        actual_active_ = true;
+        pending_ = StreamCommandType::None;
+    }
     quiesced_ = !actual_active_ && accepted_subscription_.data_id_count == 0;
     clear_error();
-    if (pending_ == StreamCommandType::Start) pending_ = StreamCommandType::None;
 }
 
 void StreamBroker::clear_quiesce() {

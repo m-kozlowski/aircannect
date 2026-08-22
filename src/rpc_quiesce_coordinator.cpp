@@ -13,7 +13,9 @@ RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcQuiescePort &transport,
                                              StreamBroker &streams)
     : transport_(transport), can_(can), events_(events), streams_(streams) {}
 
-void RpcQuiesceCoordinator::update(bool requested, uint32_t now_ms) {
+void RpcQuiesceCoordinator::update(bool requested,
+                                   bool restart_requested,
+                                   uint32_t now_ms) {
     if (requested != requested_) {
         if (requested) {
             begin(now_ms);
@@ -22,7 +24,14 @@ void RpcQuiesceCoordinator::update(bool requested, uint32_t now_ms) {
         }
     }
 
-    if (!requested_ || complete_ || timed_out_) return;
+    if (requested_ && !complete_ && !timed_out_) {
+        poll_quiesce(now_ms);
+    }
+    poll_controlled_disconnect(restart_requested, now_ms);
+}
+
+void RpcQuiesceCoordinator::poll_quiesce(uint32_t now_ms) {
+    if (!requested_) return;
 
     RpcQuiesceStatus transport = transport_.quiesce_status();
     if (push_traffic_quiesced(transport)) {
@@ -58,7 +67,8 @@ bool RpcQuiesceCoordinator::timed_out() const {
 }
 
 bool RpcQuiesceCoordinator::reboot_allowed() const {
-    return complete() || timed_out();
+    if (!restart_requested_ || (!complete() && !timed_out())) return false;
+    return disconnect_complete_ || disconnect_timed_out_;
 }
 
 void RpcQuiesceCoordinator::begin(uint32_t now_ms) {
@@ -77,15 +87,67 @@ void RpcQuiesceCoordinator::begin(uint32_t now_ms) {
 }
 
 void RpcQuiesceCoordinator::end(uint32_t now_ms) {
+    if (disconnect_requested_) {
+        transport_.set_controlled_disconnect(false);
+    }
+
     requested_ = false;
     complete_ = false;
     timed_out_ = false;
     deadline_ms_ = 0;
+    restart_requested_ = false;
+    disconnect_requested_ = false;
+    disconnect_complete_ = false;
+    disconnect_timed_out_ = false;
+    disconnect_deadline_ms_ = 0;
 
     can_.request_debug_log_rx(true);
     transport_.set_quiesce_mode(false);
     streams_.clear_quiesce();
     events_.clear_quiesce(now_ms);
+}
+
+void RpcQuiesceCoordinator::poll_controlled_disconnect(
+    bool restart_requested,
+    uint32_t now_ms) {
+    restart_requested_ = requested_ && restart_requested;
+    const bool should_disconnect =
+        restart_requested_ && (complete_ || timed_out_);
+    if (!should_disconnect) {
+        if (disconnect_requested_) {
+            transport_.set_controlled_disconnect(false);
+        }
+        disconnect_requested_ = false;
+        disconnect_complete_ = false;
+        disconnect_timed_out_ = false;
+        disconnect_deadline_ms_ = 0;
+        return;
+    }
+
+    if (!disconnect_requested_) {
+        disconnect_requested_ = true;
+        disconnect_complete_ = false;
+        disconnect_timed_out_ = false;
+        disconnect_deadline_ms_ =
+            now_ms + AC_RPC_CONTROLLED_DISCONNECT_TIMEOUT_MS;
+        if (disconnect_deadline_ms_ == 0) disconnect_deadline_ms_ = 1;
+        transport_.set_controlled_disconnect(true);
+    }
+
+    if (transport_.controlled_disconnect_complete()) {
+        disconnect_complete_ = true;
+        disconnect_deadline_ms_ = 0;
+        return;
+    }
+    if (!disconnect_deadline_ms_ ||
+        static_cast<int32_t>(now_ms - disconnect_deadline_ms_) < 0) {
+        return;
+    }
+
+    disconnect_timed_out_ = true;
+    disconnect_deadline_ms_ = 0;
+    Log::logf(CAT_RPC, LOG_WARN,
+              "AS11 link disconnect timed out before restart\n");
 }
 
 bool RpcQuiesceCoordinator::push_traffic_quiesced(

@@ -33,6 +33,8 @@ enum class As11BleLinkState : uint8_t {
     Discovering,
     Authenticating,
     Ready,
+    Disconnecting,
+    Quiesced,
     Backoff,
 };
 
@@ -98,6 +100,8 @@ public:
     RpcLinkSendResult send(RpcPayloadView payload) override;
     bool take_event(RpcLinkEvent &event) override;
     void reset() override;
+    void set_controlled_disconnect(bool requested) override;
+    bool controlled_disconnect_complete() const override;
     RpcApplicationLinkStatus status() const override;
     const char *name() const override { return "ble"; }
 
@@ -211,12 +215,15 @@ private:
     bool write_fig(uint16_t vcid, const uint8_t *data, size_t length);
     void drain_notifications(bool publish_application);
     void publish_packet(const As11BleFigPacket &packet);
+    void publish_disconnect(const char *detail);
     void publish_error(const char *detail);
 
     // Cross-task state
     Configuration configuration() const;
     bool reset_requested() const;
     void clear_reset_request();
+    bool controlled_disconnect_requested() const;
+    void set_controlled_disconnect_complete(bool complete);
     void set_status(As11BleLinkState state,
                     const char *error = nullptr);
     void set_connected(bool connected, int rssi = 0);
@@ -253,6 +260,8 @@ private:
     void *credential_store_context_ = nullptr;
     bool task_started_ = false;
     bool reset_requested_ = false;
+    bool controlled_disconnect_requested_ = false;
+    bool controlled_disconnect_complete_ = false;
     uint8_t queued_requests_ = 0;
 
     // Scan state

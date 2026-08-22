@@ -12,6 +12,7 @@ struct ActivitySnapshot {
     bool foreground_report_demand = false;
     bool ota_install_active = false;
     bool export_work_claimed = false;
+    bool as11_rpc_available = true;
     uint32_t generation = 0;
 };
 

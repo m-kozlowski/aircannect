@@ -321,7 +321,10 @@ void EventBroker::mark_command_queued(EventCommandType type,
 }
 
 void EventBroker::mark_command_deferred(uint32_t now_ms) {
-    next_subscribe_ms_ = now_ms + AC_RPC_DEFAULT_TIMEOUT_MS;
+    const uint32_t retry_ms = quiesce_requested_
+        ? AC_AS11_EVENT_QUIESCE_RETRY_MS
+        : AC_RPC_DEFAULT_TIMEOUT_MS;
+    next_subscribe_ms_ = now_ms + retry_ms;
 }
 
 void EventBroker::mark_command_timeout(uint32_t now_ms) {

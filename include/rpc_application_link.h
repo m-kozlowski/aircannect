@@ -45,6 +45,10 @@ public:
     virtual RpcLinkSendResult send(RpcPayloadView payload) = 0;
     virtual bool take_event(RpcLinkEvent &event) = 0;
     virtual void reset() = 0;
+    virtual void set_controlled_disconnect(bool requested) {
+        (void)requested;
+    }
+    virtual bool controlled_disconnect_complete() const { return true; }
 
     virtual RpcApplicationLinkStatus status() const = 0;
     virtual const char *name() const = 0;

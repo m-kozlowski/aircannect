@@ -807,6 +807,13 @@ bool FirmwareInstaller::as11_quiesce_required() const {
     return required;
 }
 
+bool FirmwareInstaller::reboot_pending() const {
+    if (!lock()) return false;
+    const bool pending = status_.reboot_pending;
+    unlock();
+    return pending;
+}
+
 FirmwareInstallStatus FirmwareInstaller::status() const {
     if (!lock()) return FirmwareInstallStatus();
     const FirmwareInstallStatus copy = status_;

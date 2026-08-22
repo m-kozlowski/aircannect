@@ -16,9 +16,9 @@ static constexpr const char *AS11_BLE_TX_UUID =
     "a6220002-35f1-4b20-afae-cb089d2044aa";
 static constexpr const char *AS11_BLE_RX_UUID =
     "a6220003-35f1-4b20-afae-cb089d2044aa";
+static constexpr TickType_t AS11_BLE_HANDOFF_WAIT = pdMS_TO_TICKS(5);
 static constexpr uint32_t AS11_BLE_SCANNER_WAIT_MS =
     AC_OXIMETRY_SENSOR_SCAN_MS + 1000;
-static constexpr TickType_t AS11_BLE_HANDOFF_WAIT = pdMS_TO_TICKS(5);
 
 bool copy_text(char *out, size_t out_size, const char *value) {
     if (!out || out_size == 0) return false;
@@ -70,6 +70,8 @@ const char *as11_ble_link_state_name(As11BleLinkState state) {
         case As11BleLinkState::Discovering: return "discovering";
         case As11BleLinkState::Authenticating: return "authenticating";
         case As11BleLinkState::Ready: return "ready";
+        case As11BleLinkState::Disconnecting: return "disconnecting";
+        case As11BleLinkState::Quiesced: return "quiesced";
         case As11BleLinkState::Backoff: return "backoff";
     }
     return "unknown";
@@ -145,7 +147,8 @@ void As11BleRpcLink::poll(uint32_t now_ms) {
 
 RpcLinkSendResult As11BleRpcLink::send(RpcPayloadView payload) {
     const As11BleLinkStatus snapshot = ble_status();
-    if (!snapshot.enabled || !snapshot.authenticated) {
+    if (!snapshot.enabled || !snapshot.authenticated ||
+        controlled_disconnect_requested()) {
         return RpcLinkSendResult::Unavailable;
     }
 
@@ -188,6 +191,31 @@ void As11BleRpcLink::reset() {
     events_.clear();
 }
 
+void As11BleRpcLink::set_controlled_disconnect(bool requested) {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    if (controlled_disconnect_requested_ != requested) {
+        controlled_disconnect_requested_ = requested;
+        controlled_disconnect_complete_ = false;
+    }
+    portEXIT_CRITICAL(&mux_);
+#else
+    (void)requested;
+#endif
+}
+
+bool As11BleRpcLink::controlled_disconnect_complete() const {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    const bool complete = !controlled_disconnect_requested_ ||
+                          controlled_disconnect_complete_;
+    portEXIT_CRITICAL(&mux_);
+    return complete;
+#else
+    return true;
+#endif
+}
+
 RpcApplicationLinkStatus As11BleRpcLink::status() const {
     const As11BleLinkStatus snapshot = ble_status();
     uint8_t queued_requests = 0;
@@ -200,7 +228,8 @@ RpcApplicationLinkStatus As11BleRpcLink::status() const {
 #endif
 
     RpcApplicationLinkStatus out;
-    out.ready = snapshot.authenticated;
+    out.ready = snapshot.authenticated &&
+                !controlled_disconnect_requested();
     out.tx_idle = queued_requests == 0;
     out.tx_queue_depth = queued_requests;
     out.rx_pressure_events = snapshot.notification_drops;
@@ -318,10 +347,53 @@ void As11BleRpcLink::task_loop() {
     uint32_t next_attempt_ms = 0;
     uint32_t reconnect_delay_ms = AC_AS11_BLE_RECONNECT_MIN_MS;
     bool ready_seen = false;
+    bool controlled_disconnect_started = false;
 
     while (true) {
         const Configuration config = configuration();
         const uint32_t now_ms = millis();
+
+        if (controlled_disconnect_requested()) {
+            if (!controlled_disconnect_started) {
+                controlled_disconnect_started = true;
+                set_authenticated(false);
+                requests_.clear(pdMS_TO_TICKS(100));
+
+                portENTER_CRITICAL(&mux_);
+                queued_requests_ = 0;
+                portEXIT_CRITICAL(&mux_);
+
+                if (client_ && client_->isConnected()) {
+                    set_status(As11BleLinkState::Disconnecting);
+                    Log::logf(CAT_BLE, LOG_INFO,
+                              "disconnecting AS11 before restart\n");
+                    (void)client_->disconnect();
+                }
+            }
+
+            if (client_ && client_->isConnected()) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            if (!controlled_disconnect_complete()) {
+                disconnect_and_clear();
+                ready_seen = false;
+                set_status(As11BleLinkState::Quiesced);
+                set_controlled_disconnect_complete(true);
+                Log::logf(CAT_BLE, LOG_INFO,
+                          "AS11 disconnected before restart\n");
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        if (controlled_disconnect_started) {
+            controlled_disconnect_started = false;
+            next_attempt_ms = 0;
+            reconnect_delay_ms = AC_AS11_BLE_RECONNECT_MIN_MS;
+        }
 
         PairingCommand pairing_command;
         if (pairing_commands_.pop(pairing_command)) {
@@ -351,7 +423,13 @@ void As11BleRpcLink::task_loop() {
             continue;
         }
 
-        if (config.generation != applied_generation || reset_requested()) {
+        const bool configuration_changed =
+            config.generation != applied_generation;
+        if (configuration_changed || reset_requested()) {
+            if (configuration_changed && ready_seen) {
+                publish_disconnect("ble_configuration_changed");
+            }
+
             disconnect_and_clear();
             clear_reset_request();
             applied_generation = config.generation;
@@ -370,10 +448,7 @@ void As11BleRpcLink::task_loop() {
 
         if (!client_ || !client_->isConnected()) {
             if (ready_seen) {
-                RpcLinkEvent event;
-                event.kind = RpcLinkEventKind::Disconnected;
-                event.detail = "ble_disconnected";
-                (void)events_.push(std::move(event), AS11_BLE_HANDOFF_WAIT);
+                publish_disconnect("ble_disconnected");
                 ready_seen = false;
             }
             disconnect_and_clear();
@@ -900,7 +975,7 @@ void As11BleRpcLink::note_disconnected(int reason) {
     status_.connected = false;
     status_.authenticated = false;
     portEXIT_CRITICAL(&mux_);
-    Log::logf(CAT_BLE, LOG_DEBUG,
+    Log::logf(CAT_BLE, LOG_INFO,
               "AS11 disconnected reason=%d\n", reason);
 #else
     (void)reason;
@@ -1256,6 +1331,16 @@ void As11BleRpcLink::publish_packet(const As11BleFigPacket &packet) {
     }
 }
 
+void As11BleRpcLink::publish_disconnect(const char *detail) {
+    RpcLinkEvent event;
+    event.kind = RpcLinkEventKind::Disconnected;
+    event.detail = detail ? detail : "ble_disconnected";
+    if (!events_.push(std::move(event), AS11_BLE_HANDOFF_WAIT)) {
+        Log::logf(CAT_BLE, LOG_WARN,
+                  "link reset notification dropped\n");
+    }
+}
+
 void As11BleRpcLink::publish_error(const char *detail) {
     const char *error = detail ? detail : "ble_link_error";
     Log::logf(CAT_BLE, LOG_WARN, "link error=%s\n", error);
@@ -1286,6 +1371,27 @@ bool As11BleRpcLink::reset_requested() const {
     portEXIT_CRITICAL(&mux_);
 #endif
     return requested;
+}
+
+bool As11BleRpcLink::controlled_disconnect_requested() const {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    const bool requested = controlled_disconnect_requested_;
+    portEXIT_CRITICAL(&mux_);
+    return requested;
+#else
+    return false;
+#endif
+}
+
+void As11BleRpcLink::set_controlled_disconnect_complete(bool complete) {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    controlled_disconnect_complete_ = complete;
+    portEXIT_CRITICAL(&mux_);
+#else
+    (void)complete;
+#endif
 }
 
 void As11BleRpcLink::clear_reset_request() {

@@ -150,9 +150,16 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
     ReportSpoolFetchCommand command;
     OperationTicket ticket;
     if (take_queued(command, ticket)) {
-        const ReportSourceDef *source = report_source_def(command.source);
+        const ReportSourceDef *source =
+            command.kind == ReportSpoolFetchKind::ReportSource
+                ? report_source_def(command.source)
+                : nullptr;
+        const char *spool_type =
+            command.kind == ReportSpoolFetchKind::SystemActivity
+                ? AC_SYSTEM_ACTIVITY_SPOOL_TYPE
+                : source ? source->spool_type : nullptr;
         std::string from_dt;
-        if (!source || !source->spool_type || !source->spool_type[0] ||
+        if (!spool_type || !spool_type[0] ||
             !format_utc_ms_iso(command.from_ms, from_dt)) {
             publish_completion(ticket,
                                OperationOutcome::failed(),
@@ -162,9 +169,10 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
         }
 
         SpoolClientRequest request;
-        request.spool_type = source->spool_type;
+        request.spool_type = spool_type;
         request.from_dt = std::move(from_dt);
         const bool complete_payload =
+            command.kind == ReportSpoolFetchKind::SystemActivity ||
             command.source == ReportSourceId::Summary;
 
         request.max_size = complete_payload

@@ -138,3 +138,4 @@ static constexpr uint32_t AC_AS11_EVENT_SUBSCRIBE_DELAY_MS = 1000;
 static constexpr uint32_t AC_AS11_EVENT_SUBSCRIBE_RETRY_MS = 30000;
 static constexpr uint32_t AC_AS11_EVENT_QUIESCE_RETRY_MS = 500;
 static constexpr uint32_t AC_RPC_QUIESCE_TIMEOUT_MS = 15000;
+static constexpr uint32_t AC_RPC_CONTROLLED_DISCONNECT_TIMEOUT_MS = 5000;

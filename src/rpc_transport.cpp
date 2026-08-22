@@ -92,14 +92,14 @@ void RpcTransport::process_link_events(size_t budget) {
                 publish_framing_error(link_.name(), event.detail);
                 break;
             case RpcLinkEventKind::Disconnected:
-                accept_link_reset(event.detail.c_str());
+                invalidate_link_state(event.detail.empty()
+                                          ? "link_disconnected"
+                                          : event.detail.c_str());
                 break;
             case RpcLinkEventKind::TransportChanged:
-                deferred_payloads_.clear();
-                cancel_all_requests(event.detail.empty()
-                                        ? "transport_changed"
-                                        : event.detail.c_str());
-                note_transport_reset();
+                invalidate_link_state(event.detail.empty()
+                                          ? "transport_changed"
+                                          : event.detail.c_str());
                 break;
         }
     }
@@ -293,6 +293,14 @@ void RpcTransport::set_as11_unavailable(bool unavailable) {
     if (unavailable) cancel_requests_while_unavailable();
 }
 
+void RpcTransport::set_controlled_disconnect(bool requested) {
+    link_.set_controlled_disconnect(requested);
+}
+
+bool RpcTransport::controlled_disconnect_complete() const {
+    return link_.controlled_disconnect_complete();
+}
+
 void RpcTransport::set_raw_rpc_forwarding_enabled(bool enabled) {
     raw_rpc_forwarding_enabled_ = enabled;
 }
@@ -345,8 +353,12 @@ void RpcTransport::accept_boot_notification(const char *detail) {
 
 void RpcTransport::accept_link_reset(const char *reason) {
     link_.reset();
+    invalidate_link_state(reason ? reason : "link_reset");
+}
+
+void RpcTransport::invalidate_link_state(const char *reason) {
     deferred_payloads_.clear();
-    cancel_all_requests(reason ? reason : "link_reset");
+    cancel_all_requests(reason);
     note_transport_reset();
 }
 
