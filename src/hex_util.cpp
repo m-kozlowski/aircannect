@@ -72,6 +72,26 @@ bool hex_encode(const uint8_t *bytes,
     return true;
 }
 
+bool hex_decode(const char *text,
+                size_t text_length,
+                uint8_t *out,
+                size_t out_size,
+                size_t &decoded_length) {
+    decoded_length = 0;
+    if (!text || !out || (text_length & 1u) != 0) return false;
+
+    const size_t byte_length = text_length / 2;
+    if (byte_length > out_size) return false;
+    for (size_t i = 0; i < byte_length; ++i) {
+        const int high = hex_nibble(text[i * 2]);
+        const int low = hex_nibble(text[i * 2 + 1]);
+        if (high < 0 || low < 0) return false;
+        out[i] = static_cast<uint8_t>((high << 4) | low);
+    }
+    decoded_length = byte_length;
+    return true;
+}
+
 bool sha256_text_valid(const char *value) {
     return value && strlen(value) == 64 && hex_text_valid(value, 64);
 }
