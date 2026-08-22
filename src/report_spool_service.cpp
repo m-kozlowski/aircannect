@@ -130,7 +130,8 @@ bool ReportSpoolService::enqueue_notification(const RpcPayloadRef &payload) {
     return initialized_ && runtime_.enqueue_notification(payload);
 }
 
-bool ReportSpoolService::poll(bool transport_backpressure_active,
+bool ReportSpoolService::poll(bool normal_rpc_available,
+                              bool transport_backpressure_active,
                               uint32_t rx_queue_full_alerts) {
     if (!initialized_) return false;
 
@@ -150,6 +151,14 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
     ReportSpoolFetchCommand command;
     OperationTicket ticket;
     if (take_queued(command, ticket)) {
+        if (!normal_rpc_available) {
+            publish_completion(ticket,
+                               OperationOutcome::failed(),
+                               nullptr,
+                               "as11_unavailable");
+            return true;
+        }
+
         const ReportSourceDef *source =
             command.kind == ReportSpoolFetchKind::ReportSource
                 ? report_source_def(command.source)

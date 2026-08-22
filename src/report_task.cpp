@@ -304,7 +304,8 @@ struct ReportTask::Runtime {
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
             activity.foreground_report_demand ||
-            activity.ota_install_active || activity.export_work_claimed;
+            activity.ota_install_active || activity.export_work_claimed ||
+            !activity.as11_rpc_available;
         if (!background_suspended || was_suspended) return true;
 
         (void)engine.cancel_background();

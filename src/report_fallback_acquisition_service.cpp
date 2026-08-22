@@ -9,6 +9,10 @@
 #include "report_planner.h"
 #include "report_sources.h"
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -67,6 +71,37 @@ StorageReadLane preserve_lane(StorageReadLane requested) {
     return requested == StorageReadLane::Foreground
         ? StorageReadLane::Foreground
         : StorageReadLane::Report;
+}
+
+void log_spool_fetch(SleepDayId sleep_day,
+                     ReportSourceId source_id,
+                     bool started,
+                     const char *error = nullptr) {
+#ifdef ARDUINO
+    char day[9] = {};
+    const ReportSourceDef *source = report_source_def(source_id);
+    const char *source_name =
+        source && source->spool_type ? source->spool_type : "unknown";
+    if (!sleep_day.format_yyyymmdd(day, sizeof(day))) {
+        snprintf(day, sizeof(day), "unknown");
+    }
+
+    if (started) {
+        Log::logf(CAT_REPORT, LOG_INFO,
+                  "fallback spool started night=%s source=%s\n",
+                  day, source_name);
+        return;
+    }
+
+    Log::logf(CAT_REPORT, LOG_WARN,
+              "fallback spool failed night=%s source=%s error=%s\n",
+              day, source_name, error ? error : "fetch_failed");
+#else
+    (void)sleep_day;
+    (void)source_id;
+    (void)started;
+    (void)error;
+#endif
 }
 
 }  // namespace
@@ -164,6 +199,8 @@ void ReportFallbackAcquisitionService::reset() {
     spool_ticket_ = {};
     write_ticket_ = {};
     source_stop_requested_ = false;
+    source_past_target_ = false;
+    round_chunk_seen_ = false;
     generation_ = 0;
     read_lane_ = StorageReadLane::Report;
     write_lane_ = StorageAtomicWriteLane::Maintenance;
@@ -213,17 +250,23 @@ bool ReportFallbackAcquisitionService::build_targets() {
         return false;
     }
 
-    auto add_target = [this](ReportSourceId source, int64_t from_ms) {
-        if (source == ReportSourceId::Summary || from_ms <= 0) return false;
+    auto add_target = [this](ReportSourceId source,
+                             int64_t from_ms,
+                             int64_t until_ms) {
+        if (source == ReportSourceId::Summary || from_ms <= 0 ||
+            until_ms <= from_ms) {
+            return false;
+        }
 
         for (size_t i = 0; i < target_count_; ++i) {
             if (targets_[i].source != source) continue;
             targets_[i].from_ms = std::min(targets_[i].from_ms, from_ms);
+            targets_[i].until_ms = std::max(targets_[i].until_ms, until_ms);
             return true;
         }
         if (target_count_ >= MaxSourceTargets) return false;
 
-        targets_[target_count_++] = {source, from_ms};
+        targets_[target_count_++] = {source, from_ms, until_ms};
         return true;
     };
 
@@ -249,7 +292,8 @@ bool ReportFallbackAcquisitionService::build_targets() {
             const ReportSignalDef &signal = signals[signal_index];
             if ((acquirable & report_signal_bit(signal.id)) == 0) continue;
             if (!add_target(signal.fallback_source,
-                            catalog_sessions[catalog_index].start_ms)) {
+                            catalog_sessions[catalog_index].start_ms,
+                            catalog_sessions[catalog_index].end_ms)) {
                 fail("fallback_source_targets_full");
                 return false;
             }
@@ -257,7 +301,8 @@ bool ReportFallbackAcquisitionService::build_targets() {
 
         if (session->missing_event_mask != 0 &&
             !add_target(ReportSourceId::RespiratoryEvents,
-                        catalog_sessions[catalog_index].start_ms)) {
+                        catalog_sessions[catalog_index].start_ms,
+                        catalog_sessions[catalog_index].end_ms)) {
             fail("fallback_event_target_failed");
             return false;
         }
@@ -478,6 +523,7 @@ bool ReportFallbackAcquisitionService::submit_current_fetch() {
 
     spool_ticket_ = submitted.ticket;
     status_.source = target.source;
+    log_spool_fetch(status_.sleep_day, target.source, true);
     return true;
 }
 
@@ -488,7 +534,7 @@ bool ReportFallbackAcquisitionService::consume_fetch_round() {
     const bool parsed = parse_round(round.result);
     round.clear();
     if (parsed && status_.state == ReportFallbackAcquisitionState::Fetching &&
-        current_sampled_target_complete()) {
+        (source_past_target_ || current_sampled_target_complete())) {
         source_stop_requested_ = true;
         (void)spool_port_->cancel(spool_ticket_);
     }
@@ -502,15 +548,17 @@ bool ReportFallbackAcquisitionService::finish_current_fetch() {
     }
 
     spool_ticket_ = {};
-    const bool stopped_after_coverage =
-        source_stop_requested_ && current_sampled_target_complete();
+    const bool target_resolved_before_completion = source_stop_requested_ &&
+        (source_past_target_ || current_sampled_target_complete());
     source_stop_requested_ = false;
-    if (!stopped_after_coverage &&
+    if (!target_resolved_before_completion &&
         (completion.outcome.disposition != OperationDisposition::Succeeded ||
          completion.result.truncated)) {
-        fail(completion.error[0]
-                 ? completion.error
-                 : "fallback_spool_fetch_failed");
+        const char *error = completion.error[0]
+            ? completion.error
+            : "fallback_spool_fetch_failed";
+        log_spool_fetch(status_.sleep_day, status_.source, false, error);
+        fail(error);
         completion.clear();
         return true;
     }
@@ -570,6 +618,8 @@ bool ReportFallbackAcquisitionService::complete_current_source() {
 
     status_.sources_completed++;
     target_index_++;
+    source_past_target_ = false;
+    round_chunk_seen_ = false;
     status_.source = ReportSourceId::Summary;
     if (target_index_ >= target_count_) {
         status_.state = ReportFallbackAcquisitionState::Publishing;
@@ -580,6 +630,7 @@ bool ReportFallbackAcquisitionService::complete_current_source() {
 bool ReportFallbackAcquisitionService::parse_round(
     ReportSpoolResult &result) {
     char error[AC_STORAGE_ERROR_MAX] = {};
+    round_chunk_seen_ = false;
     const ReportSourceId source = targets_[target_index_].source;
     const bool parsed = source == ReportSourceId::RespiratoryEvents
         ? report_parse_event_spool(result,
@@ -608,6 +659,16 @@ bool ReportFallbackAcquisitionService::accept_parsed_chunk(
     ReportFallbackAcquisitionService *service =
         static_cast<ReportFallbackAcquisitionService *>(context);
     if (!service) return false;
+
+    if (!service->round_chunk_seen_) {
+        service->round_chunk_seen_ = true;
+        if (service->target_index_ < service->target_count_ &&
+            chunk.start_ms >=
+                service->targets_[service->target_index_].until_ms) {
+            service->source_past_target_ = true;
+        }
+    }
+    if (service->source_past_target_) return true;
 
     return chunk.kind == ReportParsedChunkKind::Events
         ? service->accept_event_chunk(chunk)
@@ -903,13 +964,15 @@ bool ReportFallbackAcquisitionService::append_unavailable_sections() {
         return false;
     }
 
-    for (size_t session_index = 0;
-         session_index < session_count_;
-         ++session_index) {
-        for (size_t signal_index = 0;
-             signal_index < signal_count;
-             ++signal_index) {
-            const ReportSignalDef &signal = signals[signal_index];
+    for (size_t signal_index = 0;
+         signal_index < signal_count;
+         ++signal_index) {
+        const ReportSignalDef &signal = signals[signal_index];
+        NightCatalogTimeRange unavailable;
+
+        for (size_t session_index = 0;
+             session_index < session_count_;
+             ++session_index) {
             if (!signal_targeted(session_index, signal.id, source) ||
                 series_session_complete(session_index,
                                         source,
@@ -917,18 +980,29 @@ bool ReportFallbackAcquisitionService::append_unavailable_sections() {
                 continue;
             }
 
-            ReportFallbackSectionInput section;
-            section.kind = ReportFallbackSectionKind::Unavailable;
-            section.source = source;
-            section.signal = signal.id;
-            section.coverage = sessions[session_index];
-            if (!builder_.append_section(section)) {
-                fail("fallback_unavailable_append_failed");
-                return false;
+            if (!unavailable.valid()) {
+                unavailable = sessions[session_index];
+            } else {
+                unavailable.start_ms = std::min(
+                    unavailable.start_ms, sessions[session_index].start_ms);
+                unavailable.end_ms = std::max(
+                    unavailable.end_ms, sessions[session_index].end_ms);
             }
-            status_.sections_added++;
-            status_.unavailable_added++;
         }
+
+        if (!unavailable.valid()) continue;
+
+        ReportFallbackSectionInput section;
+        section.kind = ReportFallbackSectionKind::Unavailable;
+        section.source = source;
+        section.signal = signal.id;
+        section.coverage = unavailable;
+        if (!builder_.append_section(section)) {
+            fail("fallback_unavailable_append_failed");
+            return false;
+        }
+        status_.sections_added++;
+        status_.unavailable_added++;
     }
     return true;
 }

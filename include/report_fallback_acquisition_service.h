@@ -89,6 +89,7 @@ private:
     struct SourceTarget {
         ReportSourceId source = ReportSourceId::Summary;
         int64_t from_ms = 0;
+        int64_t until_ms = 0;
     };
 
     struct SeriesCoverage {
@@ -187,6 +188,8 @@ private:
     OperationTicket spool_ticket_;
     OperationTicket write_ticket_;
     bool source_stop_requested_ = false;
+    bool source_past_target_ = false;
+    bool round_chunk_seen_ = false;
     uint32_t generation_ = 0;
     StorageReadLane read_lane_ = StorageReadLane::Report;
     StorageAtomicWriteLane write_lane_ =

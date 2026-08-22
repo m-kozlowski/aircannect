@@ -34,7 +34,8 @@ public:
         ReportSpoolFetchCompletion &completion) override;
 
     bool enqueue_notification(const RpcPayloadRef &payload);
-    bool poll(bool transport_backpressure_active,
+    bool poll(bool normal_rpc_available,
+              bool transport_backpressure_active,
               uint32_t rx_queue_full_alerts);
     bool active() const;
 
