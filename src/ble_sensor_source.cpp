@@ -953,6 +953,22 @@ void BleSensorSource::task_loop() {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
 
+        BleRuntime::ScanLease scan_lease =
+            runtime_.acquire_scan(pdMS_TO_TICKS(100));
+        if (!scan_lease) {
+#if AC_OXIMETRY_BLE_ENABLED
+            portENTER_CRITICAL(&mux_);
+#endif
+            scan_requested_ = scan_requested_ || manual_scan;
+            manual_connect_requested_ =
+                manual_connect_requested_ || manual_connect;
+#if AC_OXIMETRY_BLE_ENABLED
+            portEXIT_CRITICAL(&mux_);
+#endif
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         NimBLEScan *scan = NimBLEDevice::getScan();
         if (!scan) {
             set_error("BLE scan unavailable");

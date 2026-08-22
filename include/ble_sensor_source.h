@@ -5,7 +5,7 @@
 
 #include "ble_sensor_protocols.h"
 #include "board.h"
-#include "oximetry_ble_runtime.h"
+#include "ble_runtime.h"
 #include "oximetry_hub.h"
 #include "oximetry_status.h"
 
@@ -33,7 +33,7 @@ struct BleSensorEvent {
 
 class BleSensorSource {
 public:
-    explicit BleSensorSource(OximetryBleRuntime &runtime)
+    explicit BleSensorSource(BleRuntime &runtime)
         : runtime_(runtime) {}
 
     bool begin(bool enabled, const char *runtime_name);
@@ -99,7 +99,7 @@ private:
                         bool contact_present);
     void callback_disconnected(int reason);
 
-    OximetryBleRuntime &runtime_;
+    BleRuntime &runtime_;
     BleSensorProtocolEngine protocols_;
 #if AC_OXIMETRY_BLE_ENABLED
     NimBLEClient *client_ = nullptr;

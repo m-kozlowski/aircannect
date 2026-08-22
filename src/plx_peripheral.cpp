@@ -320,8 +320,7 @@ void PlxPeripheral::update_bond_forget(uint32_t now_ms) {
         forget_bond_retry_ms_ = now_ms + CPAP_BOND_DELETE_RETRY_MS;
         return;
     }
-    NimBLEScan *scan = NimBLEDevice::getScan();
-    if (scan && scan->isScanning()) {
+    if (runtime_.scan_in_progress()) {
         forget_bond_retry_ms_ = now_ms + CPAP_BOND_DELETE_RETRY_MS;
         return;
     }

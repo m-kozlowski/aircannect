@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "board.h"
-#include "oximetry_ble_runtime.h"
+#include "ble_runtime.h"
 #include "oximetry_hub.h"
 #include "oximetry_status.h"
 #include "plx_pairing_policy.h"
@@ -21,7 +21,7 @@ class PlxBleServerCallbacks;
 
 class PlxPeripheral {
 public:
-    explicit PlxPeripheral(OximetryBleRuntime &runtime)
+    explicit PlxPeripheral(BleRuntime &runtime)
         : runtime_(runtime) {}
 
     bool begin(bool enabled, OximetryAdvertiseMode advertise_mode,
@@ -79,7 +79,7 @@ private:
     bool set_name(const char *name);
     void set_error(const char *text);
 
-    OximetryBleRuntime &runtime_;
+    BleRuntime &runtime_;
     PlxPeripheralStatus status_;
     bool initialized_ = false;
     bool advertising_data_dirty_ = true;

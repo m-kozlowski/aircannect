@@ -32,7 +32,7 @@
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_http_controller.h"
-#include "oximetry_ble_runtime.h"
+#include "ble_runtime.h"
 #include "oximetry_hub.h"
 #include "oximetry_http_controller.h"
 #include "plx_peripheral.h"
@@ -98,11 +98,11 @@ static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
-static OximetryBleRuntime oximetry_ble_runtime;
+static BleRuntime ble_runtime;
 static OximetryHub oximetry_hub;
 static UdpOximeterSource oximetry_udp_source;
-static BleSensorSource oximetry_sensor_source(oximetry_ble_runtime);
-static PlxPeripheral plx_peripheral(oximetry_ble_runtime);
+static BleSensorSource oximetry_sensor_source(ble_runtime);
+static PlxPeripheral plx_peripheral(ble_runtime);
 static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
@@ -903,7 +903,7 @@ void setup() {
         config_service.data().edf_capture_enabled);
 
     const AppConfigData &config = config_service.data();
-    if (!oximetry_ble_runtime.begin()) {
+    if (!ble_runtime.begin()) {
         Log::logf(CAT_OXI, LOG_ERROR, "BLE runtime mutex init failed\n");
     }
     oximetry_hub.set_enabled(config.oximetry_enabled);
