@@ -1,6 +1,7 @@
 #include "display_manager.h"
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -8,6 +9,7 @@
 #include "board_motion.h"
 #include "debug_log.h"
 #include "display_device.h"
+#include "memory_manager.h"
 #include "motion_device.h"
 
 namespace aircannect {
@@ -85,17 +87,18 @@ bool DisplayManager::begin() {
     snapshot_lock_ = xSemaphoreCreateMutexStatic(&snapshot_lock_storage_);
     if (!snapshot_lock_) return false;
 
-    // The synchronous I2C driver keeps transaction descriptors on the caller's
-    // stack while its ISR processes them, so the display task must use internal
-    // RAM when it also owns the motion sensor.
-    const BaseType_t created = xTaskCreatePinnedToCore(
-        task_entry, "ac_display", AC_DISPLAY_TASK_STACK, this,
-        AC_DISPLAY_TASK_PRIO, &task_, AC_DISPLAY_TASK_CORE);
+    BaseType_t created = pdFAIL;
+    if (Memory::psram_available()) {
+        created = xTaskCreatePinnedToCoreWithCaps(
+            task_entry, "ac_display", AC_DISPLAY_TASK_STACK, this,
+            AC_DISPLAY_TASK_PRIO, &task_, AC_DISPLAY_TASK_CORE,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
 
     if (created != pdPASS || !task_) {
         task_ = nullptr;
         Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[DISPLAY] task creation failed\n");
+                  "[DISPLAY] PSRAM task creation failed\n");
         return false;
     }
 
