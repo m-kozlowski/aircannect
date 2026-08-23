@@ -9,7 +9,7 @@ Import("env")
 
 
 project_dir = env.get("PROJECT_DIR", ".")
-script = os.path.join(project_dir, "version.py")
+script = os.path.join(project_dir, "python", "tools", "version.py")
 header = os.path.join(project_dir, "src", "version_info.h")
 
 subprocess.run(["python3", script, "--header", header], check=True)

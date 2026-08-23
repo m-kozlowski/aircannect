@@ -140,7 +140,9 @@ project_dir = env.get("PROJECT_DIR", ".")
 html_path = os.path.join(project_dir, "www", "index.html")
 web_dir = os.path.dirname(html_path)
 header_path = os.path.join(project_dir, "src", "web_ui_html.h")
-generator_path = os.path.join(project_dir, "generate_web_ui.py")
+generator_path = os.path.join(
+    project_dir, "python", "tools", "generate_web_ui.py"
+)
 
 if os.path.exists(html_path):
     with open(html_path, "r", encoding="utf-8") as f:

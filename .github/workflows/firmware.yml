@@ -36,7 +36,8 @@ jobs:
           key: >-
             ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-deps-${{
             hashFiles('platformio.ini', 'platformio-*.ini',
-            'generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**',
+            'python/tools/generate_libsmb2.py', '.gitmodules',
+            'patches/libsmb2/**',
             'third_party/libsmb2-pio/**') }}
           restore-keys: |
             ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-deps-
@@ -49,10 +50,11 @@ jobs:
           key: >-
             ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{
             hashFiles('platformio.ini', 'platformio-*.ini',
-            'generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**',
+            'python/tools/generate_libsmb2.py', '.gitmodules',
+            'patches/libsmb2/**',
             'third_party/libsmb2-pio/**') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{ hashFiles('platformio.ini', 'platformio-*.ini', 'generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**', 'third_party/libsmb2-pio/**') }}-
+            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{ hashFiles('platformio.ini', 'platformio-*.ini', 'python/tools/generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**', 'third_party/libsmb2-pio/**') }}-
             ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-
 
       - name: Create build environment
