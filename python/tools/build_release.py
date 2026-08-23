@@ -72,31 +72,40 @@ def compress_zlib(source_path: pathlib.Path,
         destination.write(compressor.flush())
 
 
-def validate_firmware(path: pathlib.Path) -> None:
+def validate_esp32_image(path: pathlib.Path) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"firmware image is missing or empty: {path}")
     with path.open("rb") as source:
         if source.read(1) != b"\xe9":
-            raise RuntimeError(f"not an esp32 application image: {path}")
+            raise RuntimeError(f"not an esp32 image: {path}")
 
 
-def build_firmware(pio: str, environment_name: str,
-                   source_date_epoch: int, version: str) -> pathlib.Path:
+def build_firmware(
+    pio: str, environment_name: str,
+    source_date_epoch: int, version: str,
+) -> tuple[pathlib.Path, pathlib.Path]:
     build_env = os.environ.copy()
     build_env["AIRCANNECT_VERSION"] = version
     build_env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
     subprocess.run(
-        [pio, "run", "-e", environment_name],
+        [pio, "run", "-e", environment_name, "-t", "initialbin"],
         cwd=PROJECT_DIR,
         env=build_env,
         check=True,
     )
 
-    firmware_path = (
-        PROJECT_DIR / ".pio" / "build" / environment_name / "firmware.bin"
-    )
-    validate_firmware(firmware_path)
-    return firmware_path
+    build_dir = PROJECT_DIR / ".pio" / "build" / environment_name
+    firmware_path = build_dir / "firmware.bin"
+    initial_path = build_dir / "firmware.factory.bin"
+
+    validate_esp32_image(firmware_path)
+    validate_esp32_image(initial_path)
+    if initial_path.stat().st_size <= firmware_path.stat().st_size:
+        raise RuntimeError(
+            f"initial image does not contain the complete flash layout: {initial_path}"
+        )
+
+    return firmware_path, initial_path
 
 
 def artifact_record(path: pathlib.Path) -> dict[str, object]:
@@ -108,8 +117,11 @@ def artifact_record(path: pathlib.Path) -> dict[str, object]:
 
 
 def package_firmware(
-    firmware_path: pathlib.Path, output_dir: pathlib.Path,
-    environment_name: str, version: str,
+    firmware_path: pathlib.Path,
+    initial_image_path: pathlib.Path,
+    output_dir: pathlib.Path,
+    environment_name: str,
+    version: str,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     stem = "-".join((
         "aircannect",
@@ -118,11 +130,15 @@ def package_firmware(
     ))
     raw_path = output_dir / f"{stem}.bin"
     compressed_path = output_dir / f"{stem}.bin.zlib"
+    initial_path = output_dir / f"{stem}-initial.bin"
+
     shutil.copyfile(firmware_path, raw_path)
     compress_zlib(raw_path, compressed_path)
+    shutil.copyfile(initial_image_path, initial_path)
 
     raw = artifact_record(raw_path)
     compressed = artifact_record(compressed_path)
+    initial = artifact_record(initial_path)
 
     target = {
         "raw": {
@@ -138,7 +154,7 @@ def package_firmware(
             "decoded_sha256": raw["sha256"],
         },
     }
-    return target, [raw, compressed]
+    return target, [raw, compressed, initial]
 
 
 def write_checksums(output_dir: pathlib.Path, artifacts: list[dict[str, object]]) -> None:
@@ -198,11 +214,15 @@ def main() -> None:
     artifacts = []
     targets = {}
     for environment_name in environments:
-        firmware_path = build_firmware(
+        firmware_path, initial_image_path = build_firmware(
             args.pio, environment_name, source_date_epoch, version
         )
         target, target_artifacts = package_firmware(
-            firmware_path, output_dir, environment_name, version
+            firmware_path,
+            initial_image_path,
+            output_dir,
+            environment_name,
+            version,
         )
         targets[environment_name] = target
         artifacts.extend(target_artifacts)
