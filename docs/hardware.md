@@ -17,8 +17,9 @@ provide either or both.
 - **XIAO ESP32-S3 Plus:** external microSD, CAN enabled by default, BLE also
   available.
 - **[Waveshare ESP32-S3-Touch-LCD-1.54](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54):**
-  onboard microSD, BLE enabled, CAN disabled by default. The LCD and touch
-  controller are not initialized and the backlight remains off.
+  onboard microSD, BLE enabled, CAN disabled by default, and a local status
+  display. Its QMI8658 accelerometer wakes the backlight after movement and
+  keeps the display upright; touch remains disabled.
 
 ## Bare minimum hardware diagram
 
@@ -140,7 +141,16 @@ microSD (4-bit SDMMC)
 ```
 
 It defaults to `as11_transport=ble`, so pairing is completed from onboarding
-or the Config tab. The profile does not pull in LCD or touch libraries.
+or the Config tab. The LCD shows time, Air11, Wi-Fi, and export status while
+idle. During therapy it shows elapsed time, algorithm pressure, and fresh
+oximetry when available. The `PLUS` button toggles the backlight on a short
+press and starts or stops therapy on a long press. Touch is not initialized.
+
+Display and button support are build capabilities, not board identities. A
+display driver is selected with `AC_DISPLAY_DRIVER` and described by its pin,
+size, rotation, and backlight flags. `AC_ACTION_BUTTON_GPIO` independently
+enables the action button. Future board profiles can therefore use another
+resolution or display backend without changing the dashboard owner.
 
 CAN is a build capability rather than a board identity. A custom environment
 may extend this profile, remove its inherited `-DAC_CAN_ENABLED=0` with
