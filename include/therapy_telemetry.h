@@ -7,17 +7,15 @@
 namespace aircannect {
 
 struct TherapyPressureSnapshot {
-    bool mask_pressure_valid = false;
     bool inspiratory_pressure_valid = false;
     bool expiratory_pressure_valid = false;
-    float mask_pressure = 0.0f;
     float inspiratory_pressure = 0.0f;
     float expiratory_pressure = 0.0f;
 };
 
 class TherapyTelemetry {
 public:
-    void accept_frame(const StreamFrameData &frame, uint32_t now_ms);
+    bool accept_frame(const StreamFrameData &frame, uint32_t now_ms);
     TherapyPressureSnapshot snapshot(uint32_t now_ms) const;
     void clear();
 
@@ -28,14 +26,13 @@ private:
         bool valid = false;
     };
 
-    static void accept_signal(const StreamFrameData &frame,
+    static bool accept_signal(const StreamFrameData &frame,
                               StreamSignalId primary,
                               StreamSignalId fallback,
                               uint32_t now_ms,
                               Reading &reading);
     static bool fresh(const Reading &reading, uint32_t now_ms);
 
-    Reading mask_pressure_;
     Reading inspiratory_pressure_;
     Reading expiratory_pressure_;
 };

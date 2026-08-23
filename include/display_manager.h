@@ -16,6 +16,7 @@ class DisplayManager {
 public:
     bool begin();
     void publish(const DisplaySnapshot &snapshot);
+    void publish_pressure(const DisplayPressureSnapshot &pressure);
 
     bool available() const { return device_ != nullptr; }
     bool backlight_on() const { return backlight_requested_.load(); }

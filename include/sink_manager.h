@@ -1,12 +1,13 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "as11_device_state.h"
 #include "session_manager.h"
 #include "stream_broker.h"
 #include "stream_frame.h"
+#include "therapy_telemetry.h"
 
 namespace aircannect {
 
@@ -43,7 +44,12 @@ public:
     void begin(StreamBroker &stream,
                const As11DeviceState &device_state,
                SessionManager &session);
-    void poll();
+    void poll(uint32_t now_ms);
+
+    void set_therapy_pressure_enabled(bool enabled);
+    TherapyPressureSnapshot therapy_pressure_snapshot(uint32_t now_ms) const;
+    bool take_therapy_pressure_update(uint32_t now_ms,
+                                      TherapyPressureSnapshot &snapshot);
 
     void set_live_chart_enabled(bool enabled);
     const LiveChartRuntimeStatus &live_chart_status() const {
@@ -53,6 +59,12 @@ public:
     void mark_live_chart_sent();
 
 private:
+    bool therapy_pressure_should_run() const;
+    void poll_therapy_pressure(uint32_t now_ms);
+    void attach_therapy_pressure_stream(uint32_t now_ms);
+    void release_therapy_pressure_stream();
+    void drain_therapy_pressure_stream(uint32_t now_ms);
+
     bool live_chart_should_run() const;
     void poll_live_chart(uint32_t now_ms);
     bool ensure_live_chart_batches();
@@ -65,6 +77,14 @@ private:
     StreamBroker *stream_ = nullptr;
     const As11DeviceState *device_state_ = nullptr;
     SessionManager *session_ = nullptr;
+
+    TherapyTelemetry therapy_pressure_;
+    StreamConsumerHandle therapy_pressure_handle_ = STREAM_CONSUMER_INVALID;
+    uint32_t therapy_pressure_session_id_ = 0;
+    uint32_t next_therapy_pressure_attach_ms_ = 0;
+    bool therapy_pressure_enabled_ = false;
+    bool therapy_pressure_dirty_ = false;
+
     LiveChartRuntimeStatus live_chart_;
     uint32_t last_live_queue_drops_ = 0;
     uint32_t next_live_attach_ms_ = 0;

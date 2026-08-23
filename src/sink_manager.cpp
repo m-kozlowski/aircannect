@@ -17,6 +17,10 @@ const char *const LIVE_CHART_STREAM_IDS =
     "_HRT,"
     "_SAO";
 
+const char *const THERAPY_PRESSURE_STREAM_IDS = "_MKI,_MKE";
+constexpr uint32_t THERAPY_PRESSURE_SAMPLE_MS = 2000;
+constexpr uint32_t THERAPY_PRESSURE_REPORT_MS = 2000;
+
 void append_live_sample(LiveChartSeriesBatch &series,
                         bool valid,
                         float value,
@@ -92,11 +96,119 @@ void SinkManager::begin(StreamBroker &stream,
     initialized_ = true;
 }
 
-void SinkManager::poll() {
+void SinkManager::poll(uint32_t now_ms) {
     if (!initialized_ || !stream_ || !session_) return;
-    const uint32_t now = millis();
 
-    poll_live_chart(now);
+    poll_therapy_pressure(now_ms);
+    poll_live_chart(now_ms);
+}
+
+void SinkManager::set_therapy_pressure_enabled(bool enabled) {
+    if (therapy_pressure_enabled_ == enabled) return;
+
+    therapy_pressure_enabled_ = enabled;
+    therapy_pressure_dirty_ = true;
+    if (!enabled) {
+        release_therapy_pressure_stream();
+        therapy_pressure_.clear();
+        therapy_pressure_session_id_ = 0;
+    }
+}
+
+TherapyPressureSnapshot SinkManager::therapy_pressure_snapshot(
+    uint32_t now_ms) const {
+    return therapy_pressure_.snapshot(now_ms);
+}
+
+bool SinkManager::take_therapy_pressure_update(
+    uint32_t now_ms,
+    TherapyPressureSnapshot &snapshot) {
+    if (!therapy_pressure_dirty_) return false;
+
+    snapshot = therapy_pressure_snapshot(now_ms);
+    therapy_pressure_dirty_ = false;
+    return true;
+}
+
+bool SinkManager::therapy_pressure_should_run() const {
+    if (!therapy_pressure_enabled_ || !stream_ || !device_state_ ||
+        !session_) {
+        return false;
+    }
+    if (device_state_->therapy_state() == As11TherapyState::Running) {
+        return true;
+    }
+    return session_->status().state == SessionState::Active;
+}
+
+void SinkManager::poll_therapy_pressure(uint32_t now_ms) {
+    if (!therapy_pressure_should_run()) {
+        release_therapy_pressure_stream();
+        if (therapy_pressure_session_id_ != 0) {
+            therapy_pressure_.clear();
+            therapy_pressure_session_id_ = 0;
+            therapy_pressure_dirty_ = true;
+        }
+        return;
+    }
+
+    const uint32_t session_id = session_->status().session_id;
+    if (session_id != therapy_pressure_session_id_) {
+        therapy_pressure_.clear();
+        therapy_pressure_session_id_ = session_id;
+        therapy_pressure_dirty_ = true;
+    }
+
+    attach_therapy_pressure_stream(now_ms);
+    drain_therapy_pressure_stream(now_ms);
+}
+
+void SinkManager::attach_therapy_pressure_stream(uint32_t now_ms) {
+    if (therapy_pressure_handle_ != STREAM_CONSUMER_INVALID &&
+        stream_->consumer_active(therapy_pressure_handle_)) {
+        return;
+    }
+
+    therapy_pressure_handle_ = STREAM_CONSUMER_INVALID;
+    if (static_cast<int32_t>(now_ms - next_therapy_pressure_attach_ms_) < 0) {
+        return;
+    }
+
+    next_therapy_pressure_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
+    const std::string params = build_stream_params(
+        THERAPY_PRESSURE_STREAM_IDS,
+        THERAPY_PRESSURE_SAMPLE_MS,
+        THERAPY_PRESSURE_REPORT_MS);
+    const StreamAcquireResult result =
+        stream_->acquire(params, RpcSource::Sink);
+    if (result.status == StreamAcquireStatus::Acquired ||
+        result.status == StreamAcquireStatus::AlreadyActive) {
+        therapy_pressure_handle_ = result.handle;
+    }
+}
+
+void SinkManager::release_therapy_pressure_stream() {
+    if (!stream_) return;
+    if (therapy_pressure_handle_ != STREAM_CONSUMER_INVALID &&
+        stream_->consumer_active(therapy_pressure_handle_)) {
+        stream_->release(therapy_pressure_handle_);
+    }
+    therapy_pressure_handle_ = STREAM_CONSUMER_INVALID;
+}
+
+void SinkManager::drain_therapy_pressure_stream(uint32_t now_ms) {
+    if (therapy_pressure_handle_ == STREAM_CONSUMER_INVALID ||
+        !stream_->consumer_active(therapy_pressure_handle_)) {
+        return;
+    }
+
+    for (size_t i = 0; i < AC_WEB_LIVE_FRAME_BUDGET; ++i) {
+        StreamFrameRef frame;
+        if (!stream_->next_frame(therapy_pressure_handle_, frame)) break;
+        if (frame && therapy_pressure_.accept_frame(*frame, now_ms)) {
+            therapy_pressure_dirty_ = true;
+        }
+    }
 }
 
 void SinkManager::set_live_chart_enabled(bool enabled) {

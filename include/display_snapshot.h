@@ -33,6 +33,18 @@ enum class DisplayExportState : uint8_t {
     Error,
 };
 
+struct DisplayPressureSnapshot {
+    enum class Kind : uint8_t {
+        Unavailable,
+        Single,
+        Pair,
+    };
+
+    Kind kind = Kind::Unavailable;
+    float inspiratory = 0.0f;
+    float expiratory = 0.0f;
+};
+
 struct DisplaySnapshot {
     uint32_t generation = 0;
     char local_time[6] = "--:--";
@@ -45,16 +57,16 @@ struct DisplaySnapshot {
     DisplayExportState smb = DisplayExportState::Disabled;
     DisplayExportState sleephq = DisplayExportState::Disabled;
 
-    bool pressure_valid = false;
-    bool pressure_pair = false;
-    float pressure = 0.0f;
-    float inspiratory_pressure = 0.0f;
-    float expiratory_pressure = 0.0f;
+    DisplayPressureSnapshot pressure;
 
     bool oximetry_valid = false;
     int16_t spo2 = -1;
     int16_t pulse_bpm = -1;
 };
+
+DisplayPressureSnapshot compose_display_pressure(
+    const TherapyPressureSnapshot &pressure,
+    int therapy_mode);
 
 DisplaySnapshot compose_display_snapshot(
     const SystemStatusSnapshot &system,

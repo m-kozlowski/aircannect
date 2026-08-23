@@ -50,6 +50,24 @@ void copy_text(char *out, size_t size, const char *value) {
 
 }  // namespace
 
+DisplayPressureSnapshot compose_display_pressure(
+    const TherapyPressureSnapshot &pressure,
+    int therapy_mode) {
+    DisplayPressureSnapshot out;
+
+    if (therapy_mode >= 3 && pressure.inspiratory_pressure_valid &&
+        pressure.expiratory_pressure_valid) {
+        out.kind = DisplayPressureSnapshot::Kind::Pair;
+        out.inspiratory = pressure.inspiratory_pressure;
+        out.expiratory = pressure.expiratory_pressure;
+    } else if (pressure.inspiratory_pressure_valid) {
+        out.kind = DisplayPressureSnapshot::Kind::Single;
+        out.inspiratory = pressure.inspiratory_pressure;
+    }
+
+    return out;
+}
+
 DisplaySnapshot compose_display_snapshot(
     const SystemStatusSnapshot &system,
     const SessionStatus &session,
@@ -103,21 +121,7 @@ DisplaySnapshot compose_display_snapshot(
     out.smb = display_state(exports.smb);
     out.sleephq = display_state(exports.sleephq);
 
-    out.pressure_pair = therapy_mode >= 3;
-    if (out.pressure_pair && pressure.inspiratory_pressure_valid &&
-        pressure.expiratory_pressure_valid) {
-        out.pressure_valid = true;
-        out.inspiratory_pressure = pressure.inspiratory_pressure;
-        out.expiratory_pressure = pressure.expiratory_pressure;
-    } else if (pressure.mask_pressure_valid) {
-        out.pressure_pair = false;
-        out.pressure_valid = true;
-        out.pressure = pressure.mask_pressure;
-    } else if (pressure.inspiratory_pressure_valid) {
-        out.pressure_pair = false;
-        out.pressure_valid = true;
-        out.pressure = pressure.inspiratory_pressure;
-    }
+    out.pressure = compose_display_pressure(pressure, therapy_mode);
 
     out.oximetry_valid = system.oximetry.source_fresh &&
                          system.oximetry.reading.valid;

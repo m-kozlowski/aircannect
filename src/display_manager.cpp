@@ -102,6 +102,24 @@ void DisplayManager::publish(const DisplaySnapshot &snapshot) {
     if (task_) xTaskNotifyGive(task_);
 }
 
+void DisplayManager::publish_pressure(
+    const DisplayPressureSnapshot &pressure) {
+    if (!device_ || !snapshot_lock_) return;
+    if (xSemaphoreTake(snapshot_lock_, 0) != pdTRUE) return;
+    if (published_generation_ == 0) {
+        xSemaphoreGive(snapshot_lock_);
+        return;
+    }
+
+    pending_snapshot_.pressure = pressure;
+    ++published_generation_;
+    if (published_generation_ == 0) ++published_generation_;
+    pending_snapshot_.generation = published_generation_;
+    xSemaphoreGive(snapshot_lock_);
+
+    if (task_) xTaskNotifyGive(task_);
+}
+
 void DisplayManager::toggle_backlight() {
     if (!device_) return;
 
@@ -227,20 +245,24 @@ void DisplayManager::render_therapy(const DisplaySnapshot &snapshot) {
     draw_centered(height / 6, elapsed, COLOR_TEXT,
                   width >= 220 ? 4 : 3);
 
+    const bool pressure_pair =
+        snapshot.pressure.kind == DisplayPressureSnapshot::Kind::Pair;
+
     device_->draw_text(margin, height * 2 / 5,
-                       snapshot.pressure_pair ? "PRESSURES" : "PRESSURE",
+                       pressure_pair ? "PRESSURES" : "PRESSURE",
                        COLOR_MUTED, 1);
 
-    if (!snapshot.pressure_valid) {
+    if (snapshot.pressure.kind ==
+        DisplayPressureSnapshot::Kind::Unavailable) {
         draw_centered(height / 2, "--", COLOR_MUTED, 4);
-    } else if (snapshot.pressure_pair) {
+    } else if (pressure_pair) {
         const int16_t column_width = (width - margin * 3) / 2;
         char ipap[12] = {};
         char epap[12] = {};
         snprintf(ipap, sizeof(ipap), "%.1f",
-                 snapshot.inspiratory_pressure);
+                 snapshot.pressure.inspiratory);
         snprintf(epap, sizeof(epap), "%.1f",
-                 snapshot.expiratory_pressure);
+                 snapshot.pressure.expiratory);
 
         device_->fill_rect(margin, height / 2 - 8,
                            column_width, height / 5, COLOR_PANEL);
@@ -256,7 +278,8 @@ void DisplayManager::render_therapy(const DisplaySnapshot &snapshot) {
                            height / 2 + 14, epap, COLOR_TEXT, 3);
     } else {
         char pressure[12] = {};
-        snprintf(pressure, sizeof(pressure), "%.1f", snapshot.pressure);
+        snprintf(pressure, sizeof(pressure), "%.1f",
+                 snapshot.pressure.inspiratory);
         draw_centered(height / 2 - 4, pressure, COLOR_TEXT, 4);
         draw_centered(height * 7 / 10, "cmH2O", COLOR_MUTED, 1);
     }
