@@ -42,11 +42,15 @@ def run_completed(cmd, cwd=None):
 
 
 def git_repo_available(path):
-    if not path.exists():
+    if not path.is_dir():
         return False
-    result = run_completed(["git", "rev-parse", "--is-inside-work-tree"],
+
+    result = run_completed(["git", "rev-parse", "--show-toplevel"],
                            cwd=path)
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    if result.returncode != 0:
+        return False
+
+    return Path(result.stdout.strip()).resolve() == path.resolve()
 
 
 def source_available(path):
