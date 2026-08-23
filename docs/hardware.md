@@ -4,28 +4,40 @@ Build notes for supported ESP32-S3 targets. AirCANnect assumes PSRAM and
 microSD storage. CAN and BLE are independent build capabilities; a board may
 provide either or both.
 
-## What you need
+## Choose a hardware path
 
-- **Supported ESP32-S3 board** with PSRAM.
-- **microSD card** - provides first-boot provisioning, EDF capture, reports,
-  file logging, and the ResMed firmware repository for raw and `.abc` images.
-- **CAN builds only:** a mating AS11 power connector, 3.3 V CAN transceiver,
-  and suitable power supply as described below.
+| Setup | Assembly | AS11 connection |
+| --- | --- | --- |
+| [**Waveshare ESP32-S3-Touch-LCD-1.54**](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54) | **No soldering required.** Insert a microSD card and power the board over USB. | BLE pairing from the setup wizard. |
+| **XIAO ESP32-S3 Plus over BLE** | Wire an external microSD socket or module to the XIAO. USB can provide power. | BLE pairing from the setup wizard; no CAN transceiver or AS11 cable is needed. |
+| **XIAO ESP32-S3 Plus over CAN** | Full hardware assembly: external microSD, CAN transceiver, buck regulator, and AS11 cable. | Physical CAN connection. |
 
-## Supported boards
+The Waveshare profile is the ready-made option when no soldering is desired.
+Its display, button, accelerometer, microSD slot, USB power, and BLE radio are
+already onboard. Adding physical CAN to it is possible, but requires an
+external transceiver, wiring, and a custom build.
 
-- **XIAO ESP32-S3 Plus:** external microSD, CAN enabled by default, BLE also
-  available.
-- **[Waveshare ESP32-S3-Touch-LCD-1.54](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54):**
-  onboard microSD, BLE enabled, CAN disabled by default, and a local status
-  display. Its QMI8658 accelerometer wakes the backlight after movement and
-  keeps the display upright; touch remains disabled.
+The published XIAO profiles use an external microSD card in either 4-bit SDMMC
+or SPI mode. Reliable SD wiring should be short and soldered; breadboard and
+long jumper-wire builds are unsuitable for regular use.
 
-## Bare minimum hardware diagram
+## Parts by capability
+
+- **Every setup:** a supported ESP32-S3 board with PSRAM and a microSD card.
+- **XIAO setups:** an external microSD socket or module and its wiring.
+- **Physical CAN setups:** a mating AS11 power connector, 3.3 V CAN
+  transceiver, 24 V to 3.3 V buck regulator, and the wiring described below.
+
+The microSD card provides first-boot provisioning, EDF capture, reports, file
+logging, and the ResMed firmware repository.
+
+## XIAO CAN wiring
 
 Default wiring for the `xiao-esp32s3-plus-sdmmc4` profile:
 
 ![AirCANnect reference wiring](images/aircannect-wiring.svg)
+
+This diagram is not needed for the standard Waveshare BLE setup.
 
 AirCANnect sits in-line between the ResMed PSU and the AirSense. +24 V
 and GND pass through to the AirSense; AirCANnect taps them locally for

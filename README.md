@@ -39,10 +39,12 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 ## First setup
 
 1. Wire up the [hardware](docs/hardware.md).
-2. Flash: `pio run -e xiao-esp32s3-plus-sdmmc4 -t upload`
-3. Open `http://aircannect/` (default login: `admin` / `aircannect`).
-
-For a longer walkthrough see the [quickstart](docs/quickstart.md).
+2. Download the `*-initial.bin` matching the board from the
+   [latest release](https://github.com/m-kozlowski/aircannect/releases/latest).
+3. Program the board with the downloaded image. See the
+   [quickstart](docs/quickstart.md) for installation options.
+4. Open `http://aircannect/` (default login: `admin` / `aircannect`) and follow
+   the setup wizard.
 
 ## Build profiles
 
@@ -51,18 +53,28 @@ Supported release profiles require an ESP32-S3 with PSRAM and microSD:
 - `xiao-esp32s3-plus-sdmmc4` *(default)* - 4-bit microSD on the exposed non-strapping GPIOs.
 - `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules.
 - `waveshare-esp32s3-touch-lcd-1-54` - onboard SDMMC and BLE transport on the
-  Waveshare ESP32-S3-Touch-LCD-1.54; the display remains off.
+  Waveshare ESP32-S3-Touch-LCD-1.54, with its local status display and action
+  button enabled.
 
-<!--
 ## Related tools
 
-[airbreak-plus](https://github.com/m-kozlowski/airbreak-plus/tree/master/python/) has Python tooling that should use the generic AirCANnect host transport:
+[airbreak-plus](https://github.com/m-kozlowski/airbreak-plus/tree/master/python/)
+provides Python tools that can use AirCANnect as their device transport:
 
-- `python/as11_config.py -p tcp:aircannect` - read/write AS11 settings, run RPC calls, follow streams.
-- `python/as11_flash.py -p tcp:aircannect` - upload ResMed firmware through the same transport.
+- `python/as11_config.py -d tcp:aircannect get _PNA` - read settings, call RPC
+  methods, and follow streams or events.
+- `python/as11_flash.py flash -d tcp:aircannect -f resmed-firmware.bin` - upload
+  ResMed firmware through AirCANnect.
 
-Both also support `-p /dev/ttyUSB0` for direct serial CAN tooling on hardware that exposes it.
--->
+Both tools also support direct CAN and BLE connections without AirCANnect.
+
+## Documentation
+
+- [Quickstart](docs/quickstart.md)
+- [Hardware and wiring](docs/hardware.md)
+- [Configuration keys](docs/configuration.md)
+- [ResMed firmware installation](docs/resmed_ota.md)
+- [UDP oximetry input](docs/udp_oximetry.md)
 
 ## Screenshots
 
