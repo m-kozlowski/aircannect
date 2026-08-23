@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build release notes from commits since the previous release tag."""
+"""Build release notes from an optional summary and release commits."""
 
 from __future__ import annotations
 
@@ -276,11 +276,18 @@ def render_release_notes(
             "no release changes remain after filtering repository-only commits"
         )
 
-    heading = (
-        f"## Changes since {previous_tag}"
-        if previous_tag
-        else "## Initial release"
-    )
+    if preface:
+        heading = (
+            f"## Detailed changes since {previous_tag}"
+            if previous_tag
+            else "## Detailed changes"
+        )
+    else:
+        heading = (
+            f"## Changes since {previous_tag}"
+            if previous_tag
+            else "## Initial release"
+        )
     generated_lines = [heading]
     for label, entries in group_subjects(subjects):
         generated_lines.extend(("", f"### {label}", ""))
