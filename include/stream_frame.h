@@ -40,6 +40,7 @@ struct StreamFrameData {
 
     bool value_valid(size_t index) const;
     const StreamSignalSpan *find_signal(StreamSignalId id) const;
+    bool last_valid_value(StreamSignalId id, float &value) const;
 };
 
 class StreamFramePool;

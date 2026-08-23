@@ -121,6 +121,7 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
     if (!task_) return;
 
     const ExportTaskControlSnapshot task_status = task_->control_snapshot();
+    status_snapshot_ = task_status;
     const StorageSyncRuntimeStatus storage = task_status.smb;
     const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
     const bool storage_active = storage.active();

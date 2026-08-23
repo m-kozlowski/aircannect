@@ -9,8 +9,10 @@
 #include "as11_ble_rpc_link.h"
 #include "as11_device_service.h"
 #include "as11_service_manager.h"
+#include "as11_settings.h"
 #include "as11_settings_manager.h"
 #include "arduino_ota_source.h"
+#include "action_button.h"
 #include "ble_sensor_source.h"
 #include "board.h"
 #include "can_driver.h"
@@ -21,6 +23,8 @@
 #include "console_commands.h"
 #include "debug_log.h"
 #include "device_http_controller.h"
+#include "display_manager.h"
+#include "display_snapshot.h"
 #include "edf_recorder_manager.h"
 #include "event_broker.h"
 #include "export_coordinator.h"
@@ -65,6 +69,7 @@
 #include "tcp_bridge.h"
 #include "telnet_console.h"
 #include "time_sync_service.h"
+#include "therapy_telemetry.h"
 #include "tls_memory.h"
 #include "update_checker.h"
 #include "udp_oximeter_source.h"
@@ -103,6 +108,9 @@ static UpdateChecker update_checker;
 static ResmedOtaManager resmed_ota_manager;
 static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
+static TherapyTelemetry therapy_telemetry;
+static DisplayManager display_manager;
+static ActionButton action_button;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
 static OximetryHub oximetry_hub;
@@ -210,6 +218,7 @@ static bool runtime_activity_published = false;
 static bool ota_storage_upload_active_published = false;
 static bool runtime_network_published = false;
 static uint32_t export_config_due_ms = 0;
+static uint32_t therapy_telemetry_session_id = 0;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static bool is_rpc_event(RpcEventKind kind) {
@@ -222,6 +231,33 @@ static void note_session_stream_frame(void *context,
                                       const StreamFrameData &frame,
                                       uint32_t now_ms) {
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
+    therapy_telemetry.accept_frame(frame, now_ms);
+}
+
+static void poll_action_button(uint32_t now_ms) {
+    const ActionButtonEvent event = action_button.poll(now_ms);
+    if (event == ActionButtonEvent::None) return;
+
+    if (event == ActionButtonEvent::ShortPress) {
+        display_manager.toggle_backlight();
+        return;
+    }
+
+    const As11TherapyState therapy =
+        as11_device_service.state().therapy_state();
+    const As11TherapyTarget target =
+        therapy == As11TherapyState::Running
+            ? As11TherapyTarget::Standby
+            : As11TherapyTarget::Running;
+    const OperationSubmission submission =
+        as11_device_service.request_therapy(
+            rpc_transport, target, RpcSource::Internal, now_ms);
+
+    Log::logf(CAT_GENERAL,
+              submission.accepted() ? LOG_INFO : LOG_WARN,
+              "[DISPLAY] therapy %s %s from action button\n",
+              target == As11TherapyTarget::Running ? "start" : "stop",
+              submission.accepted() ? "requested" : "rejected");
 }
 
 static void note_as11_device_event(void *context,
@@ -843,17 +879,23 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
                 sizeof(snapshot.as11.link_error) - 1);
     }
 
+    if (display_manager.available()) {
+        const int therapy_mode = as11_mode_index_from_value(
+            as11_device_service.state().active_therapy_profile());
+        const DisplaySnapshot display_snapshot = compose_display_snapshot(
+            snapshot,
+            session_manager.status(),
+            therapy_telemetry.snapshot(snapshot.now_ms),
+            export_coordinator.status_snapshot(),
+            therapy_mode);
+        display_manager.publish(display_snapshot);
+    }
+
     (void)status_http_controller.publish_snapshot(
         snapshot, config.hostname.c_str(), device_revision, config_revision);
 }
 
 void setup() {
-    // Board hardware
-#if AC_DISPLAY_BACKLIGHT_GPIO >= 0
-    pinMode(AC_DISPLAY_BACKLIGHT_GPIO, OUTPUT);
-    digitalWrite(AC_DISPLAY_BACKLIGHT_GPIO, LOW);
-#endif
-
     // Serial bootstrap
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);
@@ -863,6 +905,15 @@ void setup() {
     Memory::begin();
     Log::init();
     Log::bind_file_log_sink(StorageService::file_log_port());
+
+    if (!display_manager.begin()) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] display manager failed to start\n");
+    }
+    if (!action_button.begin()) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] action button failed to start\n");
+    }
 
     const bool tls_allocator_ready = TlsMemory::begin();
     const TlsMemoryStatus tls_mem = TlsMemory::status();
@@ -1262,6 +1313,18 @@ void loop() {
 
     // Session and EDF capture
     session_manager.poll(as11_device_service.state(), now_ms);
+    const SessionStatus &session = session_manager.status();
+    if (session.state == SessionState::Active &&
+        session.session_id != therapy_telemetry_session_id) {
+        therapy_telemetry.clear();
+        therapy_telemetry_session_id = session.session_id;
+    } else if (session.state == SessionState::Idle &&
+               therapy_telemetry_session_id != 0) {
+        therapy_telemetry.clear();
+        therapy_telemetry_session_id = 0;
+    }
+
+    poll_action_button(now_ms);
     drain_can_rx_after("session");
 
     edf_recorder_manager.poll(now_ms);

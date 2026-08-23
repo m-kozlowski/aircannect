@@ -22,10 +22,12 @@ class UdpOximeterSource;
 
 static constexpr size_t AC_STATUS_IP_TEXT_MAX = 46;
 static constexpr size_t AC_STATUS_ISO_TIME_TEXT_MAX = 29;
+static constexpr size_t AC_STATUS_WIFI_NAME_MAX = 33;
 
 struct WifiStatusSnapshot {
     std::string_view state;
     std::string_view ssid;
+    char softap_ssid[AC_STATUS_WIFI_NAME_MAX] = "";
     char ip[AC_STATUS_IP_TEXT_MAX] = "";
     char bssid[AC_WIFI_BSSID_TEXT_MAX] = "";
     SoftApMode softap_mode = SoftApMode::Auto;

@@ -68,6 +68,10 @@ SystemStatusSnapshot collect_system_status(
 
     out.wifi.state = sources.wifi_manager.state_name();
     out.wifi.ssid = sources.wifi_manager.sta_ssid().c_str();
+    if (sources.wifi_manager.softap_running()) {
+        sources.wifi_manager.softap_ssid(out.wifi.softap_ssid,
+                                         sizeof(out.wifi.softap_ssid));
+    }
     const IPAddress ip = sources.wifi_manager.ip();
     snprintf(out.wifi.ip, sizeof(out.wifi.ip), "%u.%u.%u.%u",
              static_cast<unsigned>(ip[0]),

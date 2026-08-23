@@ -26,6 +26,9 @@ public:
               const ActivitySnapshot &activity,
               uint32_t now_ms);
     bool endpoint_work_claimed() const;
+    ExportTaskControlSnapshot status_snapshot() const {
+        return status_snapshot_;
+    }
     StorageSyncStatus smb_status() const;
     SleepHqSyncStatus sleephq_status() const;
     ExportSmbStatusSnapshot smb_snapshot() const;
@@ -139,6 +142,7 @@ private:
     StartupCheckState startup_check_;
     StartupBackfillState startup_backfill_;
     FullReconcileState full_reconcile_;
+    ExportTaskControlSnapshot status_snapshot_;
 };
 
 }  // namespace aircannect

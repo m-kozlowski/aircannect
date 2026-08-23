@@ -60,16 +60,15 @@ void read_softap_identity_mac(uint8_t *mac) {
     efuse_mac_bytes(mac);
 }
 
-String ap_ssid(const String &hostname) {
+void format_ap_ssid(const String &hostname, char *out, size_t size) {
+    if (!out || size == 0) return;
+
     uint8_t mac[6] = {};
     read_softap_identity_mac(mac);
-    char suffix[7];
-    snprintf(suffix, sizeof(suffix), "%02X%02X%02X",
+    const char *base = hostname.length() ? hostname.c_str()
+                                         : AC_DEV_SOFTAP_SSID;
+    snprintf(out, size, "%s_%02X%02X%02X", base,
              mac[3], mac[4], mac[5]);
-    String out = hostname.length() ? hostname : String(AC_DEV_SOFTAP_SSID);
-    out += "_";
-    out += suffix;
-    return out;
 }
 
 void wifi_event_cb(WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -360,7 +359,9 @@ bool WifiManager::start_softap(bool with_sta) {
     WiFi.mode(with_sta ? WIFI_AP_STA : WIFI_AP);
     apply_country_code();
     if (with_sta) apply_sta_phy_config();
-    const String ssid = ap_ssid(hostname_);
+    char ssid_text[33] = {};
+    format_ap_ssid(hostname_, ssid_text, sizeof(ssid_text));
+    const String ssid(ssid_text);
     bool ok = WiFi.softAP(ssid.c_str(), AC_DEV_SOFTAP_PASS);
     if (!ok) {
         mode_state_ = WifiModeState::Failed;
@@ -475,6 +476,10 @@ void WifiManager::set_hostname(const String &hostname) {
 
 void WifiManager::set_softap_mode(SoftApMode mode) {
     softap_mode_ = mode;
+}
+
+void WifiManager::softap_ssid(char *out, size_t size) const {
+    format_ap_ssid(hostname_, out, size);
 }
 
 void WifiManager::apply_softap_mode() {

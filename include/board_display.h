@@ -1,5 +1,68 @@
 #pragma once
 
+#define AC_DISPLAY_DRIVER_NONE 0
+#define AC_DISPLAY_DRIVER_ST7789 1
+
+#ifndef AC_DISPLAY_DRIVER
+#define AC_DISPLAY_DRIVER AC_DISPLAY_DRIVER_NONE
+#endif
+
 #ifndef AC_DISPLAY_BACKLIGHT_GPIO
 #define AC_DISPLAY_BACKLIGHT_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_BACKLIGHT_ACTIVE_HIGH
+#define AC_DISPLAY_BACKLIGHT_ACTIVE_HIGH 1
+#endif
+
+#ifndef AC_DISPLAY_DC_GPIO
+#define AC_DISPLAY_DC_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_CS_GPIO
+#define AC_DISPLAY_CS_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_SCK_GPIO
+#define AC_DISPLAY_SCK_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_MOSI_GPIO
+#define AC_DISPLAY_MOSI_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_MISO_GPIO
+#define AC_DISPLAY_MISO_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_RESET_GPIO
+#define AC_DISPLAY_RESET_GPIO -1
+#endif
+
+#ifndef AC_DISPLAY_WIDTH
+#define AC_DISPLAY_WIDTH 240
+#endif
+
+#ifndef AC_DISPLAY_HEIGHT
+#define AC_DISPLAY_HEIGHT 240
+#endif
+
+#ifndef AC_DISPLAY_ROTATION
+#define AC_DISPLAY_ROTATION 0
+#endif
+
+#ifndef AC_DISPLAY_SPI_HZ
+#define AC_DISPLAY_SPI_HZ 40000000
+#endif
+
+#ifndef AC_DISPLAY_TASK_CORE
+#define AC_DISPLAY_TASK_CORE 0
+#endif
+
+#ifndef AC_DISPLAY_TASK_PRIO
+#define AC_DISPLAY_TASK_PRIO 0
+#endif
+
+#ifndef AC_DISPLAY_TASK_STACK
+#define AC_DISPLAY_TASK_STACK 4096
 #endif

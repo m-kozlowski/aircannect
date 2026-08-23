@@ -298,6 +298,26 @@ const StreamSignalSpan *StreamFrameData::find_signal(
     return nullptr;
 }
 
+bool StreamFrameData::last_valid_value(StreamSignalId id,
+                                       float &value) const {
+    const StreamSignalSpan *signal = find_signal(id);
+    if (!signal || signal->sample_count == 0) return false;
+
+    const size_t begin = signal->value_offset;
+    const size_t end = begin + signal->sample_count;
+    if (end > value_count) return false;
+
+    for (size_t index = end; index > begin; --index) {
+        const size_t value_index = index - 1;
+        if (!value_valid(value_index)) continue;
+
+        value = values[value_index];
+        return true;
+    }
+
+    return false;
+}
+
 StreamFrameRef::StreamFrameRef(StreamFramePool *pool, StreamFrameData *data)
     : pool_(pool), data_(data) {}
 

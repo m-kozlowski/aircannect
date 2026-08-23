@@ -102,6 +102,7 @@ public:
     void set_softap_mode(SoftApMode mode);
     SoftApMode softap_mode() const { return softap_mode_; }
     bool softap_running() const { return softap_running_; }
+    void softap_ssid(char *out, size_t size) const;
     void apply_softap_mode();
     void set_country_code(const String &country);
 
