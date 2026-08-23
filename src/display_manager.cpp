@@ -6,9 +6,11 @@
 #include <string.h>
 
 #include "board_display.h"
+#include "board_motion.h"
 #include "debug_log.h"
 #include "display_device.h"
 #include "memory_manager.h"
+#include "motion_device.h"
 
 namespace aircannect {
 namespace {
@@ -21,6 +23,7 @@ constexpr uint16_t COLOR_ACCENT = 0x06FA;
 constexpr uint16_t COLOR_READY = 0x27E8;
 constexpr uint16_t COLOR_PENDING = 0xFD20;
 constexpr uint16_t COLOR_ERROR = 0xF986;
+constexpr uint32_t MANUAL_OFF_WAKE_GRACE_MS = 3000;
 
 const char *air11_state_text(DisplayAir11State state) {
     switch (state) {
@@ -67,6 +70,19 @@ uint16_t export_state_color(DisplayExportState state) {
 bool DisplayManager::begin() {
     device_ = board_display_device();
     if (!device_) return true;
+
+    if (!device_->begin()) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[DISPLAY] initialization failed\n");
+        return false;
+    }
+
+    motion_ = board_motion_device();
+    if (motion_ && !motion_->begin()) {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[DISPLAY] motion sensor unavailable\n");
+        motion_ = nullptr;
+    }
 
     snapshot_lock_ = xSemaphoreCreateMutexStatic(&snapshot_lock_storage_);
     if (!snapshot_lock_) return false;
@@ -123,7 +139,9 @@ void DisplayManager::publish_pressure(
 void DisplayManager::toggle_backlight() {
     if (!device_) return;
 
-    backlight_requested_.store(!backlight_requested_.load());
+    const bool visible = backlight_visible_.load();
+    backlight_requested_.store(!visible);
+    if (visible) manual_backlight_off_.store(true);
     if (task_) xTaskNotifyGive(task_);
 }
 
@@ -132,50 +150,94 @@ void DisplayManager::task_entry(void *context) {
 }
 
 void DisplayManager::run() {
-    if (!device_->begin()) {
-        Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[DISPLAY] initialization failed\n");
-        while (true) {
-            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        }
-    }
-
     Log::logf(CAT_GENERAL, LOG_INFO,
-              "[DISPLAY] started size=%dx%d framebuffer=psram\n",
+              "[DISPLAY] started size=%dx%d framebuffer=psram motion=%s\n",
               static_cast<int>(device_->width()),
-              static_cast<int>(device_->height()));
+              static_cast<int>(device_->height()),
+              motion_ ? "yes" : "no");
 
+    uint32_t last_motion_poll_ms = 0;
     while (true) {
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        const uint32_t poll_ms = motion_ ? AC_MOTION_POLL_MS : 1000;
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(poll_ms));
 
-        const bool requested = backlight_requested_.load();
-        if (requested != backlight_applied_) {
-            device_->set_backlight(requested);
-            backlight_applied_ = requested;
+        const uint32_t now_ms = millis();
+        bool rotation_changed = false;
+
+        if (motion_ &&
+            (last_motion_poll_ms == 0 ||
+             now_ms - last_motion_poll_ms >= AC_MOTION_POLL_MS)) {
+            last_motion_poll_ms = now_ms;
+            rotation_changed = poll_motion(now_ms);
+        }
+
+        if (manual_backlight_off_.exchange(false)) {
+            motion_wake_until_ms_ = 0;
+            motion_wake_blocked_until_ms_ =
+                now_ms + MANUAL_OFF_WAKE_GRACE_MS;
+        }
+
+        const bool visible = backlight_requested_.load() ||
+                             temporary_wake_active(now_ms);
+        if (visible != backlight_applied_) {
+            device_->set_backlight(visible);
+            backlight_applied_ = visible;
+            backlight_visible_.store(visible);
         }
 
         DisplaySnapshot snapshot;
-        if (!take_snapshot(snapshot)) continue;
+        if (!take_snapshot(snapshot, rotation_changed)) continue;
 
         render(snapshot);
         rendered_generation_ = snapshot.generation;
     }
 }
 
-bool DisplayManager::take_snapshot(DisplaySnapshot &snapshot) {
+bool DisplayManager::take_snapshot(DisplaySnapshot &snapshot, bool force) {
     if (!snapshot_lock_) return false;
     if (xSemaphoreTake(snapshot_lock_, pdMS_TO_TICKS(10)) != pdTRUE) {
         return false;
     }
 
-    if (published_generation_ == rendered_generation_) {
+    if (published_generation_ == 0) {
+        xSemaphoreGive(snapshot_lock_);
+        return false;
+    }
+
+    if (!force && published_generation_ == rendered_generation_) {
         xSemaphoreGive(snapshot_lock_);
         return false;
     }
 
     snapshot = pending_snapshot_;
     xSemaphoreGive(snapshot_lock_);
-    return snapshot.generation != rendered_generation_;
+    return force || snapshot.generation != rendered_generation_;
+}
+
+bool DisplayManager::poll_motion(uint32_t now_ms) {
+    if (!motion_) return false;
+
+    MotionSample sample;
+    if (!motion_->read(sample)) return false;
+
+    const DisplayMotionUpdate update = motion_policy_.update(sample, now_ms);
+    if (update.wake && !motion_wake_blocked(now_ms)) {
+        motion_wake_until_ms_ = now_ms + AC_MOTION_WAKE_MS;
+    }
+    if (!update.rotation_changed) return false;
+
+    device_->set_rotation(update.rotation);
+    return true;
+}
+
+bool DisplayManager::temporary_wake_active(uint32_t now_ms) const {
+    return motion_wake_until_ms_ != 0 &&
+           static_cast<int32_t>(motion_wake_until_ms_ - now_ms) > 0;
+}
+
+bool DisplayManager::motion_wake_blocked(uint32_t now_ms) const {
+    return motion_wake_blocked_until_ms_ != 0 &&
+           static_cast<int32_t>(motion_wake_blocked_until_ms_ - now_ms) > 0;
 }
 
 void DisplayManager::render(const DisplaySnapshot &snapshot) {

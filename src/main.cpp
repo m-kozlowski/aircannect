@@ -902,10 +902,6 @@ void setup() {
     Log::init();
     Log::bind_file_log_sink(StorageService::file_log_port());
 
-    if (!display_manager.begin()) {
-        Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[INIT] display manager failed to start\n");
-    }
     if (!action_button.begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] action button failed to start\n");
@@ -930,6 +926,11 @@ void setup() {
 
     if (!ble_runtime.begin()) {
         Log::logf(CAT_BLE, LOG_ERROR, "runtime init failed\n");
+    }
+
+    if (!display_manager.begin()) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] display manager failed to start\n");
     }
 
     // Boot diagnostics

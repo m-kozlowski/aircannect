@@ -75,6 +75,10 @@ public:
         digitalWrite(AC_DISPLAY_BACKLIGHT_GPIO, high ? HIGH : LOW);
     }
 
+    void set_rotation(uint8_t rotation) override {
+        canvas_.setRotation(rotation & 0x03u);
+    }
+
     void fill(uint16_t color) override {
         canvas_.fillScreen(color);
     }

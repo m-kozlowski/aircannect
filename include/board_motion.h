@@ -1,0 +1,40 @@
+#pragma once
+
+#define AC_MOTION_DRIVER_NONE 0
+#define AC_MOTION_DRIVER_QMI8658 1
+
+#ifndef AC_MOTION_DRIVER
+#define AC_MOTION_DRIVER AC_MOTION_DRIVER_NONE
+#endif
+
+#ifndef AC_MOTION_I2C_SDA_GPIO
+#define AC_MOTION_I2C_SDA_GPIO -1
+#endif
+
+#ifndef AC_MOTION_I2C_SCL_GPIO
+#define AC_MOTION_I2C_SCL_GPIO -1
+#endif
+
+#ifndef AC_MOTION_I2C_ADDRESS
+#define AC_MOTION_I2C_ADDRESS 0x6B
+#endif
+
+#ifndef AC_MOTION_SWAP_XY
+#define AC_MOTION_SWAP_XY 0
+#endif
+
+#ifndef AC_MOTION_INVERT_X
+#define AC_MOTION_INVERT_X 0
+#endif
+
+#ifndef AC_MOTION_INVERT_Y
+#define AC_MOTION_INVERT_Y 0
+#endif
+
+#ifndef AC_MOTION_POLL_MS
+#define AC_MOTION_POLL_MS 100
+#endif
+
+#ifndef AC_MOTION_WAKE_MS
+#define AC_MOTION_WAKE_MS 10000
+#endif
