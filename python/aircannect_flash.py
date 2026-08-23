@@ -15,6 +15,7 @@ import http.client
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -27,10 +28,10 @@ from typing import Any, Callable
 from urllib.parse import urlencode, urlparse
 
 
-DEFAULT_ENV = "xiao-esp32s3-plus-sdmmc4"
 DEFAULT_HOST = "aircannect"
 DEFAULT_USER = "admin"
 DEFAULT_PASSWORD = "aircannect"
+ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class FlashError(Exception):
@@ -322,6 +323,40 @@ def detect_upload_compression(
         return "zlib"
 
     return "none"
+
+
+def detect_target_environment(
+    target: Target,
+    *,
+    auth: str | None,
+    timeout: float,
+) -> str:
+    try:
+        status, body = request_json(
+            target, "GET", "/api/ota", auth=auth, timeout=timeout
+        )
+    except (OSError, http.client.HTTPException, socket.timeout) as error:
+        die(
+            f"{target_label(target)}: environment detection failed: "
+            f"{error}"
+        )
+
+    if status >= 400:
+        die(
+            f"{target_label(target)}: environment detection failed: "
+            f"{describe_ota_error(status, body)}"
+        )
+
+    environment = body.get("release_target")
+    if not isinstance(environment, str) or not ENVIRONMENT_PATTERN.fullmatch(
+        environment
+    ):
+        die(
+            f"{target_label(target)}: target does not report a valid "
+            "release environment; pass --env explicitly"
+        )
+
+    return environment
 
 
 def make_connection(target: Target, timeout: float) -> http.client.HTTPConnection:
@@ -755,8 +790,7 @@ def main() -> int:
     parser.add_argument(
         "-e",
         "--env",
-        default=DEFAULT_ENV,
-        help=f"PlatformIO environment (default: {DEFAULT_ENV})",
+        help="PlatformIO environment (default: detected from each target)",
     )
     parser.add_argument(
         "-f",
@@ -858,27 +892,56 @@ def main() -> int:
 
         return run_target_operations(targets, install_url)
 
+    environment_by_target: dict[Target, str] = {}
+    if args.build or args.file is None:
+        for target in targets:
+            environment_by_target[target] = args.env or detect_target_environment(
+                target,
+                auth=authorization,
+                timeout=args.timeout,
+            )
+
+        for target in targets:
+            emit(
+                f"{target_label(target)}: environment "
+                f"{environment_by_target[target]}"
+            )
+
+    environments = list(dict.fromkeys(environment_by_target.values()))
     if args.build:
-        run_build(args.env)
+        for environment in environments:
+            run_build(environment)
 
-    firmware = args.file or firmware_path_for_env(args.env)
-    size = validate_firmware(firmware)
-    emit(f"firmware: {firmware} ({format_bytes(size)})")
+    firmware_by_target: dict[Target, pathlib.Path] = {}
+    for target in targets:
+        firmware_by_target[target] = args.file or firmware_path_for_env(
+            environment_by_target[target]
+        )
 
-    payloads: dict[str, UploadPayload] = {}
-    if args.compress in ("auto", "none"):
-        payloads["none"] = make_upload_payload(firmware, "none")
-    if args.compress in ("auto", "zlib"):
-        payloads["zlib"] = make_upload_payload(firmware, "zlib")
+    firmware_sizes: dict[pathlib.Path, int] = {}
+    payloads: dict[pathlib.Path, dict[str, UploadPayload]] = {}
+    for firmware in dict.fromkeys(firmware_by_target.values()):
+        size = validate_firmware(firmware)
+        firmware_sizes[firmware] = size
+        emit(f"firmware: {firmware} ({format_bytes(size)})")
+
+        firmware_payloads: dict[str, UploadPayload] = {}
+        if args.compress in ("auto", "none"):
+            firmware_payloads["none"] = make_upload_payload(firmware, "none")
+        if args.compress in ("auto", "zlib"):
+            firmware_payloads["zlib"] = make_upload_payload(firmware, "zlib")
+        payloads[firmware] = firmware_payloads
 
     def upload_firmware(target: Target) -> None:
+        firmware = firmware_by_target[target]
+        size = firmware_sizes[firmware]
         compression = args.compress
         if compression == "auto":
             compression = detect_upload_compression(
                 target, auth=authorization, timeout=args.timeout
             )
 
-        payload = payloads[compression]
+        payload = payloads[firmware][compression]
         if payload.encoding != "plain":
             ratio = payload.wire_size / payload.raw_size * 100.0
             emit(

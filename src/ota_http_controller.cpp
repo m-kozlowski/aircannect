@@ -97,6 +97,7 @@ template <typename JsonOut>
 void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
     json = "{";
     json_add_string(json, "version", aircannect_version(), false);
+    json_add_string(json, "release_target", AC_OTA_RELEASE_TARGET);
     json += ",\"upload_encodings\":[\"auto\",\"plain\",\"zlib\"]";
     json_add_bool(json, "url_update", true);
     json_add_bool(json, "arduino_started", ota.arduino_started);
