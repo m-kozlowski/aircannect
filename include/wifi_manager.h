@@ -148,8 +148,10 @@ private:
     void save_config(size_t first_dirty_index = 0);
 
     // STA/SoftAP lifecycle
-    bool start_profile(size_t index, bool keep_softap = false);
-    bool start_next_profile(size_t start_index, bool keep_softap = false);
+    bool start_profile(size_t index, bool keep_softap = false,
+                       bool reset_existing_sta = false);
+    bool start_next_profile(size_t start_index, bool keep_softap = false,
+                            bool reset_existing_sta = false);
     bool connect_profiles(size_t start_index, bool preserve_softap);
     bool start_softap(bool with_sta);
     void stop_softap(const char *reason);

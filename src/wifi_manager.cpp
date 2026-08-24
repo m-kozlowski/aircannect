@@ -87,6 +87,7 @@ bool WifiManager::begin() {
     load_config();
     stop_wifi();
     WiFi.onEvent(wifi_event_cb);
+    WiFi.setAutoReconnect(false);
 
     if (softap_mode_ == SoftApMode::Forced) {
         start_softap(sta_configured_);
@@ -165,9 +166,10 @@ void WifiManager::poll() {
                   static_cast<unsigned>(last_disconnect_reason_));
         if (active_profile_index_ >= 0) {
             start_profile(static_cast<size_t>(active_profile_index_),
-                          softap_running_);
+                          softap_running_, true);
         } else {
-            start_next_profile(preferred_profile_index_, softap_running_);
+            start_next_profile(preferred_profile_index_, softap_running_,
+                               true);
         }
         return;
     }
@@ -283,12 +285,13 @@ void WifiManager::save_config(size_t first_dirty_index) {
     prefs.end();
 }
 
-bool WifiManager::start_profile(size_t index, bool keep_softap) {
+bool WifiManager::start_profile(size_t index, bool keep_softap,
+                                bool reset_existing_sta) {
     if (index >= profile_count_) return false;
     WifiProfile &profile = profiles_[index];
     if (!profile.ssid.length()) return false;
 
-    prepare_sta_radio(keep_softap, false);
+    prepare_sta_radio(keep_softap, reset_existing_sta);
 
     mode_state_ = WifiModeState::StaConnecting;
     management_reachable_ = softap_running_;
@@ -326,11 +329,12 @@ bool WifiManager::start_profile(size_t index, bool keep_softap) {
                                      "scan_unavailable");
 }
 
-bool WifiManager::start_next_profile(size_t start_index, bool keep_softap) {
+bool WifiManager::start_next_profile(size_t start_index, bool keep_softap,
+                                     bool reset_existing_sta) {
     if (profile_count_ == 0) return false;
     for (size_t offset = 0; offset < profile_count_; ++offset) {
         const size_t index = (start_index + offset) % profile_count_;
-        if (start_profile(index, keep_softap)) return true;
+        if (start_profile(index, keep_softap, reset_existing_sta)) return true;
     }
     return false;
 }
