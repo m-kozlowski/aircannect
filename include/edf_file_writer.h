@@ -109,6 +109,10 @@ bool edf_render_numeric_record(const EdfFileSchema &schema,
                                uint8_t *dst,
                                size_t capacity,
                                size_t &written);
+bool edf_render_missing_numeric_record(const EdfFileSchema &schema,
+                                       uint8_t *dst,
+                                       size_t capacity,
+                                       size_t &written);
 
 bool edf_render_str_header(const EdfHeaderInfo &info,
                            uint8_t *dst,

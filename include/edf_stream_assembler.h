@@ -44,7 +44,7 @@ struct EdfStreamAssemblerStatus {
     }
 };
 
-using EdfRecordObserver = void (*)(void *context,
+using EdfRecordObserver = bool (*)(void *context,
                                    const EdfCompletedRecordView &record);
 
 enum class EdfFramePrepareStatus : uint8_t {
@@ -78,7 +78,7 @@ public:
                        const As11ClockTransform &clock_transform);
     void set_current_records(
         const uint32_t (&records)[AC_EDF_NUMERIC_SERIES_COUNT]);
-    void end_session();
+    bool end_session();
 
     EdfFramePrepareStatus prepare_frame(const StreamFrameData &frame,
                                         size_t max_records_to_publish);
@@ -144,12 +144,15 @@ private:
     void maybe_rebase_initial_epoch(const StreamFrameData &frame,
                                     int64_t frame_start_ms);
 
-    void publish_record(const SeriesBuffer &series);
-    void publish_current_record(SeriesBuffer &series);
+    bool publish_record(const SeriesBuffer &series);
+    bool publish_current_record(SeriesBuffer &series);
     bool advance_to_record(SeriesBuffer &series,
                            uint32_t new_record,
                            size_t *publish_budget = nullptr);
-    void flush_partial_records();
+    bool advance_sparse_to_record(SeriesBuffer &series,
+                                  uint32_t new_record,
+                                  size_t publish_budget);
+    bool flush_partial_records();
 
     void store_sample(SeriesBuffer &series,
                       uint8_t signal_index,

@@ -42,6 +42,7 @@ enum class JobType : uint8_t {
     StrRecord,
     Identification,
     Close,
+    CloseAll,
 };
 
 enum class StoredFileKind : uint8_t {
@@ -1510,6 +1511,18 @@ bool prepare_numeric_record_job(JobSlot &job,
 }
 
 bool process_numeric_record(JobSlot &job) {
+    OpenFile &state = open_files[file_index(job.kind)];
+    auto fail = [&](const char *error) {
+        set_error(error);
+        log_worker_failure(LOG_WARN, error, state.path);
+        return false;
+    };
+
+    if (!state.open || !state.file) return fail("file_not_open");
+    if (state.record_size == 0 || job.record_size != state.record_size) {
+        return fail("record_size_mismatch");
+    }
+
     EdfCompletedRecordView record;
     record.series = job.numeric_series;
     record.record_index = job.numeric_record_index;
@@ -1519,18 +1532,76 @@ bool process_numeric_record(JobSlot &job) {
     record.present = job.numeric_present;
     record.valid = job.numeric_valid;
 
-    size_t written = 0;
-    if (!edf_render_numeric_record(job.numeric_schema,
-                                   record,
-                                   job.bytes,
-                                   AC_EDF_STORAGE_SLOT_BYTES,
-                                   written)) {
-        set_error("render_failed");
-        log_worker_failure(LOG_WARN, "render_failed");
-        return false;
+    const size_t header_size = edf_header_size(job.numeric_schema);
+    const size_t expected_size =
+        header_size + static_cast<size_t>(state.record_count) *
+                          state.record_size;
+    if (state.file.size() != expected_size) {
+        return fail("numeric_file_size_mismatch");
     }
-    job.len = written;
-    return process_record(job);
+
+    auto write_bytes = [&](size_t offset, size_t len) {
+        return state.file.seek(offset) &&
+               state.file.write(job.bytes, len) == len;
+    };
+    auto render_record = [&]() {
+        size_t written = 0;
+        const bool rendered = edf_render_numeric_record(
+            job.numeric_schema,
+            record,
+            job.bytes,
+            AC_EDF_STORAGE_SLOT_BYTES,
+            written);
+        job.len = written;
+        return rendered && written == state.record_size;
+    };
+
+    if (record.record_index < state.record_count) {
+        if (!render_record()) return fail("render_failed");
+
+        const size_t offset =
+            header_size + static_cast<size_t>(record.record_index) *
+                              state.record_size;
+        if (!write_bytes(offset, job.len)) return fail("short_write");
+
+        state.file.flush();
+        service_state.last_error[0] = 0;
+        return true;
+    }
+
+    while (state.record_count < record.record_index) {
+        size_t written = 0;
+        if (!edf_render_missing_numeric_record(job.numeric_schema,
+                                               job.bytes,
+                                               AC_EDF_STORAGE_SLOT_BYTES,
+                                               written) ||
+            written != state.record_size) {
+            return fail("missing_record_render_failed");
+        }
+
+        const size_t offset =
+            header_size + static_cast<size_t>(state.record_count) *
+                              state.record_size;
+        if (!write_bytes(offset, written)) return fail("short_write");
+        state.record_count++;
+    }
+
+    if (!render_record()) return fail("render_failed");
+
+    const size_t offset =
+        header_size + static_cast<size_t>(state.record_count) *
+                          state.record_size;
+    if (!write_bytes(offset, job.len)) return fail("short_write");
+
+    state.record_count++;
+    state.file.flush();
+    if (!patch_record_count(state)) {
+        service_state.patch_errors++;
+        return fail("record_count_patch_failed");
+    }
+
+    service_state.last_error[0] = 0;
+    return true;
 }
 
 bool process_str_record(const JobSlot &job) {
@@ -1634,6 +1705,14 @@ bool process_identification_files(const JobSlot &job) {
 bool process_close(const JobSlot &job) {
     OpenFile &state = open_files[file_index(job.kind)];
     close_file(state);
+    refresh_open_file_count();
+    service_state.last_error[0] = 0;
+    return true;
+}
+
+bool process_close_all() {
+    for (OpenFile &state : open_files) close_file(state);
+
     refresh_open_file_count();
     service_state.last_error[0] = 0;
     return true;
@@ -2088,6 +2167,9 @@ void process_job(JobSlot &job) {
         case JobType::Close:
             (void)process_close(job);
             break;
+        case JobType::CloseAll:
+            (void)process_close_all();
+            break;
         case JobType::Record:
             (void)process_record(job);
             break;
@@ -2212,26 +2294,33 @@ bool enqueue(JobSlot &job) {
 }
 
 template <typename Prepare>
-bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
+EdfStorageEnqueueResult try_enqueue_prepared_slot(
+    Prepare prepare,
+    const char *prepare_error,
+    bool report_busy) {
     if (!service_state.initialized) begin();
-    if (!service_state.available) return false;
+    if (!service_state.available) return EdfStorageEnqueueResult::Busy;
     if (!lock_queue()) {
-        service_state.queue_drops++;
-        set_error("queue_lock_failed");
-        log_worker_failure(LOG_WARN, "queue_lock_failed");
-        return false;
+        if (report_busy) {
+            service_state.queue_drops++;
+            set_error("queue_lock_failed");
+            log_worker_failure(LOG_WARN, "queue_lock_failed");
+        }
+        return EdfStorageEnqueueResult::Busy;
     }
     if (!slot_storage_available()) {
         unlock_queue();
-        return false;
+        return EdfStorageEnqueueResult::Busy;
     }
 
     if (free_slots() == 0) {
         unlock_queue();
-        service_state.queue_drops++;
-        set_error("queue_full");
-        log_worker_failure(LOG_WARN, "queue_full");
-        return false;
+        if (report_busy) {
+            service_state.queue_drops++;
+            set_error("queue_full");
+            log_worker_failure(LOG_WARN, "queue_full");
+        }
+        return EdfStorageEnqueueResult::Busy;
     }
 
     JobSlot &job = slots[tail];
@@ -2240,7 +2329,7 @@ bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
         unlock_queue();
         set_error(prepare_error);
         log_worker_failure(LOG_WARN, prepare_error, job.path);
-        return false;
+        return EdfStorageEnqueueResult::Rejected;
     }
 
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
@@ -2248,7 +2337,13 @@ bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
     unlock_queue();
 
     wake_service_task();
-    return true;
+    return EdfStorageEnqueueResult::Accepted;
+}
+
+template <typename Prepare>
+bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
+    return try_enqueue_prepared_slot(prepare, prepare_error, true) ==
+           EdfStorageEnqueueResult::Accepted;
 }
 
 template <typename Prepare, typename Render>
@@ -2402,13 +2497,15 @@ bool enqueue_edf_open_annotation(const char *path,
     return true;
 }
 
-bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
-                                const EdfCompletedRecordView &record) {
-    return enqueue_prepared_slot(
+EdfStorageEnqueueResult enqueue_edf_numeric_record(
+    const EdfFileSchema &schema,
+    const EdfCompletedRecordView &record) {
+    return try_enqueue_prepared_slot(
         [&](JobSlot &job) {
             return prepare_numeric_record_job(job, schema, record);
         },
-        "record_snapshot_failed");
+        "record_snapshot_failed",
+        false);
 }
 
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
@@ -2487,6 +2584,16 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
     job.type = JobType::Close;
     job.kind = stored_kind(kind);
     return enqueue(job);
+}
+
+EdfStorageEnqueueResult enqueue_edf_close_all() {
+    return try_enqueue_prepared_slot(
+        [](JobSlot &job) {
+            job.type = JobType::CloseAll;
+            return true;
+        },
+        "close_all_prepare_failed",
+        false);
 }
 
 StorageReadPort &read_port() {

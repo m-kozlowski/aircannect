@@ -186,7 +186,7 @@ private:
     static void event_frame_observer(void *context,
                                      const As11EventFrame &frame,
                                      uint32_t now_ms);
-    static void record_observer(void *context,
+    static bool record_observer(void *context,
                                 const EdfCompletedRecordView &record);
 
     // session and recording gates
@@ -207,7 +207,7 @@ private:
     bool ensure_annotation_files_open(uint32_t now_ms);
     void begin_recording_gate(const char *start_time, uint32_t now_ms);
     void close_recording_gate(const char *end_time, uint32_t now_ms);
-    void close_recording_segment();
+    bool close_recording_segment();
 
     // session clock provenance
     bool ensure_segment_metadata_published(const char *start_time,
@@ -250,7 +250,7 @@ private:
                             size_t dst_size) const;
 
     // file state synchronization
-    void close_session_files();
+    bool close_session_files();
     void sync_annotation_open_status();
     bool sync_numeric_open_status(uint32_t now_ms);
     void buffer_numeric_open_stream();
@@ -313,7 +313,7 @@ private:
     bool sleep_day_boundary_epoch_ms(const StreamFrameData &frame,
                                      const EdfLocalDateTime &local,
                                      int64_t &boundary_ms) const;
-    void handle_completed_record(const EdfCompletedRecordView &record);
+    bool handle_completed_record(const EdfCompletedRecordView &record);
     bool enqueue_event_annotation(EdfAnnotationKind kind,
                                   const As11EventRecord &record);
 
@@ -349,6 +349,7 @@ private:
     bool recording_gate_open_ = false;
     bool recording_gate_closed_ = false;
     bool recording_gate_recovery_pending_ = false;
+    bool segment_close_pending_ = false;
     bool annotation_open_pending_ = false;
     bool str_start_pending_ = false;
     char pending_str_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};

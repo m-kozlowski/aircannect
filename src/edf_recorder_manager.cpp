@@ -157,6 +157,10 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     poll_rpc_completions();
     dispatch_session_edges(now_ms);
 
+    if (segment_close_pending_ && close_recording_segment()) {
+        segment_close_pending_ = false;
+    }
+
     if (status_.enabled && !status_.event_attached) {
         attach_events();
     }
@@ -502,19 +506,23 @@ void EdfRecorderManager::close_recording_gate(const char *end_time,
               end_time);
 
     drain_local_sa2();
-    close_recording_segment();
+    segment_close_pending_ = !close_recording_segment();
 }
 
-void EdfRecorderManager::close_recording_segment() {
+bool EdfRecorderManager::close_recording_segment() {
     release_stream();
-    assembler_.end_session();
-    close_session_files();
+    drain_local_sa2();
+    if (!assembler_.end_session()) return false;
+
+    if (!close_session_files()) return false;
+
     annotation_start_epoch_ms_ = 0;
     next_annotation_open_ms_ = 0;
     annotation_open_pending_ = false;
     numeric_open_frame_buffer_.clear();
     local_sa2_queue_.clear();
     local_sa2_clock_ = {};
+    return true;
 }
 
 bool EdfRecorderManager::ensure_segment_metadata_published(
@@ -673,10 +681,11 @@ void EdfRecorderManager::event_frame_observer(
                                                                    now_ms);
 }
 
-void EdfRecorderManager::record_observer(
+bool EdfRecorderManager::record_observer(
     void *context,
     const EdfCompletedRecordView &record) {
-    static_cast<EdfRecorderManager *>(context)->handle_completed_record(record);
+    return static_cast<EdfRecorderManager *>(context)
+        ->handle_completed_record(record);
 }
 
 void EdfRecorderManager::dispatch_session_edges(uint32_t now_ms) {
@@ -745,6 +754,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     next_annotation_open_ms_ = now_ms;
     recording_gate_open_ = false;
     recording_gate_closed_ = false;
+    segment_close_pending_ = false;
     recording_gate_recovery_pending_ =
         session.recovered_active_start ||
         (reason && (strcmp(reason, "enabled_active") == 0 ||
@@ -784,6 +794,13 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     if (str_start_pending_) (void)ensure_str_session_started(now_ms);
     apply_pending_mask_event(now_ms);
 
+    recording_gate_open_ = false;
+    if (!close_recording_segment()) {
+        segment_close_pending_ = true;
+        return;
+    }
+    segment_close_pending_ = false;
+
     if (!finish_str_session(session, now_ms, recording_end_time)) {
         Log::logf(CAT_EDF, LOG_WARN,
                   "STR session end skipped id=%lu error=%s\n",
@@ -803,9 +820,7 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         finalize_segment_metadata(segment_end, therapy_end, now_ms);
     }
 
-    close_recording_segment();
     status_.active = false;
-    recording_gate_open_ = false;
     recording_gate_recovery_pending_ = false;
     annotation_open_pending_ = false;
     str_start_pending_ = false;
@@ -1269,17 +1284,16 @@ bool EdfRecorderManager::enqueue_annotation_file_open(
     return true;
 }
 
-void EdfRecorderManager::close_session_files() {
+bool EdfRecorderManager::close_session_files() {
     if (!files_open_ && !numeric_files_open_) {
-        return;
+        return true;
     }
-    enqueue_numeric_file_closes();
-    if (files_open_) {
-        (void)StorageService::enqueue_edf_close_annotation(
-            EdfAnnotationKind::Eve);
-        (void)StorageService::enqueue_edf_close_annotation(
-            EdfAnnotationKind::Csl);
+
+    if (StorageService::enqueue_edf_close_all() !=
+        EdfStorageEnqueueResult::Accepted) {
+        return false;
     }
+
     numeric_files_open_ = false;
     files_open_ = false;
     annotation_open_synced_ = false;
@@ -1290,6 +1304,7 @@ void EdfRecorderManager::close_session_files() {
     pending_stream_frame_.reset();
     numeric_open_frame_buffer_.clear();
     reset_numeric_schemas();
+    return true;
 }
 
 void EdfRecorderManager::sync_annotation_open_status() {
@@ -2235,6 +2250,10 @@ bool EdfRecorderManager::roll_segment_if_needed(
               static_cast<unsigned>(frame_day),
               frame.start_time);
 
+    if (!assembler_.end_session()) return false;
+
+    if (!close_session_files()) return false;
+
     if (!finish_str_session_at(boundary, false)) {
         Log::logf(CAT_EDF, LOG_WARN,
                   "STR rollover finish skipped id=%lu error=%s\n",
@@ -2245,8 +2264,6 @@ bool EdfRecorderManager::roll_segment_if_needed(
     finalize_segment_metadata_at(raw_boundary_ms,
                                  raw_boundary_ms,
                                  now_ms);
-    assembler_.end_session();
-    close_session_files();
     status_.segment_rollovers++;
 
     if (!begin_str_session_at(boundary, now_ms)) {
@@ -2267,25 +2284,29 @@ bool EdfRecorderManager::roll_segment_if_needed(
     return false;
 }
 
-void EdfRecorderManager::handle_completed_record(
+bool EdfRecorderManager::handle_completed_record(
     const EdfCompletedRecordView &record) {
     const size_t index = edf_series_index(record.series);
     const NumericSchemaState *state = edf_series_id_valid(record.series)
         ? &cold_->numeric_schemas[index]
         : nullptr;
     if (numeric_files_open_ && state && state->open) {
-        if (!StorageService::enqueue_edf_numeric_record(state->layout.schema,
-                                                        record)) {
+        const EdfStorageEnqueueResult result =
+            StorageService::enqueue_edf_numeric_record(state->layout.schema,
+                                                       record);
+        if (result == EdfStorageEnqueueResult::Busy) return false;
+        if (result == EdfStorageEnqueueResult::Rejected) {
             status_.record_enqueue_failures++;
-            set_error("record_queue_failed");
-            return;
+            set_error("record_snapshot_failed");
+            return true;
         }
 
         status_.numeric_records[index]++;
-        return;
+        return true;
     }
 
     status_.numeric_record_drops++;
+    return true;
 }
 
 bool EdfRecorderManager::enqueue_event_annotation(

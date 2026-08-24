@@ -191,9 +191,11 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
     return EdfFramePrepareStatus::Ready;
 }
 
-void EdfStreamAssembler::end_session() {
-    flush_partial_records();
+bool EdfStreamAssembler::end_session() {
+    if (!flush_partial_records()) return false;
+
     status_.active = false;
+    return true;
 }
 
 void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
@@ -257,9 +259,10 @@ EdfSa2IngestStatus EdfStreamAssembler::ingest_sa2_sample(
     }
 
     SeriesBuffer buffer = series(EdfSeriesId::Sa2);
-    size_t budget = max_records_to_publish;
-    if (!advance_to_record(buffer, static_cast<uint32_t>(record_index),
-                           &budget)) {
+
+    if (!advance_sparse_to_record(buffer,
+                                  static_cast<uint32_t>(record_index),
+                                  max_records_to_publish)) {
         return EdfSa2IngestStatus::Deferred;
     }
 
@@ -640,8 +643,9 @@ void EdfStreamAssembler::maybe_rebase_initial_epoch(
     initial_epoch_rebase_allowed_ = false;
 }
 
-void EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
-    if (!record_observer_ || !series.status) return;
+bool EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
+    if (!record_observer_ || !series.status) return true;
+
     EdfCompletedRecordView record;
     record.series = series.id;
     record.record_index = series.status->current_record;
@@ -650,15 +654,18 @@ void EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
     record.values = series.values;
     record.present = series.present;
     record.valid = series.valid;
-    record_observer_(record_observer_context_, record);
+    return record_observer_(record_observer_context_, record);
 }
 
-void EdfStreamAssembler::publish_current_record(SeriesBuffer &series) {
-    if (!series.status) return;
+bool EdfStreamAssembler::publish_current_record(SeriesBuffer &series) {
+    if (!series.status) return true;
+
     const uint32_t missing = count_missing_record_samples(series);
-    publish_record(series);
+    if (!publish_record(series)) return false;
+
     series.status->records_completed++;
     series.status->missing_slots += missing;
+    return true;
 }
 
 bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
@@ -670,7 +677,8 @@ bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
 
     while (series.status->current_record < new_record) {
         if (publish_budget && *publish_budget == 0) return false;
-        publish_current_record(series);
+        if (!publish_current_record(series)) return false;
+
         if (publish_budget) --(*publish_budget);
         reset_record(series);
         series.status->current_record++;
@@ -678,8 +686,27 @@ bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
     return true;
 }
 
-void EdfStreamAssembler::flush_partial_records() {
-    if (!status_.buffers_ready) return;
+bool EdfStreamAssembler::advance_sparse_to_record(
+    SeriesBuffer &series,
+    uint32_t new_record,
+    size_t publish_budget) {
+    if (!series.status || new_record <= series.status->current_record) {
+        return true;
+    }
+
+    if (record_has_samples(series)) {
+        if (publish_budget == 0 || !publish_current_record(series)) {
+            return false;
+        }
+    }
+
+    reset_record(series);
+    series.status->current_record = new_record;
+    return true;
+}
+
+bool EdfStreamAssembler::flush_partial_records() {
+    if (!status_.buffers_ready) return true;
 
     size_t count = 0;
     const EdfFileSchema *schemas = edf_numeric_schemas(count);
@@ -687,10 +714,11 @@ void EdfStreamAssembler::flush_partial_records() {
         SeriesBuffer buffer = series(schemas[i].series);
         if (!record_has_samples(buffer)) continue;
         if (record_tail_complete(buffer)) {
-            publish_current_record(buffer);
+            if (!publish_current_record(buffer)) return false;
         }
         reset_record(buffer);
     }
+    return true;
 }
 
 void EdfStreamAssembler::store_sample(SeriesBuffer &series,

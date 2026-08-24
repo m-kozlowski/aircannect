@@ -20,9 +20,8 @@
 
 namespace aircannect {
 
-// Session shutdown can enqueue 3 final numeric records, 1 STR day upsert,
-// 1 metadata write, and 5 close jobs before the worker task drains.
-// Keep a little headroom.
+// Keep enough room for bounded gap publication and concurrent EDF work.
+// Session shutdown uses one close-all marker after its final numeric records.
 static constexpr size_t AC_EDF_STORAGE_QUEUE_CAPACITY = 12;
 static constexpr size_t AC_EDF_STORAGE_SLOT_BYTES = 6144;
 
@@ -74,6 +73,12 @@ struct EdfStorageOpenResult {
     uint32_t record_count = 0;
     char path[80] = {};
     char error[96] = {};
+};
+
+enum class EdfStorageEnqueueResult : uint8_t {
+    Accepted,
+    Busy,
+    Rejected,
 };
 
 struct StorageWorkloadSnapshot {
@@ -141,8 +146,9 @@ bool enqueue_edf_open_annotation(const char *path,
                                  EdfStorageOpenHandle *handle = nullptr);
 
 // EDF record writes
-bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
-                                const EdfCompletedRecordView &record);
+EdfStorageEnqueueResult enqueue_edf_numeric_record(
+    const EdfFileSchema &schema,
+    const EdfCompletedRecordView &record);
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
                                    const EdfAnnotationRecord &record);
 bool enqueue_edf_str_record(const char *path,
@@ -153,6 +159,7 @@ bool enqueue_edf_str_record(const char *path,
 bool enqueue_edf_identification_files(const std::string &json);
 bool enqueue_edf_close_numeric(EdfFileKind kind);
 bool enqueue_edf_close_annotation(EdfAnnotationKind kind);
+EdfStorageEnqueueResult enqueue_edf_close_all();
 bool edf_open_result(const EdfStorageOpenHandle &handle,
                      EdfStorageOpenResult &result);
 

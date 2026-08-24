@@ -496,6 +496,35 @@ bool edf_render_numeric_record(const EdfFileSchema &schema,
     return true;
 }
 
+bool edf_render_missing_numeric_record(const EdfFileSchema &schema,
+                                       uint8_t *dst,
+                                       size_t capacity,
+                                       size_t &written) {
+    written = 0;
+    const size_t required = edf_record_size(schema);
+    if (!dst || capacity < required || !schema.signals ||
+        schema.source_signal_count == 0 ||
+        schema.signal_count != schema.source_signal_count + 1) {
+        return false;
+    }
+
+    size_t offset = 0;
+    for (size_t signal = 0; signal < schema.source_signal_count; ++signal) {
+        for (size_t sample = 0; sample < schema.source_samples_per_record;
+             ++sample) {
+            (void)edf_append_i16_le(dst, capacity, offset,
+                                    EDF_MISSING_DIGITAL);
+        }
+    }
+
+    const uint16_t crc = edf_crc16_ccitt_false(dst, offset);
+    (void)edf_append_i16_le(dst, capacity, offset, static_cast<int16_t>(crc));
+    if (offset != required) return false;
+
+    written = offset;
+    return true;
+}
+
 bool edf_render_str_header(const EdfHeaderInfo &info,
                            uint8_t *dst,
                            size_t capacity,
