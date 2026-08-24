@@ -19,12 +19,15 @@ public:
     uint8_t rotation() const { return rotation_; }
 
 private:
+    void reset_measurement(const MotionSample &sample);
     bool motion_detected(const MotionSample &sample);
     int8_t orientation_candidate(const MotionSample &sample) const;
 
     MotionSample motion_reference_;
     bool have_motion_reference_ = false;
     bool motion_candidate_ = false;
+    bool have_last_sample_ = false;
+    uint32_t last_sample_ms_ = 0;
 
     int8_t candidate_rotation_ = -1;
     uint32_t candidate_since_ms_ = 0;

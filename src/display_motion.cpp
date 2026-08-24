@@ -9,6 +9,7 @@ constexpr float MOTION_DELTA_G = 0.12f;
 constexpr float ORIENTATION_AXIS_G = 0.70f;
 constexpr float ORIENTATION_DOMINANCE_G = 0.18f;
 constexpr uint32_t ORIENTATION_DWELL_MS = 500;
+constexpr uint32_t SAMPLE_CONTINUITY_TIMEOUT_MS = 1000;
 
 uint32_t elapsed_ms(uint32_t now_ms, uint32_t since_ms) {
     return now_ms - since_ms;
@@ -18,6 +19,14 @@ uint32_t elapsed_ms(uint32_t now_ms, uint32_t since_ms) {
 
 DisplayMotionUpdate DisplayMotionPolicy::update(
     const MotionSample &sample, uint32_t now_ms) {
+    if (have_last_sample_ &&
+        elapsed_ms(now_ms, last_sample_ms_) >=
+            SAMPLE_CONTINUITY_TIMEOUT_MS) {
+        reset_measurement(sample);
+    }
+    last_sample_ms_ = now_ms;
+    have_last_sample_ = true;
+
     DisplayMotionUpdate result;
     result.wake = motion_detected(sample);
     result.rotation = rotation_;
@@ -43,6 +52,13 @@ DisplayMotionUpdate DisplayMotionPolicy::update(
     result.rotation = rotation_;
     result.rotation_changed = true;
     return result;
+}
+
+void DisplayMotionPolicy::reset_measurement(const MotionSample &sample) {
+    motion_reference_ = sample;
+    have_motion_reference_ = true;
+    motion_candidate_ = false;
+    candidate_rotation_ = -1;
 }
 
 bool DisplayMotionPolicy::motion_detected(const MotionSample &sample) {
