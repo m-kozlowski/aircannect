@@ -895,6 +895,8 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
 }
 
 void setup() {
+    board_power_begin();
+
     // Serial bootstrap
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);

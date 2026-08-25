@@ -26,5 +26,6 @@ static constexpr uint32_t AC_STACK_PROFILE_SUMMARY_MS = 600000;
 #include "board_motion.h"
 #include "board_net.h"
 #include "board_oximetry.h"
+#include "board_power.h"
 #include "board_report.h"
 #include "board_storage.h"
