@@ -3,6 +3,7 @@
 #include "as11_rpc.h"
 #include "board.h"
 #include "memory_manager.h"
+#include "oximetry_hub.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -221,6 +222,33 @@ void SinkManager::set_live_chart_enabled(bool enabled) {
     }
 }
 
+void SinkManager::update_local_oximetry(const OximetryHubSnapshot &source,
+                                        bool mirrored_to_as11) {
+    local_oximetry_direct_ = source.source_present && !mirrored_to_as11;
+    if (!source.source_present) {
+        last_local_oximetry_ms_ = 0;
+        return;
+    }
+
+    const OximetryReading &reading = source.reading;
+    if (!reading.timestamp_ms ||
+        reading.timestamp_ms == last_local_oximetry_ms_) {
+        return;
+    }
+    last_local_oximetry_ms_ = reading.timestamp_ms;
+
+    if (!local_oximetry_direct_ || !initialized_ ||
+        !live_chart_.enabled || !live_chart_.desired) {
+        return;
+    }
+
+    append_live_sample(live_chart_.spo2, reading.valid,
+                       static_cast<float>(reading.spo2), live_chart_.drops);
+    append_live_sample(live_chart_.pulse, reading.valid,
+                       static_cast<float>(reading.pulse_bpm),
+                       live_chart_.drops);
+}
+
 void SinkManager::clear_live_chart_batch() {
     clear_live_series(live_chart_.pressure);
     clear_live_series(live_chart_.flow);
@@ -394,10 +422,12 @@ void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
                                 live_chart_.expiratory_pressure,
                                 live_chart_.drops);
         }
-        append_frame_signal(*frame, StreamSignalId::SpO2,
-                            live_chart_.spo2, live_chart_.drops);
-        append_frame_signal(*frame, StreamSignalId::HeartRate,
-                            live_chart_.pulse, live_chart_.drops);
+        if (!local_oximetry_direct_) {
+            append_frame_signal(*frame, StreamSignalId::SpO2,
+                                live_chart_.spo2, live_chart_.drops);
+            append_frame_signal(*frame, StreamSignalId::HeartRate,
+                                live_chart_.pulse, live_chart_.drops);
+        }
 
         live_chart_.frames++;
         live_chart_.last_frame_ms = now_ms;

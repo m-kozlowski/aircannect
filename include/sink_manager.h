@@ -11,6 +11,8 @@
 
 namespace aircannect {
 
+struct OximetryHubSnapshot;
+
 struct LiveChartSeriesBatch {
     float *values = nullptr;
     uint8_t *valid = nullptr;
@@ -52,6 +54,8 @@ public:
                                       TherapyPressureSnapshot &snapshot);
 
     void set_live_chart_enabled(bool enabled);
+    void update_local_oximetry(const OximetryHubSnapshot &source,
+                               bool mirrored_to_as11);
     const LiveChartRuntimeStatus &live_chart_status() const {
         return live_chart_;
     }
@@ -87,7 +91,9 @@ private:
 
     LiveChartRuntimeStatus live_chart_;
     uint32_t last_live_queue_drops_ = 0;
+    uint32_t last_local_oximetry_ms_ = 0;
     uint32_t next_live_attach_ms_ = 0;
+    bool local_oximetry_direct_ = false;
     bool initialized_ = false;
 };
 

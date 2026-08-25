@@ -553,6 +553,9 @@ static void poll_oximetry(bool network_available, uint32_t now_ms) {
     }
 
     plx_peripheral.poll(after, now_ms);
+    const PlxPeripheralStatus peripheral = plx_peripheral.status(now_ms);
+
+    sink_manager.update_local_oximetry(after, peripheral.subscribed);
 }
 
 static bool store_as11_ble_credentials(void *context,
