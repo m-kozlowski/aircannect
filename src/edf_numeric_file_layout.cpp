@@ -52,6 +52,20 @@ bool edf_short_tag_is_accepted(const char *accepted_data_ids_csv,
     return false;
 }
 
+bool edf_numeric_stream_available(const char *accepted_data_ids_csv) {
+    size_t descriptor_count = 0;
+    const EdfStreamSignalDescriptor *descriptors =
+        edf_stream_signal_descriptors(descriptor_count);
+    for (size_t i = 0; i < descriptor_count; ++i) {
+        const EdfStreamSignalDescriptor &entry = descriptors[i];
+        if (edf_short_tag_is_accepted(accepted_data_ids_csv,
+                                      entry.short_tag)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool edf_build_numeric_file_layout(EdfFileKind kind,
                                    const char *accepted_data_ids_csv,
                                    EdfNumericFileLayout &layout) {

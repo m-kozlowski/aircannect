@@ -1069,23 +1069,9 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     if (!stream_->actual_active()) {
         return false;
     }
-    size_t signal_count = 0;
-    const EdfStreamSignalDescriptor *signals =
-        edf_stream_signal_descriptors(signal_count);
-    for (size_t i = 0; i < signal_count; ++i) {
-        if (active_sa2_input_ == EdfSa2Input::LocalOximetry &&
-            signals[i].series == EdfSeriesId::Sa2) {
-            continue;
-        }
 
-        const EdfFileSchema *schema =
-            edf_numeric_schema_for_series(signals[i].series);
-        if (schema && schema->required &&
-            !stream_->accepted_data_id(signals[i].short_tag)) {
-            return false;
-        }
-    }
-    return true;
+    return edf_numeric_stream_available(
+        stream_->accepted_data_ids_csv().c_str());
 }
 
 bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
