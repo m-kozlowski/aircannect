@@ -110,6 +110,7 @@ void BleSensorProtocolEngine::viatom_on_connected() {
     viatom_reset_rx();
     viatom_clear_pending();
     viatom_.last_poll_ms = 0;
+    viatom_.initial_probe_complete = false;
     viatom_.need_time_sync = true;
 }
 
@@ -118,6 +119,7 @@ void BleSensorProtocolEngine::viatom_reset() {
     viatom_reset_rx();
     viatom_clear_pending();
     viatom_.last_poll_ms = 0;
+    viatom_.initial_probe_complete = false;
     viatom_.need_time_sync = false;
 }
 
@@ -134,6 +136,21 @@ void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
         viatom_clear_pending();
     }
     if (viatom_.pending_cmd != VIATOM_NO_PENDING_CMD) return;
+
+    if (!viatom_.initial_probe_complete) {
+        if (static_cast<int32_t>(now_ms - viatom_.last_poll_ms) <
+            static_cast<int32_t>(VIATOM_SENSOR_POLL_MS)) {
+            return;
+        }
+
+        if (!viatom_send_command(
+                VIATOM_CMD_READ_SENSORS, nullptr, 0, now_ms)) {
+            Log::logf(CAT_OXI, LOG_DEBUG,
+                      "Sensor Viatom probe write failed\n");
+        }
+        viatom_.last_poll_ms = now_ms;
+        return;
+    }
 
     if (viatom_.need_time_sync) {
         if (viatom_sync_datetime()) {
@@ -243,6 +260,9 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
         return;
     }
 
+    const bool charging = battery_state == 1 || battery_state == 2;
+    viatom_.initial_probe_complete = !charging;
+
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",
               invalid ? "invalid" : "valid",
@@ -252,7 +272,8 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
               static_cast<unsigned>(battery),
               static_cast<unsigned>(battery_state),
               static_cast<double>(pi) / 10.0);
-    emit_sample(spo2_raw, pulse_raw, invalid, true, lead_state != 0);
+    emit_sample(spo2_raw, pulse_raw, invalid, true, lead_state != 0,
+                charging);
 }
 
 void BleSensorProtocolEngine::viatom_reset_rx() {

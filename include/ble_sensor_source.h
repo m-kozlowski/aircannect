@@ -95,14 +95,16 @@ private:
                                          uint16_t pulse_raw,
                                          bool invalid,
                                          bool contact_known,
-                                         bool contact_present);
+                                         bool contact_present,
+                                         bool charging);
     static void advertisement_callback(
         void *context, const BleAdvertisement &advertisement);
     void note_advertisement(const BleAdvertisement &advertisement);
     void publish_sample(uint16_t spo2_raw, uint16_t pulse_raw,
                         bool from_invalid_packet,
                         bool contact_known,
-                        bool contact_present);
+                        bool contact_present,
+                        bool charging);
     void callback_disconnected(int reason);
 
     BleRuntime &runtime_;

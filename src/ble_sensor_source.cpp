@@ -976,7 +976,7 @@ void BleSensorSource::task_loop() {
                 continue;
             }
 
-            Log::logf(CAT_OXI, LOG_INFO,
+            Log::logf(CAT_OXI, LOG_DEBUG,
                       "Sensor observed addr=%s type=%u rssi=%d\n",
                       observed_target.addr,
                       static_cast<unsigned>(observed_target.addr_type),
@@ -1102,7 +1102,7 @@ bool BleSensorSource::connect_target(const OximetrySensorDevice &target,
     vTaskDelay(pdMS_TO_TICKS(100));
 
     NimBLEAddress address(std::string(target.addr), target.addr_type);
-    Log::logf(CAT_OXI, LOG_INFO,
+    Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor connecting addr=%s type=%u name=\"%s\"\n",
               target.addr,
               static_cast<unsigned>(target.addr_type),
@@ -1258,12 +1258,13 @@ void BleSensorSource::protocol_sample_callback(
     uint16_t pulse_raw,
     bool invalid,
     bool contact_known,
-    bool contact_present) {
+    bool contact_present,
+    bool charging) {
     auto *source = static_cast<BleSensorSource *>(context);
     if (!source) return;
 
     source->publish_sample(spo2_raw, pulse_raw, invalid,
-                           contact_known, contact_present);
+                           contact_known, contact_present, charging);
 }
 
 void BleSensorSource::advertisement_callback(
@@ -1321,7 +1322,8 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
                                      uint16_t pulse_raw,
                                      bool from_invalid_packet,
                                      bool contact_known,
-                                     bool contact_present) {
+                                     bool contact_present,
+                                     bool charging) {
     bool spo2_valid = false;
     bool pulse_valid = false;
     const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
@@ -1331,6 +1333,16 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
+    if (charging) {
+        disconnect_requested_ = true;
+        disconnect_hold_until_absent_ = true;
+        status_.notifications++;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&mux_);
+#endif
+        return;
+    }
+
     OximetrySample sample;
     sample.source = OximetrySource::Ble;
     sample.spo2 = valid ? spo2 : -1;

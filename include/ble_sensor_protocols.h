@@ -19,7 +19,8 @@ public:
                                     uint16_t pulse_raw,
                                     bool invalid,
                                     bool contact_known,
-                                    bool contact_present);
+                                    bool contact_present,
+                                    bool charging);
 
     bool begin();
     void set_sample_callback(SampleCallback callback, void *context);
@@ -46,7 +47,8 @@ private:
                      uint16_t pulse_raw,
                      bool invalid,
                      bool contact_known = false,
-                     bool contact_present = false);
+                     bool contact_present = false,
+                     bool charging = false);
 
 #if AC_OXIMETRY_BLE_ENABLED
     // NimBLE host callback -> sensor worker SPSC mailbox.
@@ -92,6 +94,7 @@ private:
         uint8_t pending_cmd = 0xff;
         uint32_t pending_ms = 0;
         uint32_t last_poll_ms = 0;
+        bool initial_probe_complete = false;
         bool need_time_sync = false;
     };
 
