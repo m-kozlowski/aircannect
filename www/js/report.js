@@ -648,8 +648,55 @@
       }
     }
 
+    function drawReportEventMarkers(svg, events, start, end, ranges,
+                                    pad, graphW, graphH) {
+      const markers = (events || []).map((event) => ({
+        event,
+        definition: reportEventDefs.find((item) => item.code === event.code),
+      })).filter((marker) => marker.definition &&
+        Number.isFinite(marker.event.t) &&
+        marker.event.t >= start && marker.event.t <= end &&
+        reportPointRangeIndex(marker.event.t, ranges) >= 0)
+        .sort((a, b) => a.event.t - b.event.t);
+      const laneLastX = [-Infinity, -Infinity, -Infinity];
+
+      markers.forEach((marker) => {
+        const x = pad.left + graphW *
+          ((marker.event.t - start) / (end - start));
+        let lane = laneLastX.findIndex((lastX) => x - lastX >= 12);
+        if (lane < 0) {
+          lane = laneLastX.indexOf(Math.min(...laneLastX));
+        }
+        laneLastX[lane] = x;
+
+        svg.appendChild(svgNode("line", {
+          x1: x.toFixed(1),
+          y1: String(pad.top),
+          x2: x.toFixed(1),
+          y2: (pad.top + graphH).toFixed(1),
+          stroke: marker.definition.color,
+          "stroke-opacity": "0.9",
+          "stroke-width": "1",
+          "vector-effect": "non-scaling-stroke",
+          "pointer-events": "none",
+        }));
+
+        const labelX = x + 3;
+        const labelY = pad.top + 4 + lane * 18;
+        svg.appendChild(svgText(marker.definition.key, labelX, labelY, {
+          fill: marker.definition.color,
+          "font-size": "9",
+          "font-weight": "600",
+          transform: "rotate(90 " + labelX.toFixed(1) + " " +
+            labelY.toFixed(1) + ")",
+          "pointer-events": "none",
+        }));
+      });
+    }
+
     function drawReportChart(svg,
                              seriesList,
+                             events,
                              minY,
                              maxY,
                              start,
@@ -823,6 +870,10 @@
           "vector-effect": "non-scaling-stroke",
         }));
       });
+
+      drawReportEventMarkers(svg, events, start, end, ranges,
+        pad, graphW, graphH);
+
       svg._geom = {pad, graphW, width, height};
       const cursor = svgNode("line", {
         x1: "0", x2: "0",
@@ -1258,6 +1309,7 @@
         } else {
           retry = !drawReportChart(item.canvas,
                                    item.seriesList,
+                                   item.events,
                                    item.minY,
                                    item.maxY,
                                    item.start,
@@ -1518,6 +1570,7 @@
           type: "series",
           canvas,
           seriesList,
+          events: reportEvents.slice(),
           minY: extent.min,
           maxY: extent.max,
           start: range.start,
@@ -1879,6 +1932,20 @@
         !reportChartPreferences.collapsed.has(key));
     }
 
+    function reportBaseLoadKeys(keys) {
+      const result = Array.from(keys || []);
+      const needsMarkers = result.some((key) => {
+        const definition = reportChartDefinition(key);
+        return definition && definition.type !== "events";
+      });
+      const events = reportChartDefinition("events");
+      if (needsMarkers && !result.includes("events") &&
+          reportChartPartNames(events, reportBasePlotIndex).length) {
+        result.unshift("events");
+      }
+      return result;
+    }
+
     async function fetchReportChartData(index, definition, context) {
       const decoded = {events: [], series: {}};
       const partNames = reportChartPartNames(definition, index);
@@ -1915,7 +1982,9 @@
       if (!definition || !decoded) return;
       if (definition.type === "events") {
         reportBaseEvents = decoded.events || [];
-        if (!reportZoom) reportEvents = reportBaseEvents;
+        if (!reportZoom || !currentReportRangeChartReady("events")) {
+          reportEvents = reportBaseEvents;
+        }
       } else {
         Object.keys(decoded.series || {}).forEach((name) => {
           reportBaseSeries[name] = decoded.series[name];
@@ -1979,7 +2048,7 @@
       renderReportSummary();
       renderReportCharts();
 
-      const jobs = reportExpandedChartKeys().map((key) =>
+      const jobs = reportBaseLoadKeys(reportExpandedChartKeys()).map((key) =>
         () => loadReportBaseChart(key, token, signal));
       try {
         await runReportFetchJobs(jobs, 2);
@@ -2003,7 +2072,9 @@
         ownsController = true;
       }
       try {
-        await loadReportBaseChart(key, token, controller.signal);
+        const keys = reportBaseLoadKeys([key]);
+        await runReportFetchJobs(keys.map((chartKey) =>
+          () => loadReportBaseChart(chartKey, token, controller.signal)), 2);
         if (reportZoom && token === reportLoadToken) {
           ensureReportRangeLoaded(reportZoom.start, reportZoom.end, [key]);
         }
