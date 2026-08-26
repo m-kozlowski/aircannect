@@ -51,27 +51,51 @@ void copy_text(char *out, size_t size, const char *value) {
 }  // namespace
 
 DisplayPressureSnapshot compose_display_pressure(
-    const TherapyPressureSnapshot &pressure,
+    const TherapyTelemetrySnapshot &telemetry,
     int therapy_mode) {
     DisplayPressureSnapshot out;
 
-    if (therapy_mode >= 3 && pressure.inspiratory_pressure_valid &&
-        pressure.expiratory_pressure_valid) {
+    if (therapy_mode >= 3 && telemetry.inspiratory_pressure_valid &&
+        telemetry.expiratory_pressure_valid) {
         out.kind = DisplayPressureSnapshot::Kind::Pair;
-        out.inspiratory = pressure.inspiratory_pressure;
-        out.expiratory = pressure.expiratory_pressure;
-    } else if (pressure.inspiratory_pressure_valid) {
+        out.inspiratory = telemetry.inspiratory_pressure;
+        out.expiratory = telemetry.expiratory_pressure;
+    } else if (telemetry.inspiratory_pressure_valid) {
         out.kind = DisplayPressureSnapshot::Kind::Single;
-        out.inspiratory = pressure.inspiratory_pressure;
+        out.inspiratory = telemetry.inspiratory_pressure;
     }
 
     return out;
 }
 
+void apply_display_therapy_telemetry(
+    DisplaySnapshot &snapshot,
+    const TherapyTelemetrySnapshot &telemetry,
+    int therapy_mode) {
+    snapshot.pressure = compose_display_pressure(telemetry, therapy_mode);
+    snapshot.leak_valid = telemetry.leak_valid;
+    snapshot.tidal_volume_valid = telemetry.tidal_volume_valid;
+    snapshot.respiratory_rate_valid = telemetry.respiratory_rate_valid;
+    snapshot.minute_ventilation_valid = telemetry.minute_ventilation_valid;
+    snapshot.flow_limitation_valid = telemetry.flow_limitation_valid;
+    snapshot.inspiratory_duration_valid =
+        telemetry.inspiratory_duration_valid;
+    snapshot.ie_ratio_valid = telemetry.ie_ratio_valid;
+    snapshot.snore_valid = telemetry.snore_valid;
+    snapshot.leak_l_min = telemetry.leak_l_min;
+    snapshot.tidal_volume_ml = telemetry.tidal_volume_ml;
+    snapshot.respiratory_rate = telemetry.respiratory_rate;
+    snapshot.minute_ventilation_l_min = telemetry.minute_ventilation_l_min;
+    snapshot.flow_limitation = telemetry.flow_limitation;
+    snapshot.inspiratory_duration_s = telemetry.inspiratory_duration_s;
+    snapshot.ie_ratio_percent = telemetry.ie_ratio_percent;
+    snapshot.snore = telemetry.snore;
+}
+
 DisplaySnapshot compose_display_snapshot(
     const SystemStatusSnapshot &system,
     const SessionStatus &session,
-    const TherapyPressureSnapshot &pressure,
+    const TherapyTelemetrySnapshot &telemetry,
     const ExportTaskControlSnapshot &exports,
     int therapy_mode) {
     DisplaySnapshot out;
@@ -121,8 +145,7 @@ DisplaySnapshot compose_display_snapshot(
     out.smb = display_state(exports.smb);
     out.sleephq = display_state(exports.sleephq);
 
-    out.pressure = compose_display_pressure(pressure, therapy_mode);
-
+    apply_display_therapy_telemetry(out, telemetry, therapy_mode);
     out.oximetry_valid = system.oximetry.source_fresh &&
                          system.oximetry.reading.valid;
     if (out.oximetry_valid) {

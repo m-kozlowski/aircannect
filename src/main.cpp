@@ -888,7 +888,7 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
         const DisplaySnapshot display_snapshot = compose_display_snapshot(
             snapshot,
             session_manager.status(),
-            sink_manager.therapy_pressure_snapshot(snapshot.now_ms),
+            sink_manager.therapy_telemetry_snapshot(snapshot.now_ms),
             export_coordinator.status_snapshot(),
             therapy_mode);
         display_manager.publish(display_snapshot);
@@ -1098,7 +1098,7 @@ void setup() {
 
     sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);
-    sink_manager.set_therapy_pressure_enabled(display_manager.available());
+    sink_manager.set_therapy_telemetry_enabled(display_manager.available());
 
     edf_recorder_manager.begin(event_broker, stream_broker,
                                as11_device_service.state(), session_manager,
@@ -1341,13 +1341,13 @@ void loop() {
 
     // Live sinks
     sink_manager.poll(now_ms);
-    TherapyPressureSnapshot pressure;
+    TherapyTelemetrySnapshot telemetry;
     if (display_manager.available() &&
-        sink_manager.take_therapy_pressure_update(now_ms, pressure)) {
+        sink_manager.take_therapy_telemetry_update(now_ms, telemetry)) {
         const int therapy_mode = as11_mode_index_from_value(
             as11_device_service.state().active_therapy_profile());
         display_manager.publish_pressure(
-            compose_display_pressure(pressure, therapy_mode));
+            compose_display_pressure(telemetry, therapy_mode));
     }
 
     // Wi-Fi and network services

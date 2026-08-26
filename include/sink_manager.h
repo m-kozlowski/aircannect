@@ -48,10 +48,12 @@ public:
                SessionManager &session);
     void poll(uint32_t now_ms);
 
-    void set_therapy_pressure_enabled(bool enabled);
-    TherapyPressureSnapshot therapy_pressure_snapshot(uint32_t now_ms) const;
-    bool take_therapy_pressure_update(uint32_t now_ms,
-                                      TherapyPressureSnapshot &snapshot);
+    void set_therapy_telemetry_enabled(bool enabled);
+    TherapyTelemetrySnapshot therapy_telemetry_snapshot(
+        uint32_t now_ms) const;
+    bool take_therapy_telemetry_update(
+        uint32_t now_ms,
+        TherapyTelemetrySnapshot &snapshot);
 
     void set_live_chart_enabled(bool enabled);
     void update_local_oximetry(const OximetryHubSnapshot &source,
@@ -63,11 +65,11 @@ public:
     void mark_live_chart_sent();
 
 private:
-    bool therapy_pressure_should_run() const;
-    void poll_therapy_pressure(uint32_t now_ms);
-    void attach_therapy_pressure_stream(uint32_t now_ms);
-    void release_therapy_pressure_stream();
-    void drain_therapy_pressure_stream(uint32_t now_ms);
+    bool therapy_telemetry_should_run() const;
+    void poll_therapy_telemetry(uint32_t now_ms);
+    void attach_therapy_telemetry_stream(uint32_t now_ms);
+    void release_therapy_telemetry_stream();
+    void drain_therapy_telemetry_stream(uint32_t now_ms);
 
     bool live_chart_should_run() const;
     void poll_live_chart(uint32_t now_ms);
@@ -82,12 +84,13 @@ private:
     const As11DeviceState *device_state_ = nullptr;
     SessionManager *session_ = nullptr;
 
-    TherapyTelemetry therapy_pressure_;
-    StreamConsumerHandle therapy_pressure_handle_ = STREAM_CONSUMER_INVALID;
-    uint32_t therapy_pressure_session_id_ = 0;
-    uint32_t next_therapy_pressure_attach_ms_ = 0;
-    bool therapy_pressure_enabled_ = false;
-    bool therapy_pressure_dirty_ = false;
+    TherapyTelemetry therapy_telemetry_;
+    StreamConsumerHandle therapy_telemetry_handle_ =
+        STREAM_CONSUMER_INVALID;
+    uint32_t therapy_telemetry_session_id_ = 0;
+    uint32_t next_therapy_telemetry_attach_ms_ = 0;
+    bool therapy_telemetry_enabled_ = false;
+    bool therapy_telemetry_dirty_ = false;
 
     LiveChartRuntimeStatus live_chart_;
     uint32_t last_live_queue_drops_ = 0;
