@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <new>
+#include <string.h>
 #include <utility>
 
 #include "board_report.h"
@@ -86,9 +87,14 @@ struct ReportArtifactFailureEntry {
     ReportArtifactKey artifact;
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint32_t retry_at_ms = 0;
+    bool retryable = true;
 
     bool valid() const { return artifact.valid() && error[0] != '\0'; }
 };
+
+bool report_artifact_failure_retryable(const char *error) {
+    return !error || strcmp(error, "report_source_expired") != 0;
+}
 
 struct ReportPublishedState {
     std::shared_ptr<const NightCatalog> catalog;
@@ -905,12 +911,16 @@ struct ReportTask::Runtime {
 
         for (const ReportArtifactFailureEntry &entry : artifact_failures) {
             if (!entry.valid() || entry.artifact != artifact ||
-                deadline_due(last_step_ms, entry.retry_at_ms)) {
+                (entry.retryable &&
+                 deadline_due(last_step_ms, entry.retry_at_ms))) {
                 continue;
             }
 
             copy_cstr(out.error, sizeof(out.error), entry.error);
-            out.retry_after_ms = entry.retry_at_ms - last_step_ms;
+            out.retryable = entry.retryable;
+            out.retry_after_ms = entry.retryable
+                ? entry.retry_at_ms - last_step_ms
+                : 0;
             unlock();
             return true;
         }
@@ -1033,7 +1043,10 @@ struct ReportTask::Runtime {
         ReportArtifactFailureEntry &entry = artifact_failures[selected];
         entry.artifact = artifact;
         copy_cstr(entry.error, sizeof(entry.error), error);
-        entry.retry_at_ms = now_ms + ARTIFACT_FAILURE_RETRY_MS;
+        entry.retryable = report_artifact_failure_retryable(error);
+        entry.retry_at_ms = entry.retryable
+            ? now_ms + ARTIFACT_FAILURE_RETRY_MS
+            : 0;
     }
 
     void clear_artifact_failure_locked(const ReportArtifactKey &artifact) {
@@ -1162,6 +1175,12 @@ struct ReportTask::Runtime {
                 }
             }
 
+            idle_cursor++;
+            return true;
+        }
+
+        if ((night->source_flags &
+             NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0) {
             idle_cursor++;
             return true;
         }
@@ -2122,8 +2141,32 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.pending_refresh.summary_attempted &&
         !runtime.summary_acquisition.active() &&
         deadline_due(now_ms, runtime.catalog_refresh_retry_at_ms)) {
-        const std::shared_ptr<const NightCatalogSummarySnapshot> summary =
+        std::shared_ptr<const NightCatalogSummarySnapshot> summary =
             runtime.summary_acquisition.snapshot();
+        const ReportSummaryAcquisitionStatus summary_status =
+            runtime.summary_acquisition.status();
+        if (summary && runtime.catalog &&
+            summary_status.state == ReportSummaryAcquisitionState::Ready &&
+            summary_status.generation ==
+                runtime.pending_refresh.generation) {
+            summary = NightCatalogSummarySnapshot::preserve_expired_history(
+                *summary, *runtime.catalog);
+            if (!summary) {
+                runtime.catalog_refresh_retry_at_ms =
+                    now_ms + next_background_retry_delay(
+                                 runtime.catalog_refresh_retry_attempt,
+                                 CATALOG_STORE_RETRY_MIN_MS,
+                                 CATALOG_STORE_RETRY_MAX_MS);
+                advance_background_retry(
+                    runtime.catalog_refresh_retry_attempt);
+                runtime.command_failures++;
+                worked = true;
+                runtime.publish_status();
+                return worked;
+            }
+            runtime.summary_acquisition.seed(summary);
+        }
+
         const OperationAdmission admitted =
             runtime.catalog_refresh.request_refresh(
                 summary,

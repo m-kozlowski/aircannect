@@ -122,10 +122,17 @@ void send_artifact_failure(
              sizeof(body),
              "{\"ok\":false,\"state\":\"failed\",\"error\":\"%s\"}",
              failure.error);
+    const int status = failure.retryable ? 503 : 404;
     AsyncWebServerResponse *response = request->beginResponse(
-        503, "application/json", body);
+        status, "application/json", body);
     if (!response) {
-        request->send(503, "application/json", body);
+        request->send(status, "application/json", body);
+        return;
+    }
+
+    response->addHeader("Cache-Control", "no-store");
+    if (!failure.retryable) {
+        request->send(response);
         return;
     }
 
@@ -135,7 +142,6 @@ void send_artifact_failure(
              "%lu",
              static_cast<unsigned long>(
                  (failure.retry_after_ms + 999) / 1000));
-    response->addHeader("Cache-Control", "no-store");
     response->addHeader("Retry-After", retry_after);
     request->send(response);
 }

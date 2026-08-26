@@ -508,6 +508,19 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
         return true;
     }
 
+    const NightCatalogRecord *night = catalog_
+        ? catalog_->find(artifact.sleep_day)
+        : nullptr;
+    if (night && night->source_revision == artifact.source_revision &&
+        (night->source_flags &
+         NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::Ready,
+                        ReportExecutorError::None,
+                        "report_source_expired");
+        return true;
+    }
+
     build_request_ = active_request_;
     build_request_.artifact = artifact;
 

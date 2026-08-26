@@ -41,7 +41,8 @@ constexpr uint16_t SOURCE_REVISION_POLICY_V11 = 3;
 constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
                                  NIGHT_CATALOG_SOURCE_STR |
                                  NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
-                                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
+                                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
+                                 NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED;
 constexpr uint32_t METRIC_FLAGS =
     (1u << static_cast<uint8_t>(NightCatalogMetric::Count)) - 1u;
 constexpr int32_t TIMEZONE_OFFSET_MISSING = INT32_MIN;
@@ -156,6 +157,10 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
             (((record->source_flags &
                NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) != 0) !=
              (record->summary_identity != 0)) ||
+            ((record->source_flags &
+              NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0 &&
+             (record->source_flags &
+              NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) == 0) ||
             !timezone_offset_valid(record->timezone_offset_valid,
                                    record->timezone_offset_minutes) ||
             !metrics_valid(record->metrics)) {

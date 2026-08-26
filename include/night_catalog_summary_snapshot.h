@@ -36,6 +36,10 @@ public:
         size_t error_size = 0);
     static std::shared_ptr<const NightCatalogSummarySnapshot> from_catalog(
         const NightCatalog &catalog);
+    static std::shared_ptr<const NightCatalogSummarySnapshot>
+    preserve_expired_history(
+        const NightCatalogSummarySnapshot &current,
+        const NightCatalog &previous_catalog);
 
 private:
     NightCatalogSummarySnapshot() = default;

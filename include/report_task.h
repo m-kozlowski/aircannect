@@ -135,6 +135,7 @@ struct ReportPlotPayloadQuery {
 struct ReportArtifactFailureStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint32_t retry_after_ms = 0;
+    bool retryable = true;
 
     bool valid() const { return error[0] != '\0'; }
 };

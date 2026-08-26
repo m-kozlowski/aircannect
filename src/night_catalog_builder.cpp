@@ -40,6 +40,7 @@ struct BuildNight {
     bool fallback_joins_summary = false;
     bool summary_metrics_valid = false;
     bool timezone_offset_valid = false;
+    bool summary_expired = false;
 };
 
 struct BuildSession {
@@ -943,6 +944,7 @@ bool ingest_summary(const NightCatalogBuildInput &input,
         night->timezone_offset_valid = source.timezone_offset_valid;
         night->has_summary = true;
         night->summary_metrics_valid = matched_session_count == 0;
+        night->summary_expired = source.expired;
     }
     return true;
 }
@@ -1037,7 +1039,9 @@ uint64_t calculate_revision(const NightCatalog &catalog,
     if (record.timezone_offset_valid) {
         hash = hash_i64(hash, record.timezone_offset_minutes);
     }
-    hash = hash_byte(hash, record.source_flags);
+    hash = hash_byte(
+        hash,
+        record.source_flags & ~NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED);
     hash = hash_u32(hash, record.metrics.valid_mask);
     hash = hash_u32(hash, record.metrics.str_mask);
     hash = hash_u32(hash, record.metrics.summary_mask);
@@ -1447,6 +1451,9 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
         }
         if (source.has_summary) {
             record.source_flags |= NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK;
+            if (source.summary_expired) {
+                record.source_flags |= NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED;
+            }
             record.summary_identity = source.summary_identity;
             if (source.summary_metrics_valid) {
                 (void)apply_metrics(record.metrics,

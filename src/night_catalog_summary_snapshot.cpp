@@ -203,13 +203,172 @@ bool fill_record(const ReportSummaryRecord &source,
     return sessions_written == expected_sessions;
 }
 
+template <typename T>
 void copy_summary_metric(const NightCatalogMetrics &source,
                          NightCatalogMetric metric,
                          bool &present,
-                         float &value,
-                         float source_value) {
+                         T &value,
+                         T source_value) {
     present = source.source(metric) == NightCatalogMetricSource::Summary;
     if (present) value = source_value;
+}
+
+void copy_summary_metrics(const NightCatalogMetrics &source,
+                          ReportDailyMetrics &target) {
+    target.source = ReportMetricSource::Summary;
+    copy_summary_metric(source,
+                        NightCatalogMetric::Ahi,
+                        target.has_ahi,
+                        target.ahi,
+                        source.ahi);
+    copy_summary_metric(source,
+                        NightCatalogMetric::ObstructiveApneaIndex,
+                        target.has_oa_index,
+                        target.oa_index,
+                        source.obstructive_apnea_index);
+    copy_summary_metric(source,
+                        NightCatalogMetric::CentralApneaIndex,
+                        target.has_ca_index,
+                        target.ca_index,
+                        source.central_apnea_index);
+    copy_summary_metric(source,
+                        NightCatalogMetric::UnknownApneaIndex,
+                        target.has_ua_index,
+                        target.ua_index,
+                        source.unknown_apnea_index);
+    copy_summary_metric(source,
+                        NightCatalogMetric::HypopneaIndex,
+                        target.has_hypopnea_index,
+                        target.hypopnea_index,
+                        source.hypopnea_index);
+    copy_summary_metric(source,
+                        NightCatalogMetric::ArousalIndex,
+                        target.has_arousal_index,
+                        target.arousal_index,
+                        source.arousal_index);
+    copy_summary_metric(source,
+                        NightCatalogMetric::MaskPressure50,
+                        target.has_mask_pressure_50,
+                        target.mask_pressure_50_cm_h2o,
+                        source.mask_pressure_50_cm_h2o);
+    copy_summary_metric(source,
+                        NightCatalogMetric::MaskPressure95,
+                        target.has_mask_pressure_95,
+                        target.mask_pressure_95_cm_h2o,
+                        source.mask_pressure_95_cm_h2o);
+    copy_summary_metric(source,
+                        NightCatalogMetric::Leak50,
+                        target.has_leak_50,
+                        target.leak_50_l_min,
+                        source.leak_50_l_min);
+    copy_summary_metric(source,
+                        NightCatalogMetric::Leak95,
+                        target.has_leak_95,
+                        target.leak_95_l_min,
+                        source.leak_95_l_min);
+    copy_summary_metric(source,
+                        NightCatalogMetric::MinuteVentilation50,
+                        target.has_minute_ventilation_50,
+                        target.minute_ventilation_50_l_min,
+                        source.minute_ventilation_50_l_min);
+    copy_summary_metric(source,
+                        NightCatalogMetric::MinuteVentilation95,
+                        target.has_minute_ventilation_95,
+                        target.minute_ventilation_95_l_min,
+                        source.minute_ventilation_95_l_min);
+    copy_summary_metric(source,
+                        NightCatalogMetric::RespiratoryRate50,
+                        target.has_respiratory_rate_50,
+                        target.respiratory_rate_50_bpm,
+                        source.respiratory_rate_50_bpm);
+    copy_summary_metric(source,
+                        NightCatalogMetric::RespiratoryRate95,
+                        target.has_respiratory_rate_95,
+                        target.respiratory_rate_95_bpm,
+                        source.respiratory_rate_95_bpm);
+    copy_summary_metric(source,
+                        NightCatalogMetric::TidalVolume50,
+                        target.has_tidal_volume_50,
+                        target.tidal_volume_50_l,
+                        source.tidal_volume_50_l);
+    copy_summary_metric(source,
+                        NightCatalogMetric::TidalVolume95,
+                        target.has_tidal_volume_95,
+                        target.tidal_volume_95_l,
+                        source.tidal_volume_95_l);
+    copy_summary_metric(source,
+                        NightCatalogMetric::Spo2Median,
+                        target.has_spo2_50,
+                        target.spo2_50_percent,
+                        source.spo2_median_percent);
+    copy_summary_metric(source,
+                        NightCatalogMetric::Spo2ThresholdMinutes,
+                        target.has_spo2_threshold_minutes,
+                        target.spo2_threshold_minutes,
+                        source.spo2_threshold_minutes);
+    copy_summary_metric(source,
+                        NightCatalogMetric::CsrMinutes,
+                        target.has_csr_minutes,
+                        target.csr_minutes,
+                        source.csr_minutes);
+    copy_summary_metric(source,
+                        NightCatalogMetric::DurationMinutes,
+                        target.has_duration_min,
+                        target.duration_min,
+                        source.duration_min);
+}
+
+bool copy_catalog_record(const NightCatalog &catalog,
+                         const NightCatalogRecord &source,
+                         bool expired,
+                         NightCatalogSummaryInput &target,
+                         NightCatalogTimeRange *sessions,
+                         size_t session_capacity,
+                         size_t &sessions_written) {
+    size_t session_count = 0;
+    const NightCatalogTimeRange *source_sessions =
+        catalog.sessions(source, session_count);
+    if (session_count > session_capacity ||
+        (session_count > 0 && !source_sessions)) {
+        return false;
+    }
+
+    target.sleep_day = source.sleep_day;
+    target.day_start_ms = source.day_start_ms;
+    target.day_end_ms = source.day_end_ms;
+    target.sessions = session_count > 0 ? sessions : nullptr;
+    target.session_count = session_count;
+    target.identity = source.summary_identity;
+    target.timezone_offset_minutes = source.timezone_offset_minutes;
+    target.timezone_offset_valid = source.timezone_offset_valid;
+    target.expired = expired;
+    copy_summary_metrics(source.metrics, target.metrics);
+
+    if (session_count > 0) {
+        memcpy(sessions,
+               source_sessions,
+               session_count * sizeof(NightCatalogTimeRange));
+    }
+    sessions_written = session_count;
+    return true;
+}
+
+bool current_summary_contains(const NightCatalogSummarySnapshot &current,
+                              SleepDayId sleep_day) {
+    const NightCatalogSummaryInput *records = current.records();
+    for (size_t i = 0; i < current.size(); ++i) {
+        if (records[i].sleep_day == sleep_day) return true;
+    }
+    return false;
+}
+
+bool expirable_summary_history(const NightCatalogRecord &record) {
+    constexpr uint8_t local_sources = NIGHT_CATALOG_SOURCE_EDF |
+                                      NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
+    return (record.source_flags &
+            NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) != 0 &&
+           (record.source_flags & local_sources) == 0 &&
+           record.summary_identity != 0;
 }
 
 struct ParseCountContext {
@@ -487,76 +646,113 @@ NightCatalogSummarySnapshot::from_catalog(const NightCatalog &catalog) {
             continue;
         }
 
-        NightCatalogSummaryInput &target = snapshot->records_[next_record++];
-        target.sleep_day = source->sleep_day;
-        target.day_start_ms = source->day_start_ms;
-        target.day_end_ms = source->day_end_ms;
-        target.identity = source->summary_identity;
-        target.timezone_offset_minutes = source->timezone_offset_minutes;
-        target.timezone_offset_valid = source->timezone_offset_valid;
-
-        size_t count = 0;
-        const NightCatalogTimeRange *sessions =
-            catalog.sessions(*source, count);
-        target.sessions = count > 0
+        size_t written = 0;
+        const bool expired =
+            (source->source_flags &
+             NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0;
+        NightCatalogTimeRange *session_target = next_session < session_count
             ? snapshot->sessions_ + next_session
             : nullptr;
-        target.session_count = count;
-        if (count > 0) {
-            memcpy(snapshot->sessions_ + next_session,
-                   sessions,
-                   count * sizeof(NightCatalogTimeRange));
-            next_session += count;
+        if (!copy_catalog_record(catalog,
+                                 *source,
+                                 expired,
+                                 snapshot->records_[next_record],
+                                 session_target,
+                                 session_count - next_session,
+                                 written)) {
+            return {};
+        }
+        ++next_record;
+        next_session += written;
+    }
+
+    return snapshot;
+}
+
+std::shared_ptr<const NightCatalogSummarySnapshot>
+NightCatalogSummarySnapshot::preserve_expired_history(
+    const NightCatalogSummarySnapshot &current,
+    const NightCatalog &previous_catalog) {
+    size_t record_count = current.size();
+    size_t session_count = 0;
+    const NightCatalogSummaryInput *current_records = current.records();
+    for (size_t i = 0; i < current.size(); ++i) {
+        const NightCatalogSummaryInput &record = current_records[i];
+        if (record.session_count > 0 && !record.sessions) return {};
+        if (session_count > std::numeric_limits<size_t>::max() -
+                                record.session_count) {
+            return {};
+        }
+        session_count += record.session_count;
+    }
+
+    for (size_t i = 0; i < previous_catalog.size(); ++i) {
+        const NightCatalogRecord *record = previous_catalog.record(i);
+        if (!record || !expirable_summary_history(*record) ||
+            current_summary_contains(current, record->sleep_day)) {
+            continue;
         }
 
-        target.metrics.source = ReportMetricSource::Summary;
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::Ahi,
-                            target.metrics.has_ahi,
-                            target.metrics.ahi,
-                            source->metrics.ahi);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::ObstructiveApneaIndex,
-                            target.metrics.has_oa_index,
-                            target.metrics.oa_index,
-                            source->metrics.obstructive_apnea_index);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::CentralApneaIndex,
-                            target.metrics.has_ca_index,
-                            target.metrics.ca_index,
-                            source->metrics.central_apnea_index);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::UnknownApneaIndex,
-                            target.metrics.has_ua_index,
-                            target.metrics.ua_index,
-                            source->metrics.unknown_apnea_index);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::HypopneaIndex,
-                            target.metrics.has_hypopnea_index,
-                            target.metrics.hypopnea_index,
-                            source->metrics.hypopnea_index);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::ArousalIndex,
-                            target.metrics.has_arousal_index,
-                            target.metrics.arousal_index,
-                            source->metrics.arousal_index);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::MaskPressure50,
-                            target.metrics.has_mask_pressure_50,
-                            target.metrics.mask_pressure_50_cm_h2o,
-                            source->metrics.mask_pressure_50_cm_h2o);
-        copy_summary_metric(source->metrics,
-                            NightCatalogMetric::Leak50,
-                            target.metrics.has_leak_50,
-                            target.metrics.leak_50_l_min,
-                            source->metrics.leak_50_l_min);
-        if (source->metrics.source(NightCatalogMetric::DurationMinutes) ==
-            NightCatalogMetricSource::Summary) {
-            target.metrics.has_duration_min = true;
-            target.metrics.duration_min = source->metrics.duration_min;
+        size_t count = 0;
+        (void)previous_catalog.sessions(*record, count);
+        if (record_count == std::numeric_limits<size_t>::max() ||
+            session_count > std::numeric_limits<size_t>::max() - count) {
+            return {};
+        }
+        ++record_count;
+        session_count += count;
+    }
+
+    std::shared_ptr<NightCatalogSummarySnapshot> snapshot(
+        new (std::nothrow) NightCatalogSummarySnapshot());
+    if (!snapshot || !snapshot->allocate(record_count, session_count)) {
+        return {};
+    }
+
+    size_t next_record = 0;
+    size_t next_session = 0;
+    for (size_t i = 0; i < current.size(); ++i) {
+        const NightCatalogSummaryInput &source = current_records[i];
+        NightCatalogSummaryInput &target = snapshot->records_[next_record++];
+        target = source;
+        target.sessions = source.session_count > 0
+            ? snapshot->sessions_ + next_session
+            : nullptr;
+        if (source.session_count > 0) {
+            memcpy(snapshot->sessions_ + next_session,
+                   source.sessions,
+                   source.session_count * sizeof(NightCatalogTimeRange));
+            next_session += source.session_count;
         }
     }
 
+    for (size_t i = 0; i < previous_catalog.size(); ++i) {
+        const NightCatalogRecord *source = previous_catalog.record(i);
+        if (!source || !expirable_summary_history(*source) ||
+            current_summary_contains(current, source->sleep_day)) {
+            continue;
+        }
+
+        size_t written = 0;
+        NightCatalogTimeRange *session_target = next_session < session_count
+            ? snapshot->sessions_ + next_session
+            : nullptr;
+        if (!copy_catalog_record(previous_catalog,
+                                 *source,
+                                 true,
+                                 snapshot->records_[next_record],
+                                 session_target,
+                                 session_count - next_session,
+                                 written)) {
+            return {};
+        }
+        ++next_record;
+        next_session += written;
+    }
+
+    if (next_record != record_count || next_session != session_count) {
+        return {};
+    }
     return snapshot;
 }
 

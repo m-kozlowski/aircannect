@@ -83,6 +83,7 @@ struct NightCatalogSummaryInput {
     uint64_t identity = 0;
     int32_t timezone_offset_minutes = 0;
     bool timezone_offset_valid = false;
+    bool expired = false;
 };
 
 struct NightCatalogFallbackSectionInput {
