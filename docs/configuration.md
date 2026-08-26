@@ -89,6 +89,15 @@ can be changed with `config keybindings BUTTON GESTURE ACTION`.
 | --- | --- | --- | --- |
 | `keybindings` | Hardware-specific binding set | Hardware profile | Assign local button gestures to available actions. Missing overrides retain the hardware defaults. |
 
+## Display
+
+These keys are available on builds with a local display.
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `display_orientation` | `default`, `0`, `90`, `180`, `270` | `default` | Initial and fixed display orientation. |
+| `display_auto_rotate` | boolean | on when a motion sensor is present | Adapt display orientation to stable device movement. Motion wake remains available when this is off. |
+
 ## Oximetry
 
 | Key | Values | Default | Description |

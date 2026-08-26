@@ -54,6 +54,12 @@ DisplayMotionUpdate DisplayMotionPolicy::update(
     return result;
 }
 
+void DisplayMotionPolicy::set_rotation(uint8_t rotation) {
+    rotation_ = rotation & 0x03u;
+    candidate_rotation_ = -1;
+    have_last_sample_ = false;
+}
+
 void DisplayMotionPolicy::reset_measurement(const MotionSample &sample) {
     motion_reference_ = sample;
     have_motion_reference_ = true;

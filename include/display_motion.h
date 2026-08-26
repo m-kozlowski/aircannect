@@ -15,6 +15,7 @@ struct DisplayMotionUpdate {
 class DisplayMotionPolicy {
 public:
     DisplayMotionUpdate update(const MotionSample &sample, uint32_t now_ms);
+    void set_rotation(uint8_t rotation);
 
     uint8_t rotation() const { return rotation_; }
 

@@ -29,6 +29,7 @@ enum class AppConfigGroup : uint8_t {
     Smb,
     SleepHq,
     Keybindings,
+    Display,
     Count,
 };
 
@@ -75,6 +76,7 @@ enum AppConfigDirty : uint32_t {
     AC_CONFIG_DIRTY_AS11_OTA_KEY = 1UL << 19,
     AC_CONFIG_DIRTY_ONBOARDING = 1UL << 20,
     AC_CONFIG_DIRTY_KEYBINDINGS = 1UL << 21,
+    AC_CONFIG_DIRTY_DISPLAY = 1UL << 22,
 };
 
 static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
@@ -88,7 +90,8 @@ static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
     AC_CONFIG_DIRTY_SMB_SYNC | AC_CONFIG_DIRTY_SLEEPHQ_SYNC |
     AC_CONFIG_DIRTY_FILE_LOG | AC_CONFIG_DIRTY_UPDATE_URL |
     AC_CONFIG_DIRTY_AS11_TRANSPORT | AC_CONFIG_DIRTY_AS11_OTA_KEY |
-    AC_CONFIG_DIRTY_ONBOARDING | AC_CONFIG_DIRTY_KEYBINDINGS;
+    AC_CONFIG_DIRTY_ONBOARDING | AC_CONFIG_DIRTY_KEYBINDINGS |
+    AC_CONFIG_DIRTY_DISPLAY;
 
 enum class AppConfigFieldId : uint8_t {
     OnboardingComplete,
@@ -128,6 +131,8 @@ enum class AppConfigFieldId : uint8_t {
     FileLogEnabled,
     LogLevel,
     Keybindings,
+    DisplayOrientation,
+    DisplayAutoRotate,
 };
 
 struct AppConfigEnumValue {

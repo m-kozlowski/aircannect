@@ -8,6 +8,7 @@
 #include "board.h"
 #include "button_binding_config.h"
 #include "debug_log.h"
+#include "display_config.h"
 #include "oximetry_types.h"
 #include "softap_mode.h"
 
@@ -54,6 +55,9 @@ struct AppConfigData {
     bool edf_capture_enabled = AC_DEFAULT_EDF_CAPTURE_ENABLED != 0;
 
     ButtonBindingConfig keybindings;
+    DisplayOrientation display_orientation =
+        DisplayOrientation::BoardDefault;
+    bool display_auto_rotate = true;
 
     String smb_endpoint;
     String smb_user;
@@ -117,6 +121,8 @@ private:
     bool set_oximetry_advertise_mode(OximetryAdvertiseMode mode);
     bool set_edf_capture_enabled(bool enabled);
     bool set_keybindings(const ButtonBindingConfig &keybindings);
+    bool set_display_orientation(DisplayOrientation orientation);
+    bool set_display_auto_rotate(bool enabled);
     bool set_smb_credentials(const String &endpoint,
                              const String &user,
                              const String &password);

@@ -3,6 +3,8 @@
 #include "board_ble.h"
 #include "board_can.h"
 #include "board_button.h"
+#include "board_display.h"
+#include "board_motion.h"
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
 #include "app_config_internal.h"
@@ -95,6 +97,14 @@ static constexpr AppConfigEnumValue AS11_TRANSPORT_VALUES[] = {
 #if AC_BLE_ENABLED
     {"ble", "BLE"},
 #endif
+};
+
+static constexpr AppConfigEnumValue DISPLAY_ORIENTATION_VALUES[] = {
+    {"default", "Board default"},
+    {"0", "0 degrees"},
+    {"90", "90 degrees"},
+    {"180", "180 degrees"},
+    {"270", "270 degrees"},
 };
 
 static constexpr AppConfigFieldFlags PROVISIONABLE =
@@ -314,6 +324,23 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      nullptr, 0, -1, AC_CFG_OFFSET(keybindings)},
 #endif
 
+#if AC_DISPLAY_DRIVER != AC_DISPLAY_DRIVER_NONE
+    {"display_orientation", AppConfigFieldId::DisplayOrientation,
+     AppConfigGroup::Display, 10, AppConfigFieldType::Enum,
+     PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
+     "Initial orientation", "Display orientation used at startup.",
+     DISPLAY_ORIENTATION_VALUES,
+     sizeof(DISPLAY_ORIENTATION_VALUES) /
+         sizeof(DISPLAY_ORIENTATION_VALUES[0]),
+     -1, AC_CFG_OFFSET(display_orientation)},
+#if AC_MOTION_DRIVER != AC_MOTION_DRIVER_NONE
+    {"display_auto_rotate", AppConfigFieldId::DisplayAutoRotate,
+     AppConfigGroup::Display, 20, AppConfigFieldType::Bool,
+     PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
+     "Automatic rotation", "Rotate the display with the device.",
+     nullptr, 0, -1, AC_CFG_OFFSET(display_auto_rotate)},
+#endif
+#endif
 };
 
 #undef AC_LOG_FIELD
@@ -369,6 +396,10 @@ bool raw_value(const AppConfigData &cfg,
                 case AppConfigFieldId::OximetryAdvertiseMode:
                     out = oximetry_advertise_mode_name(
                         config_field_ref<OximetryAdvertiseMode>(cfg, field));
+                    return true;
+                case AppConfigFieldId::DisplayOrientation:
+                    out = display_orientation_name(
+                        config_field_ref<DisplayOrientation>(cfg, field));
                     return true;
                 default:
                     return false;
@@ -536,6 +567,19 @@ bool AppConfigFieldWriter::set_value(
         }
         case AppConfigFieldId::Keybindings:
             return false;
+        case AppConfigFieldId::DisplayOrientation: {
+            DisplayOrientation orientation =
+                DisplayOrientation::BoardDefault;
+            String parsed = value;
+            parsed.trim();
+            if (!parse_display_orientation(parsed.c_str(), orientation)) {
+                return false;
+            }
+            return config.set_display_orientation(orientation);
+        }
+        case AppConfigFieldId::DisplayAutoRotate:
+            if (!parse_bool_yesno(value, parsed_bool)) return false;
+            return config.set_display_auto_rotate(parsed_bool);
     }
     return false;
 }
@@ -569,6 +613,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::Smb: return "smb";
         case AppConfigGroup::SleepHq: return "sleephq";
         case AppConfigGroup::Keybindings: return "keybindings";
+        case AppConfigGroup::Display: return "display";
         case AppConfigGroup::Count: break;
     }
     return "unknown";
@@ -587,6 +632,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::Smb: return "SMB";
         case AppConfigGroup::SleepHq: return "SleepHQ";
         case AppConfigGroup::Keybindings: return "Buttons";
+        case AppConfigGroup::Display: return "Display";
         case AppConfigGroup::Count: break;
     }
     return "Unknown";

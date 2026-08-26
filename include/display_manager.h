@@ -6,6 +6,7 @@
 #include <atomic>
 #include <stdint.h>
 
+#include "display_config.h"
 #include "display_motion.h"
 #include "display_snapshot.h"
 
@@ -16,6 +17,7 @@ class MotionDevice;
 
 class DisplayManager {
 public:
+    void configure(DisplayOrientation orientation, bool auto_rotate);
     bool begin();
     void publish(const DisplaySnapshot &snapshot);
     void publish_pressure(const DisplayPressureSnapshot &pressure);
@@ -30,6 +32,7 @@ private:
 
     bool take_snapshot(DisplaySnapshot &snapshot, bool force);
     bool poll_motion(uint32_t now_ms);
+    void apply_display_config();
     bool temporary_wake_active(uint32_t now_ms) const;
     bool motion_wake_blocked(uint32_t now_ms) const;
     void render(const DisplaySnapshot &snapshot);
@@ -59,6 +62,9 @@ private:
     uint32_t rendered_generation_ = 0;
 
     DisplayMotionPolicy motion_policy_;
+    std::atomic<uint8_t> configured_rotation_{0};
+    std::atomic<bool> auto_rotate_{true};
+    std::atomic<bool> config_dirty_{false};
     uint32_t motion_wake_until_ms_ = 0;
     uint32_t motion_wake_blocked_until_ms_ = 0;
     std::atomic<bool> backlight_requested_{true};

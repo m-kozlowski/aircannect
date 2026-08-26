@@ -67,6 +67,15 @@ uint16_t export_state_color(DisplayExportState state) {
 
 }  // namespace
 
+void DisplayManager::configure(DisplayOrientation orientation,
+                               bool auto_rotate) {
+    configured_rotation_.store(display_orientation_rotation(
+        orientation, AC_DISPLAY_ROTATION));
+    auto_rotate_.store(auto_rotate);
+    config_dirty_.store(true);
+    if (task_) xTaskNotifyGive(task_);
+}
+
 bool DisplayManager::begin() {
     device_ = board_display_device();
     if (!device_) return true;
@@ -76,6 +85,10 @@ bool DisplayManager::begin() {
                   "[DISPLAY] initialization failed\n");
         return false;
     }
+
+    device_->set_rotation(configured_rotation_.load());
+    motion_policy_.set_rotation(configured_rotation_.load());
+    config_dirty_.store(false);
 
     motion_ = board_motion_device();
     if (motion_ && !motion_->begin()) {
@@ -164,6 +177,11 @@ void DisplayManager::run() {
         const uint32_t now_ms = millis();
         bool rotation_changed = false;
 
+        if (config_dirty_.exchange(false)) {
+            apply_display_config();
+            rotation_changed = true;
+        }
+
         if (motion_ &&
             (last_motion_poll_ms == 0 ||
              now_ms - last_motion_poll_ms >= AC_MOTION_POLL_MS)) {
@@ -191,6 +209,14 @@ void DisplayManager::run() {
         render(snapshot);
         rendered_generation_ = snapshot.generation;
     }
+}
+
+void DisplayManager::apply_display_config() {
+    if (!device_) return;
+
+    const uint8_t rotation = configured_rotation_.load();
+    motion_policy_.set_rotation(rotation);
+    device_->set_rotation(rotation);
 }
 
 bool DisplayManager::take_snapshot(DisplaySnapshot &snapshot, bool force) {
@@ -224,7 +250,7 @@ bool DisplayManager::poll_motion(uint32_t now_ms) {
     if (update.wake && !motion_wake_blocked(now_ms)) {
         motion_wake_until_ms_ = now_ms + AC_MOTION_WAKE_MS;
     }
-    if (!update.rotation_changed) return false;
+    if (!auto_rotate_.load() || !update.rotation_changed) return false;
 
     device_->set_rotation(update.rotation);
     return true;

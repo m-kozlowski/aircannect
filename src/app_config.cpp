@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "app_config_registry.h"
+#include "board_motion.h"
 #include "debug_log.h"
 
 namespace aircannect {
@@ -236,6 +237,8 @@ OximetryAdvertiseMode default_oximetry_advertise_mode() {
 
 void apply_build_defaults(AppConfigData &data) {
     data.oximetry_advertise_mode = default_oximetry_advertise_mode();
+    data.display_auto_rotate =
+        AC_MOTION_DRIVER != AC_MOTION_DRIVER_NONE;
 }
 
 bool put_string(Preferences &prefs, const char *key, const String &value) {
@@ -272,6 +275,15 @@ bool assign_enum_field(AppConfigData &data,
             OximetryAdvertiseMode mode = OximetryAdvertiseMode::Auto;
             if (!parse_oximetry_advertise_mode(value, mode)) return false;
             config_field_ref<OximetryAdvertiseMode>(data, field) = mode;
+            return true;
+        }
+        case AppConfigFieldId::DisplayOrientation: {
+            DisplayOrientation orientation =
+                DisplayOrientation::BoardDefault;
+            if (!parse_display_orientation(value.c_str(), orientation)) {
+                return false;
+            }
+            config_field_ref<DisplayOrientation>(data, field) = orientation;
             return true;
         }
         default:
@@ -850,6 +862,21 @@ bool AppConfig::set_keybindings(
 
     data_.keybindings = keybindings;
     return mark_dirty(AC_CONFIG_DIRTY_KEYBINDINGS);
+}
+
+bool AppConfig::set_display_orientation(
+    DisplayOrientation orientation) {
+    if (data_.display_orientation == orientation) return true;
+
+    data_.display_orientation = orientation;
+    return mark_dirty(AC_CONFIG_DIRTY_DISPLAY);
+}
+
+bool AppConfig::set_display_auto_rotate(bool enabled) {
+    if (data_.display_auto_rotate == enabled) return true;
+
+    data_.display_auto_rotate = enabled;
+    return mark_dirty(AC_CONFIG_DIRTY_DISPLAY);
 }
 
 bool AppConfig::set_smb_credentials(const String &endpoint,

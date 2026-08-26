@@ -620,6 +620,10 @@ static void apply_config_runtime_effects(void *,
                       "failed to apply local input bindings\n");
         }
     }
+    if (dirty & AC_CONFIG_DIRTY_DISPLAY) {
+        display_manager.configure(config.display_orientation,
+                                  config.display_auto_rotate);
+    }
     if (dirty & (AC_CONFIG_DIRTY_AS11_TRANSPORT |
                  AC_CONFIG_DIRTY_HOSTNAME)) {
         if (!configure_as11_transport(config)) {
@@ -928,6 +932,8 @@ void setup() {
         Log::logf(CAT_BLE, LOG_ERROR, "runtime init failed\n");
     }
 
+    display_manager.configure(config_service.data().display_orientation,
+                              config_service.data().display_auto_rotate);
     if (!display_manager.begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] display manager failed to start\n");
