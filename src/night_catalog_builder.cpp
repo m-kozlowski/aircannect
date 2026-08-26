@@ -107,8 +107,8 @@ bool valid_timezone_offset(bool valid, int32_t minutes) {
     return !valid || (minutes >= -24 * 60 && minutes <= 24 * 60);
 }
 
-uint16_t metric_bit(NightCatalogMetric metric) {
-    return static_cast<uint16_t>(1u << static_cast<uint8_t>(metric));
+uint32_t metric_bit(NightCatalogMetric metric) {
+    return 1u << static_cast<uint8_t>(metric);
 }
 
 void set_metric(NightCatalogMetrics &out,
@@ -117,7 +117,7 @@ void set_metric(NightCatalogMetrics &out,
                 NightCatalogMetricSource source,
                 bool fill_only,
                 bool &used) {
-    const uint16_t bit = metric_bit(metric);
+    const uint32_t bit = metric_bit(metric);
     if (fill_only && (out.valid_mask & bit) != 0) return;
 
     switch (metric) {
@@ -143,7 +143,36 @@ void set_metric(NightCatalogMetrics &out,
         case NightCatalogMetric::Leak50:
             out.leak_50_l_min = value;
             break;
+        case NightCatalogMetric::MaskPressure95:
+            out.mask_pressure_95_cm_h2o = value;
+            break;
+        case NightCatalogMetric::Leak95:
+            out.leak_95_l_min = value;
+            break;
+        case NightCatalogMetric::MinuteVentilation50:
+            out.minute_ventilation_50_l_min = value;
+            break;
+        case NightCatalogMetric::MinuteVentilation95:
+            out.minute_ventilation_95_l_min = value;
+            break;
+        case NightCatalogMetric::RespiratoryRate50:
+            out.respiratory_rate_50_bpm = value;
+            break;
+        case NightCatalogMetric::RespiratoryRate95:
+            out.respiratory_rate_95_bpm = value;
+            break;
+        case NightCatalogMetric::TidalVolume50:
+            out.tidal_volume_50_l = value;
+            break;
+        case NightCatalogMetric::TidalVolume95:
+            out.tidal_volume_95_l = value;
+            break;
+        case NightCatalogMetric::Spo2Median:
+            out.spo2_median_percent = value;
+            break;
         case NightCatalogMetric::DurationMinutes:
+        case NightCatalogMetric::Spo2ThresholdMinutes:
+        case NightCatalogMetric::CsrMinutes:
         case NightCatalogMetric::Count:
             return;
     }
@@ -151,30 +180,44 @@ void set_metric(NightCatalogMetrics &out,
     out.valid_mask |= bit;
     if (source == NightCatalogMetricSource::Str) {
         out.str_mask |= bit;
-        out.summary_mask &= static_cast<uint16_t>(~bit);
+        out.summary_mask &= ~bit;
     } else if (source == NightCatalogMetricSource::Summary) {
         out.summary_mask |= bit;
-        out.str_mask &= static_cast<uint16_t>(~bit);
+        out.str_mask &= ~bit;
     }
     used = true;
 }
 
-void set_duration_metric(NightCatalogMetrics &out,
-                         uint32_t value,
-                         NightCatalogMetricSource source,
-                         bool fill_only,
-                         bool &used) {
-    const uint16_t bit = metric_bit(NightCatalogMetric::DurationMinutes);
+void set_uint_metric(NightCatalogMetrics &out,
+                     NightCatalogMetric metric,
+                     uint32_t value,
+                     NightCatalogMetricSource source,
+                     bool fill_only,
+                     bool &used) {
+    const uint32_t bit = metric_bit(metric);
     if (fill_only && (out.valid_mask & bit) != 0) return;
 
-    out.duration_min = value;
+    switch (metric) {
+        case NightCatalogMetric::DurationMinutes:
+            out.duration_min = value;
+            break;
+        case NightCatalogMetric::Spo2ThresholdMinutes:
+            out.spo2_threshold_minutes = value;
+            break;
+        case NightCatalogMetric::CsrMinutes:
+            out.csr_minutes = value;
+            break;
+        default:
+            return;
+    }
+
     out.valid_mask |= bit;
     if (source == NightCatalogMetricSource::Str) {
         out.str_mask |= bit;
-        out.summary_mask &= static_cast<uint16_t>(~bit);
+        out.summary_mask &= ~bit;
     } else if (source == NightCatalogMetricSource::Summary) {
         out.summary_mask |= bit;
-        out.str_mask &= static_cast<uint16_t>(~bit);
+        out.str_mask &= ~bit;
     }
     used = true;
 }
@@ -217,9 +260,63 @@ bool apply_metrics(NightCatalogMetrics &out,
         set_metric(out, NightCatalogMetric::Leak50,
                    input.leak_50_l_min, source, fill_only, used);
     }
+    if (input.has_mask_pressure_95) {
+        set_metric(out, NightCatalogMetric::MaskPressure95,
+                   input.mask_pressure_95_cm_h2o,
+                   source, fill_only, used);
+    }
+    if (input.has_leak_95) {
+        set_metric(out, NightCatalogMetric::Leak95,
+                   input.leak_95_l_min, source, fill_only, used);
+    }
+    if (input.has_minute_ventilation_50) {
+        set_metric(out, NightCatalogMetric::MinuteVentilation50,
+                   input.minute_ventilation_50_l_min,
+                   source, fill_only, used);
+    }
+    if (input.has_minute_ventilation_95) {
+        set_metric(out, NightCatalogMetric::MinuteVentilation95,
+                   input.minute_ventilation_95_l_min,
+                   source, fill_only, used);
+    }
+    if (input.has_respiratory_rate_50) {
+        set_metric(out, NightCatalogMetric::RespiratoryRate50,
+                   input.respiratory_rate_50_bpm,
+                   source, fill_only, used);
+    }
+    if (input.has_respiratory_rate_95) {
+        set_metric(out, NightCatalogMetric::RespiratoryRate95,
+                   input.respiratory_rate_95_bpm,
+                   source, fill_only, used);
+    }
+    if (input.has_tidal_volume_50) {
+        set_metric(out, NightCatalogMetric::TidalVolume50,
+                   input.tidal_volume_50_l,
+                   source, fill_only, used);
+    }
+    if (input.has_tidal_volume_95) {
+        set_metric(out, NightCatalogMetric::TidalVolume95,
+                   input.tidal_volume_95_l,
+                   source, fill_only, used);
+    }
+    if (input.has_spo2_50) {
+        set_metric(out, NightCatalogMetric::Spo2Median,
+                   input.spo2_50_percent,
+                   source, fill_only, used);
+    }
+    if (input.has_spo2_threshold_minutes) {
+        set_uint_metric(out, NightCatalogMetric::Spo2ThresholdMinutes,
+                        input.spo2_threshold_minutes,
+                        source, fill_only, used);
+    }
+    if (input.has_csr_minutes) {
+        set_uint_metric(out, NightCatalogMetric::CsrMinutes,
+                        input.csr_minutes,
+                        source, fill_only, used);
+    }
     if (include_duration && input.has_duration_min) {
-        set_duration_metric(out, input.duration_min,
-                            source, fill_only, used);
+        set_uint_metric(out, NightCatalogMetric::DurationMinutes,
+                        input.duration_min, source, fill_only, used);
     }
     return used;
 }
@@ -953,6 +1050,17 @@ uint64_t calculate_revision(const NightCatalog &catalog,
     hash = hash_float(hash, record.metrics.mask_pressure_50_cm_h2o);
     hash = hash_float(hash, record.metrics.leak_50_l_min);
     hash = hash_u32(hash, record.metrics.duration_min);
+    hash = hash_float(hash, record.metrics.mask_pressure_95_cm_h2o);
+    hash = hash_float(hash, record.metrics.leak_95_l_min);
+    hash = hash_float(hash, record.metrics.minute_ventilation_50_l_min);
+    hash = hash_float(hash, record.metrics.minute_ventilation_95_l_min);
+    hash = hash_float(hash, record.metrics.respiratory_rate_50_bpm);
+    hash = hash_float(hash, record.metrics.respiratory_rate_95_bpm);
+    hash = hash_float(hash, record.metrics.tidal_volume_50_l);
+    hash = hash_float(hash, record.metrics.tidal_volume_95_l);
+    hash = hash_float(hash, record.metrics.spo2_median_percent);
+    hash = hash_u32(hash, record.metrics.spo2_threshold_minutes);
+    hash = hash_u32(hash, record.metrics.csr_minutes);
 
     if ((record.source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) != 0) {
         hash = hash_u64(hash, record.summary_identity);

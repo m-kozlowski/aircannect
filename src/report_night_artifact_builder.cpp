@@ -13,8 +13,8 @@
 namespace aircannect {
 namespace {
 
-uint16_t metric_bit(NightCatalogMetric metric) {
-    return static_cast<uint16_t>(1u << static_cast<uint8_t>(metric));
+uint32_t metric_bit(NightCatalogMetric metric) {
+    return 1u << static_cast<uint8_t>(metric);
 }
 
 int32_t to_milli(float value) {
@@ -22,18 +22,6 @@ int32_t to_milli(float value) {
     if (scaled >= static_cast<double>(INT32_MAX)) return INT32_MAX;
     if (scaled <= static_cast<double>(INT32_MIN)) return INT32_MIN;
     return static_cast<int32_t>(llround(scaled));
-}
-
-int32_t divide_round(int64_t total, uint64_t count) {
-    if (count == 0) return 0;
-
-    const int64_t half = static_cast<int64_t>(count / 2);
-    const int64_t value = total >= 0
-        ? (total + half) / static_cast<int64_t>(count)
-        : -((-total + half) / static_cast<int64_t>(count));
-    if (value > INT32_MAX) return INT32_MAX;
-    if (value < INT32_MIN) return INT32_MIN;
-    return static_cast<int32_t>(value);
 }
 
 int32_t index_milli(uint32_t count, uint32_t duration_min) {
@@ -65,6 +53,25 @@ void copy_catalog_metrics(const NightCatalogMetrics &source,
     target.mask_pressure_50_milli =
         to_milli(source.mask_pressure_50_cm_h2o);
     target.leak_50_milli = to_milli(source.leak_50_l_min);
+    target.duration_minutes = source.duration_min;
+    target.mask_pressure_95_milli =
+        to_milli(source.mask_pressure_95_cm_h2o);
+    target.leak_95_milli = to_milli(source.leak_95_l_min);
+    target.minute_ventilation_50_milli =
+        to_milli(source.minute_ventilation_50_l_min);
+    target.minute_ventilation_95_milli =
+        to_milli(source.minute_ventilation_95_l_min);
+    target.respiratory_rate_50_milli =
+        to_milli(source.respiratory_rate_50_bpm);
+    target.respiratory_rate_95_milli =
+        to_milli(source.respiratory_rate_95_bpm);
+    target.tidal_volume_50_milli =
+        to_milli(source.tidal_volume_50_l);
+    target.tidal_volume_95_milli =
+        to_milli(source.tidal_volume_95_l);
+    target.spo2_median_milli = to_milli(source.spo2_median_percent);
+    target.spo2_threshold_minutes = source.spo2_threshold_minutes;
+    target.csr_minutes = source.csr_minutes;
 }
 
 uint32_t session_duration_minutes(const ReportReadPlan &plan) {
@@ -89,6 +96,12 @@ void complete_metrics(ReportResultArtifactData &result,
                       const ReportPlotAccumulatorSummary &plot) {
     ReportArtifactMetrics &metrics = result.metrics;
     const ReportArtifactEventCounts &events = result.events;
+    const bool scored_events_complete =
+        (result.requested_event_mask & REPORT_EVENT_SCORED) != 0 &&
+        (result.missing_event_mask & REPORT_EVENT_SCORED) == 0;
+    const bool csr_events_complete =
+        (result.requested_event_mask & REPORT_EVENT_CSR) != 0 &&
+        (result.missing_event_mask & REPORT_EVENT_CSR) == 0;
     const uint32_t apnea_count =
         events.hypopnea + events.central_apnea +
         events.obstructive_apnea + events.unknown_apnea;
@@ -116,30 +129,80 @@ void complete_metrics(ReportResultArtifactData &result,
          &metrics.arousal_index_milli},
     };
 
-    for (const auto &fallback : index_fallbacks) {
-        const uint16_t bit = metric_bit(fallback.metric);
-        if ((metrics.valid_mask & bit) != 0) continue;
+    if (scored_events_complete) {
+        for (const auto &fallback : index_fallbacks) {
+            const uint32_t bit = metric_bit(fallback.metric);
+            if ((metrics.valid_mask & bit) != 0) continue;
 
-        *fallback.value = index_milli(fallback.count, result.duration_min);
-        metrics.valid_mask |= bit;
+            *fallback.value = index_milli(
+                fallback.count, result.duration_min);
+            metrics.valid_mask |= bit;
+        }
     }
 
-    const uint16_t pressure_bit =
-        metric_bit(NightCatalogMetric::MaskPressure50);
-    if ((metrics.valid_mask & pressure_bit) == 0 &&
-        plot.pressure_samples > 0) {
-        metrics.mask_pressure_50_milli = divide_round(
-            plot.pressure_sum_milli, plot.pressure_samples);
-        metrics.valid_mask |= pressure_bit;
+    const struct {
+        NightCatalogMetric p50_metric;
+        NightCatalogMetric p95_metric;
+        const ReportMetricPercentiles *source;
+        int32_t *p50;
+        int32_t *p95;
+    } percentile_fallbacks[] = {
+        {NightCatalogMetric::MaskPressure50,
+         NightCatalogMetric::MaskPressure95,
+         &plot.pressure,
+         &metrics.mask_pressure_50_milli,
+         &metrics.mask_pressure_95_milli},
+        {NightCatalogMetric::Leak50,
+         NightCatalogMetric::Leak95,
+         &plot.leak,
+         &metrics.leak_50_milli,
+         &metrics.leak_95_milli},
+        {NightCatalogMetric::MinuteVentilation50,
+         NightCatalogMetric::MinuteVentilation95,
+         &plot.minute_ventilation,
+         &metrics.minute_ventilation_50_milli,
+         &metrics.minute_ventilation_95_milli},
+        {NightCatalogMetric::RespiratoryRate50,
+         NightCatalogMetric::RespiratoryRate95,
+         &plot.respiratory_rate,
+         &metrics.respiratory_rate_50_milli,
+         &metrics.respiratory_rate_95_milli},
+        {NightCatalogMetric::TidalVolume50,
+         NightCatalogMetric::TidalVolume95,
+         &plot.tidal_volume,
+         &metrics.tidal_volume_50_milli,
+         &metrics.tidal_volume_95_milli},
+    };
+
+    for (const auto &fallback : percentile_fallbacks) {
+        if (!fallback.source->valid) continue;
+
+        const uint32_t p50_bit = metric_bit(fallback.p50_metric);
+        if ((metrics.valid_mask & p50_bit) == 0) {
+            *fallback.p50 = fallback.source->p50_milli;
+            metrics.valid_mask |= p50_bit;
+        }
+
+        const uint32_t p95_bit = metric_bit(fallback.p95_metric);
+        if ((metrics.valid_mask & p95_bit) == 0) {
+            *fallback.p95 = fallback.source->p95_milli;
+            metrics.valid_mask |= p95_bit;
+        }
     }
 
-    const uint16_t leak_bit = metric_bit(NightCatalogMetric::Leak50);
-    if (plot.leak_samples > 0) {
-        metrics.leak_50_milli =
-            divide_round(plot.leak_sum_milli, plot.leak_samples);
-        metrics.valid_mask |= leak_bit;
-        metrics.str_mask &= static_cast<uint16_t>(~leak_bit);
-        metrics.summary_mask &= static_cast<uint16_t>(~leak_bit);
+    const uint32_t spo2_bit = metric_bit(NightCatalogMetric::Spo2Median);
+    if ((metrics.valid_mask & spo2_bit) == 0 && plot.spo2.valid) {
+        metrics.spo2_median_milli = plot.spo2.p50_milli;
+        metrics.valid_mask |= spo2_bit;
+    }
+
+    const uint32_t csr_bit = metric_bit(NightCatalogMetric::CsrMinutes);
+    if ((metrics.valid_mask & csr_bit) == 0 && csr_events_complete) {
+        const uint64_t minutes =
+            (plot.csr_duration_ms + 30000ULL) / 60000ULL;
+        metrics.csr_minutes = minutes > UINT32_MAX
+            ? UINT32_MAX : static_cast<uint32_t>(minutes);
+        metrics.valid_mask |= csr_bit;
     }
 }
 
@@ -244,7 +307,9 @@ bool ReportNightArtifactBuilder::begin_build(
     if (!runtime_->plot.begin(plan,
                               runtime_->plot_start_ms,
                               runtime_->plot_end_ms,
-                              bucket_budget)) {
+                              bucket_budget,
+                              request.artifact.kind ==
+                                  ReportArtifactKind::Result)) {
         failure_reason_ = runtime_->plot.failure_reason();
         runtime_->clear_work();
         return false;

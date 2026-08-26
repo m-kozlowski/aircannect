@@ -11,7 +11,7 @@
 namespace aircannect {
 
 static constexpr uint16_t NIGHT_CATALOG_NO_SESSION = UINT16_MAX;
-static constexpr uint16_t NIGHT_CATALOG_SOURCE_REVISION_POLICY = 3;
+static constexpr uint16_t NIGHT_CATALOG_SOURCE_REVISION_POLICY = 4;
 
 enum class NightCatalogFileKind : uint8_t {
     Brp,
@@ -32,8 +32,21 @@ enum class NightCatalogMetric : uint8_t {
     MaskPressure50,
     Leak50,
     DurationMinutes,
+    MaskPressure95,
+    Leak95,
+    MinuteVentilation50,
+    MinuteVentilation95,
+    RespiratoryRate50,
+    RespiratoryRate95,
+    TidalVolume50,
+    TidalVolume95,
+    Spo2Median,
+    Spo2ThresholdMinutes,
+    CsrMinutes,
     Count,
 };
+static_assert(static_cast<uint8_t>(NightCatalogMetric::Count) <= 32,
+              "night catalog metric mask is 32 bits");
 
 enum class NightCatalogMetricSource : uint8_t {
     None,
@@ -64,9 +77,9 @@ inline NightCatalogTimeRange night_catalog_intersection(
 }
 
 struct NightCatalogMetrics {
-    uint16_t valid_mask = 0;
-    uint16_t str_mask = 0;
-    uint16_t summary_mask = 0;
+    uint32_t valid_mask = 0;
+    uint32_t str_mask = 0;
+    uint32_t summary_mask = 0;
 
     float ahi = 0.0f;
     float obstructive_apnea_index = 0.0f;
@@ -77,6 +90,17 @@ struct NightCatalogMetrics {
     float mask_pressure_50_cm_h2o = 0.0f;
     float leak_50_l_min = 0.0f;
     uint32_t duration_min = 0;
+    float mask_pressure_95_cm_h2o = 0.0f;
+    float leak_95_l_min = 0.0f;
+    float minute_ventilation_50_l_min = 0.0f;
+    float minute_ventilation_95_l_min = 0.0f;
+    float respiratory_rate_50_bpm = 0.0f;
+    float respiratory_rate_95_bpm = 0.0f;
+    float tidal_volume_50_l = 0.0f;
+    float tidal_volume_95_l = 0.0f;
+    float spo2_median_percent = 0.0f;
+    uint32_t spo2_threshold_minutes = 0;
+    uint32_t csr_minutes = 0;
 
     bool has(NightCatalogMetric metric) const;
     NightCatalogMetricSource source(NightCatalogMetric metric) const;
@@ -233,5 +257,9 @@ private:
     friend class NightCatalogBuilder;
     friend class NightCatalogFileCodec;
 };
+
+uint32_t night_catalog_duration_minutes(
+    const NightCatalog &catalog,
+    const NightCatalogRecord &record);
 
 }  // namespace aircannect

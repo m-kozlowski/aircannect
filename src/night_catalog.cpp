@@ -9,27 +9,27 @@
 namespace aircannect {
 namespace {
 
-bool metric_bit(NightCatalogMetric metric, uint16_t &bit) {
+bool metric_bit(NightCatalogMetric metric, uint32_t &bit) {
     const uint8_t index = static_cast<uint8_t>(metric);
     if (index >= static_cast<uint8_t>(NightCatalogMetric::Count) ||
-        index >= 16) {
+        index >= 32) {
         return false;
     }
 
-    bit = static_cast<uint16_t>(1u << index);
+    bit = 1u << index;
     return true;
 }
 
 }  // namespace
 
 bool NightCatalogMetrics::has(NightCatalogMetric metric) const {
-    uint16_t bit = 0;
+    uint32_t bit = 0;
     return metric_bit(metric, bit) && (valid_mask & bit) != 0;
 }
 
 NightCatalogMetricSource NightCatalogMetrics::source(
     NightCatalogMetric metric) const {
-    uint16_t bit = 0;
+    uint32_t bit = 0;
     if (!metric_bit(metric, bit) || (valid_mask & bit) == 0) {
         return NightCatalogMetricSource::None;
     }
@@ -302,6 +302,25 @@ const char *NightCatalog::path(
         return nullptr;
     }
     return paths_ + file.path_offset;
+}
+
+uint32_t night_catalog_duration_minutes(
+    const NightCatalog &catalog,
+    const NightCatalogRecord &record) {
+    if (record.metrics.has(NightCatalogMetric::DurationMinutes)) {
+        return record.metrics.duration_min;
+    }
+
+    uint64_t duration_ms = 0;
+    size_t session_count = 0;
+    const NightCatalogTimeRange *sessions =
+        catalog.sessions(record, session_count);
+    for (size_t i = 0; sessions && i < session_count; ++i) {
+        if (!sessions[i].valid()) continue;
+        duration_ms += static_cast<uint64_t>(
+            sessions[i].end_ms - sessions[i].start_ms);
+    }
+    return static_cast<uint32_t>(duration_ms / 60000);
 }
 
 }  // namespace aircannect

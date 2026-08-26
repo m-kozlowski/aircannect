@@ -1535,6 +1535,25 @@
       updateReportZoomControls();
     }
 
+    function reportMetricPair(result, first, second, scale, suffix) {
+      const left = result && Number.isFinite(Number(result[first])) ?
+        Number(result[first]) * scale : null;
+      const right = result && Number.isFinite(Number(result[second])) ?
+        Number(result[second]) * scale : null;
+      if (left === null && right === null) return "--";
+
+      const decimals = scale === 1000 ? 0 : 1;
+      return (left === null ? "--" : left.toFixed(decimals)) + " / " +
+        (right === null ? "--" : right.toFixed(decimals)) +
+        (suffix || "");
+    }
+
+    function renderOptionalReportMetric(cardId, valueId, visible, value) {
+      const card = document.getElementById(cardId);
+      if (card) card.hidden = !visible;
+      up(valueId, visible ? value : "--");
+    }
+
     function renderReportSummary() {
       const nights = reportNightsNewestFirst();
       const selected = selectedReportNight();
@@ -1567,16 +1586,65 @@
       up("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
       up("reportAhi", displayable && Number.isFinite(Number(reportResult.ahi)) ?
         Number(reportResult.ahi).toFixed(1) : "--");
-      const averagePressure = reportResult ?
-        (reportResult.average_pressure ?? reportResult.mask_pressure_50) : null;
-      const averageLeak = reportResult ?
-        (reportResult.average_leak ?? reportResult.leak_50) : null;
-      up("reportMaskPress50",
-        displayable && Number.isFinite(Number(averagePressure)) ?
-          Number(averagePressure).toFixed(1) : "--");
-      up("reportLeak50",
-        displayable && Number.isFinite(Number(averageLeak)) ?
-          Number(averageLeak).toFixed(1) : "--");
+      up("reportRdi", displayable && Number.isFinite(Number(reportResult.rdi)) ?
+        Number(reportResult.rdi).toFixed(1) : "--");
+      up("reportPressure", displayable ? reportMetricPair(
+        reportResult, "mask_pressure_50", "mask_pressure_95",
+        1, " cmH2O") : "--");
+      up("reportLeak", displayable ? reportMetricPair(
+        reportResult, "leak_50", "leak_95", 1, " L/min") : "--");
+
+      const tidalVolumeVisible = displayable && (
+        Number.isFinite(Number(reportResult.tidal_volume_50)) ||
+        Number.isFinite(Number(reportResult.tidal_volume_95)));
+      renderOptionalReportMetric(
+        "reportTidalVolumeMetric",
+        "reportTidalVolume",
+        tidalVolumeVisible,
+        reportMetricPair(reportResult, "tidal_volume_50",
+          "tidal_volume_95", 1000, " mL"));
+
+      const respiratoryRateVisible = displayable && (
+        Number.isFinite(Number(reportResult.respiratory_rate_50)) ||
+        Number.isFinite(Number(reportResult.respiratory_rate_95)));
+      renderOptionalReportMetric(
+        "reportRespiratoryRateMetric",
+        "reportRespiratoryRate",
+        respiratoryRateVisible,
+        reportMetricPair(reportResult, "respiratory_rate_50",
+          "respiratory_rate_95", 1, " /min"));
+
+      const minuteVentilationVisible = displayable && (
+        Number.isFinite(Number(reportResult.minute_ventilation_50)) ||
+        Number.isFinite(Number(reportResult.minute_ventilation_95)));
+      renderOptionalReportMetric(
+        "reportMinuteVentilationMetric",
+        "reportMinuteVentilation",
+        minuteVentilationVisible,
+        reportMetricPair(reportResult, "minute_ventilation_50",
+          "minute_ventilation_95", 1, " L/min"));
+
+      const spo2Median = displayable &&
+        Number.isFinite(Number(reportResult.spo2_median)) ?
+        Number(reportResult.spo2_median).toFixed(0) + "%" : "--";
+      const spo2Threshold = displayable &&
+        Number.isFinite(Number(reportResult.spo2_threshold_minutes)) ?
+        Math.round(Number(reportResult.spo2_threshold_minutes)) + "m" : "--";
+      const spo2Visible = spo2Median !== "--" || spo2Threshold !== "--";
+      renderOptionalReportMetric(
+        "reportSpo2Metric",
+        "reportSpo2Summary",
+        spo2Visible,
+        spo2Median + " / " + spo2Threshold);
+
+      const csrVisible = displayable &&
+        Number.isFinite(Number(reportResult.csr_minutes));
+      renderOptionalReportMetric(
+        "reportCsrMetric",
+        "reportCsr",
+        csrVisible,
+        csrVisible ? Math.round(Number(reportResult.csr_minutes)) + "m" : "--");
+
       renderReportEventCounts(displayable ? reportResult : null);
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);
@@ -2222,20 +2290,31 @@
       const invalid = {valid: false};
       const dv = new DataView(buf);
       const bytes = new Uint8Array(buf);
-      const headerBytes = 160;
-      if (dv.byteLength < headerBytes ||
+      if (dv.byteLength < 160 ||
           dv.getUint32(0, true) !== 0x36524341 ||
-          dv.getUint16(4, true) !== 1 ||
-          dv.getUint16(6, true) !== headerBytes ||
           dv.getUint32(8, true) !== dv.byteLength) {
+        return invalid;
+      }
+
+      const version = dv.getUint16(4, true);
+      const legacy = version === 1;
+      const headerBytes = legacy ? 160 : 216;
+      const bodyCrcOffset = legacy ? 148 : 204;
+      const headerCrcOffset = legacy ? 152 : 208;
+      const eventsOffset = legacy ? 124 : 180;
+      if ((!legacy && version !== 2) ||
+          dv.getUint16(6, true) !== headerBytes ||
+          dv.byteLength < headerBytes) {
         return invalid;
       }
 
       const sessionCount = dv.getUint16(78, true);
       if (headerBytes + sessionCount * 16 !== dv.byteLength ||
-          reportCrc32(bytes, 0, 152) !== dv.getUint32(152, true) ||
+          reportCrc32(bytes, 0, headerCrcOffset) !==
+            dv.getUint32(headerCrcOffset, true) ||
           reportCrc32(bytes, headerBytes,
-            dv.byteLength - headerBytes) !== dv.getUint32(148, true)) {
+            dv.byteLength - headerBytes) !==
+            dv.getUint32(bodyCrcOffset, true)) {
         return invalid;
       }
 
@@ -2276,12 +2355,21 @@
       const missingOptional = dv.getUint32(72, true);
       const flags = dv.getUint16(76, true);
       const sourceFlags = dv.getUint8(82);
-      const metricValid = dv.getUint16(84, true);
-      const metricStr = dv.getUint16(86, true);
-      const metricSummary = dv.getUint16(88, true);
-      const metricOffsets = [92, 96, 100, 104, 108, 112, 116, 120];
-      const metrics = metricOffsets.map((offset) =>
-        dv.getInt32(offset, true) / 1000);
+      const metricValid = legacy ? dv.getUint16(84, true) :
+        dv.getUint32(84, true);
+      const metricStr = legacy ? dv.getUint16(86, true) :
+        dv.getUint32(88, true);
+      const metricSummary = legacy ? dv.getUint16(88, true) :
+        dv.getUint32(92, true);
+      const metricOffsets = legacy ?
+        [92, 96, 100, 104, 108, 112, 116, 120] :
+        Array.from({length: 20}, (_, index) => 100 + index * 4);
+      const metrics = metricOffsets.map((offset, index) => {
+        if (!legacy && (index === 8 || index === 18 || index === 19)) {
+          return dv.getUint32(offset, true);
+        }
+        return dv.getInt32(offset, true) / 1000;
+      });
       const signalNames = [
         "flow",
         "inspiratory_pressure",
@@ -2340,14 +2428,14 @@
         source_flags: sourceFlags,
         sessions,
         stream_details: streamDetails,
-        hypopnea_count: dv.getUint32(124, true),
-        ca_count: dv.getUint32(128, true),
-        oa_count: dv.getUint32(132, true),
-        ua_count: dv.getUint32(136, true),
-        arousal_count: dv.getUint32(140, true),
-        csr_count: dv.getUint32(144, true),
+        hypopnea_count: dv.getUint32(eventsOffset, true),
+        ca_count: dv.getUint32(eventsOffset + 4, true),
+        oa_count: dv.getUint32(eventsOffset + 8, true),
+        ua_count: dv.getUint32(eventsOffset + 12, true),
+        arousal_count: dv.getUint32(eventsOffset + 16, true),
+        csr_count: dv.getUint32(eventsOffset + 20, true),
       };
-      const metricFields = [
+      const metricFields = legacy ? [
         "ahi",
         "oa_index",
         "ca_index",
@@ -2356,9 +2444,30 @@
         "arousal_index",
         "mask_pressure_50",
         "leak_50",
+      ] : [
+        "ahi",
+        "oa_index",
+        "ca_index",
+        "ua_index",
+        "hypopnea_index",
+        "arousal_index",
+        "mask_pressure_50",
+        "leak_50",
+        null,
+        "mask_pressure_95",
+        "leak_95",
+        "minute_ventilation_50",
+        "minute_ventilation_95",
+        "respiratory_rate_50",
+        "respiratory_rate_95",
+        "tidal_volume_50",
+        "tidal_volume_95",
+        "spo2_median",
+        "spo2_threshold_minutes",
+        "csr_minutes",
       ];
       metricFields.forEach((field, index) => {
-        if (!(metricValid & (1 << index))) return;
+        if (!field || !(metricValid & (1 << index))) return;
         result[field] = metrics[index];
         result[field + "_source"] = reportMetricSource(
           metricValid, metricStr, metricSummary, index);
@@ -2368,6 +2477,9 @@
       }
       if (result.leak_50 !== undefined) {
         result.average_leak = result.leak_50;
+      }
+      if (result.ahi !== undefined && result.arousal_index !== undefined) {
+        result.rdi = result.ahi + result.arousal_index;
       }
       return result;
     }

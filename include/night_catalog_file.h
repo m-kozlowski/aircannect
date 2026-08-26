@@ -10,6 +10,8 @@
 namespace aircannect {
 
 struct NightCatalogFileInfo {
+    uint16_t version = 0;
+    uint16_t record_bytes = 0;
     uint32_t record_count = 0;
     uint32_t session_count = 0;
     uint32_t mask_window_count = 0;
@@ -25,7 +27,8 @@ struct NightCatalogFileInfo {
 
 class NightCatalogFileCodec {
 public:
-    static constexpr uint16_t Version = 11;
+    static constexpr uint16_t LegacyVersion = 11;
+    static constexpr uint16_t Version = 12;
     static constexpr size_t HeaderBytes = 88;
     static constexpr size_t MaximumFileBytes = 512 * 1024;
 

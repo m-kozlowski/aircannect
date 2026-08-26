@@ -18,6 +18,39 @@ namespace {
 
 constexpr size_t SIGNAL_COUNT = static_cast<size_t>(ReportSignalId::Count);
 constexpr size_t EVENT_BUFFER_MAX_BYTES = 256 * 1024;
+constexpr size_t METRIC_HISTOGRAM_BINS = 2048;
+
+enum class MetricHistogramId : uint8_t {
+    Pressure,
+    Leak,
+    MinuteVentilation,
+    RespiratoryRate,
+    TidalVolume,
+    Spo2,
+    Count,
+};
+
+constexpr size_t METRIC_HISTOGRAM_COUNT =
+    static_cast<size_t>(MetricHistogramId::Count);
+
+struct MetricHistogramConfig {
+    ReportSignalId signal;
+    int32_t minimum_milli;
+    int32_t maximum_milli;
+};
+
+constexpr MetricHistogramConfig METRIC_HISTOGRAM_CONFIGS[] = {
+    {ReportSignalId::MaskPressure, 0, 40000},
+    {ReportSignalId::Leak, 0, 120000},
+    {ReportSignalId::MinuteVentilation, 0, 30000},
+    {ReportSignalId::RespiratoryRate, 0, 90000},
+    {ReportSignalId::TidalVolume, 0, 4000},
+    {ReportSignalId::SpO2, 0, 100000},
+};
+static_assert(sizeof(METRIC_HISTOGRAM_CONFIGS) /
+                  sizeof(METRIC_HISTOGRAM_CONFIGS[0]) ==
+              METRIC_HISTOGRAM_COUNT,
+              "metric histogram config must cover every metric");
 
 struct EnvelopeCell {
     int32_t minimum = 0;
@@ -36,6 +69,107 @@ struct SeriesState {
 struct EventSlot {
     ReportEventRecord event;
 };
+
+struct MetricHistogram {
+    uint32_t *bins = nullptr;
+    uint64_t samples = 0;
+    bool active = false;
+};
+
+int metric_histogram_index(ReportSignalId signal) {
+    for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
+        if (METRIC_HISTOGRAM_CONFIGS[i].signal == signal) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void add_metric_sample(MetricHistogram &histogram,
+                       const MetricHistogramConfig &config,
+                       int32_t value_milli) {
+    if (!histogram.active || !histogram.bins ||
+        config.maximum_milli <= config.minimum_milli) {
+        return;
+    }
+
+    const int32_t bounded = std::max(
+        config.minimum_milli,
+        std::min(config.maximum_milli, value_milli));
+    const uint64_t offset = static_cast<uint64_t>(
+        bounded - config.minimum_milli);
+    const uint64_t span = static_cast<uint64_t>(
+        config.maximum_milli - config.minimum_milli);
+    const size_t bin = static_cast<size_t>(
+        (offset * (METRIC_HISTOGRAM_BINS - 1) + span / 2) / span);
+    if (histogram.bins[bin] != UINT32_MAX) ++histogram.bins[bin];
+    if (histogram.samples != UINT64_MAX) ++histogram.samples;
+}
+
+bool metric_value_at_rank(const MetricHistogram &histogram,
+                          const MetricHistogramConfig &config,
+                          uint64_t rank,
+                          int32_t &out) {
+    if (rank >= histogram.samples) return false;
+
+    uint64_t cumulative = 0;
+    for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
+        cumulative += histogram.bins[bin];
+        if (cumulative <= rank) continue;
+
+        const int64_t span = static_cast<int64_t>(
+            config.maximum_milli - config.minimum_milli);
+        out = config.minimum_milli + static_cast<int32_t>(
+            (static_cast<int64_t>(bin) * span +
+             (METRIC_HISTOGRAM_BINS - 1) / 2) /
+            (METRIC_HISTOGRAM_BINS - 1));
+        return true;
+    }
+    return false;
+}
+
+bool metric_percentile(const MetricHistogram &histogram,
+                       const MetricHistogramConfig &config,
+                       uint32_t numerator,
+                       uint32_t denominator,
+                       int32_t &out) {
+    if (!histogram.active || !histogram.bins || histogram.samples == 0 ||
+        denominator == 0 || numerator > denominator) {
+        return false;
+    }
+
+    const uint64_t scaled_rank =
+        (histogram.samples - 1) * numerator;
+    const uint64_t lower_rank = scaled_rank / denominator;
+    const uint32_t remainder = static_cast<uint32_t>(
+        scaled_rank % denominator);
+    int32_t lower = 0;
+    if (!metric_value_at_rank(histogram, config, lower_rank, lower)) {
+        return false;
+    }
+    if (remainder == 0) {
+        out = lower;
+        return true;
+    }
+
+    int32_t upper = 0;
+    if (!metric_value_at_rank(histogram, config, lower_rank + 1, upper)) {
+        return false;
+    }
+    out = static_cast<int32_t>(
+        (static_cast<int64_t>(lower) * (denominator - remainder) +
+         static_cast<int64_t>(upper) * remainder + denominator / 2) /
+        denominator);
+    return true;
+}
+
+void finish_metric_histogram(const MetricHistogram &histogram,
+                             const MetricHistogramConfig &config,
+                             ReportMetricPercentiles &out) {
+    out.valid = metric_percentile(
+        histogram, config, 50, 100, out.p50_milli) &&
+        metric_percentile(histogram, config, 95, 100, out.p95_milli);
+}
 
 int32_t scaled_plot_value(const ReportSeriesDescriptor &series,
                           int32_t value_milli) {
@@ -101,7 +235,8 @@ bool append_events(ReportSpoolBuffer &plot,
                    size_t event_count,
                    int64_t base_ms,
                    ReportArtifactEventCounts &counts,
-                   uint32_t &unique_count) {
+                   uint32_t &unique_count,
+                   uint64_t &csr_duration_ms) {
     if (event_count == 0) {
         unique_count = 0;
         return true;
@@ -122,6 +257,14 @@ bool append_events(ReportSpoolBuffer &plot,
             return false;
         }
         add_event_count(counts, events[i].event);
+        if (static_cast<ReportEventCode>(events[i].event.code) ==
+                ReportEventCode::Csr &&
+            events[i].event.duration_ms > 0) {
+            const uint64_t duration = static_cast<uint64_t>(
+                events[i].event.duration_ms);
+            csr_duration_ms = csr_duration_ms > UINT64_MAX - duration
+                ? UINT64_MAX : csr_duration_ms + duration;
+        }
         ++unique_count;
     }
     return true;
@@ -209,26 +352,23 @@ struct ReportPlotAccumulator::Runtime {
     size_t section_count = 0;
     int64_t plot_start_ms = 0;
     int64_t plot_end_ms = 0;
-    int64_t pressure_sum_milli = 0;
-    int64_t leak_sum_milli = 0;
-    uint64_t pressure_samples = 0;
-    uint64_t leak_samples = 0;
+    MetricHistogram metric_histograms[METRIC_HISTOGRAM_COUNT];
+    uint32_t *metric_bins = nullptr;
     bool active = false;
 
     void clear() {
         Memory::free(cell_storage);
         cell_storage = nullptr;
+        Memory::free(metric_bins);
+        metric_bins = nullptr;
         event_slots.clear();
         for (ReportPlotSectionDescriptor &section : sections) section = {};
         section_count = 0;
         plan = nullptr;
         for (SeriesState &state : series) state = {};
+        for (MetricHistogram &histogram : metric_histograms) histogram = {};
         plot_start_ms = 0;
         plot_end_ms = 0;
-        pressure_sum_milli = 0;
-        leak_sum_milli = 0;
-        pressure_samples = 0;
-        leak_samples = 0;
         active = false;
     }
 };
@@ -244,7 +384,8 @@ ReportPlotAccumulator::~ReportPlotAccumulator() {
 bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
                                   int64_t start_ms,
                                   int64_t end_ms,
-                                  size_t bucket_budget) {
+                                  size_t bucket_budget,
+                                  bool collect_metrics) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_plot_runtime_unavailable";
@@ -279,6 +420,14 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
         state.active = true;
         state.max_interval_ms = std::max(
             state.max_interval_ms, mapping->series.sample_interval_ms);
+
+        if (collect_metrics) {
+            const int histogram = metric_histogram_index(
+                mapping->series.signal);
+            if (histogram >= 0) {
+                runtime_->metric_histograms[histogram].active = true;
+            }
+        }
     }
 
     const uint64_t span = static_cast<uint64_t>(end_ms - start_ms);
@@ -320,6 +469,29 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
             if (!state.active) continue;
             state.cells = runtime_->cell_storage + offset;
             offset += state.cell_count;
+        }
+    }
+
+    size_t active_histograms = 0;
+    for (const MetricHistogram &histogram : runtime_->metric_histograms) {
+        if (histogram.active) ++active_histograms;
+    }
+    if (active_histograms > 0) {
+        runtime_->metric_bins = static_cast<uint32_t *>(
+            Memory::calloc_large(active_histograms * METRIC_HISTOGRAM_BINS,
+                                 sizeof(uint32_t),
+                                 false));
+        if (!runtime_->metric_bins) {
+            failure_reason_ = "report_plot_metrics_allocation_failed";
+            runtime_->clear();
+            return false;
+        }
+
+        size_t offset = 0;
+        for (MetricHistogram &histogram : runtime_->metric_histograms) {
+            if (!histogram.active) continue;
+            histogram.bins = runtime_->metric_bins + offset;
+            offset += METRIC_HISTOGRAM_BINS;
         }
     }
 
@@ -389,12 +561,11 @@ bool ReportPlotAccumulator::accept_series(
         cell.maximum = std::max(cell.maximum, value);
     }
 
-    if (series.signal == ReportSignalId::MaskPressure) {
-        runtime_->pressure_sum_milli += value;
-        ++runtime_->pressure_samples;
-    } else if (series.signal == ReportSignalId::Leak) {
-        runtime_->leak_sum_milli += value;
-        ++runtime_->leak_samples;
+    const int histogram = metric_histogram_index(series.signal);
+    if (histogram >= 0) {
+        add_metric_sample(runtime_->metric_histograms[histogram],
+                          METRIC_HISTOGRAM_CONFIGS[histogram],
+                          value);
     }
     return true;
 }
@@ -482,7 +653,8 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
                        event_count,
                        runtime_->plot_start_ms,
                        summary.events,
-                       unique_events)) {
+                       unique_events,
+                       summary.csr_duration_ms)) {
         failure_reason_ = "report_plot_encode_failed";
         return {};
     }
@@ -525,10 +697,43 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
 
     summary.prefix_crc32 = report_plot_prefix_crc32(
         plot.data(), plot.size());
-    summary.pressure_sum_milli = runtime_->pressure_sum_milli;
-    summary.leak_sum_milli = runtime_->leak_sum_milli;
-    summary.pressure_samples = runtime_->pressure_samples;
-    summary.leak_samples = runtime_->leak_samples;
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::Pressure)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::Pressure)],
+        summary.pressure);
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::Leak)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::Leak)],
+        summary.leak);
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::MinuteVentilation)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::MinuteVentilation)],
+        summary.minute_ventilation);
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::RespiratoryRate)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::RespiratoryRate)],
+        summary.respiratory_rate);
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::TidalVolume)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::TidalVolume)],
+        summary.tidal_volume);
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::Spo2)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::Spo2)],
+        summary.spo2);
+
     std::shared_ptr<const LargeByteBuffer> frozen =
         LargeByteBuffer::copy_and_freeze(plot.data(), plot.size());
     if (!frozen) failure_reason_ = "report_plot_output_allocation_failed";

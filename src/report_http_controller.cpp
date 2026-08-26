@@ -420,25 +420,6 @@ bool format_catalog_etag(const NightCatalog &catalog,
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
-uint32_t night_duration_minutes(const NightCatalog &catalog,
-                                const NightCatalogRecord &night) {
-    if (night.metrics.has(NightCatalogMetric::DurationMinutes)) {
-        return night.metrics.duration_min;
-    }
-
-    uint64_t duration_ms = 0;
-    size_t session_count = 0;
-    const NightCatalogTimeRange *sessions =
-        catalog.sessions(night, session_count);
-    for (size_t i = 0; sessions && i < session_count; ++i) {
-        const NightCatalogTimeRange &session = sessions[i];
-        if (!session.valid()) continue;
-        duration_ms += static_cast<uint64_t>(
-            session.end_ms - session.start_ms);
-    }
-    return static_cast<uint32_t>(duration_ms / 60000);
-}
-
 }  // namespace
 
 struct ReportHttpController::PendingResponses {
@@ -751,7 +732,7 @@ void ReportHttpController::send_summary(
                  sizeof(number),
                  "%lu",
                  static_cast<unsigned long>(
-                     night_duration_minutes(*catalog, *night)));
+                     night_catalog_duration_minutes(*catalog, *night)));
         *json += number;
         *json += ",\"sessions\":[";
 

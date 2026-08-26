@@ -19,9 +19,9 @@ enum ReportResultArtifactFlag : uint16_t {
 };
 
 struct ReportArtifactMetrics {
-    uint16_t valid_mask = 0;
-    uint16_t str_mask = 0;
-    uint16_t summary_mask = 0;
+    uint32_t valid_mask = 0;
+    uint32_t str_mask = 0;
+    uint32_t summary_mask = 0;
     int32_t ahi_milli = 0;
     int32_t obstructive_apnea_index_milli = 0;
     int32_t central_apnea_index_milli = 0;
@@ -30,6 +30,18 @@ struct ReportArtifactMetrics {
     int32_t arousal_index_milli = 0;
     int32_t mask_pressure_50_milli = 0;
     int32_t leak_50_milli = 0;
+    uint32_t duration_minutes = 0;
+    int32_t mask_pressure_95_milli = 0;
+    int32_t leak_95_milli = 0;
+    int32_t minute_ventilation_50_milli = 0;
+    int32_t minute_ventilation_95_milli = 0;
+    int32_t respiratory_rate_50_milli = 0;
+    int32_t respiratory_rate_95_milli = 0;
+    int32_t tidal_volume_50_milli = 0;
+    int32_t tidal_volume_95_milli = 0;
+    int32_t spo2_median_milli = 0;
+    uint32_t spo2_threshold_minutes = 0;
+    uint32_t csr_minutes = 0;
 };
 
 struct ReportArtifactEventCounts {
@@ -134,8 +146,10 @@ struct ReportArtifactAvailability {
 
 class ReportResultArtifactCodec {
 public:
-    static constexpr uint16_t Version = 1;
-    static constexpr size_t HeaderBytes = 160;
+    static constexpr uint16_t LegacyVersion = 1;
+    static constexpr size_t LegacyHeaderBytes = 160;
+    static constexpr uint16_t Version = 2;
+    static constexpr size_t HeaderBytes = 216;
     static constexpr size_t SessionBytes = 16;
 
     static std::shared_ptr<const LargeByteBuffer> encode(

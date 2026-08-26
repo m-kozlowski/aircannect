@@ -9,13 +9,22 @@
 
 namespace aircannect {
 
+struct ReportMetricPercentiles {
+    bool valid = false;
+    int32_t p50_milli = 0;
+    int32_t p95_milli = 0;
+};
+
 struct ReportPlotAccumulatorSummary {
     ReportArtifactEventCounts events;
     uint32_t prefix_crc32 = 0;
-    int64_t pressure_sum_milli = 0;
-    int64_t leak_sum_milli = 0;
-    uint64_t pressure_samples = 0;
-    uint64_t leak_samples = 0;
+    ReportMetricPercentiles pressure;
+    ReportMetricPercentiles leak;
+    ReportMetricPercentiles minute_ventilation;
+    ReportMetricPercentiles respiratory_rate;
+    ReportMetricPercentiles tidal_volume;
+    ReportMetricPercentiles spo2;
+    uint64_t csr_duration_ms = 0;
 };
 
 // Collects one plot window from the canonical report execution stream. The
@@ -32,7 +41,8 @@ public:
     bool begin(const ReportReadPlan &plan,
                int64_t start_ms,
                int64_t end_ms,
-               size_t bucket_budget);
+               size_t bucket_budget,
+               bool collect_metrics);
     bool accept_series(uint16_t session_index,
                        const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;

@@ -21,23 +21,28 @@ using LittleEndian::put_le16;
 using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
-constexpr uint8_t FILE_MAGIC[8] = {
+constexpr uint8_t FILE_MAGIC_V11[8] = {
     'A', 'C', 'N', 'C', 'A', 'T', '1', '1',
 };
+constexpr uint8_t FILE_MAGIC_V12[8] = {
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '2',
+};
 
-constexpr size_t RECORD_BYTES = 120;
+constexpr size_t RECORD_BYTES_V11 = 120;
+constexpr size_t RECORD_BYTES = 176;
 constexpr size_t RANGE_BYTES = 16;
 constexpr size_t FILE_BYTES = 96;
 constexpr size_t COVERAGE_BYTES = 24;
 constexpr size_t SIGNAL_LAYOUT_BYTES = 32;
 constexpr size_t FALLBACK_FILE_BYTES = 48;
 constexpr size_t FALLBACK_SECTION_BYTES = 48;
+constexpr uint16_t SOURCE_REVISION_POLICY_V11 = 3;
 
 constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
                                  NIGHT_CATALOG_SOURCE_STR |
                                  NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
                                  NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
-constexpr uint16_t METRIC_FLAGS =
+constexpr uint32_t METRIC_FLAGS =
     (1u << static_cast<uint8_t>(NightCatalogMetric::Count)) - 1u;
 constexpr int32_t TIMEZONE_OFFSET_MISSING = INT32_MIN;
 
@@ -88,7 +93,16 @@ bool metrics_valid(const NightCatalogMetrics &metrics) {
            std::isfinite(metrics.hypopnea_index) &&
            std::isfinite(metrics.arousal_index) &&
            std::isfinite(metrics.mask_pressure_50_cm_h2o) &&
-           std::isfinite(metrics.leak_50_l_min);
+           std::isfinite(metrics.leak_50_l_min) &&
+           std::isfinite(metrics.mask_pressure_95_cm_h2o) &&
+           std::isfinite(metrics.leak_95_l_min) &&
+           std::isfinite(metrics.minute_ventilation_50_l_min) &&
+           std::isfinite(metrics.minute_ventilation_95_l_min) &&
+           std::isfinite(metrics.respiratory_rate_50_bpm) &&
+           std::isfinite(metrics.respiratory_rate_95_bpm) &&
+           std::isfinite(metrics.tidal_volume_50_l) &&
+           std::isfinite(metrics.tidal_volume_95_l) &&
+           std::isfinite(metrics.spo2_median_percent);
 }
 
 bool timezone_offset_valid(bool valid, int32_t minutes) {
@@ -404,22 +418,58 @@ NightCatalogTimeRange decode_range(const uint8_t *in) {
 }
 
 void encode_metrics(uint8_t *out, const NightCatalogMetrics &metrics) {
-    put_le16(out, metrics.valid_mask);
-    put_le16(out + 2, metrics.str_mask);
-    put_le16(out + 4, metrics.summary_mask);
-    put_le16(out + 6, 0);
-    put_le32(out + 8, float_bits(metrics.ahi));
-    put_le32(out + 12, float_bits(metrics.obstructive_apnea_index));
-    put_le32(out + 16, float_bits(metrics.central_apnea_index));
-    put_le32(out + 20, float_bits(metrics.unknown_apnea_index));
-    put_le32(out + 24, float_bits(metrics.hypopnea_index));
-    put_le32(out + 28, float_bits(metrics.arousal_index));
-    put_le32(out + 32, float_bits(metrics.mask_pressure_50_cm_h2o));
-    put_le32(out + 36, float_bits(metrics.leak_50_l_min));
-    put_le32(out + 40, metrics.duration_min);
+    put_le32(out, metrics.valid_mask);
+    put_le32(out + 4, metrics.str_mask);
+    put_le32(out + 8, metrics.summary_mask);
+    put_le32(out + 16, float_bits(metrics.ahi));
+    put_le32(out + 20, float_bits(metrics.obstructive_apnea_index));
+    put_le32(out + 24, float_bits(metrics.central_apnea_index));
+    put_le32(out + 28, float_bits(metrics.unknown_apnea_index));
+    put_le32(out + 32, float_bits(metrics.hypopnea_index));
+    put_le32(out + 36, float_bits(metrics.arousal_index));
+    put_le32(out + 40, float_bits(metrics.mask_pressure_50_cm_h2o));
+    put_le32(out + 44, float_bits(metrics.leak_50_l_min));
+    put_le32(out + 48, metrics.duration_min);
+    put_le32(out + 52, float_bits(metrics.mask_pressure_95_cm_h2o));
+    put_le32(out + 56, float_bits(metrics.leak_95_l_min));
+    put_le32(out + 60, float_bits(metrics.minute_ventilation_50_l_min));
+    put_le32(out + 64, float_bits(metrics.minute_ventilation_95_l_min));
+    put_le32(out + 68, float_bits(metrics.respiratory_rate_50_bpm));
+    put_le32(out + 72, float_bits(metrics.respiratory_rate_95_bpm));
+    put_le32(out + 76, float_bits(metrics.tidal_volume_50_l));
+    put_le32(out + 80, float_bits(metrics.tidal_volume_95_l));
+    put_le32(out + 84, float_bits(metrics.spo2_median_percent));
+    put_le32(out + 88, metrics.spo2_threshold_minutes);
+    put_le32(out + 92, metrics.csr_minutes);
 }
 
 void decode_metrics(const uint8_t *in, NightCatalogMetrics &metrics) {
+    metrics.valid_mask = get_le32(in);
+    metrics.str_mask = get_le32(in + 4);
+    metrics.summary_mask = get_le32(in + 8);
+    metrics.ahi = bits_float(get_le32(in + 16));
+    metrics.obstructive_apnea_index = bits_float(get_le32(in + 20));
+    metrics.central_apnea_index = bits_float(get_le32(in + 24));
+    metrics.unknown_apnea_index = bits_float(get_le32(in + 28));
+    metrics.hypopnea_index = bits_float(get_le32(in + 32));
+    metrics.arousal_index = bits_float(get_le32(in + 36));
+    metrics.mask_pressure_50_cm_h2o = bits_float(get_le32(in + 40));
+    metrics.leak_50_l_min = bits_float(get_le32(in + 44));
+    metrics.duration_min = get_le32(in + 48);
+    metrics.mask_pressure_95_cm_h2o = bits_float(get_le32(in + 52));
+    metrics.leak_95_l_min = bits_float(get_le32(in + 56));
+    metrics.minute_ventilation_50_l_min = bits_float(get_le32(in + 60));
+    metrics.minute_ventilation_95_l_min = bits_float(get_le32(in + 64));
+    metrics.respiratory_rate_50_bpm = bits_float(get_le32(in + 68));
+    metrics.respiratory_rate_95_bpm = bits_float(get_le32(in + 72));
+    metrics.tidal_volume_50_l = bits_float(get_le32(in + 76));
+    metrics.tidal_volume_95_l = bits_float(get_le32(in + 80));
+    metrics.spo2_median_percent = bits_float(get_le32(in + 84));
+    metrics.spo2_threshold_minutes = get_le32(in + 88);
+    metrics.csr_minutes = get_le32(in + 92);
+}
+
+void decode_metrics_v11(const uint8_t *in, NightCatalogMetrics &metrics) {
     metrics.valid_mask = get_le16(in);
     metrics.str_mask = get_le16(in + 2);
     metrics.summary_mask = get_le16(in + 4);
@@ -448,15 +498,17 @@ void encode_record(uint8_t *out, const NightCatalogRecord &record) {
     put_le32(out + 52, record.file_count);
     put_le64(out + 56, record.summary_identity);
     encode_metrics(out + 64, record.metrics);
-    put_le32(out + 108, record.fallback_file_offset);
-    put_le32(out + 112, record.fallback_file_count);
-    put_le32(out + 116,
+    put_le32(out + 160, record.fallback_file_offset);
+    put_le32(out + 164, record.fallback_file_count);
+    put_le32(out + 168,
              static_cast<uint32_t>(record.timezone_offset_valid
                  ? record.timezone_offset_minutes
                  : TIMEZONE_OFFSET_MISSING));
 }
 
-bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
+bool decode_record(const uint8_t *in,
+                   uint16_t version,
+                   NightCatalogRecord &record) {
     SleepDayId day;
     if (!SleepDayId::from_epoch_days(
             static_cast<int32_t>(get_le32(in)), day)) {
@@ -466,13 +518,16 @@ bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
     const uint32_t session_count = get_le32(in + 36);
     const uint32_t mask_count = get_le32(in + 44);
     const uint32_t file_count = get_le32(in + 52);
-    const uint32_t fallback_file_count = get_le32(in + 112);
-    const int32_t timezone_offset =
-        static_cast<int32_t>(get_le32(in + 116));
+    const bool legacy = version == NightCatalogFileCodec::LegacyVersion;
+    const size_t fallback_offset = legacy ? 108 : 160;
+    const size_t timezone_field_offset = legacy ? 116 : 168;
+    const uint32_t fallback_file_count = get_le32(in + fallback_offset + 4);
+    const int32_t timezone_minutes =
+        static_cast<int32_t>(get_le32(in + timezone_field_offset));
     if (session_count > UINT16_MAX || mask_count > UINT16_MAX ||
         file_count > UINT16_MAX || fallback_file_count > UINT16_MAX ||
-        !timezone_offset_valid(timezone_offset != TIMEZONE_OFFSET_MISSING,
-                               timezone_offset)) {
+        !timezone_offset_valid(timezone_minutes != TIMEZONE_OFFSET_MISSING,
+                               timezone_minutes)) {
         return false;
     }
 
@@ -487,16 +542,17 @@ bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
     record.mask_window_count = static_cast<uint16_t>(mask_count);
     record.file_offset = get_le32(in + 48);
     record.file_count = static_cast<uint16_t>(file_count);
-    record.fallback_file_offset = get_le32(in + 108);
+    record.fallback_file_offset = get_le32(in + fallback_offset);
     record.fallback_file_count =
         static_cast<uint16_t>(fallback_file_count);
     record.summary_identity = get_le64(in + 56);
     record.timezone_offset_valid =
-        timezone_offset != TIMEZONE_OFFSET_MISSING;
+        timezone_minutes != TIMEZONE_OFFSET_MISSING;
     record.timezone_offset_minutes = record.timezone_offset_valid
-        ? timezone_offset
+        ? timezone_minutes
         : 0;
-    decode_metrics(in + 64, record.metrics);
+    if (legacy) decode_metrics_v11(in + 64, record.metrics);
+    else decode_metrics(in + 64, record.metrics);
     return true;
 }
 
@@ -691,23 +747,35 @@ bool parse_header(const uint8_t *header,
     info = {};
     body_crc = 0;
     if (!header || header_length != NightCatalogFileCodec::HeaderBytes ||
-        memcmp(header, FILE_MAGIC, sizeof(FILE_MAGIC)) != 0 ||
-        get_le16(header + 8) != NightCatalogFileCodec::Version ||
         get_le16(header + 10) != NightCatalogFileCodec::HeaderBytes ||
-        get_le16(header + 12) != RECORD_BYTES ||
         get_le16(header + 14) != RANGE_BYTES ||
         get_le16(header + 16) != FILE_BYTES ||
         get_le16(header + 18) != COVERAGE_BYTES ||
         get_le16(header + 20) != SIGNAL_LAYOUT_BYTES ||
         get_le16(header + 22) != FALLBACK_FILE_BYTES ||
         get_le16(header + 24) != FALLBACK_SECTION_BYTES ||
-        get_le16(header + 26) != NIGHT_CATALOG_SOURCE_REVISION_POLICY ||
         get_le32(header + 64) != 0 ||
         get_le32(header + 80) != 0 ||
         crc32_ieee(header, 84) != get_le32(header + 84)) {
         return false;
     }
 
+    const uint16_t version = get_le16(header + 8);
+    const bool legacy = version == NightCatalogFileCodec::LegacyVersion;
+    const uint16_t record_bytes = legacy ? RECORD_BYTES_V11 : RECORD_BYTES;
+    const uint16_t revision_policy = legacy
+        ? SOURCE_REVISION_POLICY_V11
+        : NIGHT_CATALOG_SOURCE_REVISION_POLICY;
+    const uint8_t *magic = legacy ? FILE_MAGIC_V11 : FILE_MAGIC_V12;
+    if ((!legacy && version != NightCatalogFileCodec::Version) ||
+        memcmp(header, magic, sizeof(FILE_MAGIC_V11)) != 0 ||
+        get_le16(header + 12) != record_bytes ||
+        get_le16(header + 26) != revision_policy) {
+        return false;
+    }
+
+    info.version = version;
+    info.record_bytes = record_bytes;
     info.record_count = get_le32(header + 28);
     info.session_count = get_le32(header + 32);
     info.mask_window_count = get_le32(header + 36);
@@ -719,7 +787,8 @@ bool parse_header(const uint8_t *header,
     info.path_bytes = get_le32(header + 60);
 
     size_t body_bytes = 0;
-    if (!CheckedSize::add_array(body_bytes, info.record_count, RECORD_BYTES) ||
+    if (!CheckedSize::add_array(
+            body_bytes, info.record_count, info.record_bytes) ||
         !CheckedSize::add_array(body_bytes, info.session_count, RANGE_BYTES) ||
         !CheckedSize::add_array(body_bytes, info.mask_window_count, RANGE_BYTES) ||
         !CheckedSize::add_array(body_bytes, info.file_count, FILE_BYTES) ||
@@ -875,7 +944,7 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         return {};
     }
 
-    memcpy(header, FILE_MAGIC, sizeof(FILE_MAGIC));
+    memcpy(header, FILE_MAGIC_V12, sizeof(FILE_MAGIC_V12));
     put_le16(header + 8, Version);
     put_le16(header + 10, HeaderBytes);
     put_le16(header + 12, RECORD_BYTES);
@@ -933,7 +1002,8 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
     }
 
     const uint8_t *records = body ? body : header + header_length;
-    const uint8_t *sessions = records + info.record_count * RECORD_BYTES;
+    const uint8_t *sessions = records +
+        info.record_count * info.record_bytes;
     const uint8_t *masks = sessions + info.session_count * RANGE_BYTES;
     const uint8_t *files = masks + info.mask_window_count * RANGE_BYTES;
     const uint8_t *coverage = files + info.file_count * FILE_BYTES;
@@ -947,7 +1017,8 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
         info.fallback_section_count * FALLBACK_SECTION_BYTES;
 
     for (size_t i = 0; i < info.record_count; ++i) {
-        if (!decode_record(records + i * RECORD_BYTES,
+        if (!decode_record(records + i * info.record_bytes,
+                           info.version,
                            catalog->records_[i])) {
             return {};
         }

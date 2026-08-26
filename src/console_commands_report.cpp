@@ -193,24 +193,6 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.println(status.catalog_error[0] ? status.catalog_error : "--");
 }
 
-uint32_t report_night_duration(const NightCatalog &catalog,
-                               const NightCatalogRecord &night) {
-    if (night.metrics.has(NightCatalogMetric::DurationMinutes)) {
-        return night.metrics.duration_min;
-    }
-
-    uint64_t duration_ms = 0;
-    size_t session_count = 0;
-    const NightCatalogTimeRange *sessions =
-        catalog.sessions(night, session_count);
-    for (size_t i = 0; sessions && i < session_count; ++i) {
-        if (!sessions[i].valid()) continue;
-        duration_ms += static_cast<uint64_t>(
-            sessions[i].end_ms - sessions[i].start_ms);
-    }
-    return static_cast<uint32_t>(duration_ms / 60000);
-}
-
 void print_report_nights(Print &out, const ReportTask &task) {
     const std::shared_ptr<const NightCatalog> catalog =
         task.catalog_snapshot();
@@ -230,7 +212,7 @@ void print_report_nights(Print &out, const ReportTask &task) {
         out.print(day);
         out.print(" duration_min=");
         out.print(static_cast<unsigned long>(
-            report_night_duration(*catalog, *night)));
+            night_catalog_duration_minutes(*catalog, *night)));
         out.print(" sessions=");
         out.print(static_cast<unsigned long>(night->session_count));
         out.print(" sources=0x");

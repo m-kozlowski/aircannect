@@ -23,8 +23,10 @@ namespace {
 constexpr uint32_t RESULT_MAGIC = 0x36524341u;    // "ACR6"
 constexpr uint32_t MANIFEST_MAGIC = 0x364d4341u;  // "ACM6"
 
-constexpr size_t RESULT_BODY_CRC_OFFSET = 148;
-constexpr size_t RESULT_HEADER_CRC_OFFSET = 152;
+constexpr size_t RESULT_V1_BODY_CRC_OFFSET = 148;
+constexpr size_t RESULT_V1_HEADER_CRC_OFFSET = 152;
+constexpr size_t RESULT_BODY_CRC_OFFSET = 204;
+constexpr size_t RESULT_HEADER_CRC_OFFSET = 208;
 constexpr size_t MANIFEST_BODY_CRC_OFFSET = 60;
 constexpr size_t MANIFEST_HEADER_CRC_OFFSET = 64;
 
@@ -164,20 +166,59 @@ std::shared_ptr<const LargeByteBuffer> encode_manifest(
 }
 
 void encode_metrics(uint8_t *out, const ReportArtifactMetrics &metrics) {
-    put_le16(out, metrics.valid_mask);
-    put_le16(out + 2, metrics.str_mask);
-    put_le16(out + 4, metrics.summary_mask);
-    put_i32(out + 8, metrics.ahi_milli);
-    put_i32(out + 12, metrics.obstructive_apnea_index_milli);
-    put_i32(out + 16, metrics.central_apnea_index_milli);
-    put_i32(out + 20, metrics.unknown_apnea_index_milli);
-    put_i32(out + 24, metrics.hypopnea_index_milli);
-    put_i32(out + 28, metrics.arousal_index_milli);
-    put_i32(out + 32, metrics.mask_pressure_50_milli);
-    put_i32(out + 36, metrics.leak_50_milli);
+    put_le32(out, metrics.valid_mask);
+    put_le32(out + 4, metrics.str_mask);
+    put_le32(out + 8, metrics.summary_mask);
+    put_i32(out + 16, metrics.ahi_milli);
+    put_i32(out + 20, metrics.obstructive_apnea_index_milli);
+    put_i32(out + 24, metrics.central_apnea_index_milli);
+    put_i32(out + 28, metrics.unknown_apnea_index_milli);
+    put_i32(out + 32, metrics.hypopnea_index_milli);
+    put_i32(out + 36, metrics.arousal_index_milli);
+    put_i32(out + 40, metrics.mask_pressure_50_milli);
+    put_i32(out + 44, metrics.leak_50_milli);
+    put_le32(out + 48, metrics.duration_minutes);
+    put_i32(out + 52, metrics.mask_pressure_95_milli);
+    put_i32(out + 56, metrics.leak_95_milli);
+    put_i32(out + 60, metrics.minute_ventilation_50_milli);
+    put_i32(out + 64, metrics.minute_ventilation_95_milli);
+    put_i32(out + 68, metrics.respiratory_rate_50_milli);
+    put_i32(out + 72, metrics.respiratory_rate_95_milli);
+    put_i32(out + 76, metrics.tidal_volume_50_milli);
+    put_i32(out + 80, metrics.tidal_volume_95_milli);
+    put_i32(out + 84, metrics.spo2_median_milli);
+    put_le32(out + 88, metrics.spo2_threshold_minutes);
+    put_le32(out + 92, metrics.csr_minutes);
 }
 
 void decode_metrics(const uint8_t *data, ReportArtifactMetrics &metrics) {
+    metrics.valid_mask = get_le32(data);
+    metrics.str_mask = get_le32(data + 4);
+    metrics.summary_mask = get_le32(data + 8);
+    metrics.ahi_milli = get_i32(data + 16);
+    metrics.obstructive_apnea_index_milli = get_i32(data + 20);
+    metrics.central_apnea_index_milli = get_i32(data + 24);
+    metrics.unknown_apnea_index_milli = get_i32(data + 28);
+    metrics.hypopnea_index_milli = get_i32(data + 32);
+    metrics.arousal_index_milli = get_i32(data + 36);
+    metrics.mask_pressure_50_milli = get_i32(data + 40);
+    metrics.leak_50_milli = get_i32(data + 44);
+    metrics.duration_minutes = get_le32(data + 48);
+    metrics.mask_pressure_95_milli = get_i32(data + 52);
+    metrics.leak_95_milli = get_i32(data + 56);
+    metrics.minute_ventilation_50_milli = get_i32(data + 60);
+    metrics.minute_ventilation_95_milli = get_i32(data + 64);
+    metrics.respiratory_rate_50_milli = get_i32(data + 68);
+    metrics.respiratory_rate_95_milli = get_i32(data + 72);
+    metrics.tidal_volume_50_milli = get_i32(data + 76);
+    metrics.tidal_volume_95_milli = get_i32(data + 80);
+    metrics.spo2_median_milli = get_i32(data + 84);
+    metrics.spo2_threshold_minutes = get_le32(data + 88);
+    metrics.csr_minutes = get_le32(data + 92);
+}
+
+void decode_metrics_v1(const uint8_t *data,
+                       ReportArtifactMetrics &metrics) {
     metrics.valid_mask = get_le16(data);
     metrics.str_mask = get_le16(data + 2);
     metrics.summary_mask = get_le16(data + 4);
@@ -449,7 +490,7 @@ std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
     bytes[81] = data.missing_event_mask;
     bytes[82] = data.source_flags;
     encode_metrics(bytes + 84, data.metrics);
-    encode_events(bytes + 124, data.events);
+    encode_events(bytes + 180, data.events);
 
     uint8_t *body = bytes + HeaderBytes;
     for (size_t i = 0; i < data.session_count; ++i) {
@@ -470,11 +511,23 @@ bool ReportResultArtifactCodec::decode(
     size_t length,
     ReportResultArtifactView &view) {
     view = {};
-    if (!bytes || length < HeaderBytes || get_le32(bytes) != RESULT_MAGIC ||
-        get_le16(bytes + 4) != Version || get_le16(bytes + 6) != HeaderBytes ||
-        get_le32(bytes + 8) != length ||
-        crc32_ieee(bytes, RESULT_HEADER_CRC_OFFSET) !=
-            get_le32(bytes + RESULT_HEADER_CRC_OFFSET)) {
+    if (!bytes || length < LegacyHeaderBytes ||
+        get_le32(bytes) != RESULT_MAGIC || get_le32(bytes + 8) != length) {
+        return false;
+    }
+
+    const uint16_t version = get_le16(bytes + 4);
+    const bool legacy = version == LegacyVersion;
+    const size_t header_bytes = legacy ? LegacyHeaderBytes : HeaderBytes;
+    const size_t body_crc_offset = legacy
+        ? RESULT_V1_BODY_CRC_OFFSET : RESULT_BODY_CRC_OFFSET;
+    const size_t header_crc_offset = legacy
+        ? RESULT_V1_HEADER_CRC_OFFSET : RESULT_HEADER_CRC_OFFSET;
+    const size_t events_offset = legacy ? 124 : 180;
+    if ((!legacy && version != Version) ||
+        get_le16(bytes + 6) != header_bytes || length < header_bytes ||
+        crc32_ieee(bytes, header_crc_offset) !=
+            get_le32(bytes + header_crc_offset)) {
         return false;
     }
 
@@ -482,9 +535,10 @@ bool ReportResultArtifactCodec::decode(
     size_t body_bytes = 0;
     size_t expected = 0;
     if (!CheckedSize::multiply(session_count, SessionBytes, body_bytes) ||
-        !CheckedSize::add(HeaderBytes, body_bytes, expected) || expected != length ||
-        crc32_ieee(bytes + HeaderBytes, body_bytes) !=
-            get_le32(bytes + RESULT_BODY_CRC_OFFSET)) {
+        !CheckedSize::add(header_bytes, body_bytes, expected) ||
+        expected != length ||
+        crc32_ieee(bytes + header_bytes, body_bytes) !=
+            get_le32(bytes + body_crc_offset)) {
         return false;
     }
 
@@ -510,9 +564,10 @@ bool ReportResultArtifactCodec::decode(
     data.requested_event_mask = bytes[80];
     data.missing_event_mask = bytes[81];
     data.source_flags = bytes[82];
-    decode_metrics(bytes + 84, data.metrics);
-    decode_events(bytes + 124, data.events);
-    view.session_bytes = bytes + HeaderBytes;
+    if (legacy) decode_metrics_v1(bytes + 84, data.metrics);
+    else decode_metrics(bytes + 84, data.metrics);
+    decode_events(bytes + events_offset, data.events);
+    view.session_bytes = bytes + header_bytes;
 
     if (!data.key.valid() || data.day_end_ms <= data.day_start_ms) {
         view = {};
