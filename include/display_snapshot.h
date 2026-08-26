@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "display_report_summary.h"
+
 namespace aircannect {
 
 struct ExportTaskControlSnapshot;
@@ -76,6 +78,8 @@ struct DisplaySnapshot {
     float ie_ratio_percent = 0.0f;
     float snore = 0.0f;
 
+    DisplayReportSummary reports;
+
     bool oximetry_valid = false;
     int16_t spo2 = -1;
     int16_t pulse_bpm = -1;
@@ -94,6 +98,7 @@ DisplaySnapshot compose_display_snapshot(
     const SessionStatus &session,
     const TherapyTelemetrySnapshot &telemetry,
     const ExportTaskControlSnapshot &exports,
-    int therapy_mode);
+    int therapy_mode,
+    const DisplayReportSummary &reports);
 
 }  // namespace aircannect

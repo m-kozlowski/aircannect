@@ -20,11 +20,15 @@ public:
     void configure(DisplayOrientation orientation, bool auto_rotate);
     bool begin();
     void publish(const DisplaySnapshot &snapshot);
-    void publish_pressure(const DisplayPressureSnapshot &pressure);
+    void publish_therapy_telemetry(
+        const TherapyTelemetrySnapshot &telemetry,
+        int therapy_mode);
 
     bool available() const { return device_ != nullptr; }
     bool backlight_on() const { return backlight_visible_.load(); }
     void toggle_backlight();
+    bool previous_page();
+    bool next_page();
 
 private:
     static void task_entry(void *context);
@@ -33,11 +37,18 @@ private:
     bool take_snapshot(DisplaySnapshot &snapshot, bool force);
     bool poll_motion(uint32_t now_ms);
     void apply_display_config();
+    bool navigate_page(int8_t direction);
     bool temporary_wake_active(uint32_t now_ms) const;
     bool motion_wake_blocked(uint32_t now_ms) const;
     void render(const DisplaySnapshot &snapshot);
     void render_idle(const DisplaySnapshot &snapshot);
+    void render_idle_dashboard(const DisplaySnapshot &snapshot);
+    void render_idle_latest(const DisplaySnapshot &snapshot);
+    void render_idle_period(const DisplaySnapshot &snapshot);
     void render_therapy(const DisplaySnapshot &snapshot);
+    void render_therapy_primary(const DisplaySnapshot &snapshot);
+    void render_therapy_detail(const DisplaySnapshot &snapshot);
+    void draw_page_indicator(uint8_t page, uint8_t count);
 
     void draw_centered(int16_t y,
                        const char *text,
@@ -70,6 +81,12 @@ private:
     std::atomic<bool> backlight_requested_{true};
     std::atomic<bool> backlight_visible_{false};
     std::atomic<bool> manual_backlight_off_{false};
+    std::atomic<bool> navigation_wake_requested_{false};
+    std::atomic<bool> page_dirty_{false};
+    std::atomic<bool> therapy_active_{false};
+    std::atomic<uint8_t> idle_page_{0};
+    std::atomic<uint8_t> therapy_page_{0};
+    std::atomic<uint8_t> therapy_page_count_{1};
     bool backlight_applied_ = false;
 };
 

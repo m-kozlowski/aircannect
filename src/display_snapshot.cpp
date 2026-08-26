@@ -97,7 +97,8 @@ DisplaySnapshot compose_display_snapshot(
     const SessionStatus &session,
     const TherapyTelemetrySnapshot &telemetry,
     const ExportTaskControlSnapshot &exports,
-    int therapy_mode) {
+    int therapy_mode,
+    const DisplayReportSummary &reports) {
     DisplaySnapshot out;
 
     if (system.time.esp_time_valid) {
@@ -146,6 +147,8 @@ DisplaySnapshot compose_display_snapshot(
     out.sleephq = display_state(exports.sleephq);
 
     apply_display_therapy_telemetry(out, telemetry, therapy_mode);
+    out.reports = reports;
+
     out.oximetry_valid = system.oximetry.source_fresh &&
                          system.oximetry.reading.valid;
     if (out.oximetry_valid) {

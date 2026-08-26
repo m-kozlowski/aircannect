@@ -154,9 +154,11 @@ microSD (4-bit SDMMC)
 
 It defaults to `as11_transport=ble`, so pairing is completed from onboarding
 or the Config tab. The LCD shows time, Air11, Wi-Fi, and export status while
-idle. During therapy it shows elapsed time, algorithm pressure, and fresh
-oximetry when available. PWR toggles the backlight on a short press and starts
-or stops therapy on a long press. Touch is not initialized.
+idle, with additional pages for the latest night and 30-day summary. During
+therapy it shows elapsed time, algorithm pressure, fresh oximetry when
+available, and a second page of current respiratory values. BOOT and PLUS move
+between pages. PWR toggles the backlight on a short press and starts or stops
+therapy on a long press. Touch is not initialized.
 
 Display and button support are build capabilities, not board identities. A
 display driver is selected with `AC_DISPLAY_DRIVER` and described by its pin,

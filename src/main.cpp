@@ -236,6 +236,14 @@ static bool toggle_display_backlight(void *, uint32_t) {
     return true;
 }
 
+static bool display_previous_page(void *, uint32_t) {
+    return display_manager.previous_page();
+}
+
+static bool display_next_page(void *, uint32_t) {
+    return display_manager.next_page();
+}
+
 static bool toggle_therapy(void *, uint32_t now_ms) {
     const As11TherapyState therapy =
         as11_device_service.state().therapy_state();
@@ -890,7 +898,8 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
             session_manager.status(),
             sink_manager.therapy_telemetry_snapshot(snapshot.now_ms),
             export_coordinator.status_snapshot(),
-            therapy_mode);
+            therapy_mode,
+            report_task.display_summary_snapshot());
         display_manager.publish(display_snapshot);
     }
 
@@ -939,6 +948,12 @@ void setup() {
                   "[INIT] display manager failed to start\n");
     }
 
+    (void)local_inputs.register_action(
+        LocalActionId::DisplayPreviousPage,
+        display_previous_page, nullptr);
+    (void)local_inputs.register_action(
+        LocalActionId::DisplayNextPage,
+        display_next_page, nullptr);
     (void)local_inputs.register_action(
         LocalActionId::DisplayToggleBacklight,
         toggle_display_backlight, nullptr);
@@ -1346,8 +1361,8 @@ void loop() {
         sink_manager.take_therapy_telemetry_update(now_ms, telemetry)) {
         const int therapy_mode = as11_mode_index_from_value(
             as11_device_service.state().active_therapy_profile());
-        display_manager.publish_pressure(
-            compose_display_pressure(telemetry, therapy_mode));
+        display_manager.publish_therapy_telemetry(
+            telemetry, therapy_mode);
     }
 
     // Wi-Fi and network services

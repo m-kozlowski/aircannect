@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "board_report.h"
+#include "display_report_summary.h"
 #include "night_catalog_builder.h"
 #include "report_artifact_index.h"
 #include "report_fallback_artifact.h"
@@ -99,6 +100,7 @@ bool report_artifact_failure_retryable(const char *error) {
 struct ReportPublishedState {
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const ReportArtifactIndex> artifact_index;
+    DisplayReportSummary display_summary;
 };
 
 enum class CatalogStorePurpose : uint8_t {
@@ -476,7 +478,8 @@ struct ReportTask::Runtime {
     bool publish_state() {
         std::shared_ptr<const ReportPublishedState> next =
             std::make_shared<ReportPublishedState>(
-                ReportPublishedState{catalog, artifact_index});
+                ReportPublishedState{
+                    catalog, artifact_index, display_summary});
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -1071,6 +1074,7 @@ struct ReportTask::Runtime {
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
                         uint32_t generation) {
         catalog = std::move(next);
+        display_summary = build_display_report_summary(*catalog);
         catalog_generation = generation;
         engine.publish_catalog(catalog);
         clear_artifact_failures();
@@ -1362,6 +1366,7 @@ struct ReportTask::Runtime {
     uint8_t catalog_refresh_retry_attempt = 0;
 
     std::shared_ptr<const NightCatalog> catalog;
+    DisplayReportSummary display_summary;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
     std::shared_ptr<const ReportArtifactIndex> artifact_index;
     std::shared_ptr<const ReportPublishedState> published;
@@ -1669,6 +1674,14 @@ std::shared_ptr<const NightCatalog> ReportTask::catalog_snapshot() const {
     const std::shared_ptr<const ReportPublishedState> published =
         runtime_->published_state();
     return published ? published->catalog : nullptr;
+}
+
+DisplayReportSummary ReportTask::display_summary_snapshot() const {
+    if (!runtime_) return {};
+
+    const std::shared_ptr<const ReportPublishedState> published =
+        runtime_->published_state();
+    return published ? published->display_summary : DisplayReportSummary{};
 }
 
 ReportArtifactQuery ReportTask::query_artifact(

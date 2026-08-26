@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "night_catalog_refresh_service.h"
+#include "display_report_summary.h"
 #include "night_catalog_store_service.h"
 #include "report_artifact_payload_cache.h"
 #include "report_artifact_payload_loader.h"
@@ -182,6 +183,7 @@ public:
         ReportArtifactAvailability &availability) const;
 #endif
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
+    DisplayReportSummary display_summary_snapshot() const;
     ReportArtifactQuery query_artifact(
         SleepDayId sleep_day,
         ReportArtifactKind kind,
