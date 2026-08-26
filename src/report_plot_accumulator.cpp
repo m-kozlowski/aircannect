@@ -72,6 +72,7 @@ struct EventSlot {
 
 struct MetricHistogram {
     uint32_t *bins = nullptr;
+    int64_t sum_milli = 0;
     uint64_t samples = 0;
     bool active = false;
 };
@@ -103,7 +104,40 @@ void add_metric_sample(MetricHistogram &histogram,
     const size_t bin = static_cast<size_t>(
         (offset * (METRIC_HISTOGRAM_BINS - 1) + span / 2) / span);
     if (histogram.bins[bin] != UINT32_MAX) ++histogram.bins[bin];
+
+    if (value_milli > 0 &&
+        histogram.sum_milli > INT64_MAX - value_milli) {
+        histogram.sum_milli = INT64_MAX;
+    } else if (value_milli < 0 &&
+               histogram.sum_milli < INT64_MIN - value_milli) {
+        histogram.sum_milli = INT64_MIN;
+    } else {
+        histogram.sum_milli += value_milli;
+    }
     if (histogram.samples != UINT64_MAX) ++histogram.samples;
+}
+
+bool metric_mean(const MetricHistogram &histogram, int32_t &out) {
+    if (!histogram.active || !histogram.bins || histogram.samples == 0 ||
+        histogram.samples > static_cast<uint64_t>(INT64_MAX)) {
+        return false;
+    }
+
+    const int64_t divisor = static_cast<int64_t>(histogram.samples);
+    int64_t mean = histogram.sum_milli / divisor;
+    const int64_t remainder = histogram.sum_milli % divisor;
+    const int64_t round_threshold = divisor / 2 + divisor % 2;
+    if (remainder >= round_threshold && mean < INT64_MAX) ++mean;
+    if (remainder <= -round_threshold && mean > INT64_MIN) --mean;
+
+    if (mean > INT32_MAX) {
+        out = INT32_MAX;
+    } else if (mean < INT32_MIN) {
+        out = INT32_MIN;
+    } else {
+        out = static_cast<int32_t>(mean);
+    }
+    return true;
 }
 
 bool metric_value_at_rank(const MetricHistogram &histogram,
@@ -165,8 +199,9 @@ bool metric_percentile(const MetricHistogram &histogram,
 
 void finish_metric_histogram(const MetricHistogram &histogram,
                              const MetricHistogramConfig &config,
-                             ReportMetricPercentiles &out) {
-    out.valid = metric_percentile(
+                             ReportMetricStatistics &out) {
+    out.valid = metric_mean(histogram, out.mean_milli) &&
+        metric_percentile(
         histogram, config, 50, 100, out.p50_milli) &&
         metric_percentile(histogram, config, 95, 100, out.p95_milli);
 }

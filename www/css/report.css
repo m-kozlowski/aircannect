@@ -285,7 +285,7 @@
     }
 
     .report-metric-events {
-      flex: 1 1 240px;
+      flex: 0 1 auto;
     }
 
     /* Fixed width so AHI up to NNN.NN never resizes the box / shifts layout. */

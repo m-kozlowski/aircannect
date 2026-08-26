@@ -143,7 +143,7 @@ void complete_metrics(ReportResultArtifactData &result,
     const struct {
         NightCatalogMetric p50_metric;
         NightCatalogMetric p95_metric;
-        const ReportMetricPercentiles *source;
+        const ReportMetricStatistics *source;
         int32_t *p50;
         int32_t *p95;
     } percentile_fallbacks[] = {
@@ -188,6 +188,11 @@ void complete_metrics(ReportResultArtifactData &result,
             *fallback.p95 = fallback.source->p95_milli;
             metrics.valid_mask |= p95_bit;
         }
+    }
+
+    if (plot.leak.valid) {
+        metrics.leak_mean_milli = plot.leak.mean_milli;
+        metrics.valid_mask |= REPORT_RESULT_METRIC_LEAK_MEAN;
     }
 
     const uint32_t spo2_bit = metric_bit(NightCatalogMetric::Spo2Median);

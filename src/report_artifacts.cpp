@@ -169,6 +169,7 @@ void encode_metrics(uint8_t *out, const ReportArtifactMetrics &metrics) {
     put_le32(out, metrics.valid_mask);
     put_le32(out + 4, metrics.str_mask);
     put_le32(out + 8, metrics.summary_mask);
+    put_i32(out + 12, metrics.leak_mean_milli);
     put_i32(out + 16, metrics.ahi_milli);
     put_i32(out + 20, metrics.obstructive_apnea_index_milli);
     put_i32(out + 24, metrics.central_apnea_index_milli);
@@ -195,6 +196,7 @@ void decode_metrics(const uint8_t *data, ReportArtifactMetrics &metrics) {
     metrics.valid_mask = get_le32(data);
     metrics.str_mask = get_le32(data + 4);
     metrics.summary_mask = get_le32(data + 8);
+    metrics.leak_mean_milli = get_i32(data + 12);
     metrics.ahi_milli = get_i32(data + 16);
     metrics.obstructive_apnea_index_milli = get_i32(data + 20);
     metrics.central_apnea_index_milli = get_i32(data + 24);

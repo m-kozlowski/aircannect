@@ -9,8 +9,9 @@
 
 namespace aircannect {
 
-struct ReportMetricPercentiles {
+struct ReportMetricStatistics {
     bool valid = false;
+    int32_t mean_milli = 0;
     int32_t p50_milli = 0;
     int32_t p95_milli = 0;
 };
@@ -18,12 +19,12 @@ struct ReportMetricPercentiles {
 struct ReportPlotAccumulatorSummary {
     ReportArtifactEventCounts events;
     uint32_t prefix_crc32 = 0;
-    ReportMetricPercentiles pressure;
-    ReportMetricPercentiles leak;
-    ReportMetricPercentiles minute_ventilation;
-    ReportMetricPercentiles respiratory_rate;
-    ReportMetricPercentiles tidal_volume;
-    ReportMetricPercentiles spo2;
+    ReportMetricStatistics pressure;
+    ReportMetricStatistics leak;
+    ReportMetricStatistics minute_ventilation;
+    ReportMetricStatistics respiratory_rate;
+    ReportMetricStatistics tidal_volume;
+    ReportMetricStatistics spo2;
     uint64_t csr_duration_ms = 0;
 };
 

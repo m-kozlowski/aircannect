@@ -1042,6 +1042,9 @@ uint64_t calculate_revision(const NightCatalog &catalog,
     hash = hash_byte(
         hash,
         record.source_flags & ~NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED);
+    if ((record.source_flags & NIGHT_CATALOG_SOURCE_EDF) != 0) {
+        hash = hash_u32(hash, NIGHT_CATALOG_EDF_DERIVATION_POLICY);
+    }
     hash = hash_u32(hash, record.metrics.valid_mask);
     hash = hash_u32(hash, record.metrics.str_mask);
     hash = hash_u32(hash, record.metrics.summary_mask);

@@ -1535,17 +1535,15 @@
       updateReportZoomControls();
     }
 
-    function reportMetricPair(result, first, second, scale, suffix) {
-      const left = result && Number.isFinite(Number(result[first])) ?
-        Number(result[first]) * scale : null;
-      const right = result && Number.isFinite(Number(result[second])) ?
-        Number(result[second]) * scale : null;
-      if (left === null && right === null) return "--";
+    function reportMetricValues(result, fields, scale) {
+      const values = fields.map((field) =>
+        result && Number.isFinite(Number(result[field])) ?
+          Number(result[field]) * scale : null);
+      if (values.every((value) => value === null)) return "--";
 
       const decimals = scale === 1000 ? 0 : 1;
-      return (left === null ? "--" : left.toFixed(decimals)) + " / " +
-        (right === null ? "--" : right.toFixed(decimals)) +
-        (suffix || "");
+      return values.map((value) =>
+        value === null ? "--" : value.toFixed(decimals)).join(" / ");
     }
 
     function renderOptionalReportMetric(cardId, valueId, visible, value) {
@@ -1588,11 +1586,10 @@
         Number(reportResult.ahi).toFixed(1) : "--");
       up("reportRdi", displayable && Number.isFinite(Number(reportResult.rdi)) ?
         Number(reportResult.rdi).toFixed(1) : "--");
-      up("reportPressure", displayable ? reportMetricPair(
-        reportResult, "mask_pressure_50", "mask_pressure_95",
-        1, " cmH2O") : "--");
-      up("reportLeak", displayable ? reportMetricPair(
-        reportResult, "leak_50", "leak_95", 1, " L/min") : "--");
+      up("reportPressure", displayable ? reportMetricValues(
+        reportResult, ["mask_pressure_50", "mask_pressure_95"], 1) : "--");
+      up("reportLeak", displayable ? reportMetricValues(
+        reportResult, ["average_leak", "leak_50", "leak_95"], 1) : "--");
 
       const tidalVolumeVisible = displayable && (
         Number.isFinite(Number(reportResult.tidal_volume_50)) ||
@@ -1601,8 +1598,8 @@
         "reportTidalVolumeMetric",
         "reportTidalVolume",
         tidalVolumeVisible,
-        reportMetricPair(reportResult, "tidal_volume_50",
-          "tidal_volume_95", 1000, " mL"));
+        reportMetricValues(reportResult,
+          ["tidal_volume_50", "tidal_volume_95"], 1000));
 
       const respiratoryRateVisible = displayable && (
         Number.isFinite(Number(reportResult.respiratory_rate_50)) ||
@@ -1611,8 +1608,8 @@
         "reportRespiratoryRateMetric",
         "reportRespiratoryRate",
         respiratoryRateVisible,
-        reportMetricPair(reportResult, "respiratory_rate_50",
-          "respiratory_rate_95", 1, " /min"));
+        reportMetricValues(reportResult,
+          ["respiratory_rate_50", "respiratory_rate_95"], 1));
 
       const minuteVentilationVisible = displayable && (
         Number.isFinite(Number(reportResult.minute_ventilation_50)) ||
@@ -1621,8 +1618,8 @@
         "reportMinuteVentilationMetric",
         "reportMinuteVentilation",
         minuteVentilationVisible,
-        reportMetricPair(reportResult, "minute_ventilation_50",
-          "minute_ventilation_95", 1, " L/min"));
+        reportMetricValues(reportResult,
+          ["minute_ventilation_50", "minute_ventilation_95"], 1));
 
       const spo2Median = displayable &&
         Number.isFinite(Number(reportResult.spo2_median)) ?
@@ -2363,7 +2360,7 @@
         dv.getUint32(92, true);
       const metricOffsets = legacy ?
         [92, 96, 100, 104, 108, 112, 116, 120] :
-        Array.from({length: 20}, (_, index) => 100 + index * 4);
+        Array.from({length: 20}, (_, index) => 100 + index * 4).concat(96);
       const metrics = metricOffsets.map((offset, index) => {
         if (!legacy && (index === 8 || index === 18 || index === 19)) {
           return dv.getUint32(offset, true);
@@ -2465,6 +2462,7 @@
         "spo2_median",
         "spo2_threshold_minutes",
         "csr_minutes",
+        "average_leak",
       ];
       metricFields.forEach((field, index) => {
         if (!field || !(metricValid & (1 << index))) return;
@@ -2474,9 +2472,6 @@
       });
       if (result.mask_pressure_50 !== undefined) {
         result.average_pressure = result.mask_pressure_50;
-      }
-      if (result.leak_50 !== undefined) {
-        result.average_leak = result.leak_50;
       }
       if (result.ahi !== undefined && result.arousal_index !== undefined) {
         result.rdi = result.ahi + result.arousal_index;

@@ -18,10 +18,18 @@ enum ReportResultArtifactFlag : uint16_t {
     REPORT_RESULT_EVENTS_AVAILABLE = 1u << 1,
 };
 
+static constexpr uint8_t REPORT_RESULT_METRIC_LEAK_MEAN_INDEX = 20;
+static constexpr uint32_t REPORT_RESULT_METRIC_LEAK_MEAN =
+    1u << REPORT_RESULT_METRIC_LEAK_MEAN_INDEX;
+static_assert(static_cast<uint8_t>(NightCatalogMetric::Count) <=
+                  REPORT_RESULT_METRIC_LEAK_MEAN_INDEX,
+              "catalog and derived result metrics must not overlap");
+
 struct ReportArtifactMetrics {
     uint32_t valid_mask = 0;
     uint32_t str_mask = 0;
     uint32_t summary_mask = 0;
+    int32_t leak_mean_milli = 0;
     int32_t ahi_milli = 0;
     int32_t obstructive_apnea_index_milli = 0;
     int32_t central_apnea_index_milli = 0;
