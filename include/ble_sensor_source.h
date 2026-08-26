@@ -58,6 +58,19 @@ public:
 #endif
 
 private:
+    enum class AutoconnectHoldoffKind : uint8_t {
+        Standard,
+        Charging,
+    };
+
+    struct AutoconnectHoldoff {
+        uint32_t retry_at_ms = 0;
+        uint32_t last_seen_ms = 0;
+        AutoconnectHoldoffKind kind = AutoconnectHoldoffKind::Standard;
+        bool clear_when_absent = false;
+        bool active = false;
+    };
+
     // Persistence and commands
     bool load_known();
     bool save_known() const;
@@ -74,8 +87,10 @@ private:
 
     // Scan and connection policy
     void hold_autoconnect(const char *addr, uint32_t now_ms,
-                          bool until_absent);
-    void update_autoconnect_holdoff(uint32_t now_ms);
+                          bool until_absent,
+                          AutoconnectHoldoffKind kind);
+    void update_autoconnect_holdoffs(uint32_t now_ms,
+                                     bool observer_active);
     void store_scan_result(const char *addr, uint8_t addr_type,
                            const char *name, int rssi);
     bool take_observed_target(OximetrySensorDevice &target);
@@ -129,15 +144,16 @@ private:
     bool manual_connect_requested_ = false;
     bool disconnect_requested_ = false;
     bool disconnect_hold_until_absent_ = false;
+    AutoconnectHoldoffKind disconnect_holdoff_kind_ =
+        AutoconnectHoldoffKind::Standard;
     bool protocol_reset_pending_ = false;
     bool client_release_pending_ = false;
     OximetrySensorDevice manual_target_device_;
     char connected_addr_[18] = {};
     char connected_name_[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
-    char auto_holdoff_addr_[18] = {};
-    uint32_t auto_holdoff_until_ms_ = 0;
-    bool auto_holdoff_until_absent_ = false;
-    uint32_t auto_holdoff_last_seen_ms_ = 0;
+    AutoconnectHoldoff auto_holdoffs_[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+    bool holdoff_observer_active_ = false;
+    uint32_t holdoff_observer_started_ms_ = 0;
     uint32_t auto_retry_at_ms_ = 0;
     uint32_t auto_retry_delay_ms_ = AC_OXIMETRY_SENSOR_RETRY_MIN_MS;
     OximetrySensorDevice observed_target_;
