@@ -75,10 +75,12 @@ private:
     // Scan and connection policy
     void hold_autoconnect(const char *addr, uint32_t now_ms,
                           bool until_absent);
-    bool autoconnect_holdoff_active(uint32_t now_ms) const;
+    void update_autoconnect_holdoff(uint32_t now_ms);
     void store_scan_result(const char *addr, uint8_t addr_type,
                            const char *name, int rssi);
-    bool pick_autoconnect_target(OximetrySensorDevice &target, uint32_t now_ms);
+    bool take_observed_target(OximetrySensorDevice &target);
+    void restore_observed_target(const OximetrySensorDevice &target);
+    void note_auto_connect_result(bool connected, uint32_t now_ms);
     bool ensure_client(SensorBleClientCallbacks &callbacks);
     void release_client_services();
     void release_client();
@@ -94,6 +96,9 @@ private:
                                          bool invalid,
                                          bool contact_known,
                                          bool contact_present);
+    static void advertisement_callback(
+        void *context, const BleAdvertisement &advertisement);
+    void note_advertisement(const BleAdvertisement &advertisement);
     void publish_sample(uint16_t spo2_raw, uint16_t pulse_raw,
                         bool from_invalid_packet,
                         bool contact_known,
@@ -124,13 +129,17 @@ private:
     bool disconnect_hold_until_absent_ = false;
     bool protocol_reset_pending_ = false;
     bool client_release_pending_ = false;
-    char manual_target_[18] = {};
     OximetrySensorDevice manual_target_device_;
     char connected_addr_[18] = {};
     char connected_name_[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
     char auto_holdoff_addr_[18] = {};
     uint32_t auto_holdoff_until_ms_ = 0;
     bool auto_holdoff_until_absent_ = false;
+    uint32_t auto_holdoff_last_seen_ms_ = 0;
+    uint32_t auto_retry_at_ms_ = 0;
+    uint32_t auto_retry_delay_ms_ = AC_OXIMETRY_SENSOR_RETRY_MIN_MS;
+    OximetrySensorDevice observed_target_;
+    bool observed_target_pending_ = false;
     bool auto_allowed_ = false;
     bool enabled_ = false;
     char runtime_name_[AC_BLE_DEVICE_NAME_MAX + 1] = {};

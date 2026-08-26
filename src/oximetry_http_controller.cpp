@@ -74,10 +74,12 @@ bool build_sensor_json(LargeTextBuffer &json,
                  static_cast<long>(sensor.task_stack_high_water_bytes));
 #endif
     json_add_bool(json, "sensor_scanning", sensor.scanning);
+    json_add_bool(json, "sensor_observing", sensor.observing);
     json_add_bool(json, "sensor_connected", sensor.connected);
     json_add_int(json, "sensor_known_count", sensor.known_count);
     json_add_int(json, "sensor_scan_count", sensor.scan_count);
     json_add_int(json, "sensor_scan_generation", sensor.scan_generation);
+    json_add_int(json, "sensor_observations", sensor.observations);
     json_add_string(json, "sensor_peer", sensor.peer);
     json_add_string(json, "sensor_name", sensor.name);
 

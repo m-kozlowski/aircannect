@@ -732,8 +732,19 @@ bool As11BleRpcLink::start_pairing_device(
     clear_pairing_context();
     set_pairing_selected(device);
     set_pairing_state(As11BlePairingState::Connecting);
-    if (!runtime_.ensure_started(config.runtime_name) ||
-        !connect_device(device, callbacks) || !discover_pipe()) {
+    if (!runtime_.ensure_started(config.runtime_name)) {
+        fail_pairing("ble_init_failed");
+        return false;
+    }
+
+    BleRuntime::ScanLease connect_lease =
+        runtime_.acquire_scan(pdMS_TO_TICKS(AS11_BLE_SCANNER_WAIT_MS));
+    if (!connect_lease) {
+        fail_pairing("scanner_busy");
+        return false;
+    }
+
+    if (!connect_device(device, callbacks) || !discover_pipe()) {
         disconnect_and_clear();
         fail_pairing("connect_failed");
         return false;
@@ -1060,7 +1071,6 @@ bool As11BleRpcLink::scan_and_connect(
     char address[sizeof(scan_match_address_)] = {};
     copy_text(address, sizeof(address), scan_match_address_);
     portEXIT_CRITICAL(&mux_);
-    scan_lease.release();
 
     if (!found) {
         set_status(As11BleLinkState::Backoff, "device_not_found");

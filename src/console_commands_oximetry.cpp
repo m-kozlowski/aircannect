@@ -117,6 +117,8 @@ void print_sensor_status(Print &out, const BleSensorSource &sensor) {
 #endif
     out.print(" scanning=");
     print_yes_no(out, status.scanning);
+    out.print(" observing=");
+    print_yes_no(out, status.observing);
     out.print(" connected=");
     print_yes_no(out, status.connected);
     if (status.peer[0]) {
@@ -132,6 +134,8 @@ void print_sensor_status(Print &out, const BleSensorSource &sensor) {
     out.print(status.known_count);
     out.print(" results=");
     out.print(status.scan_count);
+    out.print(" observations=");
+    out.print(status.observations);
     out.print(" notifications=");
     out.print(status.notifications);
     out.print(" invalid=");

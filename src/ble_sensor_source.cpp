@@ -94,6 +94,7 @@ bool BleSensorSource::begin(bool enabled, const char *runtime_name) {
 
     protocols_.set_sample_callback(protocol_sample_callback, this);
     load_known();
+    runtime_.set_passive_observer(advertisement_callback, this);
     configure(enabled, runtime_name);
     return true;
 }
@@ -113,6 +114,7 @@ void BleSensorSource::configure(bool enabled, const char *runtime_name) {
         disconnect_requested_ = true;
         disconnect_hold_until_absent_ = false;
         auto_allowed_ = false;
+        observed_target_pending_ = false;
         pending_samples_.clear();
         status_.state = OximetrySensorState::Off;
         status_.scanning = false;
@@ -122,6 +124,7 @@ void BleSensorSource::configure(bool enabled, const char *runtime_name) {
     portEXIT_CRITICAL(&mux_);
 #endif
 
+    if (!enabled) runtime_.request_passive_observation(false);
     if (should_start && has_autoconnect()) ensure_task();
 }
 
@@ -130,11 +133,13 @@ void BleSensorSource::set_auto_allowed(bool allowed) {
     portENTER_CRITICAL(&mux_);
 #endif
     auto_allowed_ = allowed;
+    if (!allowed) observed_target_pending_ = false;
     const bool should_start = enabled_ && allowed;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
 
+    if (!allowed) runtime_.request_passive_observation(false);
     if (should_start && has_autoconnect()) ensure_task();
 }
 
@@ -161,6 +166,7 @@ BleSensorStatus BleSensorSource::status() const {
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
 #endif
+    out.observing = runtime_.passive_observation_active();
 #if AC_STACK_PROFILE_ENABLED
     if (task) out.task_stack_high_water_bytes = uxTaskGetStackHighWaterMark(task);
 #endif
@@ -444,9 +450,6 @@ bool BleSensorSource::request_connect(const char *addr_or_index) {
         if (known.addr[0]) known_count++;
     }
     if (ok) {
-        strncpy(manual_target_, target.addr,
-                sizeof(manual_target_) - 1);
-        manual_target_[sizeof(manual_target_) - 1] = 0;
         manual_target_device_ = target;
         manual_connect_requested_ = true;
     }
@@ -498,9 +501,6 @@ bool BleSensorSource::request_connect(const OximetrySensorDevice &device) {
         if (!target.rssi) target.rssi = resolved.rssi;
         target.addr_type = resolved.addr_type;
     }
-    strncpy(manual_target_, target.addr,
-            sizeof(manual_target_) - 1);
-    manual_target_[sizeof(manual_target_) - 1] = 0;
     manual_target_device_ = target;
     manual_connect_requested_ = true;
 #if AC_OXIMETRY_BLE_ENABLED
@@ -651,6 +651,7 @@ void BleSensorSource::hold_autoconnect(const char *addr, uint32_t now_ms,
         auto_holdoff_until_absent_ = until_absent;
         auto_holdoff_until_ms_ =
             now_ms + AC_OXIMETRY_SENSOR_RECONNECT_HOLDOFF_MS;
+        auto_holdoff_last_seen_ms_ = now_ms;
         strncpy(auto_holdoff_addr_, hold_addr,
                 sizeof(auto_holdoff_addr_) - 1);
         auto_holdoff_addr_[sizeof(auto_holdoff_addr_) - 1] = 0;
@@ -676,20 +677,34 @@ void BleSensorSource::hold_autoconnect(const char *addr, uint32_t now_ms,
     }
 }
 
-bool BleSensorSource::autoconnect_holdoff_active(uint32_t now_ms) const {
-    bool active = false;
+void BleSensorSource::update_autoconnect_holdoff(uint32_t now_ms) {
+    bool cleared = false;
+    char address[sizeof(auto_holdoff_addr_)] = {};
 #if AC_OXIMETRY_BLE_ENABLED
-    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
+    portENTER_CRITICAL(&mux_);
 #endif
-    if (auto_holdoff_addr_[0]) {
-        active = auto_holdoff_until_ms_ &&
-                 static_cast<int32_t>(
-                     now_ms - auto_holdoff_until_ms_) < 0;
+    const bool expired = auto_holdoff_until_ms_ &&
+        static_cast<int32_t>(now_ms - auto_holdoff_until_ms_) >= 0;
+    const bool absent = auto_holdoff_until_absent_ &&
+        auto_holdoff_last_seen_ms_ &&
+        now_ms - auto_holdoff_last_seen_ms_ >=
+            AC_OXIMETRY_SENSOR_ABSENCE_MS;
+    if (auto_holdoff_addr_[0] && (expired || absent)) {
+        strncpy(address, auto_holdoff_addr_, sizeof(address) - 1);
+        auto_holdoff_addr_[0] = 0;
+        auto_holdoff_until_ms_ = 0;
+        auto_holdoff_until_absent_ = false;
+        auto_holdoff_last_seen_ms_ = 0;
+        cleared = true;
     }
 #if AC_OXIMETRY_BLE_ENABLED
-    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
+    portEXIT_CRITICAL(&mux_);
 #endif
-    return active;
+    if (cleared) {
+        Log::logf(CAT_OXI, LOG_DEBUG,
+                  "Sensor auto-connect holdoff cleared addr=%s\n",
+                  address);
+    }
 }
 
 void BleSensorSource::store_scan_result(const char *addr,
@@ -724,65 +739,56 @@ void BleSensorSource::store_scan_result(const char *addr,
 #endif
 }
 
-bool BleSensorSource::pick_autoconnect_target(OximetrySensorDevice &target,
-                                               uint32_t now_ms) {
-    int best_rssi = -999;
-    bool found = false;
-    bool holdoff_cleared = false;
-    char holdoff_cleared_addr[sizeof(auto_holdoff_addr_)] = {};
+bool BleSensorSource::take_observed_target(OximetrySensorDevice &target) {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    bool holdoff_seen = false;
-    bool timed_hold_active =
-        auto_holdoff_until_ms_ &&
-        static_cast<int32_t>(now_ms - auto_holdoff_until_ms_) < 0;
-    if (!timed_hold_active) {
-        auto_holdoff_addr_[0] = 0;
-        auto_holdoff_until_ms_ = 0;
-        auto_holdoff_until_absent_ = false;
-    }
-    for (uint8_t i = 0; i < scan_count_; ++i) {
-        const bool matches_holdoff =
-            auto_holdoff_addr_[0] &&
-            strcasecmp(auto_holdoff_addr_,
-                       scan_results_[i].addr) == 0;
-        if (matches_holdoff) holdoff_seen = true;
-        const bool holdoff_active =
-            matches_holdoff && timed_hold_active;
-        if (holdoff_active) continue;
-        for (const auto &known : known_) {
-            if (!known.addr[0] || !known.autoconnect) continue;
-            if (strcasecmp(known.addr, scan_results_[i].addr) != 0) {
-                continue;
-            }
-            if (!found || scan_results_[i].rssi > best_rssi) {
-                target = scan_results_[i];
-                target.autoconnect = known.autoconnect;
-                best_rssi = target.rssi;
-                found = true;
-            }
-        }
-    }
-    if (auto_holdoff_until_absent_ &&
-        auto_holdoff_addr_[0] && !holdoff_seen) {
-        strncpy(holdoff_cleared_addr, auto_holdoff_addr_,
-                sizeof(holdoff_cleared_addr) - 1);
-        holdoff_cleared_addr[sizeof(holdoff_cleared_addr) - 1] = 0;
-        auto_holdoff_addr_[0] = 0;
-        auto_holdoff_until_ms_ = 0;
-        auto_holdoff_until_absent_ = false;
-        holdoff_cleared = true;
+    const bool found = observed_target_pending_;
+    if (found) {
+        target = observed_target_;
+        observed_target_ = OximetrySensorDevice{};
+        observed_target_pending_ = false;
     }
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
-    if (holdoff_cleared) {
-        Log::logf(CAT_OXI, LOG_DEBUG,
-                  "Sensor auto-connect holdoff cleared addr=%s\n",
-                  holdoff_cleared_addr);
-    }
     return found;
+}
+
+void BleSensorSource::restore_observed_target(
+    const OximetrySensorDevice &target) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    if (!observed_target_pending_) {
+        observed_target_ = target;
+        observed_target_pending_ = true;
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
+}
+
+void BleSensorSource::note_auto_connect_result(bool connected,
+                                                uint32_t now_ms) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    if (connected) {
+        auto_retry_at_ms_ = 0;
+        auto_retry_delay_ms_ = AC_OXIMETRY_SENSOR_RETRY_MIN_MS;
+    } else {
+        auto_retry_at_ms_ = now_ms + auto_retry_delay_ms_;
+        if (auto_retry_delay_ms_ < AC_OXIMETRY_SENSOR_RETRY_MAX_MS) {
+            auto_retry_delay_ms_ *= 2;
+            if (auto_retry_delay_ms_ > AC_OXIMETRY_SENSOR_RETRY_MAX_MS) {
+                auto_retry_delay_ms_ = AC_OXIMETRY_SENSOR_RETRY_MAX_MS;
+            }
+        }
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
 }
 
 bool BleSensorSource::ensure_client(SensorBleClientCallbacks &callbacks) {
@@ -826,9 +832,6 @@ void BleSensorSource::task_loop() {
     set_state(OximetrySensorState::Idle);
     SensorBleScanCallbacks scan_callbacks(this);
     SensorBleClientCallbacks client_callbacks(this);
-    uint32_t next_auto_scan_ms = 0;
-    uint32_t auto_scan_idle_ms =
-        AC_OXIMETRY_SENSOR_SCAN_IDLE_MIN_MS;
 
     while (true) {
         bool enabled = false;
@@ -855,6 +858,7 @@ void BleSensorSource::task_loop() {
         }
 
         if (!enabled) {
+            runtime_.request_passive_observation(false);
             if (client_ && client_->isConnected()) {
                 client_->disconnect();
             } else {
@@ -875,7 +879,6 @@ void BleSensorSource::task_loop() {
         bool disconnect_hold_until_absent = false;
         bool manual_scan = false;
         bool manual_connect = false;
-        char manual_target[sizeof(manual_target_)] = {};
         OximetrySensorDevice manual_target_device;
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
@@ -884,9 +887,6 @@ void BleSensorSource::task_loop() {
         disconnect_hold_until_absent = disconnect_hold_until_absent_;
         manual_scan = scan_requested_;
         manual_connect = manual_connect_requested_;
-        strncpy(manual_target, manual_target_,
-                sizeof(manual_target) - 1);
-        manual_target[sizeof(manual_target) - 1] = 0;
         manual_target_device = manual_target_device_;
         disconnect_requested_ = false;
         disconnect_hold_until_absent_ = false;
@@ -916,6 +916,7 @@ void BleSensorSource::task_loop() {
 
         const uint32_t now_ms = millis();
         protocols_.poll(now_ms);
+        update_autoconnect_holdoff(now_ms);
 
         bool auto_allowed = false;
 #if AC_OXIMETRY_BLE_ENABLED
@@ -925,21 +926,36 @@ void BleSensorSource::task_loop() {
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
 #endif
-        const bool auto_scan =
+        const bool connected = client_ && client_->isConnected();
+        const bool observer_wanted =
             auto_allowed &&
             has_autoconnect() &&
-            (!client_ || !client_->isConnected()) &&
-            static_cast<int32_t>(now_ms - next_auto_scan_ms) >= 0;
+            !connected &&
+            !manual_scan &&
+            !manual_connect;
+        runtime_.request_passive_observation(observer_wanted);
 
-        if (!manual_scan && !manual_connect && !auto_scan) {
-            if (!client_ || !client_->isConnected()) {
-                set_state(OximetrySensorState::Idle);
-            }
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
+        OximetrySensorDevice observed_target;
+        const bool observed_connect =
+            observer_wanted && take_observed_target(observed_target);
 
         if (manual_connect && manual_target_device.addr[0]) {
+            runtime_.request_passive_observation(false);
+            BleRuntime::ScanLease connect_lease =
+                runtime_.acquire_scan(pdMS_TO_TICKS(100));
+            if (!connect_lease) {
+#if AC_OXIMETRY_BLE_ENABLED
+                portENTER_CRITICAL(&mux_);
+#endif
+                manual_target_device_ = manual_target_device;
+                manual_connect_requested_ = true;
+#if AC_OXIMETRY_BLE_ENABLED
+                portEXIT_CRITICAL(&mux_);
+#endif
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+
             Log::logf(CAT_OXI, LOG_INFO,
                       "Sensor manual connect starting addr=%s type=%u name=\"%s\"\n",
                       manual_target_device.addr,
@@ -950,8 +966,35 @@ void BleSensorSource::task_loop() {
             continue;
         }
 
-        if (client_ && client_->isConnected() &&
-            (manual_scan || manual_connect)) {
+        if (observed_connect) {
+            runtime_.request_passive_observation(false);
+            BleRuntime::ScanLease connect_lease =
+                runtime_.acquire_scan(pdMS_TO_TICKS(100));
+            if (!connect_lease) {
+                restore_observed_target(observed_target);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+
+            Log::logf(CAT_OXI, LOG_INFO,
+                      "Sensor observed addr=%s type=%u rssi=%d\n",
+                      observed_target.addr,
+                      static_cast<unsigned>(observed_target.addr_type),
+                      observed_target.rssi);
+            const bool connected_now = connect_target(
+                observed_target, false, client_callbacks);
+            note_auto_connect_result(connected_now, millis());
+            continue;
+        }
+
+        if (!manual_scan) {
+            if (!connected) set_state(OximetrySensorState::Idle);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        runtime_.request_passive_observation(false);
+        if (connected) {
             client_->disconnect();
             vTaskDelay(pdMS_TO_TICKS(200));
         }
@@ -995,29 +1038,16 @@ void BleSensorSource::task_loop() {
         portEXIT_CRITICAL(&mux_);
 #endif
         set_state(OximetrySensorState::Scanning);
-        const log_level_t scan_log_level =
-            (manual_scan || manual_connect) ? LOG_INFO : LOG_DEBUG;
-        Log::logf(CAT_OXI, scan_log_level,
-                  "Sensor scan started manual=%s connect=%s auto=%s\n",
-                  manual_scan ? "yes" : "no",
-                  manual_connect ? "yes" : "no",
-                  auto_scan ? "yes" : "no");
+        Log::logf(CAT_OXI, LOG_INFO, "Sensor manual scan started\n");
 
-        const bool background_scan =
-            auto_scan && !manual_scan && !manual_connect;
         scan->clearResults();
         scan->setScanCallbacks(&scan_callbacks, false);
         scan->setMaxResults(0);
-        scan->setActiveScan(!background_scan);
-        scan->setInterval(
-            background_scan
-                ? AC_OXIMETRY_SENSOR_AUTO_SCAN_INTERVAL_MS
-                : 100);
-        scan->setWindow(
-            background_scan
-                ? AC_OXIMETRY_SENSOR_AUTO_SCAN_WINDOW_MS
-                : 99);
+        scan->setActiveScan(true);
+        scan->setInterval(100);
+        scan->setWindow(99);
         (void)scan->getResults(AC_OXIMETRY_SENSOR_SCAN_MS, false);
+        scan->setScanCallbacks(nullptr, false);
         scan->clearResults();
 
         OximetrySensorDevice scan_log[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
@@ -1036,8 +1066,8 @@ void BleSensorSource::task_loop() {
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
 #endif
-        Log::logf(CAT_OXI, scan_log_level,
-                  "Sensor scan complete count=%u\n",
+        Log::logf(CAT_OXI, LOG_INFO,
+                  "Sensor manual scan complete count=%u\n",
                   static_cast<unsigned>(scan_log_count));
         for (size_t i = 0; i < scan_log_count; ++i) {
             Log::logf(CAT_OXI, LOG_DEBUG,
@@ -1049,55 +1079,7 @@ void BleSensorSource::task_loop() {
                       scan_log[i].name);
         }
 
-        OximetrySensorDevice target;
-        bool have_target = false;
-        if (manual_connect) {
-#if AC_OXIMETRY_BLE_ENABLED
-            portENTER_CRITICAL(&mux_);
-#endif
-            have_target = resolve_target(manual_target, target);
-#if AC_OXIMETRY_BLE_ENABLED
-            portEXIT_CRITICAL(&mux_);
-#endif
-        } else if (auto_scan && auto_allowed) {
-            have_target = pick_autoconnect_target(target, now_ms);
-        }
-
-        if (auto_scan) {
-            next_auto_scan_ms = millis() + auto_scan_idle_ms;
-            if (have_target) {
-                auto_scan_idle_ms =
-                    AC_OXIMETRY_SENSOR_SCAN_IDLE_MIN_MS;
-            } else if (auto_scan_idle_ms <
-                       AC_OXIMETRY_SENSOR_SCAN_IDLE_MAX_MS) {
-                auto_scan_idle_ms *= 2;
-                if (auto_scan_idle_ms >
-                    AC_OXIMETRY_SENSOR_SCAN_IDLE_MAX_MS) {
-                    auto_scan_idle_ms =
-                        AC_OXIMETRY_SENSOR_SCAN_IDLE_MAX_MS;
-                }
-            }
-        }
-
-        if (have_target) {
-            (void)connect_target(target, manual_connect, client_callbacks);
-        } else {
-            if (manual_connect) {
-                Log::logf(CAT_OXI, LOG_WARN,
-                          "Sensor manual connect target not found target=%s count=%u\n",
-                          manual_target[0] ? manual_target : "--",
-                          static_cast<unsigned>(scan_log_count));
-            } else if (auto_scan) {
-                if (autoconnect_holdoff_active(millis())) {
-                    Log::logf(CAT_OXI, LOG_DEBUG,
-                              "Sensor auto-connect holdoff active\n");
-                }
-                Log::logf(CAT_OXI, LOG_DEBUG,
-                          "Sensor auto scan found no autoconnect target count=%u\n",
-                          static_cast<unsigned>(scan_log_count));
-            }
-            set_state(OximetrySensorState::Idle);
-        }
+        set_state(OximetrySensorState::Idle);
     }
 #endif
 }
@@ -1282,6 +1264,57 @@ void BleSensorSource::protocol_sample_callback(
 
     source->publish_sample(spo2_raw, pulse_raw, invalid,
                            contact_known, contact_present);
+}
+
+void BleSensorSource::advertisement_callback(
+    void *context, const BleAdvertisement &advertisement) {
+    auto *source = static_cast<BleSensorSource *>(context);
+    if (source) source->note_advertisement(advertisement);
+}
+
+void BleSensorSource::note_advertisement(
+    const BleAdvertisement &advertisement) {
+    const uint32_t now_ms = millis();
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    if (!enabled_ || !auto_allowed_ || status_.connected ||
+        observed_target_pending_ ||
+        (auto_retry_at_ms_ &&
+         static_cast<int32_t>(now_ms - auto_retry_at_ms_) < 0)) {
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&mux_);
+#endif
+        return;
+    }
+
+    for (const auto &known : known_) {
+        if (!known.addr[0] || !known.autoconnect ||
+            strcasecmp(known.addr, advertisement.address) != 0) {
+            continue;
+        }
+
+        status_.observations++;
+        const bool holdoff_active = auto_holdoff_addr_[0] &&
+            strcasecmp(auto_holdoff_addr_, advertisement.address) == 0 &&
+            auto_holdoff_until_ms_ &&
+            static_cast<int32_t>(now_ms - auto_holdoff_until_ms_) < 0;
+        if (holdoff_active) {
+            if (auto_holdoff_until_absent_) {
+                auto_holdoff_last_seen_ms_ = now_ms;
+            }
+            break;
+        }
+
+        observed_target_ = known;
+        observed_target_.addr_type = advertisement.address_type;
+        observed_target_.rssi = advertisement.rssi;
+        observed_target_pending_ = true;
+        break;
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
 }
 
 void BleSensorSource::publish_sample(uint16_t spo2_raw,

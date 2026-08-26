@@ -42,6 +42,7 @@ struct BleSensorStatus {
     uint32_t task_stack_high_water_bytes = 0;
 #endif
     bool scanning = false;
+    bool observing = false;
     bool connected = false;
     uint8_t known_count = 0;
     uint8_t scan_count = 0;
@@ -53,6 +54,7 @@ struct BleSensorStatus {
     uint32_t disconnects = 0;
     uint32_t connect_failures = 0;
     uint32_t scans = 0;
+    uint32_t observations = 0;
     char peer[18] = {};
     char name[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
     char last_error[64] = {};
