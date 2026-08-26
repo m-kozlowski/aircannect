@@ -15,6 +15,7 @@
 #include "event_broker.h"
 #include "fixed_queue.h"
 #include "oximetry_hub.h"
+#include "report_spool_port.h"
 #include "rpc_request_port.h"
 #include "session_manager.h"
 #include "storage_service.h"
@@ -129,7 +130,8 @@ public:
                const As11DeviceState &device_state,
                SessionManager &session,
                TimeSyncService &time_sync,
-               StorageAtomicWritePort &metadata_storage);
+               StorageAtomicWritePort &metadata_storage,
+               ReportSpoolPort &report_spool);
     void poll(uint32_t now_ms);
 
     // control/status
@@ -168,6 +170,49 @@ private:
 
         OperationTicket ticket;
         uint32_t generation = 0;
+    };
+
+    struct PendingStrSummary {
+        bool active() const {
+            return awaiting_notification || waiting || ticket.valid();
+        }
+
+        uint32_t next_generation() {
+            generation++;
+            if (generation == 0) generation++;
+            return generation;
+        }
+
+        void clear() {
+            ticket = {};
+            awaiting_notification = false;
+            waiting = false;
+            discard_completion = false;
+            sleep_day = 0;
+            from_ms = 0;
+            session_start_ms = 0;
+            session_end_ms = 0;
+            notification_generation = 0;
+            fetch_notification_generation = 0;
+            retry_at_ms = 0;
+            fallback_at_ms = 0;
+            deadline_ms = 0;
+        }
+
+        OperationTicket ticket;
+        uint32_t generation = 0;
+        uint16_t sleep_day = 0;
+        int64_t from_ms = 0;
+        uint64_t session_start_ms = 0;
+        uint64_t session_end_ms = 0;
+        uint32_t notification_generation = 0;
+        uint32_t fetch_notification_generation = 0;
+        uint32_t retry_at_ms = 0;
+        uint32_t fallback_at_ms = 0;
+        uint32_t deadline_ms = 0;
+        bool awaiting_notification = false;
+        bool waiting = false;
+        bool discard_completion = false;
     };
 
     struct LocalSa2Sample {
@@ -266,19 +311,28 @@ private:
                             uint32_t now_ms,
                             const char *recording_end_time = nullptr);
     bool finish_str_session_at(const EdfLocalDateTime &end,
-                               bool request_summary);
+                               uint32_t now_ms,
+                               const SessionStatus *summary_session);
     bool request_str_settings();
-    bool request_str_summary();
     bool request_identification();
     void poll_rpc_completions();
     void poll_str_settings_completion();
-    void poll_str_summary_completion();
     void poll_identification_completion();
     void cancel_pending_rpc(PendingRpc &pending);
     void cancel_session_rpc_requests();
+
+    bool begin_str_summary_wait(const SessionStatus &session,
+                                uint32_t now_ms);
+    bool submit_str_summary_fetch(uint32_t now_ms);
+    void poll_str_summary_fetch(uint32_t now_ms);
+    void observe_str_summary_event(const As11EventFrame &frame,
+                                   uint32_t now_ms);
+    void arm_str_summary_after_notification(uint32_t now_ms);
+    void finish_str_summary_without_data(const char *error);
+    void cancel_str_summary_fetch();
+
     bool flush_pending_str_record(const char *reason);
     void handle_str_settings_response(RpcPayloadView payload);
-    void handle_str_summary_response(RpcPayloadView payload);
     void handle_identification_response(RpcPayloadView payload);
     bool write_str_day_record();
 
@@ -326,6 +380,7 @@ private:
     const As11DeviceState *device_state_ = nullptr;
     SessionManager *session_ = nullptr;
     TimeSyncService *time_sync_ = nullptr;
+    ReportSpoolPort *report_spool_ = nullptr;
 
     // session cursors
     uint32_t seen_session_starts_ = 0;
@@ -341,6 +396,11 @@ private:
     int64_t annotation_start_epoch_ms_ = 0;
     uint32_t session_event_subscription_generation_ = 0;
     uint32_t session_event_coverage_gap_count_ = 0;
+    uint32_t str_summary_notification_generation_ = 0;
+    uint32_t str_summary_stop_notification_generation_ = 0;
+    uint32_t str_summary_stop_session_id_ = 0;
+    int32_t str_summary_notification_value_ = 0;
+    bool str_summary_notification_value_valid_ = false;
 
     // open/recording state
     bool initialized_ = false;
@@ -372,8 +432,8 @@ private:
 
     // STR/identification state
     PendingRpc str_settings_rpc_;
-    PendingRpc str_summary_rpc_;
     PendingRpc identification_rpc_;
+    PendingStrSummary str_summary_;
     bool str_record_pending_write_ = false;
 
     // owned subsystems/status

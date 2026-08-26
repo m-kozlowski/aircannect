@@ -1115,10 +1115,16 @@ void setup() {
                        session_manager);
     sink_manager.set_therapy_telemetry_enabled(display_manager.available());
 
+    if (!report_spool_service.begin()) {
+        Log::logf(CAT_REPORT, LOG_ERROR,
+                  "report spool service failed to start\n");
+    }
+
     edf_recorder_manager.begin(event_broker, stream_broker,
                                as11_device_service.state(), session_manager,
                                time_sync_service,
-                               StorageService::atomic_write_port());
+                               StorageService::atomic_write_port(),
+                               report_spool_service);
     oximetry_hub.set_sample_observer(route_oximetry_sample,
                                      &edf_recorder_manager);
     edf_recorder_manager.set_enabled(
@@ -1142,10 +1148,6 @@ void setup() {
                   "PLX BLE peripheral failed to start\n");
     }
 
-    if (!report_spool_service.begin()) {
-        Log::logf(CAT_REPORT, LOG_ERROR,
-                  "report spool service failed to start\n");
-    }
     if (!as11_ble_recovery.begin(report_spool_service)) {
         Log::logf(CAT_BLE, LOG_ERROR,
                   "AS11 reconnect recovery failed to start\n");

@@ -22,9 +22,11 @@ bool summary_scaled_value(const ReportSummaryRecord &record,
                           ReportSummaryField field,
                           float scale,
                           float &out) {
-    uint32_t raw = 0;
-    if (!report_summary_field_value(record, field, raw)) return false;
-    out = static_cast<float>(raw) * scale;
+    float physical = 0.0f;
+    if (!report_summary_field_physical_value(record, field, physical)) {
+        return false;
+    }
+    out = physical * scale;
     return isfinite(out);
 }
 
@@ -93,57 +95,57 @@ bool report_daily_metrics_from_summary(const ReportSummaryRecord &record,
     out.has_mask_pressure_50 =
         summary_scaled_value(record,
                              ReportSummaryField::MaskPressureMedian,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.mask_pressure_50_cm_h2o);
     out.has_mask_pressure_95 =
         summary_scaled_value(record,
                              ReportSummaryField::MaskPressure95,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.mask_pressure_95_cm_h2o);
     out.has_leak_50 =
         summary_scaled_value(record,
                              ReportSummaryField::LeakMedian,
-                             60.0f / 100.0f,
+                             60.0f,
                              out.leak_50_l_min);
     out.has_leak_95 =
         summary_scaled_value(record,
                              ReportSummaryField::Leak95,
-                             60.0f / 100.0f,
+                             60.0f,
                              out.leak_95_l_min);
     out.has_minute_ventilation_50 =
         summary_scaled_value(record,
                              ReportSummaryField::MinuteVentMedian,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.minute_ventilation_50_l_min);
     out.has_minute_ventilation_95 =
         summary_scaled_value(record,
                              ReportSummaryField::MinuteVent95,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.minute_ventilation_95_l_min);
     out.has_respiratory_rate_50 =
         summary_scaled_value(record,
                              ReportSummaryField::RespiratoryRateMedian,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.respiratory_rate_50_bpm);
     out.has_respiratory_rate_95 =
         summary_scaled_value(record,
                              ReportSummaryField::RespiratoryRate95,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.respiratory_rate_95_bpm);
     out.has_tidal_volume_50 =
         summary_scaled_value(record,
                              ReportSummaryField::TidalVolumeMedian,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.tidal_volume_50_l);
     out.has_tidal_volume_95 =
         summary_scaled_value(record,
                              ReportSummaryField::TidalVolume95,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.tidal_volume_95_l);
     out.has_spo2_50 =
         summary_scaled_value(record,
                              ReportSummaryField::Spo2Median,
-                             1.0f / 100.0f,
+                             1.0f,
                              out.spo2_50_percent);
     out.has_spo2_threshold_minutes = summary_uint_value(
         record,

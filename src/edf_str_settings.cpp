@@ -11,11 +11,29 @@
 #include "as11_rpc.h"
 #include "as11_settings.h"
 #include "edf_str_signal_table.h"
+#include "report_parser.h"
 
 namespace aircannect {
 namespace {
 
 static constexpr size_t EDF_STR_GET_NAMES_RESERVE = 512;
+static constexpr uint64_t EDF_STR_SUMMARY_SESSION_TOLERANCE_MS =
+    2ULL * 60ULL * 1000ULL;
+
+struct EdfStrSummaryFieldMap {
+    const char *tag = nullptr;
+    ReportSummaryField field = ReportSummaryField::Count;
+};
+
+static constexpr EdfStrSummaryFieldMap STR_SUMMARY_FIELDS[] = {
+#define EDF_STR_SUMMARY_FIELD(tag, field) \
+    {tag, ReportSummaryField::field},
+#include "edf_str_summary_fields.inc"
+#undef EDF_STR_SUMMARY_FIELD
+};
+static_assert(sizeof(STR_SUMMARY_FIELDS) / sizeof(STR_SUMMARY_FIELDS[0]) ==
+                  AC_REPORT_SUMMARY_FIELD_COUNT,
+              "STR mapping must cover every Summary field");
 
 bool parse_float_text(const char *text, float &out) {
     if (!text || !text[0]) return false;
@@ -383,84 +401,108 @@ bool append_str_get_name(std::string &names, const char *tag) {
     return true;
 }
 
-bool summary_code_from_index(JsonVariantConst value,
+bool summary_code_from_index(uint32_t index,
                              const int16_t *codes,
                              size_t code_count,
                              int16_t &digital) {
-    int16_t index = 0;
-    if (integer_from_json_value(value, index) ||
-        (value.is<const char *>() &&
-         parse_integer_text(value.as<const char *>(), index))) {
-        if (index < 0 || index >= static_cast<int16_t>(code_count)) {
-            return false;
-        }
-        digital = codes[index];
-        return true;
-    }
-    return false;
+    if (index >= code_count) return false;
+    digital = codes[index];
+    return true;
 }
 
-bool summary_tube_connected_code(JsonVariantConst value, int16_t &digital) {
+bool summary_tube_connected_code(uint32_t index, int16_t &digital) {
     static constexpr int16_t kCodes[] = {3, 4, 1, 5, 2};
-    if (summary_code_from_index(value,
-                                kCodes,
-                                sizeof(kCodes) / sizeof(kCodes[0]),
-                                digital)) {
-        return true;
-    }
-    if (!value.is<const char *>()) return false;
-    const char *text = value.as<const char *>();
-    if (text_equals(text, "15mmNonHeated")) {
-        digital = kCodes[0];
-        return true;
-    }
-    if (text_equals(text, "19mm")) {
-        digital = kCodes[1];
-        return true;
-    }
-    if (text_equals(text, "15mmHeated")) {
-        digital = kCodes[2];
-        return true;
-    }
-    return false;
+    return summary_code_from_index(index,
+                                   kCodes,
+                                   sizeof(kCodes) / sizeof(kCodes[0]),
+                                   digital);
 }
 
-bool summary_humidifier_connected_code(JsonVariantConst value,
+bool summary_humidifier_connected_code(uint32_t index,
                                        int16_t &digital) {
     static constexpr int16_t kCodes[] = {1, 2, 3};
-    if (summary_code_from_index(value,
-                                kCodes,
-                                sizeof(kCodes) / sizeof(kCodes[0]),
-                                digital)) {
-        return true;
+    return summary_code_from_index(index,
+                                   kCodes,
+                                   sizeof(kCodes) / sizeof(kCodes[0]),
+                                   digital);
+}
+
+bool summary_digital_from_raw(ReportSummaryField field,
+                              uint32_t raw,
+                              int16_t &digital) {
+    if (field == ReportSummaryField::TubeConnected) {
+        return summary_tube_connected_code(raw, digital);
     }
-    if (!value.is<const char *>()) return false;
-    const char *text = value.as<const char *>();
-    if (text_equals(text, "EndCap")) {
-        digital = kCodes[0];
-        return true;
-    }
-    if (text_equals(text, "Internal")) {
-        digital = kCodes[1];
-        return true;
-    }
-    if (text_equals(text, "External")) {
-        digital = kCodes[2];
-        return true;
+    if (field == ReportSummaryField::HumidifierConnected) {
+        return summary_humidifier_connected_code(raw, digital);
     }
     return false;
 }
 
-bool summary_digital_from_json_value(JsonVariantConst value,
-                                     const char *rpc_name,
-                                     int16_t &digital) {
-    if (strcmp(rpc_name, "_ZHT") == 0) {
-        return summary_tube_connected_code(value, digital);
-    }
-    if (strcmp(rpc_name, "_HUC") == 0) {
-        return summary_humidifier_connected_code(value, digital);
+struct SummarySpoolApplyContext {
+    uint16_t sleep_day = 0;
+    uint64_t session_start_ms = 0;
+    uint64_t session_end_ms = 0;
+    EdfStrSessionAccumulator *session = nullptr;
+    EdfStrSummaryApplyResult *result = nullptr;
+};
+
+bool summary_timestamp_within(uint64_t lhs, uint64_t rhs) {
+    return lhs >= rhs
+        ? lhs - rhs <= EDF_STR_SUMMARY_SESSION_TOLERANCE_MS
+        : rhs - lhs <= EDF_STR_SUMMARY_SESSION_TOLERANCE_MS;
+}
+
+bool summary_record_contains_session(const ReportSummaryRecord &record,
+                                     uint64_t session_start_ms,
+                                     uint64_t session_end_ms) {
+    for (uint32_t i = 0; i < record.session_interval_count; ++i) {
+        const ReportSummarySession &candidate = record.sessions[i];
+        const uint64_t duration_ms =
+            static_cast<uint64_t>(candidate.duration_min) * 60ULL * 1000ULL;
+        if (!candidate.start_ms || !duration_ms ||
+            candidate.start_ms > UINT64_MAX - duration_ms) {
+            continue;
+        }
+
+        const uint64_t candidate_end_ms = candidate.start_ms + duration_ms;
+        if (summary_timestamp_within(candidate.start_ms, session_start_ms) &&
+            summary_timestamp_within(candidate_end_ms, session_end_ms)) {
+            return true;
+        }
     }
     return false;
+}
+
+bool apply_summary_spool_record(void *opaque,
+                                const ReportSummaryRecord &record) {
+    SummarySpoolApplyContext *context =
+        static_cast<SummarySpoolApplyContext *>(opaque);
+    if (!context || !context->session || !context->result ||
+        context->result->record_found) {
+        return true;
+    }
+
+    int32_t sleep_day = 0;
+    if (!report_summary_sleep_day_epoch_days(record, sleep_day) ||
+        sleep_day != context->sleep_day ||
+        !summary_record_contains_session(record,
+                                         context->session_start_ms,
+                                         context->session_end_ms)) {
+        return true;
+    }
+
+    EdfStrSettingsApplyResult applied;
+    if (!edf_str_apply_summary_record(record, *context->session, applied)) {
+        context->result->error = applied.error;
+        return true;
+    }
+
+    context->result->record_found = true;
+    context->result->values = applied.values;
+    context->result->missing = applied.missing;
+    context->result->unmapped = applied.unmapped;
+    return true;
 }
 
 }  // namespace
@@ -481,20 +523,17 @@ std::string edf_str_setting_get_names() {
     return names;
 }
 
-std::string edf_str_summary_get_names() {
-    std::string names;
-    names.reserve(EDF_STR_GET_NAMES_RESERVE);
-    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
-        const EdfStrSignalDescriptor *signal =
-            edf_str_signal_descriptor(i);
-        if (!signal || signal->source != EdfStrFieldSource::Summary ||
-            !signal->short_tag) {
-            continue;
-        }
+bool edf_str_summary_field_for_tag(const char *tag,
+                                   ReportSummaryField &out) {
+    if (!tag || !tag[0]) return false;
 
-        (void)append_str_get_name(names, signal->short_tag);
+    for (const EdfStrSummaryFieldMap &mapping : STR_SUMMARY_FIELDS) {
+        if (strcmp(tag, mapping.tag) != 0) continue;
+
+        out = mapping.field;
+        return true;
     }
-    return names;
+    return false;
 }
 
 bool edf_str_apply_settings_response(RpcPayloadView payload,
@@ -574,25 +613,12 @@ bool edf_str_apply_settings_response(RpcPayloadView payload,
     return true;
 }
 
-bool edf_str_apply_summary_get_response(RpcPayloadView payload,
-                                        EdfStrSessionAccumulator &session,
-                                        EdfStrSettingsApplyResult &result) {
+bool edf_str_apply_summary_record(const ReportSummaryRecord &record,
+                                  EdfStrSessionAccumulator &session,
+                                  EdfStrSettingsApplyResult &result) {
     result = {};
-
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(
-        doc, payload.data() ? payload.data() : "", payload.size());
-    if (err) {
-        result.error = "str_summary_json_failed";
-        return false;
-    }
-
-    JsonObjectConst json_result = get_value_object(doc);
-    if (json_result.isNull()) {
-        result.error = json_member_present(payload.data(), payload.size(),
-                                           "error")
-                           ? "str_summary_rpc_error"
-                           : "str_summary_missing_result";
+    if (!record.valid) {
+        result.error = "str_summary_record_invalid";
         return false;
     }
 
@@ -604,16 +630,25 @@ bool edf_str_apply_summary_get_response(RpcPayloadView payload,
             continue;
         }
 
-        char rpc_name[8] = {};
-        rpc_name_for_str_tag(signal->short_tag, rpc_name, sizeof(rpc_name));
-        JsonVariantConst value = json_result[rpc_name];
-        if (value.isNull()) {
+        ReportSummaryField field = ReportSummaryField::Count;
+        if (!edf_str_summary_field_for_tag(signal->short_tag, field)) {
+            result.unmapped++;
+            continue;
+        }
+
+        uint32_t raw = 0;
+        if (!report_summary_field_value(record, field, raw)) {
             result.missing++;
             continue;
         }
 
         int16_t digital = 0;
-        if (summary_digital_from_json_value(value, rpc_name, digital)) {
+        if (report_summary_field_encoding(field) ==
+            ReportSummaryValueEncoding::EnumIndex) {
+            if (!summary_digital_from_raw(field, raw, digital)) {
+                result.unmapped++;
+                continue;
+            }
             if (session.set_signal_digital(i, digital)) {
                 result.values++;
             } else {
@@ -623,13 +658,43 @@ bool edf_str_apply_summary_get_response(RpcPayloadView payload,
         }
 
         float physical = 0.0f;
-        if (physical_from_json_value(value, rpc_name, physical) &&
+        if (report_summary_field_physical_value(record, field, physical) &&
             session.set_signal_physical(i, physical)) {
             result.values++;
         } else {
             result.unmapped++;
         }
     }
+
+    result.ok = true;
+    return true;
+}
+
+bool edf_str_apply_summary_spool(const ReportSpoolResult &spool,
+                                 uint16_t sleep_day,
+                                 uint64_t session_start_ms,
+                                 uint64_t session_end_ms,
+                                 EdfStrSessionAccumulator &session,
+                                 EdfStrSummaryApplyResult &result) {
+    result = {};
+
+    SummarySpoolApplyContext context;
+    context.sleep_day = sleep_day;
+    context.session_start_ms = session_start_ms;
+    context.session_end_ms = session_end_ms;
+    context.session = &session;
+    context.result = &result;
+
+    char error[64] = {};
+    if (!report_parse_summary_spool(spool,
+                                    apply_summary_spool_record,
+                                    &context,
+                                    error,
+                                    sizeof(error))) {
+        result.error = "str_summary_spool_invalid";
+        return false;
+    }
+    if (result.error) return false;
 
     result.ok = true;
     return true;

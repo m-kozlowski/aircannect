@@ -1,9 +1,34 @@
 #include "report_proto.h"
 
+#include <limits.h>
 #include <stdio.h>
 
 namespace aircannect {
 namespace {
+
+constexpr int64_t SUMMARY_DAY_MS = 24LL * 60LL * 60LL * 1000LL;
+constexpr int64_t SUMMARY_MINUTE_MS = 60LL * 1000LL;
+
+struct ReportSummaryFieldInfo {
+    ReportSummaryValueEncoding encoding =
+        ReportSummaryValueEncoding::Integer;
+};
+
+static constexpr ReportSummaryFieldInfo SUMMARY_FIELD_INFO[] = {
+#define REPORT_SUMMARY_FIELD(name, encoding) \
+    {ReportSummaryValueEncoding::encoding},
+#include "report_summary_fields.inc"
+#undef REPORT_SUMMARY_FIELD
+};
+static_assert(sizeof(SUMMARY_FIELD_INFO) / sizeof(SUMMARY_FIELD_INFO[0]) ==
+                  AC_REPORT_SUMMARY_FIELD_COUNT,
+              "summary field metadata must cover every field");
+
+const ReportSummaryFieldInfo *summary_field_info(ReportSummaryField field) {
+    const size_t index = static_cast<size_t>(field);
+    return index < AC_REPORT_SUMMARY_FIELD_COUNT
+        ? &SUMMARY_FIELD_INFO[index] : nullptr;
+}
 
 void set_error(char *error, size_t error_len, const char *message) {
     if (!error || error_len == 0) return;
@@ -312,6 +337,61 @@ bool report_summary_field_value(const ReportSummaryRecord &record,
     if ((record.summary_field_mask & (1ULL << index)) == 0) return false;
 
     out = record.summary_field_values[index];
+    return true;
+}
+
+ReportSummaryValueEncoding report_summary_field_encoding(
+    ReportSummaryField field) {
+    const ReportSummaryFieldInfo *info = summary_field_info(field);
+    return info ? info->encoding : ReportSummaryValueEncoding::Integer;
+}
+
+bool report_summary_field_physical_value(const ReportSummaryRecord &record,
+                                         ReportSummaryField field,
+                                         float &out) {
+    uint32_t raw = 0;
+    if (!report_summary_field_value(record, field, raw)) return false;
+
+    switch (report_summary_field_encoding(field)) {
+        case ReportSummaryValueEncoding::Hundredths:
+            out = static_cast<float>(raw) / 100.0f;
+            return true;
+        case ReportSummaryValueEncoding::Tenths:
+            out = static_cast<float>(raw) / 10.0f;
+            return true;
+        case ReportSummaryValueEncoding::Integer:
+            out = static_cast<float>(raw);
+            return true;
+        case ReportSummaryValueEncoding::EnumIndex:
+        default:
+            return false;
+    }
+}
+
+bool report_summary_sleep_day_epoch_days(const ReportSummaryRecord &record,
+                                         int32_t &out) {
+    if (!record.valid || !record.start_ms || !record.has_tz_offset_min ||
+        record.start_ms > static_cast<uint64_t>(INT64_MAX) ||
+        record.tz_offset_min < -24 * 60 ||
+        record.tz_offset_min > 24 * 60) {
+        return false;
+    }
+
+    const int64_t offset_ms =
+        static_cast<int64_t>(record.tz_offset_min) * SUMMARY_MINUTE_MS;
+    const int64_t start_ms = static_cast<int64_t>(record.start_ms);
+    if ((offset_ms > 0 && start_ms > INT64_MAX - offset_ms) ||
+        (offset_ms < 0 && start_ms < INT64_MIN - offset_ms)) {
+        return false;
+    }
+
+    const int64_t local_ms = start_ms + offset_ms;
+    if (local_ms < 0) return false;
+
+    const int64_t epoch_days = local_ms / SUMMARY_DAY_MS;
+    if (epoch_days > INT32_MAX) return false;
+
+    out = static_cast<int32_t>(epoch_days);
     return true;
 }
 

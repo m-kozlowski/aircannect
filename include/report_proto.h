@@ -7,64 +7,17 @@ namespace aircannect {
 
 static constexpr size_t AC_REPORT_SUMMARY_SESSION_MAX = 16;
 
+enum class ReportSummaryValueEncoding : uint8_t {
+    EnumIndex,
+    Hundredths,
+    Tenths,
+    Integer,
+};
+
 enum class ReportSummaryField : uint8_t {
-    TubeConnected,
-    HumidifierConnected,
-    BlowPressure95,
-    BlowPressure5,
-    Flow95,
-    Flow5,
-    BlowerFlow50,
-    AmbientHumidity50,
-    HumidifierTemperature50,
-    HeatedTubeTemperature50,
-    HeatedTubePower50,
-    HumidifierPower50,
-    Spo2Median,
-    Spo2_95,
-    Spo2Max,
-    Spo2ThresholdMinutes,
-    SpontaneousTriggerPercent,
-    SpontaneousCyclePercent,
-    MaskPressureMedian,
-    MaskPressure95,
-    MaskPressureMax,
-    TargetIpapMedian,
-    TargetIpap95,
-    TargetIpapMax,
-    TargetEpapMedian,
-    TargetEpap95,
-    TargetEpapMax,
-    LeakMedian,
-    Leak95,
-    Leak70,
-    LeakMax,
-    MinuteVentMedian,
-    MinuteVent95,
-    MinuteVentMax,
-    RespiratoryRateMedian,
-    RespiratoryRate95,
-    RespiratoryRateMax,
-    TidalVolumeMedian,
-    TidalVolume95,
-    TidalVolumeMax,
-    TargetVentMedian,
-    TargetVent95,
-    TargetVentMax,
-    IeRatioMedian,
-    IeRatio95,
-    IeRatioMax,
-    InspirationTimeMedian,
-    InspirationTime95,
-    InspirationTimeMax,
-    Ahi,
-    HypopneaIndex,
-    ApneaIndex,
-    ObstructiveApneaIndex,
-    CentralApneaIndex,
-    UnknownApneaIndex,
-    ReraIndex,
-    Csr,
+#define REPORT_SUMMARY_FIELD(name, encoding) name,
+#include "report_summary_fields.inc"
+#undef REPORT_SUMMARY_FIELD
     Count,
 };
 
@@ -143,5 +96,12 @@ bool report_parse_summary_records(const uint8_t *data,
 bool report_summary_field_value(const ReportSummaryRecord &record,
                                 ReportSummaryField field,
                                 uint32_t &out);
+ReportSummaryValueEncoding report_summary_field_encoding(
+    ReportSummaryField field);
+bool report_summary_field_physical_value(const ReportSummaryRecord &record,
+                                         ReportSummaryField field,
+                                         float &out);
+bool report_summary_sleep_day_epoch_days(const ReportSummaryRecord &record,
+                                         int32_t &out);
 
 }  // namespace aircannect

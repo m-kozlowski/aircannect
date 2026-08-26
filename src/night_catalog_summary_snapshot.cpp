@@ -67,23 +67,9 @@ uint64_t summary_identity(const ReportSummaryRecord &record) {
 }
 
 bool summary_sleep_day(const ReportSummaryRecord &record, SleepDayId &out) {
-    if (!record.valid || record.start_ms == 0 ||
-        !record.has_tz_offset_min) {
-        return false;
-    }
-
-    const int64_t offset_ms =
-        static_cast<int64_t>(record.tz_offset_min) * MS_PER_MINUTE;
-    if (record.start_ms > static_cast<uint64_t>(INT64_MAX) ||
-        (offset_ms > 0 &&
-         static_cast<int64_t>(record.start_ms) > INT64_MAX - offset_ms)) {
-        return false;
-    }
-
-    const int64_t local_ms =
-        static_cast<int64_t>(record.start_ms) + offset_ms;
-    if (local_ms < 0) return false;
-    return SleepDayId::from_epoch_days(local_ms / MS_PER_DAY, out);
+    int32_t epoch_days = 0;
+    return report_summary_sleep_day_epoch_days(record, epoch_days) &&
+           SleepDayId::from_epoch_days(epoch_days, out);
 }
 
 bool summary_axis_timezone_offset(SleepDayId sleep_day,

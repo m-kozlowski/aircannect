@@ -26,15 +26,20 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t AC_EDF_STR_SETTINGS_TIMEOUT_MS = 12000;
-static constexpr uint32_t AC_EDF_STR_SUMMARY_TIMEOUT_MS = 12000;
 static constexpr uint32_t AC_EDF_IDENTIFICATION_TIMEOUT_MS = 12000;
+static constexpr uint32_t AC_EDF_STR_SUMMARY_BUSY_RETRY_MS = 500;
+static constexpr uint32_t AC_EDF_STR_SUMMARY_TRIGGER_WAIT_MS = 20000;
+static constexpr uint32_t AC_EDF_STR_SUMMARY_DEADLINE_MS = 60000;
+static constexpr int64_t AC_EDF_DAY_MS = 24LL * 60LL * 60LL * 1000LL;
+static constexpr int64_t AC_EDF_MINUTE_MS = 60LL * 1000LL;
 static constexpr size_t AC_EDF_GAP_RECORD_BUDGET = 3;
 
 const char *const EDF_RECORDING_GATE_DATA_ID = "_ZLE";
+const char *const EDF_SUMMARY_NOTIFICATION_DATA_ID = "_SNC";
 const char *const EDF_MASK_ON_EVENT = "MaskOn";
 const char *const EDF_MASK_OFF_EVENT = "MaskOff";
 const char *const EDF_CAPTURE_EVENT_IDS =
-    "_ZLE,TherapyEvents-RespiratoryEvents";
+    "_ZLE,_SNC,TherapyEvents-RespiratoryEvents";
 
 struct StatusCarryover {
     bool enabled = false;
@@ -96,6 +101,13 @@ bool edf_event_record_is_mask_event(const As11EventFrame &frame,
            record.name == EDF_MASK_OFF_EVENT;
 }
 
+bool edf_event_record_is_therapy_stop(const As11EventFrame &frame,
+                                      const As11EventRecord &record) {
+    return as11_event_data_id_is_activity(frame.data_id) &&
+           (record.name == "TherapyStop" ||
+            record.name == "StandbyStarted");
+}
+
 }  // namespace
 
 struct EdfRecorderManager::ColdState {
@@ -114,7 +126,8 @@ void EdfRecorderManager::begin(EventBroker &events,
                                const As11DeviceState &device_state,
                                SessionManager &session,
                                TimeSyncService &time_sync,
-                               StorageAtomicWritePort &metadata_storage) {
+                               StorageAtomicWritePort &metadata_storage,
+                               ReportSpoolPort &report_spool) {
     if (initialized_) return;
 
     void *memory = Memory::alloc_large(sizeof(ColdState), false);
@@ -131,6 +144,7 @@ void EdfRecorderManager::begin(EventBroker &events,
     device_state_ = &device_state;
     session_ = &session;
     time_sync_ = &time_sync;
+    report_spool_ = &report_spool;
     cold_->metadata_publisher.begin(metadata_storage);
 
     // EdfRecorderManager is a program-lifetime singleton; this observer hook
@@ -155,6 +169,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     cold_->metadata_publisher.poll(now_ms);
 
     poll_rpc_completions();
+    poll_str_summary_fetch(now_ms);
     dispatch_session_edges(now_ms);
 
     if (segment_close_pending_ && close_recording_segment()) {
@@ -403,7 +418,7 @@ void EdfRecorderManager::finish_mask_event(const char *end_time,
               end_time);
 
     if (!str_.therapy_open()) {
-        if (str_summary_rpc_.active()) {
+        if (str_summary_.active()) {
             str_record_pending_write_ = true;
         } else {
             str_record_pending_write_ = false;
@@ -653,6 +668,7 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
                                             uint32_t now_ms) {
     if (!status_.enabled) return;
 
+    observe_str_summary_event(frame, now_ms);
     (void)handle_mask_event_frame(frame, now_ms);
     const bool recording_gate_frame =
         handle_recording_gate_frame(frame, now_ms);
@@ -770,6 +786,9 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     next_attach_ms_ = now_ms;
     next_numeric_open_ms_ = now_ms;
     cancel_session_rpc_requests();
+    str_summary_stop_notification_generation_ =
+        str_summary_notification_generation_;
+    str_summary_stop_session_id_ = 0;
     str_start_pending_ = false;
     pending_str_start_time_[0] = 0;
     snapshot_event_coverage();
@@ -1569,30 +1588,6 @@ bool EdfRecorderManager::request_str_settings() {
     return true;
 }
 
-bool EdfRecorderManager::request_str_summary() {
-    if (str_summary_rpc_.active()) return false;
-
-    const std::string names = edf_str_summary_get_names();
-    if (names.empty()) return false;
-
-    RpcRequestCommand command;
-    command.method = "Get";
-    command.params_json = build_get_params(names);
-    command.source = RpcSource::EdfRecorder;
-    command.timeout_ms = AC_EDF_STR_SUMMARY_TIMEOUT_MS;
-    command.generation = str_summary_rpc_.next_generation();
-
-    const OperationSubmission submission = rpc_.request(command);
-    if (!submission.accepted()) {
-        status_.metadata_failures++;
-        set_error("str_summary_queue_failed");
-        return false;
-    }
-
-    str_summary_rpc_.mark(submission.ticket);
-    return true;
-}
-
 bool EdfRecorderManager::request_identification() {
     if (identification_rpc_.active()) return false;
 
@@ -1616,7 +1611,6 @@ bool EdfRecorderManager::request_identification() {
 
 void EdfRecorderManager::poll_rpc_completions() {
     poll_str_settings_completion();
-    poll_str_summary_completion();
     poll_identification_completion();
 }
 
@@ -1639,33 +1633,6 @@ void EdfRecorderManager::poll_str_settings_completion() {
         set_error("str_settings_dispatch_failed");
     } else {
         set_error("str_settings_cancelled");
-    }
-}
-
-void EdfRecorderManager::poll_str_summary_completion() {
-    if (!str_summary_rpc_.active()) return;
-
-    RpcRequestCompletion completion;
-    if (!rpc_.take_completion(str_summary_rpc_.ticket, completion)) return;
-
-    str_summary_rpc_.clear();
-    if (completion.cause == RpcCompletionCause::Response) {
-        handle_str_summary_response(rpc_payload_view(completion.payload));
-        return;
-    }
-
-    status_.metadata_failures++;
-    if (completion.cause == RpcCompletionCause::Timeout) {
-        set_error("str_summary_timeout");
-    } else if (completion.cause == RpcCompletionCause::DispatchFailure) {
-        set_error("str_summary_dispatch_failed");
-    } else {
-        set_error("str_summary_cancelled");
-    }
-
-    if (str_record_pending_write_) {
-        str_record_pending_write_ = false;
-        (void)write_str_day_record();
     }
 }
 
@@ -1704,15 +1671,256 @@ void EdfRecorderManager::cancel_pending_rpc(PendingRpc &pending) {
 
 void EdfRecorderManager::cancel_session_rpc_requests() {
     cancel_pending_rpc(str_settings_rpc_);
-    cancel_pending_rpc(str_summary_rpc_);
     cancel_pending_rpc(identification_rpc_);
+}
+
+bool EdfRecorderManager::begin_str_summary_wait(
+    const SessionStatus &session,
+    uint32_t now_ms) {
+    if (!report_spool_ || str_summary_.active() ||
+        !str_record_pending_write_) {
+        return false;
+    }
+
+    int64_t session_start_ms = 0;
+    int64_t session_end_ms = 0;
+    if (!parse_session_raw_time(session.start_device_time,
+                                session_start_ms) ||
+        !parse_session_raw_time(session.end_device_time,
+                                session_end_ms) ||
+        session_start_ms <= 0 || session_end_ms <= session_start_ms) {
+        finish_str_summary_without_data("str_summary_session_invalid");
+        return true;
+    }
+
+    const int64_t local_day_start_ms =
+        static_cast<int64_t>(str_.day_epoch_days()) * AC_EDF_DAY_MS;
+    const int64_t timezone_offset_ms =
+        static_cast<int64_t>(session_timezone_offset_minutes_) *
+        AC_EDF_MINUTE_MS;
+    const int64_t from_ms = local_day_start_ms - timezone_offset_ms -
+        AC_EDF_DAY_MS;
+    if (from_ms <= 0) return false;
+
+    str_summary_.sleep_day = str_.day_epoch_days();
+    str_summary_.from_ms = from_ms;
+    str_summary_.session_start_ms =
+        static_cast<uint64_t>(session_start_ms);
+    str_summary_.session_end_ms = static_cast<uint64_t>(session_end_ms);
+    str_summary_.notification_generation =
+        str_summary_stop_session_id_ == session.session_id
+            ? str_summary_stop_notification_generation_
+            : str_summary_notification_generation_;
+    str_summary_.fallback_at_ms =
+        now_ms + AC_EDF_STR_SUMMARY_TRIGGER_WAIT_MS;
+    str_summary_.deadline_ms = now_ms + AC_EDF_STR_SUMMARY_DEADLINE_MS;
+    str_summary_.awaiting_notification = true;
+    arm_str_summary_after_notification(now_ms);
+    return true;
+}
+
+bool EdfRecorderManager::submit_str_summary_fetch(uint32_t now_ms) {
+    if (!report_spool_ || !str_summary_.waiting ||
+        static_cast<int32_t>(now_ms - str_summary_.retry_at_ms) < 0) {
+        return false;
+    }
+
+    ReportSpoolFetchCommand command;
+    command.source = ReportSourceId::Summary;
+    command.from_ms = str_summary_.from_ms;
+    command.generation = str_summary_.next_generation();
+
+    const OperationSubmission submission =
+        report_spool_->request_fetch(command);
+    if (submission.accepted()) {
+        str_summary_.ticket = submission.ticket;
+        str_summary_.fetch_notification_generation =
+            str_summary_notification_generation_;
+        str_summary_.waiting = false;
+        return true;
+    }
+    if (submission.admission == OperationAdmission::Busy) {
+        str_summary_.retry_at_ms =
+            now_ms + AC_EDF_STR_SUMMARY_BUSY_RETRY_MS;
+        return false;
+    }
+
+    str_summary_.clear();
+    finish_str_summary_without_data("str_summary_spool_rejected");
+    return false;
+}
+
+void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
+    if (!str_summary_.active() || !report_spool_) return;
+
+    if (str_summary_.ticket.valid()) {
+        ReportSpoolFetchRound round;
+        if (report_spool_->take_round(str_summary_.ticket, round)) {
+            round.clear();
+            (void)report_spool_->cancel(str_summary_.ticket);
+            str_summary_.discard_completion = true;
+            finish_str_summary_without_data("str_summary_round_unexpected");
+            return;
+        }
+
+        ReportSpoolFetchCompletion completion;
+        if (report_spool_->take_completion(str_summary_.ticket, completion)) {
+            const bool discard = str_summary_.discard_completion;
+            str_summary_.ticket = {};
+            str_summary_.discard_completion = false;
+            if (discard) {
+                str_summary_.clear();
+                return;
+            }
+
+            if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded) {
+                const char *error = completion.error[0]
+                    ? completion.error : "str_summary_spool_failed";
+                str_summary_.clear();
+                finish_str_summary_without_data(error);
+                return;
+            }
+
+            EdfStrSummaryApplyResult applied;
+            const bool parsed = edf_str_apply_summary_spool(
+                completion.result,
+                str_summary_.sleep_day,
+                str_summary_.session_start_ms,
+                str_summary_.session_end_ms,
+                str_,
+                applied);
+            completion.clear();
+            if (!parsed) {
+                str_summary_.clear();
+                finish_str_summary_without_data(applied.error);
+                return;
+            }
+            if (applied.record_found) {
+                Log::logf(CAT_EDF, LOG_DEBUG,
+                          "STR summary values=%lu missing=%lu unmapped=%lu\n",
+                          static_cast<unsigned long>(applied.values),
+                          static_cast<unsigned long>(applied.missing),
+                          static_cast<unsigned long>(applied.unmapped));
+                str_summary_.clear();
+                str_record_pending_write_ = false;
+                (void)write_str_day_record();
+                return;
+            }
+
+            str_summary_.notification_generation =
+                str_summary_.fetch_notification_generation;
+            str_summary_.awaiting_notification = true;
+            arm_str_summary_after_notification(now_ms);
+        }
+    }
+
+    if (static_cast<int32_t>(now_ms - str_summary_.deadline_ms) >= 0) {
+        if (str_summary_.ticket.valid()) {
+            (void)report_spool_->cancel(str_summary_.ticket);
+            str_summary_.discard_completion = true;
+            str_summary_.waiting = false;
+        } else {
+            str_summary_.clear();
+        }
+        finish_str_summary_without_data("str_summary_unavailable");
+        return;
+    }
+
+    if (str_summary_.awaiting_notification &&
+        str_summary_.fallback_at_ms != 0 &&
+        static_cast<int32_t>(now_ms - str_summary_.fallback_at_ms) >= 0) {
+        str_summary_.fallback_at_ms = 0;
+        str_summary_.awaiting_notification = false;
+        str_summary_.waiting = true;
+        str_summary_.retry_at_ms = now_ms;
+    }
+
+    (void)submit_str_summary_fetch(now_ms);
+}
+
+void EdfRecorderManager::observe_str_summary_event(
+    const As11EventFrame &frame,
+    uint32_t now_ms) {
+    for (size_t i = 0; i < frame.event_count; ++i) {
+        const As11EventRecord &record = frame.events[i];
+        if (status_.active &&
+            str_summary_stop_session_id_ != status_.session_id &&
+            edf_event_record_is_therapy_stop(frame, record)) {
+            str_summary_stop_session_id_ = status_.session_id;
+            str_summary_stop_notification_generation_ =
+                str_summary_notification_generation_;
+        }
+
+        if (frame.data_id != EDF_SUMMARY_NOTIFICATION_DATA_ID) continue;
+
+        int32_t value = 0;
+        if (!as11_event_record_value_change(record, value) ||
+            (str_summary_notification_value_valid_ &&
+             value == str_summary_notification_value_)) {
+            continue;
+        }
+
+        str_summary_notification_value_ = value;
+        str_summary_notification_value_valid_ = true;
+        str_summary_notification_generation_++;
+        if (str_summary_notification_generation_ == 0) {
+            str_summary_notification_generation_++;
+        }
+    }
+
+    arm_str_summary_after_notification(now_ms);
+}
+
+void EdfRecorderManager::arm_str_summary_after_notification(
+    uint32_t now_ms) {
+    if (!str_summary_.active() ||
+        str_summary_notification_generation_ <=
+            str_summary_.notification_generation) {
+        return;
+    }
+
+    str_summary_.fallback_at_ms = 0;
+    if (!str_summary_.awaiting_notification) return;
+
+    str_summary_.awaiting_notification = false;
+    str_summary_.waiting = true;
+    str_summary_.retry_at_ms = now_ms;
+}
+
+void EdfRecorderManager::finish_str_summary_without_data(
+    const char *error) {
+    if (!str_record_pending_write_) return;
+
+    status_.metadata_failures++;
+    set_error(error ? error : "str_summary_unavailable");
+    Log::logf(CAT_EDF, LOG_WARN,
+              "STR summary unavailable sleep_day=%u error=%s\n",
+              static_cast<unsigned>(str_.day_epoch_days()),
+              status_.last_error);
+
+    str_record_pending_write_ = false;
+    (void)write_str_day_record();
+}
+
+void EdfRecorderManager::cancel_str_summary_fetch() {
+    if (!str_summary_.active()) return;
+
+    str_summary_.awaiting_notification = false;
+    str_summary_.waiting = false;
+    if (str_summary_.ticket.valid()) {
+        (void)report_spool_->cancel(str_summary_.ticket);
+        str_summary_.discard_completion = true;
+    } else {
+        str_summary_.clear();
+    }
 }
 
 bool EdfRecorderManager::flush_pending_str_record(const char *reason) {
     if (!str_record_pending_write_) return true;
 
-    const bool summary_was_pending = str_summary_rpc_.active();
-    cancel_pending_rpc(str_summary_rpc_);
+    const bool summary_was_pending = str_summary_.active();
+    cancel_str_summary_fetch();
     str_record_pending_write_ = false;
 
     if (!write_str_day_record()) {
@@ -1743,27 +1951,7 @@ void EdfRecorderManager::handle_str_settings_response(
               static_cast<unsigned long>(result.unmapped));
 
     if (str_.active() && !str_.therapy_open() && !str_record_pending_write_ &&
-        !str_summary_rpc_.active()) {
-        (void)write_str_day_record();
-    }
-}
-
-void EdfRecorderManager::handle_str_summary_response(
-    RpcPayloadView payload) {
-    EdfStrSettingsApplyResult result;
-    if (!edf_str_apply_summary_get_response(payload, str_, result)) {
-        status_.metadata_failures++;
-        set_error(result.error);
-    } else {
-        Log::logf(CAT_EDF, LOG_DEBUG,
-                  "STR summary values=%lu missing=%lu unmapped=%lu\n",
-                  static_cast<unsigned long>(result.values),
-                  static_cast<unsigned long>(result.missing),
-                  static_cast<unsigned long>(result.unmapped));
-    }
-
-    if (str_record_pending_write_) {
-        str_record_pending_write_ = false;
+        !str_summary_.active()) {
         (void)write_str_day_record();
     }
 }
@@ -1816,7 +2004,7 @@ bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
     }
 
     if (end_day != str_.day_epoch_days()) {
-        if (!finish_str_session_at(end_day_start, false)) {
+        if (!finish_str_session_at(end_day_start, now_ms, nullptr)) {
             return false;
         }
         if (end_minute == 0) return true;
@@ -1825,11 +2013,12 @@ bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
         }
     }
 
-    return finish_str_session_at(end, true);
+    return finish_str_session_at(end, now_ms, &session);
 }
 
 bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
-                                               bool request_summary) {
+                                               uint32_t now_ms,
+                                               const SessionStatus *summary_session) {
     if (!str_.active() || !str_.therapy_open()) return true;
 
     bool record_ready = false;
@@ -1852,8 +2041,8 @@ bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
     if (!record_ready) return true;
 
     str_record_pending_write_ = true;
-    if (request_summary &&
-        (str_summary_rpc_.active() || request_str_summary())) {
+    if (summary_session &&
+        begin_str_summary_wait(*summary_session, now_ms)) {
         return true;
     }
 
@@ -2240,7 +2429,7 @@ bool EdfRecorderManager::roll_segment_if_needed(
 
     if (!close_session_files()) return false;
 
-    if (!finish_str_session_at(boundary, false)) {
+    if (!finish_str_session_at(boundary, now_ms, nullptr)) {
         Log::logf(CAT_EDF, LOG_WARN,
                   "STR rollover finish skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
