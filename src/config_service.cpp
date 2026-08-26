@@ -86,6 +86,30 @@ ConfigFieldUpdate ConfigService::set_transaction_value(
     return update;
 }
 
+ConfigFieldUpdate ConfigService::set_transaction_keybindings(
+    const ButtonBindingConfig &keybindings) {
+    ConfigFieldUpdate update;
+    if (!transaction_active_) return update;
+
+    const ButtonBindingConfig before =
+        transaction_store_->data().keybindings;
+    if (!transaction_store_->set_keybindings(keybindings)) {
+        update.disposition = ConfigFieldDisposition::InvalidValue;
+        return update;
+    }
+
+    update.disposition = ConfigFieldDisposition::Accepted;
+    update.changed = before != transaction_store_->data().keybindings;
+    update.dirty = update.changed ? AC_CONFIG_DIRTY_KEYBINDINGS : 0;
+
+    transaction_accepted_++;
+    if (update.changed) {
+        transaction_changed_++;
+        transaction_dirty_ |= update.dirty;
+    }
+    return update;
+}
+
 ConfigTransactionResult ConfigService::commit_transaction() {
     ConfigTransactionResult result;
     if (!transaction_active_) return result;
@@ -120,6 +144,18 @@ ConfigFieldUpdate ConfigService::set_value(
     if (!begin_transaction()) return update;
 
     update = set_transaction_value(key, value, preserve_secret_sentinel);
+    const ConfigTransactionResult committed = commit_transaction();
+    if (transaction) *transaction = committed;
+    return update;
+}
+
+ConfigFieldUpdate ConfigService::set_keybindings(
+    const ButtonBindingConfig &keybindings,
+    ConfigTransactionResult *transaction) {
+    ConfigFieldUpdate update;
+    if (!begin_transaction()) return update;
+
+    update = set_transaction_keybindings(keybindings);
     const ConfigTransactionResult committed = commit_transaction();
     if (transaction) *transaction = committed;
     return update;

@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <utility>
+#include <vector>
 
 #include "app_config_registry.h"
 #include "debug_log.h"
@@ -366,6 +368,27 @@ void load_config_field(Preferences &prefs,
             data.log_levels[field.index] = level;
             return;
         }
+        case AppConfigFieldType::Keybindings: {
+            if (stored_type != PT_BLOB) return;
+            const size_t length = prefs.getBytesLength(load_key);
+            std::vector<uint8_t> bytes(length);
+            if (length > 0 &&
+                prefs.getBytes(load_key, bytes.data(), length) != length) {
+                return;
+            }
+
+            ButtonBindingConfig loaded;
+            const bool valid = button_binding_config_decode(
+                bytes.data(), bytes.size(), loaded);
+            data.keybindings = std::move(loaded);
+            if (!valid) {
+                Log::logf(CAT_CONFIG, LOG_WARN,
+                          "keybindings blob state=%s; using board defaults\n",
+                          button_binding_blob_state_name(
+                              data.keybindings.state));
+            }
+            return;
+        }
     }
 }
 
@@ -386,6 +409,15 @@ bool save_config_field(Preferences &prefs,
         case AppConfigFieldType::Enum:
         case AppConfigFieldType::LogLevel:
             return put_string(prefs, field.key, raw);
+        case AppConfigFieldType::Keybindings: {
+            std::vector<uint8_t> bytes;
+            if (!button_binding_config_encode(data.keybindings, bytes) ||
+                bytes.empty()) {
+                return false;
+            }
+            return prefs.putBytes(field.key, bytes.data(), bytes.size()) ==
+                   bytes.size();
+        }
     }
     return false;
 }
@@ -810,6 +842,14 @@ bool AppConfig::set_edf_capture_enabled(bool enabled) {
     if (data_.edf_capture_enabled == enabled) return true;
     data_.edf_capture_enabled = enabled;
     return mark_dirty(AC_CONFIG_DIRTY_EDF_CAPTURE);
+}
+
+bool AppConfig::set_keybindings(
+    const ButtonBindingConfig &keybindings) {
+    if (data_.keybindings == keybindings) return true;
+
+    data_.keybindings = keybindings;
+    return mark_dirty(AC_CONFIG_DIRTY_KEYBINDINGS);
 }
 
 bool AppConfig::set_smb_credentials(const String &endpoint,

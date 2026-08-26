@@ -461,6 +461,23 @@
       border-bottom: 1px solid #30364166;
     }
 
+    .keybindings-field {
+      display: block;
+    }
+
+    .keybindings-field > label {
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    .keybindings-config {
+      width: 100%;
+    }
+
+    .keybindings-config .row:last-child {
+      border-bottom: 1px solid #30364166;
+    }
+
     .as11-pairing-instruction {
       margin: 10px 0 4px;
       color: var(--muted);

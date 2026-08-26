@@ -2,6 +2,7 @@
 
 #include "board_ble.h"
 #include "board_can.h"
+#include "board_button.h"
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
 #include "app_config_internal.h"
@@ -304,6 +305,15 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "SleepHQ device ID",
      "SleepHQ device ID.", nullptr, 0, -1,
      AC_CFG_OFFSET(sleephq_device_id)},
+
+#if AC_BUTTON_PROFILE != AC_BUTTON_PROFILE_NONE
+    {"keybindings", AppConfigFieldId::Keybindings,
+     AppConfigGroup::Keybindings, 10, AppConfigFieldType::Keybindings,
+     AC_CONFIG_FIELD_NONE, AC_CONFIG_DIRTY_KEYBINDINGS,
+     "Button bindings", "Actions assigned to local buttons.",
+     nullptr, 0, -1, AC_CFG_OFFSET(keybindings)},
+#endif
+
 };
 
 #undef AC_LOG_FIELD
@@ -367,6 +377,19 @@ bool raw_value(const AppConfigData &cfg,
             if (field.index < 0 || field.index >= CAT_COUNT) return false;
             out = Log::level_name(cfg.log_levels[field.index]);
             return true;
+        case AppConfigFieldType::Keybindings: {
+            std::vector<uint8_t> bytes;
+            if (!button_binding_config_encode(cfg.keybindings, bytes)) {
+                return false;
+            }
+            static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+            out.reserve(bytes.size() * 2);
+            for (uint8_t byte : bytes) {
+                out += HEX_DIGITS[byte >> 4];
+                out += HEX_DIGITS[byte & 0x0f];
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -511,6 +534,8 @@ bool AppConfigFieldWriter::set_value(
             return config.set_log_level(static_cast<log_cat_t>(field.index),
                                         level);
         }
+        case AppConfigFieldId::Keybindings:
+            return false;
     }
     return false;
 }
@@ -543,6 +568,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::Oximetry: return "oximetry";
         case AppConfigGroup::Smb: return "smb";
         case AppConfigGroup::SleepHq: return "sleephq";
+        case AppConfigGroup::Keybindings: return "keybindings";
         case AppConfigGroup::Count: break;
     }
     return "unknown";
@@ -560,6 +586,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::Oximetry: return "Oximetry";
         case AppConfigGroup::Smb: return "SMB";
         case AppConfigGroup::SleepHq: return "SleepHQ";
+        case AppConfigGroup::Keybindings: return "Buttons";
         case AppConfigGroup::Count: break;
     }
     return "Unknown";
@@ -604,6 +631,16 @@ bool app_config_field_get_console_value(const AppConfigData &cfg,
         String raw;
         if (!raw_value(cfg, field, raw)) return false;
         out = raw == "1" ? "on" : "off";
+        return true;
+    }
+
+    if (field.type == AppConfigFieldType::Keybindings) {
+        out = button_binding_blob_state_name(cfg.keybindings.state);
+        if (cfg.keybindings.state == ButtonBindingBlobState::Valid) {
+            out += " (";
+            out += static_cast<unsigned>(cfg.keybindings.overrides.size());
+            out += " overrides)";
+        }
         return true;
     }
 

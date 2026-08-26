@@ -2039,8 +2039,73 @@
       return Object.assign({}, ...parts);
     }
 
+    function normalizedKeybindingOverrides(value) {
+      const overrides = value && Array.isArray(value.overrides) ?
+        value.overrides : [];
+      return overrides.map((binding) => ({
+        button: String(binding.button || ""),
+        gesture: String(binding.gesture || ""),
+        action: String(binding.action || ""),
+      })).sort((left, right) =>
+        (left.button + ":" + left.gesture).localeCompare(
+          right.button + ":" + right.gesture));
+    }
+
+    function renderKeybindingsField(root, section, field, data) {
+      const value = data[field.key] || {};
+      const overrides = new Map(normalizedKeybindingOverrides(value).map(
+        (binding) => [binding.button + ":" + binding.gesture,
+          binding.action]));
+      const panel = document.createElement("div");
+      panel.className = "keybindings-config";
+      panel.dataset.keybindings = field.key;
+      panel.dataset.section = section.id;
+      panel.dataset.orig = JSON.stringify(normalizedKeybindingOverrides(value));
+
+      (field.buttons || []).forEach((button) => {
+        (button.gestures || []).forEach((gesture) => {
+          const select = document.createElement("select");
+          select.dataset.button = button.id;
+          select.dataset.gesture = gesture.gesture;
+          select.dataset.defaultAction = gesture.default;
+
+          const defaultOption = document.createElement("option");
+          defaultOption.value = "";
+          const defaultAction = (field.actions || []).find(
+            (action) => action.value === gesture.default);
+          const defaultLabel = defaultAction ?
+            defaultAction.label : gesture.default;
+          defaultOption.textContent = "Default";
+          select.appendChild(defaultOption);
+
+          (field.actions || []).forEach((action) => {
+            const option = document.createElement("option");
+            option.value = action.value;
+            option.textContent = action.label || action.value;
+            select.appendChild(option);
+          });
+
+          select.value = overrides.get(
+            button.id + ":" + gesture.gesture) || "";
+          panel.appendChild(row(
+            button.label + " / " + gesture.gesture,
+            select,
+            "Hardware default: " + defaultLabel));
+        });
+      });
+
+      const fieldRow = row(field.label || field.key, panel, field.key);
+      fieldRow.classList.add("keybindings-field");
+      root.appendChild(fieldRow);
+    }
+
     function renderConfigField(root, section, field, data) {
       data = data || configData || {};
+      if (field.type === "keybindings") {
+        renderKeybindingsField(root, section, field, data);
+        return;
+      }
+
       let control;
       if (field.type === "bool") {
         control = document.createElement("select");
@@ -2327,6 +2392,10 @@
     function configFieldApplied(data, key, value) {
       if (!data) return false;
       const field = configFieldByKey[key];
+      if (field && field.type === "keybindings") {
+        return JSON.stringify(normalizedKeybindingOverrides(data[key])) ===
+          JSON.stringify(normalizedKeybindingOverrides(value));
+      }
       if (field && field.secret) {
         if (value === "********") return true;
         const setKey = key + "_set";
@@ -2426,6 +2495,22 @@
           changes[input.dataset.key] = Number(rawValue);
         } else {
           changes[input.dataset.key] = rawValue;
+        }
+      });
+
+      root.querySelectorAll("[data-keybindings]").forEach((panel) => {
+        const overrides = [];
+        panel.querySelectorAll("select[data-button]").forEach((select) => {
+          if (!select.value) return;
+          overrides.push({
+            button: select.dataset.button,
+            gesture: select.dataset.gesture,
+            action: select.value,
+          });
+        });
+        const normalized = normalizedKeybindingOverrides({overrides});
+        if (JSON.stringify(normalized) !== panel.dataset.orig) {
+          changes[panel.dataset.keybindings] = {overrides: normalized};
         }
       });
       return changes;

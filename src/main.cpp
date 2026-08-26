@@ -12,7 +12,6 @@
 #include "as11_settings.h"
 #include "as11_settings_manager.h"
 #include "arduino_ota_source.h"
-#include "action_button.h"
 #include "ble_sensor_source.h"
 #include "board.h"
 #include "can_driver.h"
@@ -35,6 +34,7 @@
 #include "firmware_url_source.h"
 #include "http_route_module.h"
 #include "live_http_controller.h"
+#include "local_input_controller.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_http_controller.h"
@@ -108,7 +108,7 @@ static ResmedOtaManager resmed_ota_manager;
 static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static DisplayManager display_manager;
-static ActionButton action_button;
+static LocalInputController local_inputs;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
 static OximetryHub oximetry_hub;
@@ -230,15 +230,13 @@ static void note_session_stream_frame(void *context,
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
 }
 
-static void poll_action_button(uint32_t now_ms) {
-    const ActionButtonEvent event = action_button.poll(now_ms);
-    if (event == ActionButtonEvent::None) return;
+static bool toggle_display_backlight(void *, uint32_t) {
+    if (!display_manager.available()) return false;
+    display_manager.toggle_backlight();
+    return true;
+}
 
-    if (event == ActionButtonEvent::ShortPress) {
-        display_manager.toggle_backlight();
-        return;
-    }
-
+static bool toggle_therapy(void *, uint32_t now_ms) {
     const As11TherapyState therapy =
         as11_device_service.state().therapy_state();
     const As11TherapyTarget target =
@@ -249,11 +247,7 @@ static void poll_action_button(uint32_t now_ms) {
         as11_device_service.request_therapy(
             rpc_transport, target, RpcSource::Internal, now_ms);
 
-    Log::logf(CAT_GENERAL,
-              submission.accepted() ? LOG_INFO : LOG_WARN,
-              "[DISPLAY] therapy %s %s from action button\n",
-              target == As11TherapyTarget::Running ? "start" : "stop",
-              submission.accepted() ? "requested" : "rejected");
+    return submission.accepted();
 }
 
 static void note_as11_device_event(void *context,
@@ -620,6 +614,12 @@ static void apply_config_runtime_effects(void *,
     if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
         edf_recorder_manager.set_enabled(config.edf_capture_enabled);
     }
+    if (dirty & AC_CONFIG_DIRTY_KEYBINDINGS) {
+        if (!local_inputs.apply_config(config.keybindings, millis())) {
+            Log::logf(CAT_CONFIG, LOG_ERROR,
+                      "failed to apply local input bindings\n");
+        }
+    }
     if (dirty & (AC_CONFIG_DIRTY_AS11_TRANSPORT |
                  AC_CONFIG_DIRTY_HOSTNAME)) {
         if (!configure_as11_transport(config)) {
@@ -907,11 +907,6 @@ void setup() {
     Log::init();
     Log::bind_file_log_sink(StorageService::file_log_port());
 
-    if (!action_button.begin()) {
-        Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[INIT] action button failed to start\n");
-    }
-
     const bool tls_allocator_ready = TlsMemory::begin();
     const TlsMemoryStatus tls_mem = TlsMemory::status();
 
@@ -936,6 +931,18 @@ void setup() {
     if (!display_manager.begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] display manager failed to start\n");
+    }
+
+    (void)local_inputs.register_action(
+        LocalActionId::DisplayToggleBacklight,
+        toggle_display_backlight, nullptr);
+    (void)local_inputs.register_action(
+        LocalActionId::TherapyToggle, toggle_therapy, nullptr);
+    if (!local_inputs.begin() ||
+        !local_inputs.apply_config(config_service.data().keybindings,
+                                   millis())) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] local inputs failed to start\n");
     }
 
     // Boot diagnostics
@@ -1317,7 +1324,7 @@ void loop() {
     // Session and EDF capture
     session_manager.poll(as11_device_service.state(), now_ms);
 
-    poll_action_button(now_ms);
+    local_inputs.poll(now_ms);
     drain_can_rx_after("session");
 
     edf_recorder_manager.poll(now_ms);

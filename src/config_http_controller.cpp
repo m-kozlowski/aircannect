@@ -6,9 +6,12 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 #include <utility>
 
 #include "app_config_registry.h"
+#include "board_button.h"
+#include "button_binding_config.h"
 #include "config_service.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
@@ -73,6 +76,8 @@ const char *field_type_name(AppConfigFieldType type) {
         case AppConfigFieldType::Enum:
         case AppConfigFieldType::LogLevel:
             return "enum";
+        case AppConfigFieldType::Keybindings:
+            return "keybindings";
     }
     return "text";
 }
@@ -113,8 +118,161 @@ bool config_value_text(JsonVariantConst value,
             if (!value.is<const char *>()) return false;
             out = value.as<const char *>();
             return true;
+        case AppConfigFieldType::Keybindings:
+            return false;
     }
     return false;
+}
+
+bool known_binding(const ButtonBinding &binding) {
+    const BoardButtonDefinition *button =
+        board_button_find(binding.button_key);
+    return button && board_button_supports_gesture(*button, binding.gesture) &&
+           local_action_find(binding.action) != nullptr;
+}
+
+void append_keybindings_json(LargeTextBuffer &json,
+                             const ButtonBindingConfig &config,
+    bool comma) {
+    if (comma) json += ',';
+    json += "\"keybindings\":{";
+    json_add_string(json, "state",
+                    button_binding_blob_state_name(config.state), false);
+    json += ",\"overrides\":[";
+
+    bool first = true;
+    if (config.state == ButtonBindingBlobState::Valid) {
+        for (const ButtonBinding &binding : config.overrides) {
+            if (!known_binding(binding)) continue;
+
+            const BoardButtonDefinition *button =
+                board_button_find(binding.button_key);
+            const LocalActionDefinition *action =
+                local_action_find(binding.action);
+            if (!button || !action) continue;
+
+            if (!first) json += ',';
+            first = false;
+            json += '{';
+            json_add_string(json, "button", button->id, false);
+            json_add_string(json, "gesture",
+                            button_gesture_name(binding.gesture));
+            json_add_string(json, "action", action->name);
+            json += '}';
+        }
+    }
+    json += "]}";
+}
+
+void append_keybindings_schema(LargeTextBuffer &json) {
+    json += ",\"buttons\":[";
+
+    size_t button_count = 0;
+    const BoardButtonDefinition *buttons = board_button_catalog(button_count);
+    for (size_t i = 0; i < button_count; ++i) {
+        if (i) json += ',';
+        const BoardButtonDefinition &button = buttons[i];
+        json += '{';
+        json_add_int(json, "key", button.key, false);
+        json_add_string(json, "id", button.id);
+        json_add_string(json, "label", button.label);
+        json += ",\"gestures\":[";
+
+        bool first_gesture = true;
+        const ButtonGesture gestures[] = {
+            ButtonGesture::ShortPress,
+            ButtonGesture::LongPress,
+        };
+        for (ButtonGesture gesture : gestures) {
+            if (!board_button_supports_gesture(button, gesture)) continue;
+            const LocalActionId default_action =
+                board_button_default_action(button, gesture);
+            const LocalActionDefinition *action =
+                local_action_find(default_action);
+
+            if (!first_gesture) json += ',';
+            first_gesture = false;
+            json += '{';
+            json_add_string(json, "gesture",
+                            button_gesture_name(gesture), false);
+            json_add_string(json, "default",
+                            action ? action->name : "none");
+            json += '}';
+        }
+        json += "]}";
+    }
+    json += "]";
+
+    json += ",\"actions\":[";
+    size_t action_count = 0;
+    const LocalActionDefinition *actions =
+        local_action_catalog(action_count);
+    for (size_t i = 0; i < action_count; ++i) {
+        if (i) json += ',';
+        json += '{';
+        json_add_string(json, "value", actions[i].name, false);
+        json_add_string(json, "label", actions[i].label);
+        json += '}';
+    }
+    json += ']';
+}
+
+bool parse_keybindings_update(JsonVariantConst value,
+                              const ButtonBindingConfig &current,
+                              ButtonBindingConfig &next) {
+    if (!value.is<JsonObjectConst>()) return false;
+    const JsonObjectConst object = value.as<JsonObjectConst>();
+
+    if (object["reset"].is<bool>() && object["reset"].as<bool>()) {
+        button_binding_reset(next);
+        return true;
+    }
+    if (current.state != ButtonBindingBlobState::Valid ||
+        !object["overrides"].is<JsonArrayConst>()) {
+        return false;
+    }
+
+    next = current;
+    next.overrides.erase(
+        std::remove_if(next.overrides.begin(), next.overrides.end(),
+                       [](const ButtonBinding &binding) {
+                           return known_binding(binding);
+                       }),
+        next.overrides.end());
+
+    for (JsonVariantConst item : object["overrides"].as<JsonArrayConst>()) {
+        if (!item.is<JsonObjectConst>()) return false;
+        const JsonObjectConst binding = item.as<JsonObjectConst>();
+        if (!binding["button"].is<const char *>() ||
+            !binding["gesture"].is<const char *>() ||
+            !binding["action"].is<const char *>()) {
+            return false;
+        }
+
+        const BoardButtonDefinition *button =
+            board_button_find(binding["button"].as<const char *>());
+        ButtonGesture gesture = ButtonGesture::ShortPress;
+        const LocalActionDefinition *action =
+            local_action_find(binding["action"].as<const char *>());
+        if (!button ||
+            !parse_button_gesture(
+                binding["gesture"].as<const char *>(), gesture) ||
+            !board_button_supports_gesture(*button, gesture) || !action) {
+            return false;
+        }
+
+        for (const ButtonBinding &existing : next.overrides) {
+            if (existing.button_key == button->key &&
+                existing.gesture == gesture && known_binding(existing)) {
+                return false;
+            }
+        }
+        if (!button_binding_set_override(
+                next, button->key, gesture, action->id)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void append_schema_enum(LargeTextBuffer &json,
@@ -187,6 +345,10 @@ void build_config_json(LargeTextBuffer &json,
 
             case AppConfigFieldType::Secret:
                 break;
+            case AppConfigFieldType::Keybindings:
+                append_keybindings_json(json, config.keybindings, comma);
+                comma = true;
+                break;
         }
     }
     json += '}';
@@ -233,6 +395,9 @@ void build_schema_json(LargeTextBuffer &json) {
             json_add_string(json, "help", field.help);
         }
         append_schema_enum(json, field);
+        if (field.type == AppConfigFieldType::Keybindings) {
+            append_keybindings_schema(json);
+        }
         json += '}';
     }
 
@@ -355,6 +520,20 @@ void ConfigHttpController::execute(Command &command) {
         }
 
         String value;
+        if (field->type == AppConfigFieldType::Keybindings) {
+            ButtonBindingConfig keybindings;
+            if (!parse_keybindings_update(
+                    pair.value(), config_->data().keybindings,
+                    keybindings) ||
+                !config_->set_transaction_keybindings(
+                    keybindings).accepted()) {
+                Log::logf(CAT_CONFIG, LOG_WARN,
+                          "rejected web config key=%s reason=invalid_value\n",
+                          field->key);
+            }
+            continue;
+        }
+
         if (!config_value_text(pair.value(), *field, value)) {
             Log::logf(CAT_CONFIG, LOG_WARN,
                       "rejected web config key=%s reason=bad_type\n",

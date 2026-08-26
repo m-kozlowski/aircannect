@@ -1,21 +1,20 @@
 #pragma once
 
-#ifndef AC_ACTION_BUTTON_GPIO
-#define AC_ACTION_BUTTON_GPIO -1
+#include <stddef.h>
+
+#include "local_input.h"
+
+#define AC_BUTTON_PROFILE_NONE 0
+#define AC_BUTTON_PROFILE_WAVESHARE_154 1
+
+#ifndef AC_BUTTON_PROFILE
+#define AC_BUTTON_PROFILE AC_BUTTON_PROFILE_NONE
 #endif
 
-#ifndef AC_ACTION_BUTTON_ACTIVE_LOW
-#define AC_ACTION_BUTTON_ACTIVE_LOW 1
-#endif
+namespace aircannect {
 
-#ifndef AC_ACTION_BUTTON_PULLUP
-#define AC_ACTION_BUTTON_PULLUP 1
-#endif
+const BoardButtonDefinition *board_button_catalog(size_t &count);
+const BoardButtonDefinition *board_button_find(uint16_t key);
+const BoardButtonDefinition *board_button_find(const char *id);
 
-#ifndef AC_ACTION_BUTTON_DEBOUNCE_MS
-#define AC_ACTION_BUTTON_DEBOUNCE_MS 35
-#endif
-
-#ifndef AC_ACTION_BUTTON_LONG_PRESS_MS
-#define AC_ACTION_BUTTON_LONG_PRESS_MS 1200
-#endif
+}  // namespace aircannect

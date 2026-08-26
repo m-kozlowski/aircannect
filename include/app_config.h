@@ -6,6 +6,7 @@
 #include "app_config_schema.h"
 #include "as11_transport.h"
 #include "board.h"
+#include "button_binding_config.h"
 #include "debug_log.h"
 #include "oximetry_types.h"
 #include "softap_mode.h"
@@ -51,6 +52,8 @@ struct AppConfigData {
         OximetryAdvertiseMode::Auto;
 
     bool edf_capture_enabled = AC_DEFAULT_EDF_CAPTURE_ENABLED != 0;
+
+    ButtonBindingConfig keybindings;
 
     String smb_endpoint;
     String smb_user;
@@ -113,6 +116,7 @@ private:
     bool set_oximetry_udp_port(uint16_t port);
     bool set_oximetry_advertise_mode(OximetryAdvertiseMode mode);
     bool set_edf_capture_enabled(bool enabled);
+    bool set_keybindings(const ButtonBindingConfig &keybindings);
     bool set_smb_credentials(const String &endpoint,
                              const String &user,
                              const String &password);

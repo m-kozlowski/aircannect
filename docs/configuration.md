@@ -78,6 +78,17 @@ action from the OTA tab or the `ota install` CLI command.
 | `tz` | POSIX timezone string, max 64 chars | `UTC` | Local timezone used for UI/CLI display. AS11 RPC time remains UTC. |
 | `resmed_time` | boolean | `off` | When NTP is synced and therapy is idle, push ESP time to the ResMed device. |
 
+## Buttons
+
+Button bindings are available on builds with local buttons. The Web UI shows
+the buttons and gestures supplied by the hardware profile. `config keybindings`
+shows their defaults, overrides, and effective actions; individual overrides
+can be changed with `config keybindings BUTTON GESTURE ACTION`.
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `keybindings` | Hardware-specific binding set | Hardware profile | Assign local button gestures to available actions. Missing overrides retain the hardware defaults. |
+
 ## Oximetry
 
 | Key | Values | Default | Description |

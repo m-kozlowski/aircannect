@@ -1,9 +1,13 @@
 #include "console_commands.h"
 
 #include <ctype.h>
+#include <string.h>
 
 #include "app_config_registry.h"
+#include "board_button.h"
+#include "button_binding_config.h"
 #include "config_service.h"
+#include "local_input.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "string_util.h"
@@ -11,6 +15,140 @@
 
 namespace aircannect {
 namespace {
+
+const ButtonBinding *find_override(const ButtonBindingConfig &config,
+                                   uint16_t button_key,
+                                   ButtonGesture gesture) {
+    if (config.state != ButtonBindingBlobState::Valid) return nullptr;
+    for (const ButtonBinding &binding : config.overrides) {
+        if (binding.button_key == button_key &&
+            binding.gesture == gesture) {
+            return &binding;
+        }
+    }
+    return nullptr;
+}
+
+void print_keybindings(Print &out, const ButtonBindingConfig &config) {
+    out.print("[CONFIG] keybindings state=");
+    out.println(button_binding_blob_state_name(config.state));
+
+    size_t count = 0;
+    const BoardButtonDefinition *buttons = board_button_catalog(count);
+    const ButtonGesture gestures[] = {
+        ButtonGesture::ShortPress,
+        ButtonGesture::LongPress,
+    };
+    for (size_t i = 0; i < count; ++i) {
+        for (ButtonGesture gesture : gestures) {
+            if (!board_button_supports_gesture(buttons[i], gesture)) continue;
+
+            const LocalActionId default_action =
+                board_button_default_action(buttons[i], gesture);
+            const ButtonBinding *override =
+                find_override(config, buttons[i].key, gesture);
+            const LocalActionId effective =
+                override ? override->action : default_action;
+            const LocalActionDefinition *default_definition =
+                local_action_find(default_action);
+            const LocalActionDefinition *effective_definition =
+                local_action_find(effective);
+
+            out.print("  ");
+            out.print(buttons[i].id);
+            out.print(' ');
+            out.print(button_gesture_name(gesture));
+            out.print(" default=");
+            out.print(default_definition ? default_definition->name
+                                         : "unknown");
+            out.print(" override=");
+            if (override) {
+                const LocalActionDefinition *override_definition =
+                    local_action_find(override->action);
+                out.print(override_definition ? override_definition->name
+                                              : "unknown");
+            } else {
+                out.print("--");
+            }
+            out.print(" effective=");
+            out.println(effective_definition ? effective_definition->name
+                                             : "unknown");
+        }
+    }
+}
+
+bool handle_keybindings(Print &out,
+                        String rest,
+                        ConfigService &config) {
+    if (rest != "keybindings" && !rest.startsWith("keybindings ")) {
+        return false;
+    }
+
+    rest.remove(0, strlen("keybindings"));
+    trim_inplace(rest);
+    if (!rest.length()) {
+        print_keybindings(out, config.data().keybindings);
+        return true;
+    }
+
+    if (rest == "reset") {
+        ButtonBindingConfig next;
+        button_binding_reset(next);
+        const ConfigFieldUpdate update = config.set_keybindings(next);
+        out.println(update.accepted()
+                        ? "[CONFIG] keybindings reset"
+                        : "[CONFIG] keybindings reset failed");
+        return true;
+    }
+
+    int pos = 0;
+    String button_id;
+    String gesture_text;
+    String action_text;
+    if (!parse_console_arg(rest, pos, button_id) ||
+        !parse_console_arg(rest, pos, gesture_text) ||
+        !parse_console_arg(rest, pos, action_text)) {
+        out.println("[CONFIG] usage: config keybindings "
+                    "BUTTON GESTURE ACTION|default");
+        return true;
+    }
+
+    const BoardButtonDefinition *button =
+        board_button_find(button_id.c_str());
+    ButtonGesture gesture = ButtonGesture::ShortPress;
+    if (!button || !parse_button_gesture(gesture_text.c_str(), gesture) ||
+        !board_button_supports_gesture(*button, gesture)) {
+        out.println("[CONFIG] invalid button or gesture");
+        return true;
+    }
+
+    ButtonBindingConfig next = config.data().keybindings;
+    bool changed = false;
+    if (action_text == "default") {
+        if (next.state != ButtonBindingBlobState::Valid) {
+            out.println("[CONFIG] reset invalid keybindings before editing");
+            return true;
+        }
+        changed = button_binding_remove_override(next, button->key, gesture);
+    } else {
+        const LocalActionDefinition *action =
+            local_action_find(action_text.c_str());
+        if (!action || !button_binding_set_override(
+                           next, button->key, gesture, action->id)) {
+            out.println("[CONFIG] invalid local action");
+            return true;
+        }
+        changed = true;
+    }
+
+    if (!changed || !config.set_keybindings(next).accepted()) {
+        out.println("[CONFIG] failed to update keybindings");
+        return true;
+    }
+
+    print_keybindings(out, config.data().keybindings);
+    return true;
+}
 
 void print_config(Print &out, const AppConfigData &config) {
     out.println("[CONFIG]");
@@ -169,10 +307,14 @@ void handle_config(Print &out,
         return;
     }
 
+    if (handle_keybindings(out, rest, config)) return;
+
     if (handle_config_key(out, rest, config)) return;
 
     print_unknown_command(out, "CONFIG",
-                          "config, config KEY [VALUE], reset, factory-reset");
+                          "config, config KEY [VALUE], config keybindings "
+                          "[reset|BUTTON GESTURE ACTION|default], reset, "
+                          "factory-reset");
 }
 
 }  // namespace
