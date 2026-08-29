@@ -382,7 +382,7 @@ void As11BleRpcLink::task_loop() {
                 if (client_ && client_->isConnected()) {
                     set_status(As11BleLinkState::Disconnecting);
                     Log::logf(CAT_BLE, LOG_INFO,
-                              "disconnecting AS11 before restart\n");
+                              "disconnecting AS11 on request\n");
                     (void)client_->disconnect();
                 }
             }
@@ -398,7 +398,7 @@ void As11BleRpcLink::task_loop() {
                 set_status(As11BleLinkState::Quiesced);
                 set_controlled_disconnect_complete(true);
                 Log::logf(CAT_BLE, LOG_INFO,
-                          "AS11 disconnected before restart\n");
+                          "AS11 disconnected on request\n");
             }
 
             vTaskDelay(pdMS_TO_TICKS(20));

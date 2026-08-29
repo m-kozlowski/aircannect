@@ -37,11 +37,11 @@ bool button_binding_config_encode(const ButtonBindingConfig &config,
                                   std::vector<uint8_t> &bytes);
 
 bool button_binding_set_override(ButtonBindingConfig &config,
-                                 uint16_t button_key,
+                                 ButtonInput input,
                                  ButtonGesture gesture,
                                  LocalActionId action);
 bool button_binding_remove_override(ButtonBindingConfig &config,
-                                    uint16_t button_key,
+                                    ButtonInput input,
                                     ButtonGesture gesture);
 void button_binding_reset(ButtonBindingConfig &config);
 

@@ -14,7 +14,7 @@ RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcQuiescePort &transport,
     : transport_(transport), can_(can), events_(events), streams_(streams) {}
 
 void RpcQuiesceCoordinator::update(bool requested,
-                                   bool restart_requested,
+                                   bool controlled_disconnect_required,
                                    uint32_t now_ms) {
     if (requested != requested_) {
         if (requested) {
@@ -27,7 +27,7 @@ void RpcQuiesceCoordinator::update(bool requested,
     if (requested_ && !complete_ && !timed_out_) {
         poll_quiesce(now_ms);
     }
-    poll_controlled_disconnect(restart_requested, now_ms);
+    poll_controlled_disconnect(controlled_disconnect_required, now_ms);
 }
 
 void RpcQuiesceCoordinator::poll_quiesce(uint32_t now_ms) {
@@ -66,9 +66,16 @@ bool RpcQuiesceCoordinator::timed_out() const {
     return requested_ && timed_out_;
 }
 
-bool RpcQuiesceCoordinator::reboot_allowed() const {
-    if (!restart_requested_ || (!complete() && !timed_out())) return false;
+bool RpcQuiesceCoordinator::shutdown_allowed() const {
+    if (!controlled_disconnect_required_ ||
+        (!complete() && !timed_out())) {
+        return false;
+    }
     return disconnect_complete_ || disconnect_timed_out_;
+}
+
+bool RpcQuiesceCoordinator::reboot_allowed() const {
+    return shutdown_allowed();
 }
 
 void RpcQuiesceCoordinator::begin(uint32_t now_ms) {
@@ -95,7 +102,7 @@ void RpcQuiesceCoordinator::end(uint32_t now_ms) {
     complete_ = false;
     timed_out_ = false;
     deadline_ms_ = 0;
-    restart_requested_ = false;
+    controlled_disconnect_required_ = false;
     disconnect_requested_ = false;
     disconnect_complete_ = false;
     disconnect_timed_out_ = false;
@@ -108,11 +115,11 @@ void RpcQuiesceCoordinator::end(uint32_t now_ms) {
 }
 
 void RpcQuiesceCoordinator::poll_controlled_disconnect(
-    bool restart_requested,
+    bool required,
     uint32_t now_ms) {
-    restart_requested_ = requested_ && restart_requested;
+    controlled_disconnect_required_ = requested_ && required;
     const bool should_disconnect =
-        restart_requested_ && (complete_ || timed_out_);
+        controlled_disconnect_required_ && (complete_ || timed_out_);
     if (!should_disconnect) {
         if (disconnect_requested_) {
             transport_.set_controlled_disconnect(false);
@@ -147,7 +154,7 @@ void RpcQuiesceCoordinator::poll_controlled_disconnect(
     disconnect_timed_out_ = true;
     disconnect_deadline_ms_ = 0;
     Log::logf(CAT_RPC, LOG_WARN,
-              "AS11 link disconnect timed out before restart\n");
+              "controlled AS11 link disconnect timed out\n");
 }
 
 bool RpcQuiesceCoordinator::push_traffic_quiesced(

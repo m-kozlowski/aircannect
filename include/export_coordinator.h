@@ -35,6 +35,7 @@ public:
     ExportSleepHqStatusSnapshot sleephq_snapshot() const;
 
     // external requests
+    bool request_sync();
     bool request_smb_sync();
     bool request_smb_verify();
     bool request_sleephq_sync();
@@ -75,6 +76,10 @@ private:
         uint32_t config_generation = 0;
         uint32_t idle_due_ms = 0;
         bool queued = false;
+    };
+
+    struct ManualSyncState {
+        bool sleephq_pending = false;
     };
 
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
@@ -121,6 +126,9 @@ private:
     bool startup_backfill_pending(
         const ExportTaskControlSnapshot &task_status) const;
 
+    // manual all-endpoint sync
+    void poll_manual_sync(const ExportTaskControlSnapshot &task_status);
+
     // full SMB reconcile
     void maybe_preempt_full_reconcile(
         const ExportReportActivity &report,
@@ -141,6 +149,7 @@ private:
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
     StartupBackfillState startup_backfill_;
+    ManualSyncState manual_sync_;
     FullReconcileState full_reconcile_;
     ExportTaskControlSnapshot status_snapshot_;
 };

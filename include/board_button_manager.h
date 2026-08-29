@@ -13,7 +13,7 @@ namespace aircannect {
 class BoardButtonManager {
 public:
     using EventHandler = void (*)(void *context,
-                                  uint16_t button_key,
+                                  ButtonInput input,
                                   ButtonGesture gesture,
                                   uint32_t now_ms);
 
@@ -30,9 +30,21 @@ private:
         ButtonGestureState gesture;
     };
 
+    struct PendingButtonEvent {
+        ButtonInput input;
+        ButtonGesture gesture = ButtonGesture::ShortPress;
+    };
+
     bool read_pressed(const BoardButtonDefinition &button) const;
+    RuntimeButton *find_runtime(uint16_t button_key);
+    void poll_chord(uint32_t now_ms);
+    void emit(ButtonInput input,
+              ButtonGesture gesture,
+              uint32_t now_ms) const;
 
     std::vector<RuntimeButton> buttons_;
+    std::vector<PendingButtonEvent> pending_events_;
+    ButtonChordGestureState chord_;
     EventHandler event_handler_ = nullptr;
     void *event_context_ = nullptr;
 };

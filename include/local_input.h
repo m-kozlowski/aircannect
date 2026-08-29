@@ -28,6 +28,10 @@ enum class LocalActionId : uint16_t {
     DisplayNextPage = 2,
     DisplayToggleBacklight = 3,
     TherapyToggle = 4,
+    PowerOff = 5,
+    RestartAirCANnect = 6,
+    TriggerSync = 7,
+    DisconnectCpap = 8,
 };
 
 struct LocalActionDefinition {
@@ -50,11 +54,22 @@ struct BoardButtonDefinition {
     LocalActionId long_action = LocalActionId::None;
 };
 
+struct ButtonInput {
+    uint16_t first_button_key = 0;
+    uint16_t second_button_key = 0;
+
+    bool chord() const { return second_button_key != 0; }
+};
+
 struct ButtonBinding {
-    uint16_t button_key = 0;
+    ButtonInput input;
     ButtonGesture gesture = ButtonGesture::ShortPress;
     LocalActionId action = LocalActionId::None;
 };
+
+bool operator==(const ButtonInput &left, const ButtonInput &right);
+ButtonInput button_input(uint16_t first_button_key,
+                         uint16_t second_button_key = 0);
 
 const LocalActionDefinition *local_action_catalog(size_t &count);
 const LocalActionDefinition *local_action_find(LocalActionId id);

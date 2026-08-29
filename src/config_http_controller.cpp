@@ -125,9 +125,7 @@ bool config_value_text(JsonVariantConst value,
 }
 
 bool known_binding(const ButtonBinding &binding) {
-    const BoardButtonDefinition *button =
-        board_button_find(binding.button_key);
-    return button && board_button_supports_gesture(*button, binding.gesture) &&
+    return board_button_input_supported(binding.input, binding.gesture) &&
            local_action_find(binding.action) != nullptr;
 }
 
@@ -145,16 +143,19 @@ void append_keybindings_json(LargeTextBuffer &json,
         for (const ButtonBinding &binding : config.overrides) {
             if (!known_binding(binding)) continue;
 
-            const BoardButtonDefinition *button =
-                board_button_find(binding.button_key);
             const LocalActionDefinition *action =
                 local_action_find(binding.action);
-            if (!button || !action) continue;
+            char input_id[48] = {};
+            if (!action || !board_button_input_id(
+                               binding.input, input_id,
+                               sizeof(input_id))) {
+                continue;
+            }
 
             if (!first) json += ',';
             first = false;
             json += '{';
-            json_add_string(json, "button", button->id, false);
+            json_add_string(json, "button", input_id, false);
             json_add_string(json, "gesture",
                             button_gesture_name(binding.gesture));
             json_add_string(json, "action", action->name);
@@ -164,42 +165,71 @@ void append_keybindings_json(LargeTextBuffer &json,
     json += "]}";
 }
 
+void append_keybinding_input_schema(LargeTextBuffer &json,
+                                    ButtonInput input,
+                                    bool &first_input) {
+    char id[48] = {};
+    char label[64] = {};
+    if (!board_button_input_id(input, id, sizeof(id)) ||
+        !board_button_input_label(input, label, sizeof(label))) {
+        return;
+    }
+
+    if (!first_input) json += ',';
+    first_input = false;
+    json += '{';
+    json_add_string(json, "id", id, false);
+    if (!input.chord()) {
+        json_add_int(json, "key", input.first_button_key);
+    }
+    json_add_string(json, "label", label);
+    json += ",\"gestures\":[";
+
+    bool first_gesture = true;
+    const ButtonGesture gestures[] = {
+        ButtonGesture::ShortPress,
+        ButtonGesture::LongPress,
+    };
+    for (ButtonGesture gesture : gestures) {
+        if (!board_button_input_supported(input, gesture)) continue;
+
+        LocalActionId default_action = LocalActionId::None;
+        if (!input.chord()) {
+            const BoardButtonDefinition *button =
+                board_button_find(input.first_button_key);
+            if (!button) continue;
+            default_action = board_button_default_action(*button, gesture);
+        }
+        const LocalActionDefinition *action =
+            local_action_find(default_action);
+
+        if (!first_gesture) json += ',';
+        first_gesture = false;
+        json += '{';
+        json_add_string(json, "gesture",
+                        button_gesture_name(gesture), false);
+        json_add_string(json, "default",
+                        action ? action->name : "none");
+        json += '}';
+    }
+    json += "]}";
+}
+
 void append_keybindings_schema(LargeTextBuffer &json) {
     json += ",\"buttons\":[";
 
     size_t button_count = 0;
     const BoardButtonDefinition *buttons = board_button_catalog(button_count);
+    bool first_input = true;
     for (size_t i = 0; i < button_count; ++i) {
-        if (i) json += ',';
-        const BoardButtonDefinition &button = buttons[i];
-        json += '{';
-        json_add_int(json, "key", button.key, false);
-        json_add_string(json, "id", button.id);
-        json_add_string(json, "label", button.label);
-        json += ",\"gestures\":[";
+        append_keybinding_input_schema(
+            json, button_input(buttons[i].key), first_input);
 
-        bool first_gesture = true;
-        const ButtonGesture gestures[] = {
-            ButtonGesture::ShortPress,
-            ButtonGesture::LongPress,
-        };
-        for (ButtonGesture gesture : gestures) {
-            if (!board_button_supports_gesture(button, gesture)) continue;
-            const LocalActionId default_action =
-                board_button_default_action(button, gesture);
-            const LocalActionDefinition *action =
-                local_action_find(default_action);
-
-            if (!first_gesture) json += ',';
-            first_gesture = false;
-            json += '{';
-            json_add_string(json, "gesture",
-                            button_gesture_name(gesture), false);
-            json_add_string(json, "default",
-                            action ? action->name : "none");
-            json += '}';
+        for (size_t other = i + 1; other < button_count; ++other) {
+            append_keybinding_input_schema(
+                json, button_input(buttons[i].key, buttons[other].key),
+                first_input);
         }
-        json += "]}";
     }
     json += "]";
 
@@ -249,26 +279,26 @@ bool parse_keybindings_update(JsonVariantConst value,
             return false;
         }
 
-        const BoardButtonDefinition *button =
-            board_button_find(binding["button"].as<const char *>());
+        ButtonInput input;
         ButtonGesture gesture = ButtonGesture::ShortPress;
         const LocalActionDefinition *action =
             local_action_find(binding["action"].as<const char *>());
-        if (!button ||
+        if (!board_button_input_find(
+                binding["button"].as<const char *>(), input) ||
             !parse_button_gesture(
                 binding["gesture"].as<const char *>(), gesture) ||
-            !board_button_supports_gesture(*button, gesture) || !action) {
+            !board_button_input_supported(input, gesture) || !action) {
             return false;
         }
 
         for (const ButtonBinding &existing : next.overrides) {
-            if (existing.button_key == button->key &&
+            if (existing.input == input &&
                 existing.gesture == gesture && known_binding(existing)) {
                 return false;
             }
         }
         if (!button_binding_set_override(
-                next, button->key, gesture, action->id)) {
+                next, input, gesture, action->id)) {
             return false;
         }
     }

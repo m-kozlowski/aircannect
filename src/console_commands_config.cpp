@@ -17,16 +17,59 @@ namespace aircannect {
 namespace {
 
 const ButtonBinding *find_override(const ButtonBindingConfig &config,
-                                   uint16_t button_key,
+                                   ButtonInput input,
                                    ButtonGesture gesture) {
     if (config.state != ButtonBindingBlobState::Valid) return nullptr;
     for (const ButtonBinding &binding : config.overrides) {
-        if (binding.button_key == button_key &&
+        if (binding.input == input &&
             binding.gesture == gesture) {
             return &binding;
         }
     }
     return nullptr;
+}
+
+void print_binding(Print &out,
+                   const ButtonBindingConfig &config,
+                   ButtonInput input,
+                   ButtonGesture gesture) {
+    char id[48] = {};
+    if (!board_button_input_id(input, id, sizeof(id))) return;
+
+    LocalActionId default_action = LocalActionId::None;
+    if (!input.chord()) {
+        const BoardButtonDefinition *button =
+            board_button_find(input.first_button_key);
+        if (!button) return;
+        default_action = board_button_default_action(*button, gesture);
+    }
+
+    const ButtonBinding *override = find_override(config, input, gesture);
+    const LocalActionId effective =
+        override ? override->action : default_action;
+    const LocalActionDefinition *default_definition =
+        local_action_find(default_action);
+    const LocalActionDefinition *effective_definition =
+        local_action_find(effective);
+
+    out.print("  ");
+    out.print(id);
+    out.print(' ');
+    out.print(button_gesture_name(gesture));
+    out.print(" default=");
+    out.print(default_definition ? default_definition->name : "unknown");
+    out.print(" override=");
+    if (override) {
+        const LocalActionDefinition *override_definition =
+            local_action_find(override->action);
+        out.print(override_definition ? override_definition->name
+                                      : "unknown");
+    } else {
+        out.print("--");
+    }
+    out.print(" effective=");
+    out.println(effective_definition ? effective_definition->name
+                                     : "unknown");
 }
 
 void print_keybindings(Print &out, const ButtonBindingConfig &config) {
@@ -42,37 +85,16 @@ void print_keybindings(Print &out, const ButtonBindingConfig &config) {
     for (size_t i = 0; i < count; ++i) {
         for (ButtonGesture gesture : gestures) {
             if (!board_button_supports_gesture(buttons[i], gesture)) continue;
+            print_binding(out, config, button_input(buttons[i].key),
+                          gesture);
+        }
 
-            const LocalActionId default_action =
-                board_button_default_action(buttons[i], gesture);
-            const ButtonBinding *override =
-                find_override(config, buttons[i].key, gesture);
-            const LocalActionId effective =
-                override ? override->action : default_action;
-            const LocalActionDefinition *default_definition =
-                local_action_find(default_action);
-            const LocalActionDefinition *effective_definition =
-                local_action_find(effective);
-
-            out.print("  ");
-            out.print(buttons[i].id);
-            out.print(' ');
-            out.print(button_gesture_name(gesture));
-            out.print(" default=");
-            out.print(default_definition ? default_definition->name
-                                         : "unknown");
-            out.print(" override=");
-            if (override) {
-                const LocalActionDefinition *override_definition =
-                    local_action_find(override->action);
-                out.print(override_definition ? override_definition->name
-                                              : "unknown");
-            } else {
-                out.print("--");
+        for (size_t other = i + 1; other < count; ++other) {
+            const ButtonInput input =
+                button_input(buttons[i].key, buttons[other].key);
+            for (ButtonGesture gesture : gestures) {
+                print_binding(out, config, input, gesture);
             }
-            out.print(" effective=");
-            out.println(effective_definition ? effective_definition->name
-                                             : "unknown");
         }
     }
 }
@@ -109,15 +131,15 @@ bool handle_keybindings(Print &out,
         !parse_console_arg(rest, pos, gesture_text) ||
         !parse_console_arg(rest, pos, action_text)) {
         out.println("[CONFIG] usage: config keybindings "
-                    "BUTTON GESTURE ACTION|default");
+                    "BUTTON[+BUTTON] GESTURE ACTION|default");
         return true;
     }
 
-    const BoardButtonDefinition *button =
-        board_button_find(button_id.c_str());
+    ButtonInput input;
     ButtonGesture gesture = ButtonGesture::ShortPress;
-    if (!button || !parse_button_gesture(gesture_text.c_str(), gesture) ||
-        !board_button_supports_gesture(*button, gesture)) {
+    if (!board_button_input_find(button_id.c_str(), input) ||
+        !parse_button_gesture(gesture_text.c_str(), gesture) ||
+        !board_button_input_supported(input, gesture)) {
         out.println("[CONFIG] invalid button or gesture");
         return true;
     }
@@ -129,12 +151,12 @@ bool handle_keybindings(Print &out,
             out.println("[CONFIG] reset invalid keybindings before editing");
             return true;
         }
-        changed = button_binding_remove_override(next, button->key, gesture);
+        changed = button_binding_remove_override(next, input, gesture);
     } else {
         const LocalActionDefinition *action =
             local_action_find(action_text.c_str());
         if (!action || !button_binding_set_override(
-                           next, button->key, gesture, action->id)) {
+                           next, input, gesture, action->id)) {
             out.println("[CONFIG] invalid local action");
             return true;
         }
@@ -313,7 +335,8 @@ void handle_config(Print &out,
 
     print_unknown_command(out, "CONFIG",
                           "config, config KEY [VALUE], config keybindings "
-                          "[reset|BUTTON GESTURE ACTION|default], reset, "
+                          "[reset|BUTTON[+BUTTON] GESTURE "
+                          "ACTION|default], reset, "
                           "factory-reset");
 }
 

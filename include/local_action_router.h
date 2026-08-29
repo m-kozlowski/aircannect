@@ -17,11 +17,11 @@ public:
                           Handler handler,
                           void *context);
     void apply_bindings(const ButtonBinding *bindings, size_t count);
-    bool dispatch(uint16_t button_key,
+    bool dispatch(ButtonInput input,
                   ButtonGesture gesture,
                   uint32_t now_ms) const;
 
-    LocalActionId effective_action(uint16_t button_key,
+    LocalActionId effective_action(ButtonInput input,
                                    ButtonGesture gesture) const;
 
 private:

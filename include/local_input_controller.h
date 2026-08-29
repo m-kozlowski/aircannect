@@ -27,10 +27,10 @@ public:
 
 private:
     static void handle_button_event(void *context,
-                                    uint16_t button_key,
+                                    ButtonInput input,
                                     ButtonGesture gesture,
                                     uint32_t now_ms);
-    void dispatch(uint16_t button_key,
+    void dispatch(ButtonInput input,
                   ButtonGesture gesture,
                   uint32_t now_ms);
 

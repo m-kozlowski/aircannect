@@ -54,6 +54,24 @@ bool ExportCoordinator::endpoint_work_claimed() const {
                startup_check_.smb_requested_generation;
 }
 
+bool ExportCoordinator::request_sync() {
+    if (!task_ || manual_sync_.sleephq_pending) return false;
+
+    const ExportTaskControlSnapshot current = control_snapshot();
+    const bool smb_configured =
+        current.smb.enabled && current.smb.configured;
+    const bool sleephq_configured = current.sleephq.configured;
+    if (!smb_configured && !sleephq_configured) return false;
+
+    if (smb_configured) {
+        if (!request_smb_sync()) return false;
+        manual_sync_.sleephq_pending = sleephq_configured;
+        return true;
+    }
+
+    return request_sleephq_sync();
+}
+
 bool ExportCoordinator::request_smb_sync() {
     if (!task_) return false;
     const ExportTaskControlSnapshot current = control_snapshot();
@@ -134,6 +152,8 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
                       storage_active,
                       now_ms);
 
+    poll_manual_sync(task_status);
+
     maybe_preempt_full_reconcile(report, activity, task_status);
 
     if (sleephq.state == SleepHqSyncState::Working) {
@@ -163,6 +183,18 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
     poll_startup_backfill(report, activity, task_status, now_ms);
 
     poll_full_reconcile(report, activity, task_status, now_ms);
+}
+
+void ExportCoordinator::poll_manual_sync(
+    const ExportTaskControlSnapshot &task_status) {
+    if (!manual_sync_.sleephq_pending || task_status.command_pending ||
+        task_status.busy) {
+        return;
+    }
+
+    if (request_sleephq_sync()) {
+        manual_sync_.sleephq_pending = false;
+    }
 }
 
 void ExportCoordinator::poll_post_therapy(

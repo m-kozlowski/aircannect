@@ -16,9 +16,30 @@ constexpr LocalActionDefinition ACTIONS[] = {
      "display_toggle_backlight", "Toggle display backlight"},
     {LocalActionId::TherapyToggle,
      "therapy_toggle", "Start or stop therapy"},
+    {LocalActionId::PowerOff, "power_off", "Power off AirCANnect"},
+    {LocalActionId::RestartAirCANnect,
+     "restart_aircannect", "Restart AirCANnect"},
+    {LocalActionId::TriggerSync, "trigger_sync", "Sync exports"},
+    {LocalActionId::DisconnectCpap,
+     "disconnect_cpap", "Disconnect from CPAP"},
 };
 
 }  // namespace
+
+bool operator==(const ButtonInput &left, const ButtonInput &right) {
+    return left.first_button_key == right.first_button_key &&
+           left.second_button_key == right.second_button_key;
+}
+
+ButtonInput button_input(uint16_t first_button_key,
+                         uint16_t second_button_key) {
+    if (second_button_key != 0 && second_button_key < first_button_key) {
+        const uint16_t swap = first_button_key;
+        first_button_key = second_button_key;
+        second_button_key = swap;
+    }
+    return {first_button_key, second_button_key};
+}
 
 const LocalActionDefinition *local_action_catalog(size_t &count) {
     count = sizeof(ACTIONS) / sizeof(ACTIONS[0]);
@@ -76,6 +97,7 @@ bool validate_button_catalog(const BoardButtonDefinition *buttons,
         const BoardButtonDefinition &button = buttons[i];
         if (button.key == 0 || !button.id || !button.id[0] ||
             !button.label || !button.label[0] || button.gpio < 0 ||
+            strchr(button.id, '+') != nullptr ||
             button.gestures == BUTTON_GESTURE_NONE ||
             button.debounce_ms == 0) {
             return false;

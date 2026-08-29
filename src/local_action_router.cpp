@@ -31,10 +31,11 @@ void LocalActionRouter::apply_bindings(const ButtonBinding *bindings,
 }
 
 LocalActionId LocalActionRouter::effective_action(
-    uint16_t button_key,
+    ButtonInput input,
     ButtonGesture gesture) const {
+    input = button_input(input.first_button_key, input.second_button_key);
     for (const ButtonBinding &binding : bindings_) {
-        if (binding.button_key == button_key &&
+        if (binding.input == input &&
             binding.gesture == gesture) {
             return binding.action;
         }
@@ -42,10 +43,10 @@ LocalActionId LocalActionRouter::effective_action(
     return LocalActionId::None;
 }
 
-bool LocalActionRouter::dispatch(uint16_t button_key,
+bool LocalActionRouter::dispatch(ButtonInput input,
                                  ButtonGesture gesture,
                                  uint32_t now_ms) const {
-    const LocalActionId action = effective_action(button_key, gesture);
+    const LocalActionId action = effective_action(input, gesture);
     if (action == LocalActionId::None) return true;
 
     for (const HandlerEntry &entry : handlers_) {

@@ -227,6 +227,9 @@ static bool runtime_activity_published = false;
 static bool ota_storage_upload_active_published = false;
 static bool runtime_network_published = false;
 static uint32_t export_config_due_ms = 0;
+static bool local_poweroff_requested = false;
+static bool local_poweroff_attempted = false;
+static bool local_as11_disconnect_requested = false;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static bool is_rpc_event(RpcEventKind kind) {
@@ -267,6 +270,42 @@ static bool toggle_therapy(void *, uint32_t now_ms) {
             rpc_transport, target, RpcSource::Internal, now_ms);
 
     return submission.accepted();
+}
+
+static bool power_off_aircannect(void *, uint32_t) {
+    if (!board_power_off_supported() || local_poweroff_requested ||
+        firmware_installer.active() || resmed_ota_manager.active()) {
+        return false;
+    }
+
+    local_poweroff_requested = true;
+    local_poweroff_attempted = false;
+    return true;
+}
+
+static bool restart_aircannect(void *, uint32_t) {
+    if (firmware_installer.active() || resmed_ota_manager.active()) {
+        return false;
+    }
+
+    firmware_installer.schedule_reboot(500);
+    return true;
+}
+
+static bool trigger_export_sync(void *, uint32_t) {
+    return export_coordinator.request_sync();
+}
+
+static bool disconnect_cpap(void *, uint32_t) {
+    if (rpc_link_selector.selected() != As11Transport::Ble ||
+        !rpc_link_selector.status().ready ||
+        rpc_quiesce_coordinator.requested() ||
+        firmware_installer.active() || resmed_ota_manager.active()) {
+        return false;
+    }
+
+    local_as11_disconnect_requested = true;
+    return true;
 }
 
 static void note_as11_device_event(void *context,
@@ -1046,6 +1085,14 @@ void setup() {
         toggle_display_backlight, nullptr);
     (void)local_inputs.register_action(
         LocalActionId::TherapyToggle, toggle_therapy, nullptr);
+    (void)local_inputs.register_action(
+        LocalActionId::PowerOff, power_off_aircannect, nullptr);
+    (void)local_inputs.register_action(
+        LocalActionId::RestartAirCANnect, restart_aircannect, nullptr);
+    (void)local_inputs.register_action(
+        LocalActionId::TriggerSync, trigger_export_sync, nullptr);
+    (void)local_inputs.register_action(
+        LocalActionId::DisconnectCpap, disconnect_cpap, nullptr);
     if (!local_inputs.begin() ||
         !local_inputs.apply_config(config_service.data().keybindings,
                                    millis())) {
@@ -1355,9 +1402,14 @@ void loop() {
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
+    const bool local_shutdown_requested =
+        local_poweroff_requested || local_as11_disconnect_requested;
+    const bool as11_application_quiesce_requested =
+        esp_ota_quiesce_requested || as11_service_exclusive ||
+        local_shutdown_requested;
     rpc_quiesce_coordinator.update(
-        esp_ota_quiesce_requested || as11_service_exclusive,
-        esp_reboot_pending,
+        as11_application_quiesce_requested,
+        esp_reboot_pending || local_shutdown_requested,
         now_ms);
 
     const bool resmed_ota_transport_active =
@@ -1385,8 +1437,8 @@ void loop() {
                           as11_device_service.unavailable());
     as11_device_service.poll(
         rpc_transport, now_ms,
-        esp_ota_quiesce_requested || resmed_ota_transport_active ||
-            as11_service_exclusive || !as11_link_ready);
+        as11_application_quiesce_requested ||
+            resmed_ota_transport_active || !as11_link_ready);
     const bool as11_device_unavailable =
         as11_device_service.unavailable();
     const bool as11_rpc_available =
@@ -1397,8 +1449,8 @@ void loop() {
         as11_device_service.state().software_identifier().c_str());
     as11_settings_manager.poll(
         rpc_transport, now_ms,
-        esp_ota_quiesce_requested || resmed_ota_transport_active ||
-            as11_service_exclusive || !as11_rpc_available);
+        as11_application_quiesce_requested ||
+            resmed_ota_transport_active || !as11_rpc_available);
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();
@@ -1478,7 +1530,8 @@ void loop() {
     Log::poll(wifi_manager.sta_ipv4_online());
     drain_can_rx_after("log");
 
-    if (!resmed_ota_transport_active && !as11_service_exclusive) {
+    if (!resmed_ota_transport_active &&
+        !as11_application_quiesce_requested) {
         time_sync_service.poll();
     }
 
@@ -1489,6 +1542,14 @@ void loop() {
     const bool esp_reboot_allowed =
         !install_status.reboot_pending ||
         rpc_quiesce_coordinator.reboot_allowed();
+
+    if (local_poweroff_requested && !local_poweroff_attempted &&
+        rpc_quiesce_coordinator.shutdown_allowed()) {
+        local_poweroff_attempted = true;
+        Log::logf(CAT_GENERAL, LOG_INFO, "[POWER] powering off\n");
+        delay(50);
+        (void)board_power_off();
+    }
 
     const bool arduino_ota_poll_allowed =
         as11_device_service.state().therapy_state() !=
@@ -1570,7 +1631,8 @@ void loop() {
     drain_can_rx_after("web_ui");
 
     const bool service_entry_allowed =
-        !esp_ota_quiesce_requested && !firmware_installer.active() &&
+        !as11_application_quiesce_requested &&
+        !firmware_installer.active() &&
         !resmed_ota_manager.active();
     tcp_bridge.poll(rpc_transport, service_entry_allowed);
     telnet_console.poll(config_service.data(), console_router);

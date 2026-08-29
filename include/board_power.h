@@ -11,5 +11,7 @@
 namespace aircannect {
 
 void board_power_begin();
+bool board_power_off_supported();
+bool board_power_off();
 
 }  // namespace aircannect
