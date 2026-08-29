@@ -1606,6 +1606,265 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     return catalog;
 }
 
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
+    const NightCatalog &source,
+    const NightCatalog &replacement,
+    SleepDayId sleep_day) {
+    if (!sleep_day.valid() || replacement.record_count_ != 1 ||
+        replacement.records_[0].sleep_day != sleep_day) {
+        return {};
+    }
+
+    struct CatalogCounts {
+        size_t records = 0;
+        size_t sessions = 0;
+        size_t mask_windows = 0;
+        size_t files = 0;
+        size_t coverage = 0;
+        size_t signal_layouts = 0;
+        size_t fallback_files = 0;
+        size_t fallback_sections = 0;
+        size_t paths = 0;
+    };
+
+    CatalogCounts counts;
+    auto count_record = [&counts](const NightCatalog &catalog,
+                                  const NightCatalogRecord &record) {
+        if (!add_count(counts.records, 1) ||
+            !add_count(counts.sessions, record.session_count) ||
+            !add_count(counts.mask_windows, record.mask_window_count) ||
+            !add_count(counts.files, record.file_count) ||
+            !add_count(counts.fallback_files,
+                       record.fallback_file_count)) {
+            return false;
+        }
+
+        size_t file_count = 0;
+        const NightCatalogSourceFile *files =
+            catalog.files(record, file_count);
+        if (file_count != record.file_count ||
+            (file_count > 0 && !files)) {
+            return false;
+        }
+        for (size_t i = 0; i < file_count; ++i) {
+            if (!catalog.path(files[i]) ||
+                !add_count(counts.coverage, files[i].coverage_count) ||
+                !add_count(counts.signal_layouts,
+                           files[i].signal_layout_count) ||
+                !add_count(counts.paths,
+                           static_cast<size_t>(files[i].path_length) + 1)) {
+                return false;
+            }
+        }
+
+        size_t fallback_count = 0;
+        const NightCatalogFallbackFile *fallback_files =
+            catalog.fallback_files(record, fallback_count);
+        if (fallback_count != record.fallback_file_count ||
+            (fallback_count > 0 && !fallback_files)) {
+            return false;
+        }
+        for (size_t i = 0; i < fallback_count; ++i) {
+            if (!catalog.path(fallback_files[i]) ||
+                !add_count(counts.fallback_sections,
+                           fallback_files[i].section_count) ||
+                !add_count(
+                    counts.paths,
+                    static_cast<size_t>(fallback_files[i].path_length) + 1)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    for (size_t i = 0; i < source.record_count_; ++i) {
+        if (source.records_[i].sleep_day == sleep_day) continue;
+        if (!count_record(source, source.records_[i])) return {};
+    }
+    if (!count_record(replacement, replacement.records_[0])) return {};
+
+    std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
+    if (!catalog ||
+        !catalog->allocate(counts.records,
+                           counts.sessions,
+                           counts.mask_windows,
+                           counts.files,
+                           counts.coverage,
+                           counts.signal_layouts,
+                           counts.fallback_files,
+                           counts.fallback_sections,
+                           counts.paths)) {
+        return {};
+    }
+
+    size_t next_record = 0;
+    size_t next_session = 0;
+    size_t next_mask_window = 0;
+    size_t next_file = 0;
+    size_t next_coverage = 0;
+    size_t next_signal_layout = 0;
+    size_t next_fallback_file = 0;
+    size_t next_fallback_section = 0;
+    size_t next_path = 0;
+
+    auto append_record = [&](const NightCatalog &from,
+                             const NightCatalogRecord &old_record) {
+        NightCatalogRecord &record = catalog->records_[next_record++];
+        record = old_record;
+        record.session_offset = static_cast<uint32_t>(next_session);
+        record.mask_window_offset =
+            static_cast<uint32_t>(next_mask_window);
+        record.file_offset = static_cast<uint32_t>(next_file);
+        record.fallback_file_offset =
+            static_cast<uint32_t>(next_fallback_file);
+
+        size_t session_count = 0;
+        const NightCatalogTimeRange *sessions =
+            from.sessions(old_record, session_count);
+        if (session_count != old_record.session_count ||
+            (session_count > 0 && !sessions)) {
+            return false;
+        }
+        for (size_t i = 0; i < session_count; ++i) {
+            catalog->sessions_[next_session++] = sessions[i];
+        }
+
+        size_t mask_window_count = 0;
+        const NightCatalogTimeRange *mask_windows =
+            from.mask_windows(old_record, mask_window_count);
+        if (mask_window_count != old_record.mask_window_count ||
+            (mask_window_count > 0 && !mask_windows)) {
+            return false;
+        }
+        for (size_t i = 0; i < mask_window_count; ++i) {
+            catalog->mask_windows_[next_mask_window++] = mask_windows[i];
+        }
+
+        size_t file_count = 0;
+        const NightCatalogSourceFile *files =
+            from.files(old_record, file_count);
+        if (file_count != old_record.file_count ||
+            (file_count > 0 && !files)) {
+            return false;
+        }
+        for (size_t i = 0; i < file_count; ++i) {
+            const char *path = from.path(files[i]);
+            size_t coverage_count = 0;
+            const NightCatalogSourceCoverage *coverage =
+                from.coverage(files[i], coverage_count);
+            size_t signal_layout_count = 0;
+            const EdfReportSignalLayout *signal_layouts =
+                from.signal_layouts(files[i], signal_layout_count);
+            if (!path || coverage_count != files[i].coverage_count ||
+                signal_layout_count != files[i].signal_layout_count ||
+                (coverage_count > 0 && !coverage) ||
+                (signal_layout_count > 0 && !signal_layouts)) {
+                return false;
+            }
+
+            NightCatalogSourceFile &file = catalog->files_[next_file++];
+            file = files[i];
+            file.path_offset = static_cast<uint32_t>(next_path);
+            file.coverage_offset = static_cast<uint32_t>(next_coverage);
+            file.signal_layout_offset =
+                static_cast<uint32_t>(next_signal_layout);
+
+            for (size_t j = 0; j < coverage_count; ++j) {
+                catalog->coverage_[next_coverage++] = coverage[j];
+            }
+            for (size_t j = 0; j < signal_layout_count; ++j) {
+                catalog->signal_layouts_[next_signal_layout++] =
+                    signal_layouts[j];
+            }
+
+            const size_t path_bytes =
+                static_cast<size_t>(file.path_length) + 1;
+            memcpy(catalog->paths_ + next_path, path, path_bytes);
+            next_path += path_bytes;
+        }
+
+        size_t fallback_count = 0;
+        const NightCatalogFallbackFile *fallback_files =
+            from.fallback_files(old_record, fallback_count);
+        if (fallback_count != old_record.fallback_file_count ||
+            (fallback_count > 0 && !fallback_files)) {
+            return false;
+        }
+        for (size_t i = 0; i < fallback_count; ++i) {
+            const char *path = from.path(fallback_files[i]);
+            size_t section_count = 0;
+            const NightCatalogFallbackSection *sections =
+                from.fallback_sections(fallback_files[i], section_count);
+            if (!path || section_count != fallback_files[i].section_count ||
+                (section_count > 0 && !sections)) {
+                return false;
+            }
+
+            NightCatalogFallbackFile &file =
+                catalog->fallback_files_[next_fallback_file++];
+            file = fallback_files[i];
+            file.path_offset = static_cast<uint32_t>(next_path);
+            file.section_offset =
+                static_cast<uint32_t>(next_fallback_section);
+            for (size_t j = 0; j < section_count; ++j) {
+                catalog->fallback_sections_[next_fallback_section++] =
+                    sections[j];
+            }
+
+            const size_t path_bytes =
+                static_cast<size_t>(file.path_length) + 1;
+            memcpy(catalog->paths_ + next_path, path, path_bytes);
+            next_path += path_bytes;
+        }
+        return true;
+    };
+
+    bool replacement_added = false;
+    size_t source_index = 0;
+    while (source_index < source.record_count_ || !replacement_added) {
+        const NightCatalogRecord *source_record =
+            source_index < source.record_count_
+                ? &source.records_[source_index]
+                : nullptr;
+
+        if (source_record && source_record->sleep_day == sleep_day) {
+            if (!replacement_added &&
+                !append_record(replacement, replacement.records_[0])) {
+                return {};
+            }
+            replacement_added = true;
+            source_index++;
+            continue;
+        }
+
+        if (!replacement_added &&
+            (!source_record || source_record->sleep_day < sleep_day)) {
+            if (!append_record(replacement, replacement.records_[0])) {
+                return {};
+            }
+            replacement_added = true;
+            continue;
+        }
+
+        if (!source_record || !append_record(source, *source_record)) {
+            return {};
+        }
+        source_index++;
+    }
+
+    if (next_record != counts.records ||
+        next_session != counts.sessions ||
+        next_mask_window != counts.mask_windows ||
+        next_file != counts.files || next_coverage != counts.coverage ||
+        next_signal_layout != counts.signal_layouts ||
+        next_fallback_file != counts.fallback_files ||
+        next_fallback_section != counts.fallback_sections ||
+        next_path != counts.paths) {
+        return {};
+    }
+    return catalog;
+}
+
 std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
     const NightCatalog &source,
     const char *path,

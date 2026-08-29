@@ -57,6 +57,10 @@ struct ReportTaskControlSnapshot {
     uint32_t durable_catalog_generation = 0;
     bool foreground_active = false;
     bool background_active = false;
+    NightCatalogRefreshState catalog_refresh_state =
+        NightCatalogRefreshState::Idle;
+    uint32_t catalog_refresh_generation = 0;
+    bool catalog_refresh_retryable = false;
 };
 
 struct ReportTaskDiagnosticSnapshot {
@@ -172,7 +176,8 @@ public:
     OperationAdmission request_catalog_refresh(
         bool current_offset_valid,
         int32_t current_offset_minutes,
-        uint32_t generation);
+        uint32_t generation,
+        const NightCatalogRefreshTarget &target = {});
     void publish_activity(const ActivitySnapshot &activity);
 
     ReportTaskControlSnapshot control_snapshot() const;

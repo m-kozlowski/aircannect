@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <new>
+#include <stdio.h>
 #include <string.h>
 #include <type_traits>
 
@@ -448,6 +449,9 @@ struct NightCatalogRefreshRuntime {
     void clear_summary() {
         summary.reset();
         previous_catalog.reset();
+        target = {};
+        datalog_root[0] = '\0';
+        metadata_root[0] = '\0';
     }
 
     Phase phase = Phase::Idle;
@@ -457,6 +461,9 @@ struct NightCatalogRefreshRuntime {
 
     std::shared_ptr<const NightCatalogSummarySnapshot> summary;
     std::shared_ptr<const NightCatalog> previous_catalog;
+    NightCatalogRefreshTarget target;
+    char datalog_root[AC_STORAGE_PATH_MAX] = {};
+    char metadata_root[AC_STORAGE_PATH_MAX] = {};
 
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_capacity = 0;
@@ -578,27 +585,69 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     bool current_offset_valid,
     int32_t current_offset_minutes,
     uint32_t generation,
-    std::shared_ptr<const NightCatalog> previous_catalog) {
+    std::shared_ptr<const NightCatalog> previous_catalog,
+    const NightCatalogRefreshTarget &target) {
     if (!runtime_ || !scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
     if (generation == 0) return OperationAdmission::Rejected;
 
+    if (target.valid()) {
+        if (!previous_catalog || strlen(target.datalog_sleep_day) != 8) {
+            return OperationAdmission::Rejected;
+        }
+        for (size_t i = 0; i < 8; ++i) {
+            if (target.datalog_sleep_day[i] < '0' ||
+                target.datalog_sleep_day[i] > '9') {
+                return OperationAdmission::Rejected;
+            }
+        }
+    }
+
     reset_transient();
     runtime_->summary = std::move(summary);
     runtime_->previous_catalog = std::move(previous_catalog);
+    runtime_->target = target;
     runtime_->current_offset_valid = current_offset_valid;
     runtime_->current_offset_minutes = current_offset_minutes;
 
-    StorageScanRoot roots[] = {
-        {"/DATALOG", true},
-        {EDF_SESSION_METADATA_ROOT, true},
-        {"/STR.edf", false},
-        {REPORT_FALLBACK_ARTIFACT_ROOT, false},
-    };
+    StorageScanRoot roots[4] = {};
+    size_t root_count = 0;
+    if (target.valid()) {
+        const int datalog_length = snprintf(
+            runtime_->datalog_root,
+            sizeof(runtime_->datalog_root),
+            "/DATALOG/%s",
+            target.datalog_sleep_day);
+        const int metadata_length = snprintf(
+            runtime_->metadata_root,
+            sizeof(runtime_->metadata_root),
+            "%s/%s",
+            EDF_SESSION_METADATA_ROOT,
+            target.datalog_sleep_day);
+        if (datalog_length <= 0 ||
+            static_cast<size_t>(datalog_length) >=
+                sizeof(runtime_->datalog_root) ||
+            metadata_length <= 0 ||
+            static_cast<size_t>(metadata_length) >=
+                sizeof(runtime_->metadata_root)) {
+            reset_transient();
+            return OperationAdmission::Rejected;
+        }
+
+        roots[root_count++] = {runtime_->datalog_root, true};
+        roots[root_count++] = {runtime_->metadata_root, true};
+        roots[root_count++] = {"/STR.edf", false};
+    } else {
+        roots[root_count++] = {"/DATALOG", true};
+        roots[root_count++] = {EDF_SESSION_METADATA_ROOT, true};
+        roots[root_count++] = {"/STR.edf", false};
+        roots[root_count++] = {REPORT_FALLBACK_ARTIFACT_ROOT, false};
+    }
+
     StorageScanCommand command;
     command.roots = roots;
-    command.root_count = sizeof(roots) / sizeof(roots[0]);
+    command.root_count = root_count;
     command.generation = generation;
 
     const OperationSubmission submission = scan_port_->request_scan(command);
@@ -1643,6 +1692,39 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             ? status.files_indexed - skipped
             : 0;
         set_warning(status, "night_catalog_fallback_invalid");
+    }
+
+    if (runtime.target.valid()) {
+        if (!runtime.previous_catalog) {
+            error = "night_catalog_target_base_missing";
+            catalog.reset();
+            return false;
+        }
+        if (catalog->size() != 1) {
+            error = catalog->size() == 0
+                ? "night_catalog_target_empty"
+                : "night_catalog_target_count_mismatch";
+            catalog.reset();
+            return false;
+        }
+        if (!catalog->find(runtime.target.sleep_day)) {
+            error = "night_catalog_target_day_mismatch";
+            catalog.reset();
+            return false;
+        }
+
+        std::shared_ptr<const NightCatalog> merged =
+            NightCatalogBuilder::upsert_night(
+                *runtime.previous_catalog,
+                *catalog,
+                runtime.target.sleep_day);
+        if (!merged) {
+            error = "night_catalog_target_merge_failed";
+            catalog.reset();
+            retryable = true;
+            return false;
+        }
+        catalog = std::move(merged);
     }
     return true;
 }

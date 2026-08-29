@@ -152,6 +152,7 @@ struct EdfRecorderManager::ColdState {
     EdfSessionMetadata segment_metadata;
     EdfSessionMetadata pending_final_metadata;
     EdfSessionMetadataPublication metadata_open_publication;
+    EdfCatalogRefreshHint latest_catalog_refresh_hint;
     bool segment_metadata_active = false;
     bool pending_final_metadata_valid = false;
 
@@ -371,6 +372,20 @@ const EdfRecorderStatus &EdfRecorderManager::status() const {
     status_.event_coverage_session_gap_count =
         event_coverage_session_gaps();
     return status_;
+}
+
+bool EdfRecorderManager::latest_catalog_refresh_hint(
+    EdfCatalogRefreshHint &out) const {
+    out = {};
+    if (!cold_ ||
+        cold_->latest_catalog_refresh_hint.sessions_ended !=
+            status_.sessions_ended ||
+        !cold_->latest_catalog_refresh_hint.valid()) {
+        return false;
+    }
+
+    out = cold_->latest_catalog_refresh_hint;
+    return true;
 }
 
 bool EdfRecorderManager::handle_recording_gate_frame(
@@ -690,11 +705,12 @@ bool EdfRecorderManager::build_segment_metadata(
         metadata);
 }
 
-void EdfRecorderManager::finalize_segment_metadata(
+bool EdfRecorderManager::finalize_segment_metadata(
     const char *segment_end_time,
     const char *therapy_end_time,
-    uint32_t now_ms) {
-    if (!cold_->segment_metadata_active) return;
+    uint32_t now_ms,
+    EdfSessionMetadata *finalized_metadata) {
+    if (!cold_->segment_metadata_active) return false;
 
     int64_t raw_segment_end_ms = 0;
     int64_t raw_therapy_end_ms = 0;
@@ -703,19 +719,21 @@ void EdfRecorderManager::finalize_segment_metadata(
         set_error("session_metadata_end_invalid");
         cold_->segment_metadata_active = false;
         cold_->metadata_open_publication = {};
-        return;
+        return false;
     }
 
-    finalize_segment_metadata_at(raw_segment_end_ms,
-                                 raw_therapy_end_ms,
-                                 now_ms);
+    return finalize_segment_metadata_at(raw_segment_end_ms,
+                                        raw_therapy_end_ms,
+                                        now_ms,
+                                        finalized_metadata);
 }
 
-void EdfRecorderManager::finalize_segment_metadata_at(
+bool EdfRecorderManager::finalize_segment_metadata_at(
     int64_t raw_segment_end_ms,
     int64_t raw_therapy_end_ms,
-    uint32_t now_ms) {
-    if (!cold_->segment_metadata_active) return;
+    uint32_t now_ms,
+    EdfSessionMetadata *finalized_metadata) {
+    if (!cold_->segment_metadata_active) return false;
 
     EdfSessionMetadata finalized = cold_->segment_metadata;
     if (!edf_session_metadata_finalize(finalized,
@@ -724,12 +742,12 @@ void EdfRecorderManager::finalize_segment_metadata_at(
         set_error("session_metadata_finalize_failed");
         cold_->segment_metadata_active = false;
         cold_->metadata_open_publication = {};
-        return;
+        return false;
     }
 
     if (cold_->pending_final_metadata_valid) {
         set_error("session_metadata_finalize_queue_full");
-        return;
+        return false;
     }
 
     cold_->pending_final_metadata = finalized;
@@ -738,6 +756,8 @@ void EdfRecorderManager::finalize_segment_metadata_at(
     cold_->metadata_open_publication = {};
     (void)queue_pending_final_metadata();
     cold_->metadata_publisher.poll(now_ms);
+    if (finalized_metadata) *finalized_metadata = finalized;
+    return true;
 }
 
 bool EdfRecorderManager::queue_pending_final_metadata() {
@@ -923,8 +943,14 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     const char *therapy_end = session.end_device_time[0]
         ? session.end_device_time
         : segment_end;
+    EdfSessionMetadata finalized_metadata;
+    bool metadata_finalized = false;
     if (segment_end && segment_end[0] && therapy_end && therapy_end[0]) {
-        finalize_segment_metadata(segment_end, therapy_end, now_ms);
+        metadata_finalized = finalize_segment_metadata(
+            segment_end,
+            therapy_end,
+            now_ms,
+            &finalized_metadata);
     }
 
     status_.active = false;
@@ -935,6 +961,16 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     pending_mask_event_start_time_[0] = 0;
     numeric_open_frame_buffer_.clear();
     status_.sessions_ended++;
+    cold_->latest_catalog_refresh_hint = {};
+    if (metadata_finalized) {
+        EdfCatalogRefreshHint &hint =
+            cold_->latest_catalog_refresh_hint;
+        hint.sessions_ended = status_.sessions_ended;
+        hint.sleep_day = finalized_metadata.canonical_sleep_day;
+        copy_cstr(hint.datalog_sleep_day,
+                  sizeof(hint.datalog_sleep_day),
+                  finalized_metadata.datalog_sleep_day);
+    }
     status_.event_coverage_session_gap_count =
         event_coverage_session_gaps();
 

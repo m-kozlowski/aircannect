@@ -40,6 +40,15 @@ struct NightCatalogRefreshStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
+struct NightCatalogRefreshTarget {
+    SleepDayId sleep_day;
+    char datalog_sleep_day[9] = {};
+
+    bool valid() const {
+        return sleep_day.valid() && datalog_sleep_day[0] != '\0';
+    }
+};
+
 struct NightCatalogRefreshRuntime;
 
 class NightCatalogRefreshService {
@@ -58,7 +67,8 @@ public:
         bool current_offset_valid,
         int32_t current_offset_minutes,
         uint32_t generation,
-        std::shared_ptr<const NightCatalog> previous_catalog = {});
+        std::shared_ptr<const NightCatalog> previous_catalog = {},
+        const NightCatalogRefreshTarget &target = {});
     bool poll();
     void cancel();
 
