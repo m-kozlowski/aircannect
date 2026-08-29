@@ -153,6 +153,10 @@ public:
     static std::shared_ptr<const NightCatalog> build(
         const NightCatalogBuildInput &input,
         NightCatalogBuildStatus *status = nullptr);
+    static std::shared_ptr<const NightCatalog> upsert_night(
+        const NightCatalog &catalog,
+        const NightCatalog &replacement,
+        SleepDayId sleep_day);
     static std::shared_ptr<const NightCatalog> replace_fallback(
         const NightCatalog &catalog,
         const char *path,

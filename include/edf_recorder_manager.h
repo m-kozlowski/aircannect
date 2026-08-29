@@ -38,6 +38,17 @@ enum class EdfSa2Input : uint8_t {
     LocalOximetry,
 };
 
+struct EdfCatalogRefreshHint {
+    uint32_t sessions_ended = 0;
+    SleepDayId sleep_day;
+    char datalog_sleep_day[9] = {};
+
+    bool valid() const {
+        return sessions_ended != 0 && sleep_day.valid() &&
+               datalog_sleep_day[0] != '\0';
+    }
+};
+
 struct EdfRecorderStatus {
     // capture state
     bool enabled = false;
@@ -143,6 +154,7 @@ public:
     void accept_oximetry_sample(const OximetrySample &sample);
     const EdfRecorderStatus &status() const;
     uint32_t sessions_ended() const { return status_.sessions_ended; }
+    bool latest_catalog_refresh_hint(EdfCatalogRefreshHint &out) const;
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }
@@ -267,12 +279,16 @@ private:
                                            uint32_t now_ms);
     bool build_segment_metadata(const char *start_time,
                                 EdfSessionMetadata &metadata) const;
-    void finalize_segment_metadata(const char *segment_end_time,
-                                   const char *therapy_end_time,
-                                   uint32_t now_ms);
-    void finalize_segment_metadata_at(int64_t raw_segment_end_ms,
-                                      int64_t raw_therapy_end_ms,
-                                      uint32_t now_ms);
+    bool finalize_segment_metadata(
+        const char *segment_end_time,
+        const char *therapy_end_time,
+        uint32_t now_ms,
+        EdfSessionMetadata *finalized_metadata = nullptr);
+    bool finalize_segment_metadata_at(
+        int64_t raw_segment_end_ms,
+        int64_t raw_therapy_end_ms,
+        uint32_t now_ms,
+        EdfSessionMetadata *finalized_metadata = nullptr);
     bool queue_pending_final_metadata();
 
     // EDF file opens

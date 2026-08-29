@@ -72,6 +72,7 @@ struct ReportTaskCommand {
     uint32_t generation = 0;
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
+    NightCatalogRefreshTarget catalog_target;
 };
 
 struct PendingCatalogRefresh {
@@ -79,6 +80,7 @@ struct PendingCatalogRefresh {
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
     bool summary_attempted = false;
+    NightCatalogRefreshTarget target;
 
     bool valid() const { return generation != 0; }
     void clear() { *this = {}; }
@@ -278,6 +280,7 @@ struct ReportTask::Runtime {
             pending_refresh.generation = refresh_generation;
             pending_refresh.current_offset_valid = refresh_offset_valid;
             pending_refresh.current_offset_minutes = refresh_offset_minutes;
+            pending_refresh.target = refresh_target;
             pending_refresh.summary_attempted = true;
         }
 
@@ -1388,6 +1391,7 @@ struct ReportTask::Runtime {
 
     bool refresh_offset_valid = false;
     int32_t refresh_offset_minutes = 0;
+    NightCatalogRefreshTarget refresh_target;
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
@@ -1563,7 +1567,8 @@ OperationAdmission ReportTask::request_payload_cache(
 OperationAdmission ReportTask::request_catalog_refresh(
     bool current_offset_valid,
     int32_t current_offset_minutes,
-    uint32_t generation) {
+    uint32_t generation,
+    const NightCatalogRefreshTarget &target) {
     if (!runtime_ || !runtime_->initialized || generation == 0) {
         return OperationAdmission::Rejected;
     }
@@ -1573,6 +1578,7 @@ OperationAdmission ReportTask::request_catalog_refresh(
     command.generation = generation;
     command.current_offset_valid = current_offset_valid;
     command.current_offset_minutes = current_offset_minutes;
+    command.catalog_target = target;
     return runtime_->enqueue(command);
 }
 
@@ -1593,6 +1599,11 @@ ReportTaskControlSnapshot ReportTask::control_snapshot() const {
         runtime_->status.durable_catalog_generation;
     out.foreground_active = runtime_->status.foreground_active;
     out.background_active = runtime_->status.background_active;
+    out.catalog_refresh_state = runtime_->status.catalog_refresh.state;
+    out.catalog_refresh_generation =
+        runtime_->status.catalog_refresh.generation;
+    out.catalog_refresh_retryable =
+        runtime_->status.catalog_refresh.retryable;
 
     runtime_->unlock();
     return out;
@@ -1948,7 +1959,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     command.current_offset_valid;
                 runtime.pending_refresh.current_offset_minutes =
                     command.current_offset_minutes;
-                runtime.pending_refresh.summary_attempted = false;
+                runtime.pending_refresh.target = command.catalog_target;
+                runtime.pending_refresh.summary_attempted =
+                    command.catalog_target.valid();
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
                 break;
@@ -2062,6 +2075,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         runtime.refresh_offset_valid;
                     runtime.pending_refresh.current_offset_minutes =
                         runtime.refresh_offset_minutes;
+                    runtime.pending_refresh.target = runtime.refresh_target;
                     runtime.pending_refresh.summary_attempted = true;
                 }
                 runtime.catalog_refresh_retry_at_ms =
@@ -2078,6 +2092,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.command_failures++;
             }
             runtime.refresh_generation = 0;
+            runtime.refresh_target = {};
             worked = true;
         }
     }
@@ -2120,6 +2135,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.catalog_store_retry_at_ms = 0;
             runtime.catalog_store_retry_attempt = 0;
         }
+        worked = true;
+    }
+
+    if (runtime.pending_refresh.valid() &&
+        runtime.pending_refresh.target.valid() &&
+        !runtime.catalog && !runtime.catalog_load_pending &&
+        runtime.store_purpose != CatalogStorePurpose::Load) {
+        runtime.pending_refresh.target = {};
+        runtime.pending_refresh.summary_attempted = false;
         worked = true;
     }
 
@@ -2186,13 +2210,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_refresh.current_offset_valid,
                 runtime.pending_refresh.current_offset_minutes,
                 runtime.pending_refresh.generation,
-                runtime.catalog);
+                runtime.catalog,
+                runtime.pending_refresh.target);
         if (admitted == OperationAdmission::Accepted) {
             runtime.refresh_generation = runtime.pending_refresh.generation;
             runtime.refresh_offset_valid =
                 runtime.pending_refresh.current_offset_valid;
             runtime.refresh_offset_minutes =
                 runtime.pending_refresh.current_offset_minutes;
+            runtime.refresh_target = runtime.pending_refresh.target;
             runtime.pending_refresh.clear();
             runtime.catalog_refresh_retry_at_ms = 0;
             worked = true;
