@@ -26,6 +26,7 @@ public:
 
     bool available() const { return device_ != nullptr; }
     bool backlight_on() const { return backlight_visible_.load(); }
+    void set_backlight(bool enabled);
     void toggle_backlight();
     bool previous_page();
     bool next_page();

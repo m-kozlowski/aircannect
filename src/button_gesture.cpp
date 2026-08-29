@@ -61,10 +61,12 @@ void ButtonGestureState::suppress_current_press() {
 }
 
 void ButtonChordGestureState::begin(ButtonInput input,
+                                    uint8_t gestures,
                                     uint16_t long_press_ms,
                                     uint32_t now_ms) {
     input_ = button_input(input.first_button_key,
                           input.second_button_key);
+    gestures_ = gestures;
     long_press_ms_ = long_press_ms;
     pressed_ms_ = now_ms;
     emitted_ = false;
@@ -72,6 +74,7 @@ void ButtonChordGestureState::begin(ButtonInput input,
 
 void ButtonChordGestureState::reset() {
     input_ = {};
+    gestures_ = BUTTON_GESTURE_NONE;
     long_press_ms_ = 0;
     pressed_ms_ = 0;
     emitted_ = false;
@@ -83,7 +86,9 @@ bool ButtonChordGestureState::update(bool first_pressed,
                                      ButtonGesture &event) {
     if (!active()) return false;
 
-    if (!emitted_ && first_pressed && second_pressed &&
+    if (!emitted_ &&
+        (gestures_ & BUTTON_GESTURE_LONG) != 0 &&
+        first_pressed && second_pressed &&
         now_ms - pressed_ms_ >= long_press_ms_) {
         emitted_ = true;
         event = ButtonGesture::LongPress;
@@ -91,8 +96,10 @@ bool ButtonChordGestureState::update(bool first_pressed,
     }
     if (!emitted_ && (!first_pressed || !second_pressed)) {
         emitted_ = true;
-        event = ButtonGesture::ShortPress;
-        return true;
+        if ((gestures_ & BUTTON_GESTURE_SHORT) != 0) {
+            event = ButtonGesture::ShortPress;
+            return true;
+        }
     }
 
     if (!first_pressed && !second_pressed) reset();

@@ -167,6 +167,8 @@ void append_keybindings_json(LargeTextBuffer &json,
 
 void append_keybinding_input_schema(LargeTextBuffer &json,
                                     ButtonInput input,
+                                    const ButtonBinding *defaults,
+                                    size_t default_count,
                                     bool &first_input) {
     char id[48] = {};
     char label[64] = {};
@@ -193,13 +195,11 @@ void append_keybinding_input_schema(LargeTextBuffer &json,
     for (ButtonGesture gesture : gestures) {
         if (!board_button_input_supported(input, gesture)) continue;
 
-        LocalActionId default_action = LocalActionId::None;
-        if (!input.chord()) {
-            const BoardButtonDefinition *button =
-                board_button_find(input.first_button_key);
-            if (!button) continue;
-            default_action = board_button_default_action(*button, gesture);
-        }
+        const ButtonBinding *profile_default = button_binding_find(
+            defaults, default_count, input, gesture);
+        const LocalActionId default_action =
+            profile_default ? profile_default->action
+                            : LocalActionId::None;
         const LocalActionDefinition *action =
             local_action_find(default_action);
 
@@ -220,16 +220,31 @@ void append_keybindings_schema(LargeTextBuffer &json) {
 
     size_t button_count = 0;
     const BoardButtonDefinition *buttons = board_button_catalog(button_count);
+    size_t default_count = 0;
+    const ButtonBinding *defaults =
+        board_button_binding_defaults(default_count);
     bool first_input = true;
     for (size_t i = 0; i < button_count; ++i) {
         append_keybinding_input_schema(
-            json, button_input(buttons[i].key), first_input);
+            json, button_input(buttons[i].key), defaults, default_count,
+            first_input);
+    }
 
-        for (size_t other = i + 1; other < button_count; ++other) {
-            append_keybinding_input_schema(
-                json, button_input(buttons[i].key, buttons[other].key),
-                first_input);
+    for (size_t i = 0; i < default_count; ++i) {
+        if (!defaults[i].input.chord()) continue;
+
+        bool already_added = false;
+        for (size_t previous = 0; previous < i; ++previous) {
+            if (defaults[previous].input == defaults[i].input) {
+                already_added = true;
+                break;
+            }
         }
+        if (already_added) continue;
+
+        append_keybinding_input_schema(
+            json, defaults[i].input, defaults, default_count,
+            first_input);
     }
     json += "]";
 

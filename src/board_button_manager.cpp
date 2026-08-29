@@ -7,6 +7,7 @@ namespace aircannect {
 bool BoardButtonManager::begin(const BoardButtonDefinition *buttons,
                                size_t count) {
     buttons_.clear();
+    chords_.clear();
     pending_events_.clear();
     chord_.reset();
     if (!validate_button_catalog(buttons, count)) return false;
@@ -28,6 +29,15 @@ bool BoardButtonManager::begin(const BoardButtonDefinition *buttons,
         buttons_.push_back(runtime);
     }
     return true;
+}
+
+void BoardButtonManager::set_chords(const ButtonChordDefinition *chords,
+                                    size_t count,
+                                    uint32_t now_ms) {
+    std::vector<ButtonChordDefinition> next;
+    if (chords && count > 0) next.assign(chords, chords + count);
+    chords_.swap(next);
+    rearm(now_ms);
 }
 
 void BoardButtonManager::set_event_handler(EventHandler handler,
@@ -110,12 +120,21 @@ void BoardButtonManager::poll_chord(uint32_t now_ms) {
 
     const ButtonInput input = button_input(pressed[0]->definition.key,
                                            pressed[1]->definition.key);
+    const ButtonChordDefinition *configured = nullptr;
+    for (const ButtonChordDefinition &candidate : chords_) {
+        if (candidate.input == input) {
+            configured = &candidate;
+            break;
+        }
+    }
+    if (!configured) return;
+
     const uint16_t long_press_ms =
         pressed[0]->definition.long_press_ms >
                 pressed[1]->definition.long_press_ms
             ? pressed[0]->definition.long_press_ms
             : pressed[1]->definition.long_press_ms;
-    chord_.begin(input, long_press_ms, now_ms);
+    chord_.begin(input, configured->gestures, long_press_ms, now_ms);
 
     pressed[0]->gesture.suppress_current_press();
     pressed[1]->gesture.suppress_current_press();

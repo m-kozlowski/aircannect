@@ -8,6 +8,14 @@
 #define AC_POWER_HOLD_ACTIVE_HIGH 1
 #endif
 
+#ifndef AC_POWER_WAKE_GPIO
+#define AC_POWER_WAKE_GPIO -1
+#endif
+
+#ifndef AC_POWER_WAKE_ACTIVE_LOW
+#define AC_POWER_WAKE_ACTIVE_LOW 1
+#endif
+
 namespace aircannect {
 
 void board_power_begin();

@@ -33,14 +33,9 @@ void LocalActionRouter::apply_bindings(const ButtonBinding *bindings,
 LocalActionId LocalActionRouter::effective_action(
     ButtonInput input,
     ButtonGesture gesture) const {
-    input = button_input(input.first_button_key, input.second_button_key);
-    for (const ButtonBinding &binding : bindings_) {
-        if (binding.input == input &&
-            binding.gesture == gesture) {
-            return binding.action;
-        }
-    }
-    return LocalActionId::None;
+    const ButtonBinding *binding = button_binding_find(
+        bindings_.data(), bindings_.size(), input, gesture);
+    return binding ? binding->action : LocalActionId::None;
 }
 
 bool LocalActionRouter::dispatch(ButtonInput input,

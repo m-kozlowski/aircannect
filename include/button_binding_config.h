@@ -48,6 +48,8 @@ void button_binding_reset(ButtonBindingConfig &config);
 bool resolve_button_bindings(const BoardButtonDefinition *buttons,
                              size_t button_count,
                              const ButtonBindingConfig &config,
-                             std::vector<ButtonBinding> &resolved);
+                             std::vector<ButtonBinding> &resolved,
+                             const ButtonBinding *binding_defaults = nullptr,
+                             size_t binding_default_count = 0);
 
 }  // namespace aircannect

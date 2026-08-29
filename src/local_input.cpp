@@ -41,6 +41,24 @@ ButtonInput button_input(uint16_t first_button_key,
     return {first_button_key, second_button_key};
 }
 
+const ButtonBinding *button_binding_find(const ButtonBinding *bindings,
+                                         size_t count,
+                                         ButtonInput input,
+                                         ButtonGesture gesture) {
+    if (!bindings) return nullptr;
+    input = button_input(input.first_button_key, input.second_button_key);
+
+    for (size_t i = 0; i < count; ++i) {
+        const ButtonInput candidate = button_input(
+            bindings[i].input.first_button_key,
+            bindings[i].input.second_button_key);
+        if (candidate == input && bindings[i].gesture == gesture) {
+            return &bindings[i];
+        }
+    }
+    return nullptr;
+}
+
 const LocalActionDefinition *local_action_catalog(size_t &count) {
     count = sizeof(ACTIONS) / sizeof(ACTIONS[0]);
     return ACTIONS;
@@ -111,18 +129,6 @@ bool validate_button_catalog(const BoardButtonDefinition *buttons,
         }
     }
     return true;
-}
-
-LocalActionId board_button_default_action(
-    const BoardButtonDefinition &button,
-    ButtonGesture gesture) {
-    switch (gesture) {
-        case ButtonGesture::ShortPress:
-            return button.short_action;
-        case ButtonGesture::LongPress:
-            return button.long_action;
-    }
-    return LocalActionId::None;
 }
 
 bool board_button_supports_gesture(const BoardButtonDefinition &button,

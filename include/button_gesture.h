@@ -31,6 +31,7 @@ private:
 class ButtonChordGestureState {
 public:
     void begin(ButtonInput input,
+               uint8_t gestures,
                uint16_t long_press_ms,
                uint32_t now_ms);
     void reset();
@@ -44,6 +45,7 @@ public:
 
 private:
     ButtonInput input_;
+    uint8_t gestures_ = BUTTON_GESTURE_NONE;
     uint16_t long_press_ms_ = 0;
     uint32_t pressed_ms_ = 0;
     bool emitted_ = false;

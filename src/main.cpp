@@ -229,6 +229,7 @@ static bool runtime_network_published = false;
 static uint32_t export_config_due_ms = 0;
 static bool local_poweroff_requested = false;
 static bool local_poweroff_attempted = false;
+static bool local_poweroff_backlight_was_on = false;
 static bool local_as11_disconnect_requested = false;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
@@ -278,6 +279,8 @@ static bool power_off_aircannect(void *, uint32_t) {
         return false;
     }
 
+    local_poweroff_backlight_was_on = display_manager.backlight_on();
+    display_manager.set_backlight(false);
     local_poweroff_requested = true;
     local_poweroff_attempted = false;
     return true;
@@ -1548,7 +1551,15 @@ void loop() {
         local_poweroff_attempted = true;
         Log::logf(CAT_GENERAL, LOG_INFO, "[POWER] powering off\n");
         delay(50);
-        (void)board_power_off();
+        if (!board_power_off()) {
+            Log::logf(CAT_GENERAL, LOG_ERROR,
+                      "[POWER] power off failed\n");
+            if (local_poweroff_backlight_was_on) {
+                display_manager.set_backlight(true);
+            }
+            local_poweroff_requested = false;
+            local_poweroff_attempted = false;
+        }
     }
 
     const bool arduino_ota_poll_allowed =

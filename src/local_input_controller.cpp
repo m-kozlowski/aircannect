@@ -15,12 +15,16 @@ bool LocalInputController::begin() {
 
     std::vector<ButtonBinding> defaults;
     const ButtonBindingConfig no_overrides;
-    if (!resolve_button_bindings(catalog, count, no_overrides, defaults)) {
+    size_t default_count = 0;
+    const ButtonBinding *binding_defaults =
+        board_button_binding_defaults(default_count);
+    if (!resolve_button_bindings(catalog, count, no_overrides, defaults,
+                                 binding_defaults, default_count)) {
         return false;
     }
 
-    actions_.apply_bindings(defaults.data(), defaults.size());
     buttons_.set_event_handler(handle_button_event, this);
+    apply_bindings(defaults.data(), defaults.size(), millis());
     return true;
 }
 
@@ -39,8 +43,12 @@ bool LocalInputController::apply_config(const ButtonBindingConfig &config,
                                         uint32_t now_ms) {
     size_t count = 0;
     const BoardButtonDefinition *catalog = board_button_catalog(count);
+    size_t default_count = 0;
+    const ButtonBinding *binding_defaults =
+        board_button_binding_defaults(default_count);
     std::vector<ButtonBinding> resolved;
-    if (!resolve_button_bindings(catalog, count, config, resolved)) {
+    if (!resolve_button_bindings(catalog, count, config, resolved,
+                                 binding_defaults, default_count)) {
         return false;
     }
 
@@ -51,8 +59,35 @@ bool LocalInputController::apply_config(const ButtonBindingConfig &config,
 void LocalInputController::apply_bindings(const ButtonBinding *bindings,
                                           size_t count,
                                           uint32_t now_ms) {
+    std::vector<ButtonChordDefinition> chords;
+    chords.reserve(count / 2);
+    for (size_t i = 0; i < count; ++i) {
+        if (!bindings[i].input.chord() ||
+            bindings[i].action == LocalActionId::None ||
+            !local_action_find(bindings[i].action)) {
+            continue;
+        }
+
+        ButtonChordDefinition *chord = nullptr;
+        for (ButtonChordDefinition &candidate : chords) {
+            if (candidate.input == bindings[i].input) {
+                chord = &candidate;
+                break;
+            }
+        }
+        if (!chord) {
+            chords.push_back({bindings[i].input, BUTTON_GESTURE_NONE});
+            chord = &chords.back();
+        }
+
+        chord->gestures |=
+            bindings[i].gesture == ButtonGesture::ShortPress
+                ? BUTTON_GESTURE_SHORT
+                : BUTTON_GESTURE_LONG;
+    }
+
     actions_.apply_bindings(bindings, count);
-    buttons_.rearm(now_ms);
+    buttons_.set_chords(chords.data(), chords.size(), now_ms);
 }
 
 void LocalInputController::handle_button_event(void *context,

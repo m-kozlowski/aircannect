@@ -32,6 +32,39 @@ bool valid_input(ButtonInput input) {
            input.first_button_key != input.second_button_key;
 }
 
+bool catalog_contains_button(const BoardButtonDefinition *buttons,
+                             size_t count,
+                             uint16_t button_key) {
+    for (size_t i = 0; i < count; ++i) {
+        if (buttons[i].key == button_key) return true;
+    }
+    return false;
+}
+
+bool append_pair_bindings(const BoardButtonDefinition *buttons,
+                          size_t button_count,
+                          ButtonInput input,
+                          std::vector<ButtonBinding> &resolved) {
+    input = button_input(input.first_button_key, input.second_button_key);
+    if (!input.chord() ||
+        !catalog_contains_button(buttons, button_count,
+                                 input.first_button_key) ||
+        !catalog_contains_button(buttons, button_count,
+                                 input.second_button_key)) {
+        return false;
+    }
+    if (button_binding_find(resolved.data(), resolved.size(), input,
+                            ButtonGesture::ShortPress)) {
+        return true;
+    }
+
+    resolved.push_back(
+        {input, ButtonGesture::ShortPress, LocalActionId::None});
+    resolved.push_back(
+        {input, ButtonGesture::LongPress, LocalActionId::None});
+    return true;
+}
+
 }  // namespace
 
 bool operator==(const ButtonBinding &left, const ButtonBinding &right) {
@@ -203,34 +236,66 @@ void button_binding_reset(ButtonBindingConfig &config) {
 bool resolve_button_bindings(const BoardButtonDefinition *buttons,
                              size_t button_count,
                              const ButtonBindingConfig &config,
-                             std::vector<ButtonBinding> &resolved) {
+                             std::vector<ButtonBinding> &resolved,
+                             const ButtonBinding *binding_defaults,
+                             size_t binding_default_count) {
     resolved.clear();
-    if (!validate_button_catalog(buttons, button_count)) return false;
+    if (!validate_button_catalog(buttons, button_count) ||
+        (binding_default_count > 0 && !binding_defaults)) {
+        return false;
+    }
 
-    resolved.reserve(button_count * button_count + button_count);
+    resolved.reserve(button_count * 2 + binding_default_count * 2 +
+                     config.overrides.size() * 2);
     for (size_t i = 0; i < button_count; ++i) {
         const BoardButtonDefinition &button = buttons[i];
         if (board_button_supports_gesture(
                 button, ButtonGesture::ShortPress)) {
             resolved.push_back({button_input(button.key),
                                 ButtonGesture::ShortPress,
-                                button.short_action});
+                                LocalActionId::None});
         }
         if (board_button_supports_gesture(
                 button, ButtonGesture::LongPress)) {
             resolved.push_back({button_input(button.key),
                                 ButtonGesture::LongPress,
-                                button.long_action});
+                                LocalActionId::None});
         }
+    }
 
-        for (size_t other = i + 1; other < button_count; ++other) {
-            const ButtonInput input =
-                button_input(button.key, buttons[other].key);
-            resolved.push_back({input, ButtonGesture::ShortPress,
-                                LocalActionId::None});
-            resolved.push_back({input, ButtonGesture::LongPress,
-                                LocalActionId::None});
+    for (size_t i = 0; i < binding_default_count; ++i) {
+        if (binding_defaults[i].input.chord() &&
+            !append_pair_bindings(buttons, button_count,
+                                  binding_defaults[i].input, resolved)) {
+            return false;
         }
+    }
+    if (config.state == ButtonBindingBlobState::Valid) {
+        for (const ButtonBinding &override : config.overrides) {
+            if (override.input.chord()) {
+                (void)append_pair_bindings(
+                    buttons, button_count, override.input, resolved);
+            }
+        }
+    }
+
+    for (size_t i = 0; i < binding_default_count; ++i) {
+        if (!local_action_find(binding_defaults[i].action) ||
+            !button_binding_find(resolved.data(), resolved.size(),
+                                 binding_defaults[i].input,
+                                 binding_defaults[i].gesture) ||
+            button_binding_find(binding_defaults, i,
+                                binding_defaults[i].input,
+                                binding_defaults[i].gesture)) {
+            return false;
+        }
+    }
+
+    for (ButtonBinding &binding : resolved) {
+        const ButtonBinding *profile_default = button_binding_find(
+            binding_defaults, binding_default_count,
+            binding.input, binding.gesture);
+        if (profile_default) binding.action = profile_default->action;
     }
 
     if (config.state != ButtonBindingBlobState::Valid) return true;

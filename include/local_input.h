@@ -50,8 +50,6 @@ struct BoardButtonDefinition {
     uint8_t gestures = BUTTON_GESTURE_NONE;
     uint16_t debounce_ms = 35;
     uint16_t long_press_ms = 1200;
-    LocalActionId short_action = LocalActionId::None;
-    LocalActionId long_action = LocalActionId::None;
 };
 
 struct ButtonInput {
@@ -67,9 +65,18 @@ struct ButtonBinding {
     LocalActionId action = LocalActionId::None;
 };
 
+struct ButtonChordDefinition {
+    ButtonInput input;
+    uint8_t gestures = BUTTON_GESTURE_NONE;
+};
+
 bool operator==(const ButtonInput &left, const ButtonInput &right);
 ButtonInput button_input(uint16_t first_button_key,
                          uint16_t second_button_key = 0);
+const ButtonBinding *button_binding_find(const ButtonBinding *bindings,
+                                         size_t count,
+                                         ButtonInput input,
+                                         ButtonGesture gesture);
 
 const LocalActionDefinition *local_action_catalog(size_t &count);
 const LocalActionDefinition *local_action_find(LocalActionId id);
@@ -79,9 +86,6 @@ bool parse_button_gesture(const char *value, ButtonGesture &gesture);
 
 bool validate_button_catalog(const BoardButtonDefinition *buttons,
                              size_t count);
-LocalActionId board_button_default_action(
-    const BoardButtonDefinition &button,
-    ButtonGesture gesture);
 bool board_button_supports_gesture(const BoardButtonDefinition &button,
                                    ButtonGesture gesture);
 

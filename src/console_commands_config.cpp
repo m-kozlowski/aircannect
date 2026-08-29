@@ -16,35 +16,25 @@
 namespace aircannect {
 namespace {
 
-const ButtonBinding *find_override(const ButtonBindingConfig &config,
-                                   ButtonInput input,
-                                   ButtonGesture gesture) {
-    if (config.state != ButtonBindingBlobState::Valid) return nullptr;
-    for (const ButtonBinding &binding : config.overrides) {
-        if (binding.input == input &&
-            binding.gesture == gesture) {
-            return &binding;
-        }
-    }
-    return nullptr;
-}
-
 void print_binding(Print &out,
                    const ButtonBindingConfig &config,
                    ButtonInput input,
-                   ButtonGesture gesture) {
+                   ButtonGesture gesture,
+                   const ButtonBinding *defaults,
+                   size_t default_count) {
     char id[48] = {};
     if (!board_button_input_id(input, id, sizeof(id))) return;
 
-    LocalActionId default_action = LocalActionId::None;
-    if (!input.chord()) {
-        const BoardButtonDefinition *button =
-            board_button_find(input.first_button_key);
-        if (!button) return;
-        default_action = board_button_default_action(*button, gesture);
-    }
+    const ButtonBinding *profile_default = button_binding_find(
+        defaults, default_count, input, gesture);
+    const LocalActionId default_action =
+        profile_default ? profile_default->action : LocalActionId::None;
 
-    const ButtonBinding *override = find_override(config, input, gesture);
+    const ButtonBinding *override =
+        config.state == ButtonBindingBlobState::Valid
+            ? button_binding_find(config.overrides.data(),
+                                  config.overrides.size(), input, gesture)
+            : nullptr;
     const LocalActionId effective =
         override ? override->action : default_action;
     const LocalActionDefinition *default_definition =
@@ -78,24 +68,19 @@ void print_keybindings(Print &out, const ButtonBindingConfig &config) {
 
     size_t count = 0;
     const BoardButtonDefinition *buttons = board_button_catalog(count);
-    const ButtonGesture gestures[] = {
-        ButtonGesture::ShortPress,
-        ButtonGesture::LongPress,
-    };
-    for (size_t i = 0; i < count; ++i) {
-        for (ButtonGesture gesture : gestures) {
-            if (!board_button_supports_gesture(buttons[i], gesture)) continue;
-            print_binding(out, config, button_input(buttons[i].key),
-                          gesture);
-        }
+    size_t default_count = 0;
+    const ButtonBinding *defaults =
+        board_button_binding_defaults(default_count);
+    std::vector<ButtonBinding> resolved;
+    if (!resolve_button_bindings(buttons, count, config, resolved,
+                                 defaults, default_count)) {
+        out.println("[CONFIG] keybinding catalog invalid");
+        return;
+    }
 
-        for (size_t other = i + 1; other < count; ++other) {
-            const ButtonInput input =
-                button_input(buttons[i].key, buttons[other].key);
-            for (ButtonGesture gesture : gestures) {
-                print_binding(out, config, input, gesture);
-            }
-        }
+    for (const ButtonBinding &binding : resolved) {
+        print_binding(out, config, binding.input, binding.gesture,
+                      defaults, default_count);
     }
 }
 

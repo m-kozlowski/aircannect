@@ -16,6 +16,7 @@
 namespace aircannect {
 
 const BoardButtonDefinition *board_button_catalog(size_t &count);
+const ButtonBinding *board_button_binding_defaults(size_t &count);
 const BoardButtonDefinition *board_button_find(uint16_t key);
 const BoardButtonDefinition *board_button_find(const char *id);
 bool board_button_input_find(const char *id, ButtonInput &input);

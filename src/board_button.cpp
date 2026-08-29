@@ -9,18 +9,36 @@ const BoardButtonDefinition *board_button_catalog(size_t &count) {
 #if AC_BUTTON_PROFILE == AC_BUTTON_PROFILE_WAVESHARE_154
     static constexpr BoardButtonDefinition BUTTONS[] = {
         {1, "boot", "BOOT", 0, true, BoardButtonPull::Up,
-         BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200,
-         LocalActionId::DisplayPreviousPage, LocalActionId::None},
+         BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200},
         {2, "power", "PWR", 5, true, BoardButtonPull::Up,
-         BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200,
-         LocalActionId::DisplayToggleBacklight,
-         LocalActionId::TherapyToggle},
+         BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200},
         {3, "plus", "PLUS", 4, true, BoardButtonPull::Up,
-         BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200,
-         LocalActionId::DisplayNextPage, LocalActionId::None},
+         BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200},
     };
     count = sizeof(BUTTONS) / sizeof(BUTTONS[0]);
     return BUTTONS;
+#else
+    count = 0;
+    return nullptr;
+#endif
+}
+
+const ButtonBinding *board_button_binding_defaults(size_t &count) {
+#if AC_BUTTON_PROFILE == AC_BUTTON_PROFILE_WAVESHARE_154
+    static constexpr ButtonBinding DEFAULTS[] = {
+        {{1, 0}, ButtonGesture::ShortPress,
+         LocalActionId::DisplayPreviousPage},
+        {{2, 0}, ButtonGesture::ShortPress,
+         LocalActionId::DisplayToggleBacklight},
+        {{2, 0}, ButtonGesture::LongPress,
+         LocalActionId::TherapyToggle},
+        {{3, 0}, ButtonGesture::ShortPress,
+         LocalActionId::DisplayNextPage},
+        {{1, 3}, ButtonGesture::LongPress,
+         LocalActionId::PowerOff},
+    };
+    count = sizeof(DEFAULTS) / sizeof(DEFAULTS[0]);
+    return DEFAULTS;
 #else
     count = 0;
     return nullptr;

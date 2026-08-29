@@ -18,6 +18,9 @@ public:
                                   uint32_t now_ms);
 
     bool begin(const BoardButtonDefinition *buttons, size_t count);
+    void set_chords(const ButtonChordDefinition *chords,
+                    size_t count,
+                    uint32_t now_ms);
     void set_event_handler(EventHandler handler, void *context);
     void poll(uint32_t now_ms);
     void rearm(uint32_t now_ms);
@@ -43,6 +46,7 @@ private:
               uint32_t now_ms) const;
 
     std::vector<RuntimeButton> buttons_;
+    std::vector<ButtonChordDefinition> chords_;
     std::vector<PendingButtonEvent> pending_events_;
     ButtonChordGestureState chord_;
     EventHandler event_handler_ = nullptr;

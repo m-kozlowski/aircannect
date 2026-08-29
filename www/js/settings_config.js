@@ -2053,16 +2053,43 @@
 
     function renderKeybindingsField(root, section, field, data) {
       const value = data[field.key] || {};
-      const overrides = new Map(normalizedKeybindingOverrides(value).map(
+      const normalizedOverrides = normalizedKeybindingOverrides(value);
+      const overrides = new Map(normalizedOverrides.map(
         (binding) => [binding.button + ":" + binding.gesture,
           binding.action]));
       const panel = document.createElement("div");
       panel.className = "keybindings-config";
       panel.dataset.keybindings = field.key;
       panel.dataset.section = section.id;
-      panel.dataset.orig = JSON.stringify(normalizedKeybindingOverrides(value));
+      panel.dataset.orig = JSON.stringify(normalizedOverrides);
 
-      (field.buttons || []).forEach((button) => {
+      const schemaInputs = new Map((field.buttons || []).map(
+        (button) => [button.id, button]));
+      const physicalButtons = (field.buttons || []).filter(
+        (button) => button.key !== undefined);
+      const physicalById = new Map(physicalButtons.map(
+        (button) => [button.id, button]));
+
+      normalizedOverrides.forEach((binding) => {
+        if (schemaInputs.has(binding.button) ||
+            !binding.button.includes("+")) return;
+
+        const ids = binding.button.split("+");
+        if (ids.length !== 2 || ids[0] === ids[1] ||
+            !physicalById.has(ids[0]) || !physicalById.has(ids[1])) return;
+
+        schemaInputs.set(binding.button, {
+          id: binding.button,
+          label: physicalById.get(ids[0]).label + " + " +
+            physicalById.get(ids[1]).label,
+          gestures: [
+            {gesture: "short", default: "none"},
+            {gesture: "long", default: "none"},
+          ],
+        });
+      });
+
+      function appendInputRows(button, before) {
         (button.gestures || []).forEach((gesture) => {
           const select = document.createElement("select");
           select.dataset.button = button.id;
@@ -2087,12 +2114,60 @@
 
           select.value = overrides.get(
             button.id + ":" + gesture.gesture) || "";
-          panel.appendChild(row(
+          const bindingRow = row(
             button.label + " / " + gesture.gesture,
             select,
-            "Hardware default: " + defaultLabel));
+            "Hardware default: " + defaultLabel);
+          panel.insertBefore(bindingRow, before || null);
         });
-      });
+      }
+
+      schemaInputs.forEach((button) => appendInputRows(button));
+
+      if (physicalButtons.length > 1) {
+        const addControls = document.createElement("div");
+        addControls.className = "config-helper keybinding-add";
+        const first = document.createElement("select");
+        const second = document.createElement("select");
+        [first, second].forEach((select) => {
+          physicalButtons.forEach((button) => {
+            const option = document.createElement("option");
+            option.value = button.id;
+            option.textContent = button.label;
+            select.appendChild(option);
+          });
+        });
+        second.selectedIndex = 1;
+
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "btn";
+        add.textContent = "Add combination";
+        add.onclick = () => {
+          if (first.value === second.value) return;
+          const selected = [physicalById.get(first.value),
+            physicalById.get(second.value)].sort(
+            (left, right) => Number(left.key) - Number(right.key));
+          const id = selected[0].id + "+" + selected[1].id;
+          if (schemaInputs.has(id)) return;
+
+          const input = {
+            id,
+            label: selected[0].label + " + " + selected[1].label,
+            gestures: [
+              {gesture: "short", default: "none"},
+              {gesture: "long", default: "none"},
+            ],
+          };
+          schemaInputs.set(id, input);
+          appendInputRows(input, addControls);
+        };
+
+        addControls.appendChild(first);
+        addControls.appendChild(second);
+        addControls.appendChild(add);
+        panel.appendChild(addControls);
+      }
 
       const fieldRow = row(field.label || field.key, panel, field.key);
       fieldRow.classList.add("keybindings-field");

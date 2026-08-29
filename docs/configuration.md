@@ -81,7 +81,7 @@ action from the OTA tab or the `ota install` CLI command.
 ## Buttons
 
 Button bindings are available on builds with local buttons. The Web UI shows
-the buttons, button pairs, and gestures supplied by the hardware profile.
+every physical button plus default or user-added button combinations.
 `config keybindings` shows their defaults, overrides, and effective actions;
 individual overrides can be changed with
 `config keybindings BUTTON[+BUTTON] GESTURE ACTION`.

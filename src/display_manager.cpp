@@ -246,13 +246,16 @@ void DisplayManager::publish_therapy_telemetry(
     if (task_) xTaskNotifyGive(task_);
 }
 
-void DisplayManager::toggle_backlight() {
+void DisplayManager::set_backlight(bool enabled) {
     if (!device_) return;
 
-    const bool visible = backlight_visible_.load();
-    backlight_requested_.store(!visible);
-    if (visible) manual_backlight_off_.store(true);
+    backlight_requested_.store(enabled);
+    if (!enabled) manual_backlight_off_.store(true);
     if (task_) xTaskNotifyGive(task_);
+}
+
+void DisplayManager::toggle_backlight() {
+    set_backlight(!backlight_visible_.load());
 }
 
 bool DisplayManager::previous_page() {
