@@ -177,6 +177,7 @@ void ReportFallbackAcquisitionService::reset() {
 
     builder_.reset();
     event_records_.clear();
+    clear_pending_series();
     plan_.reset();
     replacement_.reset();
     std::fill(std::begin(targets_), std::end(targets_), SourceTarget{});
@@ -611,6 +612,10 @@ bool ReportFallbackAcquisitionService::complete_current_source() {
         return true;
     }
 
+    if (report_source_is_sampled(*source) && !flush_pending_series()) {
+        return true;
+    }
+
     const bool finalized = source_id == ReportSourceId::RespiratoryEvents
         ? append_event_sections()
         : report_source_is_sampled(*source) && append_unavailable_sections();
@@ -801,6 +806,24 @@ bool ReportFallbackAcquisitionService::append_series_run(
     const int64_t end_ms = std::min(
         sessions[session_index].end_ms,
         start_ms + static_cast<int64_t>(sample_count) * view.interval_ms);
+
+    const ReportSourceDef *source = report_source_def(chunk.source);
+    if (source &&
+        (source->purposes & REPORT_SOURCE_HIGH_RES_SERIES) != 0 &&
+        view.missing_bitmap_bytes == 0) {
+        return append_high_res_series_run(
+            chunk.source,
+            signal->id,
+            session_index,
+            view.interval_ms,
+            start_ms,
+            end_ms,
+            view.values_milli_le + static_cast<size_t>(first_sample) * 4u,
+            sample_count);
+    }
+
+    if (!flush_pending_series()) return false;
+
     const size_t payload_size =
         report_series_payload_v2_uniform_slice_size(
             view, first_sample, sample_count);
@@ -837,6 +860,143 @@ bool ReportFallbackAcquisitionService::append_series_run(
 
     status_.sections_added++;
     return true;
+}
+
+bool ReportFallbackAcquisitionService::append_high_res_series_run(
+    ReportSourceId source,
+    ReportSignalId signal,
+    size_t session_index,
+    uint32_t interval_ms,
+    int64_t start_ms,
+    int64_t end_ms,
+    const uint8_t *values_milli_le,
+    uint32_t sample_count) {
+    const size_t one_sample_size =
+        report_series_v2_uniform_wire_size(1, 0);
+    if (!values_milli_le || interval_ms == 0 || sample_count == 0 ||
+        end_ms <= start_ms || one_sample_size <= sizeof(int32_t) ||
+        one_sample_size > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
+        fail("fallback_series_slice_invalid");
+        return false;
+    }
+
+    const size_t header_size = one_sample_size - sizeof(int32_t);
+    const size_t max_values_bytes =
+        AC_STORAGE_PREPARED_READ_MAX_BYTES - header_size;
+    uint32_t consumed = 0;
+
+    while (consumed < sample_count) {
+        const int64_t run_start = start_ms +
+            static_cast<int64_t>(consumed) * interval_ms;
+        const bool compatible = pending_series_.valid() &&
+            pending_series_.source == source &&
+            pending_series_.signal == signal &&
+            pending_series_.session_index == session_index &&
+            pending_series_.interval_ms == interval_ms &&
+            pending_series_.end_ms == run_start;
+        if (pending_series_.valid() && !compatible &&
+            !flush_pending_series()) {
+            return false;
+        }
+
+        if (!pending_series_.valid()) {
+            pending_series_.source = source;
+            pending_series_.signal = signal;
+            pending_series_.session_index = session_index;
+            pending_series_.interval_ms = interval_ms;
+            pending_series_.start_ms = run_start;
+            pending_series_.end_ms = run_start;
+            pending_series_.values.set_max_size(max_values_bytes);
+        }
+
+        const size_t available_bytes =
+            max_values_bytes - pending_series_.values.size();
+        const uint32_t available_samples = static_cast<uint32_t>(
+            available_bytes / sizeof(int32_t));
+        if (available_samples == 0) {
+            if (!flush_pending_series()) return false;
+            continue;
+        }
+
+        const uint32_t appended = std::min(
+            sample_count - consumed, available_samples);
+        const size_t appended_bytes =
+            static_cast<size_t>(appended) * sizeof(int32_t);
+        if (!pending_series_.values.append(
+                values_milli_le +
+                    static_cast<size_t>(consumed) * sizeof(int32_t),
+                appended_bytes)) {
+            fail("fallback_series_append_failed");
+            return false;
+        }
+
+        consumed += appended;
+        pending_series_.sample_count += appended;
+        pending_series_.end_ms = consumed == sample_count
+            ? end_ms
+            : start_ms + static_cast<int64_t>(consumed) * interval_ms;
+
+        if (pending_series_.values.size() == max_values_bytes &&
+            !flush_pending_series()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::flush_pending_series() {
+    if (!pending_series_.valid()) return true;
+
+    ReportSeriesV2UniformView view;
+    view.interval_ms = pending_series_.interval_ms;
+    view.sample_count = pending_series_.sample_count;
+    view.values_milli_le = pending_series_.values.data();
+    view.values_milli_bytes = pending_series_.values.size();
+    const size_t payload_size =
+        report_series_payload_v2_uniform_slice_size(
+            view, 0, pending_series_.sample_count);
+
+    ReportFallbackSectionInput section;
+    section.kind = ReportFallbackSectionKind::Series;
+    section.source = pending_series_.source;
+    section.signal = pending_series_.signal;
+    section.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
+    section.record_count = pending_series_.sample_count;
+    section.sample_interval_ms = pending_series_.interval_ms;
+    section.coverage = {pending_series_.start_ms, pending_series_.end_ms};
+    section.payload_size = payload_size;
+
+    uint8_t *payload = nullptr;
+    if (payload_size == 0 ||
+        !builder_.reserve_section(section, payload) ||
+        !report_write_series_payload_v2_uniform_slice(
+            view,
+            0,
+            pending_series_.sample_count,
+            payload,
+            payload_size) ||
+        !builder_.commit_reserved_section() ||
+        !append_series_coverage(pending_series_.source,
+                                pending_series_.signal,
+                                section.coverage)) {
+        fail("fallback_series_append_failed");
+        return false;
+    }
+
+    clear_pending_series();
+    status_.sections_added++;
+    return true;
+}
+
+void ReportFallbackAcquisitionService::clear_pending_series() {
+    pending_series_.values.clear();
+    pending_series_.source = ReportSourceId::Summary;
+    pending_series_.signal = ReportSignalId::Invalid;
+    pending_series_.session_index = SIZE_MAX;
+    pending_series_.interval_ms = 0;
+    pending_series_.sample_count = 0;
+    pending_series_.start_ms = 0;
+    pending_series_.end_ms = 0;
 }
 
 bool ReportFallbackAcquisitionService::accept_event_chunk(
@@ -1168,6 +1328,12 @@ void ReportFallbackAcquisitionService::series_coverage_after(
             consider(added_series_[i].range);
         }
     }
+
+    if (pending_series_.valid() &&
+        pending_series_.source == source &&
+        pending_series_.signal == signal) {
+        consider({pending_series_.start_ms, pending_series_.end_ms});
+    }
 }
 
 bool ReportFallbackAcquisitionService::series_session_complete(
@@ -1210,13 +1376,34 @@ bool ReportFallbackAcquisitionService::append_series_coverage(
     ReportSourceId source,
     ReportSignalId signal,
     const NightCatalogTimeRange &range) {
-    if (!range.valid() ||
-        added_series_count_ >=
-            ReportFallbackArtifactCodec::MaxSections) {
+    if (!range.valid()) return false;
+
+    NightCatalogTimeRange merged = range;
+    for (size_t i = 0; i < added_series_count_;) {
+        const SeriesCoverage &coverage = added_series_[i];
+        const bool adjacent = coverage.source == source &&
+            coverage.signal == signal &&
+            coverage.range.start_ms <= merged.end_ms &&
+            merged.start_ms <= coverage.range.end_ms;
+        if (!adjacent) {
+            ++i;
+            continue;
+        }
+
+        merged.start_ms = std::min(merged.start_ms,
+                                   coverage.range.start_ms);
+        merged.end_ms = std::max(merged.end_ms,
+                                 coverage.range.end_ms);
+        added_series_[i] = added_series_[added_series_count_ - 1];
+        added_series_[added_series_count_ - 1] = {};
+        added_series_count_--;
+    }
+
+    if (added_series_count_ >= ReportFallbackArtifactCodec::MaxSections) {
         return false;
     }
 
-    added_series_[added_series_count_++] = {source, signal, range};
+    added_series_[added_series_count_++] = {source, signal, merged};
     return true;
 }
 
@@ -1326,6 +1513,7 @@ void ReportFallbackAcquisitionService::finish(
     ReportFallbackAcquisitionState state) {
     builder_.reset();
     event_records_.clear();
+    clear_pending_series();
     plan_.reset();
     if (state != ReportFallbackAcquisitionState::Ready) {
         replacement_.reset();

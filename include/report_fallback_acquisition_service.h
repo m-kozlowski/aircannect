@@ -98,6 +98,19 @@ private:
         NightCatalogTimeRange range;
     };
 
+    struct PendingSeries {
+        ReportSourceId source = ReportSourceId::Summary;
+        ReportSignalId signal = ReportSignalId::Invalid;
+        size_t session_index = SIZE_MAX;
+        uint32_t interval_ms = 0;
+        uint32_t sample_count = 0;
+        int64_t start_ms = 0;
+        int64_t end_ms = 0;
+        ReportSpoolBuffer values;
+
+        bool valid() const { return sample_count > 0; }
+    };
+
     static bool accept_parsed_chunk(
         void *context,
         const ReportParsedChunk &chunk);
@@ -124,6 +137,16 @@ private:
                            size_t session_index,
                            uint32_t first_sample,
                            uint32_t sample_count);
+    bool append_high_res_series_run(ReportSourceId source,
+                                    ReportSignalId signal,
+                                    size_t session_index,
+                                    uint32_t interval_ms,
+                                    int64_t start_ms,
+                                    int64_t end_ms,
+                                    const uint8_t *values_milli_le,
+                                    uint32_t sample_count);
+    bool flush_pending_series();
+    void clear_pending_series();
     bool append_event_sections();
     bool append_unavailable_sections();
 
@@ -165,6 +188,7 @@ private:
     std::shared_ptr<const LargeByteBuffer> replacement_;
     ReportFallbackArtifactBuilder builder_;
     ReportSpoolBuffer event_records_;
+    PendingSeries pending_series_;
 
     SourceTarget targets_[MaxSourceTargets] = {};
     size_t target_count_ = 0;

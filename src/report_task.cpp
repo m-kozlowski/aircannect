@@ -988,7 +988,15 @@ struct ReportTask::Runtime {
                         completion.request.artifact.sleep_day &&
                     night->source_revision ==
                         completion.request.artifact.source_revision) {
-                    idle_cursor++;
+                    const ReportSourceDef *fallback_source =
+                        report_source_def(completion.fallback_source);
+                    const bool periodic_stall =
+                        strcmp(completion.error, "fragment_timeout") == 0 &&
+                        fallback_source && fallback_source->spool_type &&
+                        report_source_is_sampled(*fallback_source);
+                    idle_cursor = periodic_stall
+                        ? idle_catalog_limit()
+                        : idle_cursor + 1;
                     idle_pass_failed = true;
                     if (idle_retry_at_ms == 0) {
                         idle_retry_at_ms = now_ms +

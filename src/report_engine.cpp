@@ -630,7 +630,8 @@ bool ReportEngine::finish_fallback_acquisition() {
                     ReportExecutorError::None,
                     fallback_status.error[0]
                         ? fallback_status.error
-                        : "fallback_acquisition_failed");
+                        : "fallback_acquisition_failed",
+                    fallback_status.source);
     return true;
 }
 
@@ -784,11 +785,13 @@ void ReportEngine::cancel_active_work() {
 void ReportEngine::complete_active(OperationOutcome outcome,
                                    ReportPlanStatus plan_status,
                                    ReportExecutorError executor_error,
-                                   const char *error) {
+                                   const char *error,
+                                   ReportSourceId fallback_source) {
     last_completion_.request = active_request_;
     last_completion_.outcome = outcome;
     last_completion_.plan_status = plan_status;
     last_completion_.executor_error = executor_error;
+    last_completion_.fallback_source = fallback_source;
     copy_cstr(last_completion_.error,
               sizeof(last_completion_.error),
               completion_error(outcome,

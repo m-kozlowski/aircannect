@@ -28,6 +28,7 @@ struct ReportEngineCompletion {
     OperationOutcome outcome = OperationOutcome::failed();
     ReportPlanStatus plan_status = ReportPlanStatus::InvalidRequest;
     ReportExecutorError executor_error = ReportExecutorError::None;
+    ReportSourceId fallback_source = ReportSourceId::Summary;
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }
@@ -114,7 +115,9 @@ private:
     void complete_active(OperationOutcome outcome,
                          ReportPlanStatus plan_status,
                          ReportExecutorError executor_error,
-                         const char *error = nullptr);
+                         const char *error = nullptr,
+                         ReportSourceId fallback_source =
+                             ReportSourceId::Summary);
     void reset_active();
 
     ReportRequestQueue queue_;
