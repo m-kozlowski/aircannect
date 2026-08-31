@@ -160,7 +160,7 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
         }
 
         const ReportSourceDef *source =
-            command.kind == ReportSpoolFetchKind::ReportSource
+            command.kind != ReportSpoolFetchKind::SystemActivity
                 ? report_source_def(command.source)
                 : nullptr;
         const char *spool_type =
@@ -180,17 +180,22 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
         SpoolClientRequest request;
         request.spool_type = spool_type;
         request.from_dt = std::move(from_dt);
-        const bool complete_payload =
+        const bool availability_probe =
+            command.kind == ReportSpoolFetchKind::AvailabilityProbe;
+        const bool complete_payload = availability_probe ||
             command.kind == ReportSpoolFetchKind::SystemActivity ||
             command.source == ReportSourceId::Summary;
 
-        request.max_size = complete_payload
-            ? AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES
-            : AC_REPORT_CACHE_SPOOL_ROUND_BYTES;
+        request.max_size = availability_probe
+            ? AC_REPORT_AVAILABILITY_PROBE_BYTES
+            : complete_payload ? AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES
+                               : AC_REPORT_CACHE_SPOOL_ROUND_BYTES;
         request.fragment_max = AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES;
         request.max_notifications =
             AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL;
-        request.max_rounds = complete_payload ? 64 : 128;
+        request.max_rounds = availability_probe
+            ? 1
+            : complete_payload ? 64 : 128;
         request.pace_on_backpressure = true;
         request.stream_rounds = !complete_payload;
         if (!runtime_.begin(request)) {

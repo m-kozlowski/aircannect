@@ -7,6 +7,7 @@
 #include "report_fallback_artifact.h"
 #include "report_parser.h"
 #include "report_read_plan.h"
+#include "report_spool_availability.h"
 #include "report_spool_port.h"
 #include "report_spool_types.h"
 #include "storage_atomic_write_port.h"
@@ -69,10 +70,13 @@ public:
         std::shared_ptr<const ReportReadPlan> plan,
         uint32_t generation,
         StorageReadLane read_lane,
-        StorageAtomicWriteLane write_lane);
+        StorageAtomicWriteLane write_lane,
+        const ReportSpoolAvailability &availability = {});
     bool poll();
     void cancel();
     void reset();
+    void publish_spool_availability(
+        const ReportSpoolAvailability &availability);
 
     const ReportFallbackAcquisitionStatus &status() const {
         return status_;
@@ -124,6 +128,7 @@ private:
     bool should_preserve(const NightCatalogFallbackSection &section) const;
 
     bool poll_fetch();
+    bool complete_source_before_retention();
     bool submit_current_fetch();
     bool consume_fetch_round();
     bool finish_current_fetch();
@@ -187,6 +192,7 @@ private:
     std::shared_ptr<const ReportReadPlan> plan_;
     std::shared_ptr<const LargeByteBuffer> replacement_;
     ReportFallbackArtifactBuilder builder_;
+    ReportSpoolAvailability availability_;
     ReportSpoolBuffer event_records_;
     PendingSeries pending_series_;
 

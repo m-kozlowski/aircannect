@@ -103,6 +103,7 @@ static constexpr size_t AC_REPORT_SPOOL_NOTIFICATION_BACKPRESSURE_WATERMARK =
 static constexpr uint32_t AC_REPORT_SPOOL_PULL_PACE_MS = 100;
 static constexpr size_t AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES = 8192;
 static constexpr size_t AC_REPORT_CACHE_SPOOL_ROUND_BYTES = 8192;
+static constexpr size_t AC_REPORT_AVAILABILITY_PROBE_BYTES = 4096;
 
 // Report result assembly and plot build.
 // Full-night overview plot: target min/max envelope buckets across a night's

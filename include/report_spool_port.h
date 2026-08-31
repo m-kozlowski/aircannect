@@ -14,6 +14,7 @@ inline constexpr char AC_SYSTEM_ACTIVITY_SPOOL_TYPE[] =
 
 enum class ReportSpoolFetchKind : uint8_t {
     ReportSource,
+    AvailabilityProbe,
     SystemActivity,
 };
 

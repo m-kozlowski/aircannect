@@ -10,6 +10,7 @@
 #include "report_fallback_acquisition_service.h"
 #include "report_planner.h"
 #include "report_request_queue.h"
+#include "report_spool_availability.h"
 
 namespace aircannect {
 
@@ -72,6 +73,9 @@ public:
                ReportArtifactAssembler &assembler);
 
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog);
+    void publish_spool_availability(
+        const ReportSpoolAvailability &availability,
+        bool complete);
     bool catalog_update_required() const;
     std::shared_ptr<const LargeByteBuffer> fallback_replacement() const;
     void catalog_update_failed(const char *error);
@@ -128,6 +132,8 @@ private:
     StorageReadPort *read_port_ = nullptr;
     ReportArtifactAssembler *assembler_ = nullptr;
     std::shared_ptr<const NightCatalog> catalog_;
+    ReportSpoolAvailability spool_availability_;
+    bool spool_availability_complete_ = false;
     std::shared_ptr<const ReportReadPlan> active_plan_;
     ReportArtifactRequest active_request_;
     ReportArtifactRequest build_request_;

@@ -124,7 +124,8 @@ OperationAdmission ReportFallbackAcquisitionService::start(
     std::shared_ptr<const ReportReadPlan> plan,
     uint32_t generation,
     StorageReadLane read_lane,
-    StorageAtomicWriteLane write_lane) {
+    StorageAtomicWriteLane write_lane,
+    const ReportSpoolAvailability &availability) {
     if (status_.active()) return OperationAdmission::Busy;
 
     reset();
@@ -135,6 +136,7 @@ OperationAdmission ReportFallbackAcquisitionService::start(
     }
 
     plan_ = std::move(plan);
+    availability_ = availability;
     generation_ = generation;
     read_lane_ = read_lane;
     write_lane_ = write_lane;
@@ -207,6 +209,11 @@ void ReportFallbackAcquisitionService::reset() {
     write_lane_ = StorageAtomicWriteLane::Maintenance;
     terminal_state_ = ReportFallbackAcquisitionState::Idle;
     status_ = {};
+}
+
+void ReportFallbackAcquisitionService::publish_spool_availability(
+    const ReportSpoolAvailability &availability) {
+    availability_ = availability;
 }
 
 bool ReportFallbackAcquisitionService::prepare() {
@@ -500,12 +507,26 @@ bool ReportFallbackAcquisitionService::poll_fetch() {
         (void)spool_port_->cancel(spool_ticket_);
         return finish_current_fetch();
     }
+    if (!spool_ticket_.valid() && complete_source_before_retention()) {
+        return true;
+    }
     if (!spool_ticket_.valid() && !submit_current_fetch()) return false;
     if (status_.state != ReportFallbackAcquisitionState::Fetching) {
         return true;
     }
     if (consume_fetch_round()) return true;
     return finish_current_fetch();
+}
+
+bool ReportFallbackAcquisitionService::complete_source_before_retention() {
+    if (target_index_ >= target_count_) return false;
+
+    const SourceTarget &target = targets_[target_index_];
+    if (!availability_.excludes(target.source, target.until_ms)) return false;
+
+    status_.source = target.source;
+    source_past_target_ = true;
+    return complete_current_source();
 }
 
 bool ReportFallbackAcquisitionService::submit_current_fetch() {

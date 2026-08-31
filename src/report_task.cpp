@@ -14,6 +14,7 @@
 #include "report_night_artifact_builder.h"
 #include "report_payload_deflater.h"
 #include "report_plot_format.h"
+#include "report_spool_availability.h"
 #include "string_util.h"
 
 #ifdef ARDUINO
@@ -36,6 +37,7 @@ constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
 constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MAX_MS = 15 * 60 * 1000;
+constexpr uint32_t SPOOL_AVAILABILITY_RETRY_MS = 10 * 60 * 1000;
 constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
 constexpr const char *LEGACY_CACHE_NAMES[] = {
     "v3", "v4", "v5", "v6", "v7",
@@ -306,6 +308,11 @@ struct ReportTask::Runtime {
             worked = true;
         }
 
+        if (spool_availability_probe.status().active()) {
+            spool_availability_probe.cancel();
+            worked = true;
+        }
+
         worked = defer_active_catalog_refresh() || worked;
 
         return worked;
@@ -318,6 +325,78 @@ struct ReportTask::Runtime {
 
     bool background_work_blocked() const {
         return background_suspended || engine.status().foreground_active;
+    }
+
+    void invalidate_spool_availability() {
+        spool_availability_needed = true;
+        spool_availability_retry_at_ms = 0;
+        spool_availability_terminal_handled = false;
+        spool_availability_probe.cancel();
+        engine.publish_spool_availability({}, false);
+
+        idle_cursor = 0;
+        idle_retry_at_ms = 0;
+        idle_retry_attempt = 0;
+        idle_pass_failed = false;
+    }
+
+    bool start_spool_availability_probe(uint32_t now_ms) {
+        if (!spool_availability_needed ||
+            spool_availability_probe.status().active() ||
+            !deadline_due(now_ms, spool_availability_retry_at_ms)) {
+            return false;
+        }
+
+        const ReportEngineStatus engine_status = engine.status();
+        if (engine_status.state != ReportEngineState::Idle ||
+            engine_status.queued != 0 || payload_loader.status().active()) {
+            return false;
+        }
+
+        spool_availability_generation = next_catalog_generation(
+            spool_availability_generation);
+        const OperationAdmission admitted =
+            spool_availability_probe.request(
+                spool_availability_generation);
+        if (admitted == OperationAdmission::Busy) return false;
+        if (admitted == OperationAdmission::Rejected) {
+            spool_availability_retry_at_ms =
+                now_ms + SPOOL_AVAILABILITY_RETRY_MS;
+            command_failures++;
+            return true;
+        }
+
+        spool_availability_terminal_handled = false;
+        spool_availability_retry_at_ms = 0;
+        engine.publish_spool_availability({}, false);
+        return true;
+    }
+
+    bool observe_spool_availability_probe(uint32_t now_ms) {
+        const ReportSpoolAvailabilityProbeStatus probe =
+            spool_availability_probe.status();
+        if (!probe.terminal() || spool_availability_terminal_handled) {
+            return false;
+        }
+
+        spool_availability_terminal_handled = true;
+        engine.publish_spool_availability(
+            spool_availability_probe.availability(),
+            probe.state == ReportSpoolAvailabilityProbeState::Ready);
+        if (probe.state == ReportSpoolAvailabilityProbeState::Ready) {
+            spool_availability_needed = false;
+            spool_availability_retry_at_ms = 0;
+            idle_cursor = 0;
+            idle_retry_at_ms = 0;
+            idle_retry_attempt = 0;
+            idle_pass_failed = false;
+            return true;
+        }
+
+        spool_availability_needed = true;
+        spool_availability_retry_at_ms =
+            now_ms + SPOOL_AVAILABILITY_RETRY_MS;
+        return true;
     }
 
     bool apply_pending_activity() {
@@ -333,12 +412,15 @@ struct ReportTask::Runtime {
         unlock();
 
         const bool was_suspended = background_suspended;
+        const bool therapy_ended =
+            activity.therapy_active && !next.therapy_active;
         activity = next;
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
             activity.foreground_report_demand ||
             activity.ota_install_active || activity.export_work_claimed ||
             !activity.as11_rpc_available;
+        if (therapy_ended) invalidate_spool_availability();
         if (!background_suspended || was_suspended) return true;
 
         (void)engine.cancel_background();
@@ -346,6 +428,10 @@ struct ReportTask::Runtime {
 
         if (summary_acquisition.active()) {
             summary_acquisition.cancel();
+        }
+
+        if (spool_availability_probe.status().active()) {
+            spool_availability_probe.cancel();
         }
 
         const ReportArtifactPayloadLoadStatus payload_status =
@@ -979,6 +1065,27 @@ struct ReportTask::Runtime {
         observed_engine_completion = completion.request.ticket;
         if (completion.request.priority !=
                 ReportRequestPriority::Foreground) {
+            if (strcmp(completion.error,
+                       "report_spool_availability_pending") == 0 &&
+                catalog && idle_cursor < idle_catalog_limit()) {
+                const NightCatalogRecord *night = catalog->record(idle_cursor);
+                if (night &&
+                    night->sleep_day ==
+                        completion.request.artifact.sleep_day &&
+                    night->source_revision ==
+                        completion.request.artifact.source_revision) {
+                    idle_cursor++;
+                    if (spool_availability_probe.status().state ==
+                        ReportSpoolAvailabilityProbeState::Incomplete) {
+                        idle_pass_failed = true;
+                        idle_retry_at_ms =
+                            spool_availability_retry_at_ms;
+                    }
+                }
+                unlock();
+                return;
+            }
+
             if (completion.outcome.disposition ==
                     OperationDisposition::Failed &&
                 catalog && idle_cursor < idle_catalog_limit()) {
@@ -1339,6 +1446,7 @@ struct ReportTask::Runtime {
             static_cast<bool>(pending_catalog_save);
         next.background_active =
             queued > 0 || catalog_commit_pending ||
+            spool_availability_probe.status().active() ||
             next.payload_load.active() || payload_deflater.active() ||
             (next.state != ReportTaskState::Stopped &&
              next.state != ReportTaskState::Idle);
@@ -1355,6 +1463,7 @@ struct ReportTask::Runtime {
     ReportPayloadDeflater payload_deflater;
     ReportNightArtifactBuilder builder;
     ReportSummaryAcquisition summary_acquisition;
+    ReportSpoolAvailabilityProbe spool_availability_probe;
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
     StorageDeletePort *delete_port = nullptr;
@@ -1388,6 +1497,10 @@ struct ReportTask::Runtime {
     uint32_t idle_retry_at_ms = 0;
     uint8_t idle_retry_attempt = 0;
     bool idle_pass_failed = false;
+    uint32_t spool_availability_generation = 0;
+    uint32_t spool_availability_retry_at_ms = 0;
+    bool spool_availability_needed = true;
+    bool spool_availability_terminal_handled = false;
     uint32_t legacy_cleanup_retry_at_ms = 0;
     bool legacy_cleanup_pending = true;
 
@@ -1470,6 +1583,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(read_port, write_port);
     runtime_->summary_acquisition.begin(spool_port);
+    runtime_->spool_availability_probe.begin(spool_port);
     runtime_->payload_loader.begin(read_port);
     runtime_->delete_port = &delete_port;
     runtime_->engine.begin(read_port,
@@ -1962,6 +2076,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             }
 
             case ReportTaskCommandKind::RefreshCatalog:
+                if (runtime.spool_availability_probe.status().active()) {
+                    runtime.spool_availability_probe.cancel();
+                }
                 runtime.pending_refresh.generation = command.generation;
                 runtime.pending_refresh.current_offset_valid =
                     command.current_offset_valid;
@@ -1983,6 +2100,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (runtime.summary_acquisition.active()) {
         worked = runtime.summary_acquisition.poll() || worked;
     }
+
+    if (runtime.spool_availability_probe.status().active()) {
+        worked = runtime.spool_availability_probe.poll() || worked;
+    }
+    worked = runtime.observe_spool_availability_probe(now_ms) || worked;
 
     if (runtime.pending_refresh.valid() &&
         !runtime.pending_refresh.summary_attempted) {
@@ -2276,6 +2398,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.pending_catalog_save;
     if (catalog_stable && !background_work_blocked &&
         startup_idle_work_allowed) {
+        worked = runtime.start_spool_availability_probe(now_ms) || worked;
         worked = runtime.schedule_catalog_work(now_ms) || worked;
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }

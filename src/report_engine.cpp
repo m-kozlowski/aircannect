@@ -164,6 +164,14 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
     }
 }
 
+void ReportEngine::publish_spool_availability(
+    const ReportSpoolAvailability &availability,
+    bool complete) {
+    spool_availability_ = availability;
+    spool_availability_complete_ = complete;
+    fallback_acquisition_.publish_spool_availability(availability);
+}
+
 bool ReportEngine::catalog_update_required() const {
     return phase_ == ActivePhase::WaitingForCatalog;
 }
@@ -546,11 +554,21 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     if (active_plan_->fallback_acquisition_allowed() &&
         (active_plan_->acquirable_signal_mask() != 0 ||
          active_plan_->missing_event_mask() != 0)) {
+        if (active_request_.priority != ReportRequestPriority::Foreground &&
+            !spool_availability_complete_) {
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_spool_availability_pending");
+            return true;
+        }
+
         const OperationAdmission admitted = fallback_acquisition_.start(
             active_plan_,
             active_request_.ticket.generation,
             lookup_lane(active_request_.priority),
-            write_lane(active_request_.priority));
+            write_lane(active_request_.priority),
+            spool_availability_);
         if (admitted != OperationAdmission::Accepted) {
             const ReportFallbackAcquisitionStatus fallback_status =
                 fallback_acquisition_.status();
