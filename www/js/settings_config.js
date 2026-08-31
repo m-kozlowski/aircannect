@@ -2247,7 +2247,7 @@
       return labels[data.state] || data.state || "Unknown";
     }
 
-    function scheduleAs11BlePairingPoll(data) {
+    function scheduleAs11BlePairingPoll(data, afterError) {
       if (as11BlePairTimer) {
         clearTimeout(as11BlePairTimer);
         as11BlePairTimer = null;
@@ -2261,7 +2261,8 @@
       }
 
       as11BlePairTimer = setTimeout(
-        () => loadAs11BlePairing(false), data.active ? 700 : 500);
+        () => loadAs11BlePairing(false),
+        afterError ? 1500 : (data.active ? 700 : 500));
     }
 
     function renderAs11BlePairingPanel(panel, data) {
@@ -2396,6 +2397,7 @@
         renderAs11BlePairing(await response.json());
       } catch (error) {
         if (showError) showAs11BlePairingError(error.message);
+        scheduleAs11BlePairingPoll(as11BlePairingData, true);
       }
     }
 
