@@ -11,6 +11,9 @@
 #include "as11_service_manager.h"
 #include "as11_settings.h"
 #include "as11_settings_manager.h"
+#include "alert_manager.h"
+#include "audible_alert_sink.h"
+#include "audible_output.h"
 #include "arduino_ota_source.h"
 #include "ble_sensor_source.h"
 #include "board.h"
@@ -80,6 +83,31 @@
 
 using namespace aircannect;
 
+namespace {
+
+class AlertLogSink final : public AlertSink {
+public:
+    void accept(const AlertEvent &event) override {
+        if (event.state == AlertState::Raised) {
+            Log::logf(CAT_GENERAL, LOG_WARN,
+                      "[ALERT] raised kind=%s incident=%lu value=%.1f "
+                      "threshold=%.1f\n",
+                      alert_kind_name(event.kind),
+                      static_cast<unsigned long>(event.incident_id),
+                      event.value, event.threshold);
+            return;
+        }
+
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[ALERT] cleared kind=%s incident=%lu reason=%s\n",
+                  alert_kind_name(event.kind),
+                  static_cast<unsigned long>(event.incident_id),
+                  alert_clear_reason_name(event.clear_reason));
+    }
+};
+
+}  // namespace
+
 static CanDriver can_driver;
 static CanRpcLink can_rpc_link(can_driver);
 static BleRuntime ble_runtime;
@@ -111,6 +139,9 @@ static SessionManager session_manager;
 static DisplayManager display_manager;
 static LocalInputController local_inputs;
 static SinkManager sink_manager;
+static AlertManager alert_manager;
+static AlertLogSink alert_log_sink;
+static AudibleAlertSink audible_alert_sink;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
 static OximetryHub oximetry_hub;
 static UdpOximeterSource oximetry_udp_source;
@@ -569,6 +600,45 @@ static void configure_oximetry(const AppConfigData &config) {
                              config.hostname.c_str());
 }
 
+static void configure_alerts(const AppConfigData &config, uint32_t now_ms) {
+    AlertThresholdRule leak;
+    leak.kind = AlertKind::HighLeak;
+    leak.metric = AlertMetric::Leak;
+    leak.scope = AlertScope::TherapySession;
+    leak.severity = AlertSeverity::Warning;
+    leak.direction = AlertDirection::Above;
+    leak.raise_threshold = config.alert_leak_threshold_l_min;
+    leak.clear_threshold =
+        config.alert_leak_threshold_l_min > 3
+            ? config.alert_leak_threshold_l_min - 3
+            : 0;
+    leak.raise_delay_ms =
+        static_cast<uint32_t>(config.alert_leak_delay_s) * 1000UL;
+    leak.clear_delay_ms = 5000;
+    leak.enabled = config.alert_leak_enabled;
+    if (!alert_manager.configure_threshold(leak, now_ms)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[ALERT] failed to configure high leak rule\n");
+    }
+
+    uint8_t telemetry_signals = display_manager.available()
+                                    ? THERAPY_TELEMETRY_PRESSURE
+                                    : THERAPY_TELEMETRY_NONE;
+    if (config.alert_leak_enabled) {
+        telemetry_signals |= THERAPY_TELEMETRY_LEAK;
+    }
+    sink_manager.set_therapy_telemetry_signals(telemetry_signals);
+
+    AudibleOutput *output = board_audible_output();
+    audible_alert_sink.set_volume(
+        static_cast<uint8_t>(config.alert_audible_volume_percent));
+    if (output && config.alert_audible_enabled &&
+        config.alert_leak_enabled) {
+        (void)audible_alert_sink.begin(*output, now_ms);
+    }
+    audible_alert_sink.set_enabled(config.alert_audible_enabled);
+}
+
 static void poll_oximetry(bool network_available, uint32_t now_ms) {
     const OximetryHubSnapshot before = oximetry_hub.snapshot(now_ms);
     OximetryHubAction actions = oximetry_udp_source.poll(
@@ -684,6 +754,9 @@ static void apply_config_runtime_effects(void *,
     if (dirty & AC_CONFIG_DIRTY_DISPLAY) {
         display_manager.configure(config.display_orientation,
                                   config.display_auto_rotate);
+    }
+    if (dirty & AC_CONFIG_DIRTY_ALERTS) {
+        configure_alerts(config, millis());
     }
     if (dirty & (AC_CONFIG_DIRTY_AS11_TRANSPORT |
                  AC_CONFIG_DIRTY_HOSTNAME)) {
@@ -1250,7 +1323,11 @@ void setup() {
 
     sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);
-    sink_manager.set_therapy_telemetry_enabled(display_manager.available());
+    (void)alert_manager.add_sink(alert_log_sink);
+    if (board_audible_output()) {
+        (void)alert_manager.add_sink(audible_alert_sink);
+    }
+    configure_alerts(config_service.data(), millis());
 
     if (!report_spool_service.begin()) {
         Log::logf(CAT_REPORT, LOG_ERROR,
@@ -1504,6 +1581,20 @@ void loop() {
 
     // Live sinks
     sink_manager.poll(now_ms);
+    audible_alert_sink.poll(now_ms);
+    alert_manager.set_scope_active(AlertScope::TherapySession,
+                                   session_manager.status().state ==
+                                       SessionState::Active,
+                                   now_ms);
+    if (config_service.data().alert_leak_enabled) {
+        const TherapyTelemetrySnapshot alert_telemetry =
+            sink_manager.therapy_telemetry_snapshot(now_ms);
+        alert_manager.observe(AlertMetric::Leak,
+                              alert_telemetry.leak_valid,
+                              alert_telemetry.leak_l_min,
+                              now_ms);
+    }
+
     TherapyTelemetrySnapshot telemetry;
     if (display_manager.available() &&
         sink_manager.take_therapy_telemetry_update(now_ms, telemetry)) {

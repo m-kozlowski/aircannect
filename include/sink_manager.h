@@ -41,6 +41,12 @@ struct LiveChartRuntimeStatus {
     LiveChartSeriesBatch pulse;
 };
 
+enum TherapyTelemetrySignal : uint8_t {
+    THERAPY_TELEMETRY_NONE = 0,
+    THERAPY_TELEMETRY_PRESSURE = 1u << 0,
+    THERAPY_TELEMETRY_LEAK = 1u << 1,
+};
+
 class SinkManager {
 public:
     void begin(StreamBroker &stream,
@@ -48,7 +54,7 @@ public:
                SessionManager &session);
     void poll(uint32_t now_ms);
 
-    void set_therapy_telemetry_enabled(bool enabled);
+    void set_therapy_telemetry_signals(uint8_t signals);
     TherapyTelemetrySnapshot therapy_telemetry_snapshot(
         uint32_t now_ms) const;
     bool take_therapy_telemetry_update(
@@ -89,7 +95,7 @@ private:
         STREAM_CONSUMER_INVALID;
     uint32_t therapy_telemetry_session_id_ = 0;
     uint32_t next_therapy_telemetry_attach_ms_ = 0;
-    bool therapy_telemetry_enabled_ = false;
+    uint8_t therapy_telemetry_signals_ = THERAPY_TELEMETRY_NONE;
     bool therapy_telemetry_dirty_ = false;
 
     LiveChartRuntimeStatus live_chart_;

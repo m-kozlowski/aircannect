@@ -52,6 +52,13 @@ struct AppConfigData {
     OximetryAdvertiseMode oximetry_advertise_mode =
         OximetryAdvertiseMode::Auto;
 
+    bool alert_leak_enabled = false;
+    uint16_t alert_leak_threshold_l_min = 24;
+    uint16_t alert_leak_delay_s = 30;
+    bool alert_audible_enabled =
+        AC_AUDIO_DRIVER != AC_AUDIO_DRIVER_NONE;
+    uint16_t alert_audible_volume_percent = 88;
+
     bool edf_capture_enabled = AC_DEFAULT_EDF_CAPTURE_ENABLED != 0;
 
     ButtonBindingConfig keybindings;
@@ -119,6 +126,11 @@ private:
     bool set_oximetry_enabled(bool enabled);
     bool set_oximetry_udp_port(uint16_t port);
     bool set_oximetry_advertise_mode(OximetryAdvertiseMode mode);
+    bool set_alert_leak_enabled(bool enabled);
+    bool set_alert_leak_threshold(uint16_t threshold_l_min);
+    bool set_alert_leak_delay(uint16_t delay_s);
+    bool set_alert_audible_enabled(bool enabled);
+    bool set_alert_audible_volume(uint16_t percent);
     bool set_edf_capture_enabled(bool enabled);
     bool set_keybindings(const ButtonBindingConfig &keybindings);
     bool set_display_orientation(DisplayOrientation orientation);

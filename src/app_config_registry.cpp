@@ -1,6 +1,7 @@
 #include "app_config_registry.h"
 
 #include "board_ble.h"
+#include "board_audio.h"
 #include "board_can.h"
 #include "board_button.h"
 #include "board_display.h"
@@ -283,6 +284,34 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
          sizeof(OXIMETRY_ADVERTISE_VALUES[0]),
      -1, AC_CFG_OFFSET(oximetry_advertise_mode)},
 
+    {"alert_leak_en", AppConfigFieldId::AlertLeakEnabled,
+     AppConfigGroup::Alerts, 10, AppConfigFieldType::Bool, PROVISIONABLE,
+     AC_CONFIG_DIRTY_ALERTS, "High leak alert",
+     "Raise an alert during sustained high leak.", nullptr, 0, -1,
+     AC_CFG_OFFSET(alert_leak_enabled)},
+    {"alert_leak_lpm", AppConfigFieldId::AlertLeakThreshold,
+     AppConfigGroup::Alerts, 20, AppConfigFieldType::UInt16, PROVISIONABLE,
+     AC_CONFIG_DIRTY_ALERTS, "High leak threshold (L/min)",
+     "Leak level that raises the alert.", nullptr, 0, -1,
+     AC_CFG_OFFSET(alert_leak_threshold_l_min)},
+    {"alert_leak_sec", AppConfigFieldId::AlertLeakDelay,
+     AppConfigGroup::Alerts, 30, AppConfigFieldType::UInt16, PROVISIONABLE,
+     AC_CONFIG_DIRTY_ALERTS, "High leak delay (seconds)",
+     "Time above the threshold before raising the alert.", nullptr, 0, -1,
+     AC_CFG_OFFSET(alert_leak_delay_s)},
+#if AC_AUDIO_DRIVER != AC_AUDIO_DRIVER_NONE
+    {"alert_sound_en", AppConfigFieldId::AlertAudibleEnabled,
+     AppConfigGroup::Alerts, 40, AppConfigFieldType::Bool, PROVISIONABLE,
+     AC_CONFIG_DIRTY_ALERTS, "Audible alerts",
+     "Play active alerts through the local speaker.", nullptr, 0, -1,
+     AC_CFG_OFFSET(alert_audible_enabled)},
+    {"alert_sound_vol", AppConfigFieldId::AlertAudibleVolume,
+     AppConfigGroup::Alerts, 50, AppConfigFieldType::UInt16, PROVISIONABLE,
+     AC_CONFIG_DIRTY_ALERTS, "Audible alert volume (%)",
+     "Speaker volume from 0 to 100 percent.", nullptr, 0, -1,
+     AC_CFG_OFFSET(alert_audible_volume_percent)},
+#endif
+
     {"smb_ep", AppConfigFieldId::SmbEndpoint, AppConfigGroup::Smb, 10,
      AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_SMB_SYNC,
      "SMB endpoint", "SMB UNC endpoint.", nullptr, 0, -1,
@@ -498,6 +527,37 @@ bool AppConfigFieldWriter::set_value(
             if (!parse_oximetry_advertise_mode(value, mode)) return false;
             return config.set_oximetry_advertise_mode(mode);
         }
+        case AppConfigFieldId::AlertLeakEnabled:
+            if (!parse_bool_yesno(value, parsed_bool)) return false;
+            return config.set_alert_leak_enabled(parsed_bool);
+        case AppConfigFieldId::AlertLeakThreshold:
+            if (!parse_port(value, parsed_port)) return false;
+            return config.set_alert_leak_threshold(parsed_port);
+        case AppConfigFieldId::AlertLeakDelay: {
+            String parsed = value;
+            parsed.trim();
+            uint32_t delay_s = 0;
+            if (!parse_uint32_decimal(parsed.c_str(), delay_s) ||
+                delay_s > UINT16_MAX) {
+                return false;
+            }
+            return config.set_alert_leak_delay(
+                static_cast<uint16_t>(delay_s));
+        }
+        case AppConfigFieldId::AlertAudibleEnabled:
+            if (!parse_bool_yesno(value, parsed_bool)) return false;
+            return config.set_alert_audible_enabled(parsed_bool);
+        case AppConfigFieldId::AlertAudibleVolume: {
+            String parsed = value;
+            parsed.trim();
+            uint32_t percent = 0;
+            if (!parse_uint32_decimal(parsed.c_str(), percent) ||
+                percent > 100) {
+                return false;
+            }
+            return config.set_alert_audible_volume(
+                static_cast<uint16_t>(percent));
+        }
         case AppConfigFieldId::EdfCaptureEnabled:
             if (!parse_bool_yesno(value, parsed_bool)) return false;
             return config.set_edf_capture_enabled(parsed_bool);
@@ -610,6 +670,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::Logging: return "logging";
         case AppConfigGroup::Time: return "time";
         case AppConfigGroup::Oximetry: return "oximetry";
+        case AppConfigGroup::Alerts: return "alerts";
         case AppConfigGroup::Smb: return "smb";
         case AppConfigGroup::SleepHq: return "sleephq";
         case AppConfigGroup::Keybindings: return "keybindings";
@@ -629,6 +690,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::Logging: return "Logging";
         case AppConfigGroup::Time: return "Time";
         case AppConfigGroup::Oximetry: return "Oximetry";
+        case AppConfigGroup::Alerts: return "Alerts";
         case AppConfigGroup::Smb: return "SMB";
         case AppConfigGroup::SleepHq: return "SleepHQ";
         case AppConfigGroup::Keybindings: return "Buttons";

@@ -110,6 +110,16 @@ These keys are available on builds with a local display.
 Known BLE oximeters are stored separately and managed from the Web UI or
 `oxi sensor` console commands, not from `config.txt`.
 
+## Alerts
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `alert_leak_en` | boolean | `off` | Alert when leak remains above the configured threshold during therapy. |
+| `alert_leak_lpm` | `1` to `120` L/min | `24` | High leak threshold. |
+| `alert_leak_sec` | `0` to `3600` seconds | `30` | Time above the high leak threshold before the alert is raised. |
+| `alert_sound_en` | boolean | `on` | Play active alerts through the local speaker. Available only on builds with audio output. |
+| `alert_sound_vol` | `0` to `100` percent | `88` | Local speaker volume for audible alerts. Available only on builds with audio output. |
+
 ## SMB Sync
 
 | Key | Values | Default | Description |

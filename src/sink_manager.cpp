@@ -18,9 +18,17 @@ const char *const LIVE_CHART_STREAM_IDS =
     "_HRT,"
     "_SAO";
 
-const char *const THERAPY_TELEMETRY_STREAM_IDS = "_MKI,_MKE";
 constexpr uint32_t THERAPY_TELEMETRY_SAMPLE_MS = 2000;
 constexpr uint32_t THERAPY_TELEMETRY_REPORT_MS = 2000;
+
+const char *therapy_telemetry_stream_ids(uint8_t signals) {
+    const bool pressure = (signals & THERAPY_TELEMETRY_PRESSURE) != 0;
+    const bool leak = (signals & THERAPY_TELEMETRY_LEAK) != 0;
+    if (pressure && leak) return "_MKI,_MKE,_LKF";
+    if (pressure) return "_MKI,_MKE";
+    if (leak) return "_LKF";
+    return "";
+}
 
 void append_live_sample(LiveChartSeriesBatch &series,
                         bool valid,
@@ -104,13 +112,15 @@ void SinkManager::poll(uint32_t now_ms) {
     poll_live_chart(now_ms);
 }
 
-void SinkManager::set_therapy_telemetry_enabled(bool enabled) {
-    if (therapy_telemetry_enabled_ == enabled) return;
+void SinkManager::set_therapy_telemetry_signals(uint8_t signals) {
+    signals &= THERAPY_TELEMETRY_PRESSURE | THERAPY_TELEMETRY_LEAK;
+    if (therapy_telemetry_signals_ == signals) return;
 
-    therapy_telemetry_enabled_ = enabled;
+    therapy_telemetry_signals_ = signals;
     therapy_telemetry_dirty_ = true;
-    if (!enabled) {
-        release_therapy_telemetry_stream();
+    release_therapy_telemetry_stream();
+    next_therapy_telemetry_attach_ms_ = 0;
+    if (signals == THERAPY_TELEMETRY_NONE) {
         therapy_telemetry_.clear();
         therapy_telemetry_session_id_ = 0;
     }
@@ -132,7 +142,8 @@ bool SinkManager::take_therapy_telemetry_update(
 }
 
 bool SinkManager::therapy_telemetry_should_run() const {
-    if (!therapy_telemetry_enabled_ || !stream_ || !device_state_ ||
+    if (therapy_telemetry_signals_ == THERAPY_TELEMETRY_NONE || !stream_ ||
+        !device_state_ ||
         !session_) {
         return false;
     }
@@ -178,7 +189,7 @@ void SinkManager::attach_therapy_telemetry_stream(uint32_t now_ms) {
 
     next_therapy_telemetry_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
     const std::string params = build_stream_params(
-        THERAPY_TELEMETRY_STREAM_IDS,
+        therapy_telemetry_stream_ids(therapy_telemetry_signals_),
         THERAPY_TELEMETRY_SAMPLE_MS,
         THERAPY_TELEMETRY_REPORT_MS);
     const StreamAcquireResult result =

@@ -14,7 +14,8 @@ provide either or both.
 
 The Waveshare profile is the ready-made option when no soldering is desired.
 Its display, button, accelerometer, microSD slot, USB power, and BLE radio are
-already onboard. Adding physical CAN to it is possible, but requires an
+already onboard. Its speaker can be used for configured local alerts. Adding
+physical CAN to it is possible, but requires an
 external transceiver, wiring, and a custom build.
 
 The published XIAO profiles use an external microSD card in either 4-bit SDMMC

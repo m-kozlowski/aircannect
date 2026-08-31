@@ -4,7 +4,7 @@
 
 namespace aircannect {
 
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 22;
+static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 24;
 
 enum class AppConfigSchemaMode : uint8_t {
     Initialize,

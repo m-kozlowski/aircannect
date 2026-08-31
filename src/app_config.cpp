@@ -42,6 +42,18 @@ bool valid_timezone(const String &timezone) {
     return true;
 }
 
+bool valid_alert_leak_threshold(uint16_t threshold_l_min) {
+    return threshold_l_min >= 1 && threshold_l_min <= 120;
+}
+
+bool valid_alert_leak_delay(uint16_t delay_s) {
+    return delay_s <= 3600;
+}
+
+bool valid_alert_audible_volume(uint16_t percent) {
+    return percent <= 100;
+}
+
 bool valid_hex_string(const String &value, size_t length) {
     if (value.length() != length) return false;
     for (size_t i = 0; i < value.length(); ++i) {
@@ -470,7 +482,11 @@ bool save_config(const AppConfigData &data, const AppConfigData *baseline) {
         }
         if (!app_config_write_includes_field(write_mode, changed)) continue;
 
-        ok = save_config_field(prefs, fields[i], data) && ok;
+        if (!save_config_field(prefs, fields[i], data)) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "failed to persist key=%s\n", fields[i].key);
+            ok = false;
+        }
     }
     prefs.end();
 
@@ -635,6 +651,21 @@ bool AppConfig::normalize() {
     if (!oximetry_advertise_mode_valid(data_.oximetry_advertise_mode)) {
         data_.oximetry_advertise_mode =
             defaults.oximetry_advertise_mode;
+        unchanged = false;
+    }
+    if (!valid_alert_leak_threshold(data_.alert_leak_threshold_l_min)) {
+        data_.alert_leak_threshold_l_min =
+            defaults.alert_leak_threshold_l_min;
+        unchanged = false;
+    }
+    if (!valid_alert_leak_delay(data_.alert_leak_delay_s)) {
+        data_.alert_leak_delay_s = defaults.alert_leak_delay_s;
+        unchanged = false;
+    }
+    if (!valid_alert_audible_volume(
+            data_.alert_audible_volume_percent)) {
+        data_.alert_audible_volume_percent =
+            defaults.alert_audible_volume_percent;
         unchanged = false;
     }
     normalize_smb_endpoint(data_.smb_endpoint);
@@ -848,6 +879,44 @@ bool AppConfig::set_oximetry_advertise_mode(
     if (data_.oximetry_advertise_mode == mode) return true;
     data_.oximetry_advertise_mode = mode;
     return mark_dirty(AC_CONFIG_DIRTY_OXIMETRY);
+}
+
+bool AppConfig::set_alert_leak_enabled(bool enabled) {
+    if (data_.alert_leak_enabled == enabled) return true;
+
+    data_.alert_leak_enabled = enabled;
+    return mark_dirty(AC_CONFIG_DIRTY_ALERTS);
+}
+
+bool AppConfig::set_alert_leak_threshold(uint16_t threshold_l_min) {
+    if (!valid_alert_leak_threshold(threshold_l_min)) return false;
+    if (data_.alert_leak_threshold_l_min == threshold_l_min) return true;
+
+    data_.alert_leak_threshold_l_min = threshold_l_min;
+    return mark_dirty(AC_CONFIG_DIRTY_ALERTS);
+}
+
+bool AppConfig::set_alert_leak_delay(uint16_t delay_s) {
+    if (!valid_alert_leak_delay(delay_s)) return false;
+    if (data_.alert_leak_delay_s == delay_s) return true;
+
+    data_.alert_leak_delay_s = delay_s;
+    return mark_dirty(AC_CONFIG_DIRTY_ALERTS);
+}
+
+bool AppConfig::set_alert_audible_enabled(bool enabled) {
+    if (data_.alert_audible_enabled == enabled) return true;
+
+    data_.alert_audible_enabled = enabled;
+    return mark_dirty(AC_CONFIG_DIRTY_ALERTS);
+}
+
+bool AppConfig::set_alert_audible_volume(uint16_t percent) {
+    if (!valid_alert_audible_volume(percent)) return false;
+    if (data_.alert_audible_volume_percent == percent) return true;
+
+    data_.alert_audible_volume_percent = percent;
+    return mark_dirty(AC_CONFIG_DIRTY_ALERTS);
 }
 
 bool AppConfig::set_edf_capture_enabled(bool enabled) {

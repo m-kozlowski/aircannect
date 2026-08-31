@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "shared_i2c_bus.h"
 
 namespace aircannect {
 namespace {
@@ -51,8 +52,6 @@ constexpr uint32_t QMI8658_SAMPLE_TIMEOUT_MS = 100;
 constexpr uint32_t QMI8658_STALE_DATA_TIMEOUT_MS = 2000;
 constexpr uint32_t QMI8658_TRANSACTION_TIMEOUT_MS = 50;
 constexpr float QMI8658_ACCEL_SCALE_G = 4.0f / 32768.0f;
-constexpr i2c_port_num_t QMI8658_I2C_PORT = I2C_NUM_0;
-
 class Qmi8658MotionDevice final : public MotionDevice {
 public:
     bool begin() override {
@@ -173,22 +172,8 @@ private:
     }
 
     bool start_bus() {
-        i2c_master_bus_config_t bus_config = {};
-        bus_config.i2c_port = QMI8658_I2C_PORT;
-        bus_config.clk_source = I2C_CLK_SRC_DEFAULT;
-        bus_config.sda_io_num =
-            static_cast<gpio_num_t>(AC_MOTION_I2C_SDA_GPIO);
-        bus_config.scl_io_num =
-            static_cast<gpio_num_t>(AC_MOTION_I2C_SCL_GPIO);
-        bus_config.glitch_ignore_cnt = 7;
-        bus_config.trans_queue_depth = 0;
-        bus_config.flags.enable_internal_pullup = true;
-        bus_config.flags.allow_pd = false;
-
-        if (i2c_new_master_bus(&bus_config, &bus_) != ESP_OK) {
-            bus_ = nullptr;
-            return false;
-        }
+        i2c_master_bus_handle_t bus = board_shared_i2c_bus();
+        if (!bus) return false;
 
         i2c_device_config_t device_config = {};
         device_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
@@ -197,10 +182,8 @@ private:
         device_config.scl_wait_us = QMI8658_SCL_WAIT_US;
         device_config.flags.disable_ack_check = false;
 
-        if (i2c_master_bus_add_device(bus_, &device_config, &device_) !=
+        if (i2c_master_bus_add_device(bus, &device_config, &device_) !=
             ESP_OK) {
-            (void)i2c_del_master_bus(bus_);
-            bus_ = nullptr;
             device_ = nullptr;
             return false;
         }
@@ -213,10 +196,6 @@ private:
             (void)i2c_master_bus_rm_device(device_);
             device_ = nullptr;
         }
-        if (!bus_) return;
-
-        (void)i2c_del_master_bus(bus_);
-        bus_ = nullptr;
     }
 
     bool initialize() {
@@ -404,7 +383,6 @@ private:
     static constexpr size_t QMI8658_TIMESTAMP_BYTES = 3;
     static constexpr size_t QMI8658_MAX_READ_BYTES = QMI8658_SAMPLE_BYTES;
 
-    i2c_master_bus_handle_t bus_ = nullptr;
     i2c_master_dev_handle_t device_ = nullptr;
     uint8_t transaction_buffer_[QMI8658_MAX_READ_BYTES + 1] = {};
 

@@ -1,0 +1,44 @@
+#pragma once
+
+#define AC_AUDIO_DRIVER_NONE 0
+#define AC_AUDIO_DRIVER_ES8311_I2S 1
+
+#ifndef AC_AUDIO_DRIVER
+#define AC_AUDIO_DRIVER AC_AUDIO_DRIVER_NONE
+#endif
+
+#ifndef AC_AUDIO_I2C_ADDRESS
+#define AC_AUDIO_I2C_ADDRESS 0x18
+#endif
+
+#ifndef AC_AUDIO_MCLK_GPIO
+#define AC_AUDIO_MCLK_GPIO -1
+#endif
+
+#ifndef AC_AUDIO_BCLK_GPIO
+#define AC_AUDIO_BCLK_GPIO -1
+#endif
+
+#ifndef AC_AUDIO_LRCK_GPIO
+#define AC_AUDIO_LRCK_GPIO -1
+#endif
+
+#ifndef AC_AUDIO_DOUT_GPIO
+#define AC_AUDIO_DOUT_GPIO -1
+#endif
+
+#ifndef AC_AUDIO_PA_GPIO
+#define AC_AUDIO_PA_GPIO -1
+#endif
+
+#ifndef AC_AUDIO_PA_ACTIVE_HIGH
+#define AC_AUDIO_PA_ACTIVE_HIGH 1
+#endif
+
+#ifndef AC_AUDIO_PA_STARTUP_MS
+#define AC_AUDIO_PA_STARTUP_MS 0
+#endif
+
+#ifndef AC_AUDIO_SAMPLE_RATE
+#define AC_AUDIO_SAMPLE_RATE 16000
+#endif
