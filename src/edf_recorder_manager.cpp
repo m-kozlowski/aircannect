@@ -153,8 +153,10 @@ struct EdfRecorderManager::ColdState {
     EdfSessionMetadata pending_final_metadata;
     EdfSessionMetadataPublication metadata_open_publication;
     EdfCatalogRefreshHint latest_catalog_refresh_hint;
+    EdfStrSessionAccumulator str_session_checkpoint;
     bool segment_metadata_active = false;
     bool pending_final_metadata_valid = false;
+    bool str_session_checkpoint_valid = false;
 
     NumericSchemaState numeric_schemas[AC_EDF_NUMERIC_SERIES_COUNT];
 };
@@ -855,6 +857,9 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
                   status_.last_error[0] ? status_.last_error : "--");
     }
 
+    cold_->str_session_checkpoint = str_;
+    cold_->str_session_checkpoint_valid = true;
+
     release_stream();
     const StatusCarryover carryover = preserve_status_carryover(status_);
 
@@ -917,9 +922,20 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     if (!status_.active) return;
     update_event_coverage();
 
-    if (!session_clock_frozen_) freeze_session_clock(now_ms);
-    if (str_start_pending_) (void)ensure_str_session_started(now_ms);
-    apply_pending_mask_event(now_ms);
+    const bool recording_gate_seen = status_.recording_start_time[0] != 0;
+    if (recording_gate_seen) {
+        if (!session_clock_frozen_) freeze_session_clock(now_ms);
+        if (str_start_pending_) (void)ensure_str_session_started(now_ms);
+        apply_pending_mask_event(now_ms);
+    } else {
+        cancel_session_rpc_requests();
+        if (cold_->str_session_checkpoint_valid) {
+            str_ = cold_->str_session_checkpoint;
+        }
+        str_start_pending_ = false;
+        pending_str_start_time_[0] = 0;
+        pending_mask_event_start_time_[0] = 0;
+    }
 
     recording_gate_open_ = false;
     if (!close_recording_segment()) {
@@ -928,12 +944,14 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     }
     segment_close_pending_ = false;
 
-    if (!finish_str_session(session, now_ms, recording_end_time)) {
+    if (recording_gate_seen &&
+        !finish_str_session(session, now_ms, recording_end_time)) {
         Log::logf(CAT_EDF, LOG_WARN,
                   "STR session end skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
     }
+    cold_->str_session_checkpoint_valid = false;
 
     const char *segment_end = recording_end_time && recording_end_time[0]
         ? recording_end_time
