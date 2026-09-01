@@ -166,6 +166,9 @@ private:
     void maybe_retry_softap_sta();
 
     // scanning and roaming
+    bool start_automatic_scan();
+    bool automatic_scan_finished(bool &success);
+    void cancel_automatic_scan();
     void maybe_start_roam_scan();
     void handle_roam_scan();
     void cleanup_manual_scan();
@@ -184,8 +187,9 @@ private:
     void remember_good_candidate(uint8_t profile_index, const uint8_t *bssid);
 
     int8_t find_profile_by_ssid(const String &ssid) const;
-    void collect_scan_candidates(int16_t scan_count,
-                                 int8_t profile_filter = -1);
+    void reset_scan_candidates();
+    void collect_scan_candidates(int8_t profile_filter = -1);
+    const ScanCandidate *best_scan_candidate(size_t profile_index) const;
     bool start_scan_candidate(size_t candidate_index);
     void retry_with_pmf_disabled();
     const char *mode_name() const;
@@ -200,6 +204,8 @@ private:
     bool roaming_suspended_ = false;
     bool roam_connect_pending_ = false;
     bool ap_select_keep_softap_ = false;
+    bool automatic_scan_active_ = false;
+    bool profile_scan_snapshot_valid_ = false;
     bool manual_scan_active_ = false;
     bool pmf_retry_attempted_ = false;
     uint8_t last_disconnect_reason_ = 0;
@@ -226,6 +232,7 @@ private:
     ScanCandidate scan_candidates_[AC_WIFI_SCAN_CANDIDATES_MAX];
     size_t scan_candidate_count_ = 0;
     size_t scan_ip_failed_skips_ = 0;
+    uint8_t scan_ip_failed_skips_by_profile_[AC_WIFI_PROFILE_MAX] = {};
     IpFailedCandidate ip_failed_[AC_WIFI_SCAN_CANDIDATES_MAX];
 
     // diagnostics

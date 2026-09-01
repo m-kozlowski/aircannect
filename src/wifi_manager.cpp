@@ -21,8 +21,13 @@ static constexpr const char *WIFI_PREF_PASS = "pass";
 static constexpr const char *WIFI_PREF_OPEN = "open";
 static constexpr const char *WIFI_PREF_COUNT = "count";
 static constexpr const char *WIFI_PREF_LAST_GOOD = "last_good";
+static constexpr uint16_t WIFI_COEX_SCAN_ACTIVE_MAX_MS = 120;
+static constexpr uint8_t WIFI_COEX_SCAN_HOME_DWELL_MS = 30;
 
 static volatile uint8_t last_disconnect_reason = 0;
+static volatile bool automatic_scan_pending = false;
+static volatile bool automatic_scan_done = false;
+static volatile uint32_t automatic_scan_status = 1;
 
 void format_bssid(char *out, size_t size, const uint8_t *bssid) {
     if (!out || size == 0) return;
@@ -74,6 +79,10 @@ void format_ap_ssid(const String &hostname, char *out, size_t size) {
 void wifi_event_cb(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
         last_disconnect_reason = info.wifi_sta_disconnected.reason;
+    } else if (event == ARDUINO_EVENT_WIFI_SCAN_DONE &&
+               automatic_scan_pending) {
+        automatic_scan_status = info.wifi_scan_done.status;
+        automatic_scan_done = true;
     }
 }
 
@@ -291,6 +300,36 @@ bool WifiManager::start_profile(size_t index, bool keep_softap,
     WifiProfile &profile = profiles_[index];
     if (!profile.ssid.length()) return false;
 
+    if (profile_scan_snapshot_valid_) {
+        const ScanCandidate *candidate = best_scan_candidate(index);
+        if (candidate) {
+            const ScanCandidate selected = *candidate;
+            const bool started = begin_profile_association(
+                index, &selected, keep_softap, false, nullptr);
+            profile_scan_snapshot_valid_ = true;
+            return started;
+        }
+
+        if (scan_ip_failed_skips_by_profile_[index] > 0) {
+            Log::logf(
+                CAT_WIFI, LOG_WARN,
+                "AP selection skipped %u IPv4-failed candidate(s) for SSID=%s\n",
+                static_cast<unsigned>(
+                    scan_ip_failed_skips_by_profile_[index]),
+                profile.ssid.c_str());
+            stats_.connect_failures++;
+            consecutive_profile_failures_++;
+            return false;
+        }
+
+        Log::logf(CAT_WIFI, LOG_WARN,
+                  "AP selection found no candidate for SSID=%s; using "
+                  "unpinned connect\n",
+                  profile.ssid.c_str());
+        return begin_profile_association(index, nullptr, keep_softap, false,
+                                         "no_scan_candidate");
+    }
+
     prepare_sta_radio(keep_softap, reset_existing_sta);
 
     mode_state_ = WifiModeState::StaConnecting;
@@ -309,22 +348,19 @@ bool WifiManager::start_profile(size_t index, bool keep_softap,
     last_disconnect_reason_ = 0;
     last_disconnect_reason = 0;
 
-    if (roaming_enabled()) {
-        WiFi.scanDelete();
-        int16_t rc = WiFi.scanNetworks(true);
-        if (rc != WIFI_SCAN_FAILED) {
-            mode_state_ = WifiModeState::StaApSelecting;
-            Log::logf(CAT_WIFI, LOG_DEBUG,
-                      "selecting AP for profile %u SSID=%s\n",
-                      static_cast<unsigned>(index), profile.ssid.c_str());
-            return true;
-        }
-        Log::logf(CAT_WIFI, LOG_WARN,
-                  "AP selection scan failed for SSID=%s; using unpinned "
-                  "connect\n",
-                  profile.ssid.c_str());
+    reset_scan_candidates();
+    if (start_automatic_scan()) {
+        mode_state_ = WifiModeState::StaApSelecting;
+        Log::logf(CAT_WIFI, LOG_DEBUG,
+                  "selecting APs for %u profile(s), starting with %u SSID=%s\n",
+                  static_cast<unsigned>(profile_count_),
+                  static_cast<unsigned>(index), profile.ssid.c_str());
+        return true;
     }
 
+    profile_scan_snapshot_valid_ = true;
+    Log::logf(CAT_WIFI, LOG_WARN,
+              "AP selection scan failed; using unpinned profile connects\n");
     return begin_profile_association(index, nullptr, keep_softap, false,
                                      "scan_unavailable");
 }
@@ -333,6 +369,7 @@ bool WifiManager::start_next_profile(size_t start_index, bool keep_softap,
                                      bool reset_existing_sta) {
     if (profile_count_ == 0) return false;
     for (size_t offset = 0; offset < profile_count_; ++offset) {
+        if (consecutive_profile_failures_ >= profile_count_) break;
         const size_t index = (start_index + offset) % profile_count_;
         if (start_profile(index, keep_softap, reset_existing_sta)) return true;
     }
@@ -399,6 +436,9 @@ void WifiManager::stop_softap(const char *reason) {
 }
 
 void WifiManager::stop_wifi() {
+    cancel_automatic_scan();
+    profile_scan_snapshot_valid_ = false;
+
     if (manual_scan_active_) {
         esp_wifi_scan_stop();
         WiFi.scanDelete();
@@ -535,8 +575,7 @@ void WifiManager::set_roaming_suspended(bool suspended) {
     if (!suspended) return;
     low_rssi_count_ = 0;
     if (mode_state_ == WifiModeState::StaRoamScanning) {
-        esp_wifi_scan_stop();
-        WiFi.scanDelete();
+        cancel_automatic_scan();
         mode_state_ = WiFi.status() == WL_CONNECTED
                           ? (sta_has_ipv4()
                                  ? WifiModeState::StaConnected
@@ -693,6 +732,9 @@ bool WifiManager::reconnect() {
 }
 
 bool WifiManager::connect_profiles(size_t start_index, bool preserve_softap) {
+    cancel_automatic_scan();
+    profile_scan_snapshot_valid_ = false;
+    reset_scan_candidates();
     consecutive_profile_failures_ = 0;
     const bool keep_softap = preserve_softap && softap_running_;
     if (sta_configured_) return start_next_profile(start_index, keep_softap);
@@ -962,6 +1004,7 @@ void WifiManager::handle_connected() {
     last_disconnect_reason = 0;
     low_rssi_count_ = 0;
     last_roam_check_ms_ = millis();
+    profile_scan_snapshot_valid_ = false;
     if (roam_connect_pending_) {
         stats_.roam_switches++;
         roam_connect_pending_ = false;
@@ -1039,6 +1082,7 @@ bool WifiManager::begin_profile_association(
 }
 
 void WifiManager::enter_softap_fallback() {
+    profile_scan_snapshot_valid_ = false;
     if (!start_softap(false)) return;
     if (!sta_configured_ || profile_count_ == 0) {
         softap_retry_deadline_ms_ = 0;
@@ -1068,22 +1112,80 @@ void WifiManager::maybe_retry_softap_sta() {
     }
 }
 
+bool WifiManager::start_automatic_scan() {
+    cancel_automatic_scan();
+
+    if (manual_scan_active_) {
+        esp_wifi_scan_stop();
+        WiFi.scanDelete();
+        manual_scan_active_ = false;
+        manual_scan_completed_ms_ = 0;
+    } else {
+        WiFi.scanDelete();
+    }
+
+    wifi_scan_config_t config = {};
+    config.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    config.scan_time.active.max = WIFI_COEX_SCAN_ACTIVE_MAX_MS;
+    config.home_chan_dwell_time = WIFI_COEX_SCAN_HOME_DWELL_MS;
+    config.coex_background_scan = true;
+
+    automatic_scan_done = false;
+    automatic_scan_status = 1;
+    automatic_scan_pending = true;
+
+    const esp_err_t err = esp_wifi_scan_start(&config, false);
+    if (err != ESP_OK) {
+        automatic_scan_pending = false;
+        Log::logf(CAT_WIFI, LOG_DEBUG,
+                  "coexistence scan start failed err=%d\n",
+                  static_cast<int>(err));
+        return false;
+    }
+
+    automatic_scan_active_ = true;
+    ap_select_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
+    return true;
+}
+
+bool WifiManager::automatic_scan_finished(bool &success) {
+    success = false;
+    if (!automatic_scan_active_ || !automatic_scan_done) return false;
+
+    success = automatic_scan_status == 0;
+    automatic_scan_pending = false;
+    automatic_scan_done = false;
+    automatic_scan_active_ = false;
+    return true;
+}
+
+void WifiManager::cancel_automatic_scan() {
+    if (!automatic_scan_active_) return;
+
+    automatic_scan_pending = false;
+    automatic_scan_done = false;
+    automatic_scan_status = 1;
+    esp_wifi_scan_stop();
+    esp_wifi_clear_ap_list();
+    automatic_scan_active_ = false;
+}
+
 void WifiManager::handle_ap_select_scan() {
-    const int16_t result = WiFi.scanComplete();
-    if (result == WIFI_SCAN_RUNNING) {
+    bool scan_succeeded = false;
+    if (!automatic_scan_finished(scan_succeeded)) {
         if (static_cast<int32_t>(millis() - ap_select_deadline_ms_) < 0) {
             return;
         }
-        esp_wifi_scan_stop();
-        WiFi.scanDelete();
+
+        cancel_automatic_scan();
+        reset_scan_candidates();
+        profile_scan_snapshot_valid_ = true;
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "AP selection scan timed out for SSID=%s; using unpinned "
-                  "connect\n",
-                  sta_ssid_.c_str());
+                  "AP selection scan timed out; using unpinned profile "
+                  "connects\n");
         if (active_profile_index_ >= 0) {
-            begin_profile_association(
-                static_cast<size_t>(active_profile_index_), nullptr,
-                ap_select_keep_softap_, false, "scan_timeout");
+            start_profile(static_cast<size_t>(active_profile_index_),
+                          ap_select_keep_softap_);
         }
         return;
     }
@@ -1091,56 +1193,30 @@ void WifiManager::handle_ap_select_scan() {
     const int8_t active_profile = active_profile_index_;
     const bool keep_softap = ap_select_keep_softap_;
     if (active_profile < 0) {
-        WiFi.scanDelete();
+        esp_wifi_clear_ap_list();
         mode_state_ = softap_running_ ? WifiModeState::SoftAp
                                       : WifiModeState::Off;
         return;
     }
 
-    if (result == WIFI_SCAN_FAILED) {
-        WiFi.scanDelete();
+    if (!scan_succeeded) {
+        reset_scan_candidates();
+        esp_wifi_clear_ap_list();
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "AP selection scan failed for SSID=%s; using unpinned "
-                  "connect\n",
-                  sta_ssid_.c_str());
-        begin_profile_association(static_cast<size_t>(active_profile), nullptr,
-                                  keep_softap, false, "scan_failed");
-        return;
+                  "AP selection scan failed; using unpinned profile "
+                  "connects\n");
+    } else {
+        collect_scan_candidates();
     }
 
-    collect_scan_candidates(result, active_profile);
-    WiFi.scanDelete();
-    if (scan_candidate_count_ > 0) {
-        const ScanCandidate candidate = scan_candidates_[0];
-        begin_profile_association(candidate.profile_index, &candidate,
-                                  keep_softap, false, nullptr);
+    profile_scan_snapshot_valid_ = true;
+    if (start_profile(static_cast<size_t>(active_profile), keep_softap)) return;
+
+    if (start_next_profile(static_cast<size_t>(active_profile + 1),
+                           keep_softap)) {
         return;
     }
-
-    if (scan_ip_failed_skips_ > 0) {
-        Log::logf(CAT_WIFI, LOG_WARN,
-                  "AP selection skipped %u IPv4-failed candidate(s) for SSID=%s\n",
-                  static_cast<unsigned>(scan_ip_failed_skips_),
-                  sta_ssid_.c_str());
-        stats_.connect_failures++;
-        consecutive_profile_failures_++;
-        if (profile_count_ > 1 &&
-            consecutive_profile_failures_ < profile_count_ &&
-            active_profile_index_ >= 0 &&
-            start_next_profile(static_cast<size_t>(active_profile_index_ + 1),
-                               keep_softap)) {
-            return;
-        }
-        enter_softap_fallback();
-        return;
-    }
-
-    Log::logf(CAT_WIFI, LOG_WARN,
-              "AP selection found no candidate for SSID=%s; using unpinned "
-              "connect\n",
-              sta_ssid_.c_str());
-    begin_profile_association(static_cast<size_t>(active_profile), nullptr,
-                              keep_softap, false, "no_scan_candidate");
+    enter_softap_fallback();
 }
 
 void WifiManager::maybe_start_roam_scan() {
@@ -1165,9 +1241,7 @@ void WifiManager::maybe_start_roam_scan() {
               static_cast<unsigned>(AC_WIFI_ROAM_CONSECUTIVE_LOW));
     if (low_rssi_count_ < AC_WIFI_ROAM_CONSECUTIVE_LOW) return;
 
-    WiFi.scanDelete();
-    int16_t rc = WiFi.scanNetworks(true);
-    if (rc == WIFI_SCAN_FAILED) {
+    if (!start_automatic_scan()) {
         low_rssi_count_ = 0;
         return;
     }
@@ -1185,30 +1259,46 @@ int8_t WifiManager::find_profile_by_ssid(const String &ssid) const {
     return -1;
 }
 
-void WifiManager::collect_scan_candidates(int16_t scan_count,
-                                          int8_t profile_filter) {
+void WifiManager::reset_scan_candidates() {
     scan_candidate_count_ = 0;
     scan_ip_failed_skips_ = 0;
+    memset(scan_ip_failed_skips_by_profile_, 0,
+           sizeof(scan_ip_failed_skips_by_profile_));
+}
+
+void WifiManager::collect_scan_candidates(int8_t profile_filter) {
+    reset_scan_candidates();
+
+    uint16_t scan_count = 0;
+    if (esp_wifi_scan_get_ap_num(&scan_count) != ESP_OK) {
+        esp_wifi_clear_ap_list();
+        return;
+    }
+
     const uint32_t now_ms = millis();
-    for (int i = 0; i < scan_count &&
-                    scan_candidate_count_ < AC_WIFI_SCAN_CANDIDATES_MAX; ++i) {
-        const int8_t profile_index = find_profile_by_ssid(WiFi.SSID(i));
+    for (uint16_t i = 0; i < scan_count; ++i) {
+        wifi_ap_record_t record = {};
+        if (esp_wifi_scan_get_ap_record(&record) != ESP_OK) break;
+
+        const String ssid(reinterpret_cast<const char *>(record.ssid));
+        const int8_t profile_index = find_profile_by_ssid(ssid);
         if (profile_index < 0) continue;
         if (profile_filter >= 0 && profile_index != profile_filter) continue;
-        uint8_t *bssid = WiFi.BSSID(i);
-        if (!bssid) continue;
         if (candidate_ip_failed(static_cast<uint8_t>(profile_index),
-                                bssid, now_ms)) {
+                                record.bssid, now_ms)) {
             scan_ip_failed_skips_++;
+            scan_ip_failed_skips_by_profile_[profile_index]++;
             continue;
         }
+        if (scan_candidate_count_ >= AC_WIFI_SCAN_CANDIDATES_MAX) continue;
 
         ScanCandidate &candidate = scan_candidates_[scan_candidate_count_++];
         candidate.profile_index = static_cast<uint8_t>(profile_index);
-        memcpy(candidate.bssid, bssid, 6);
-        candidate.channel = static_cast<uint8_t>(WiFi.channel(i));
-        candidate.rssi = static_cast<int8_t>(WiFi.RSSI(i));
+        memcpy(candidate.bssid, record.bssid, sizeof(candidate.bssid));
+        candidate.channel = record.primary;
+        candidate.rssi = record.rssi;
     }
+    esp_wifi_clear_ap_list();
 
     for (size_t i = 0; i < scan_candidate_count_; ++i) {
         for (size_t j = i + 1; j < scan_candidate_count_; ++j) {
@@ -1224,6 +1314,16 @@ void WifiManager::collect_scan_candidates(int16_t scan_count,
     stats_.last_ip_failed_skips = scan_ip_failed_skips_;
 }
 
+const WifiManager::ScanCandidate *WifiManager::best_scan_candidate(
+    size_t profile_index) const {
+    for (size_t i = 0; i < scan_candidate_count_; ++i) {
+        if (scan_candidates_[i].profile_index == profile_index) {
+            return &scan_candidates_[i];
+        }
+    }
+    return nullptr;
+}
+
 bool WifiManager::start_scan_candidate(size_t candidate_index) {
     if (candidate_index >= scan_candidate_count_) return false;
 
@@ -1233,11 +1333,16 @@ bool WifiManager::start_scan_candidate(size_t candidate_index) {
 }
 
 void WifiManager::handle_roam_scan() {
-    const int16_t result = WiFi.scanComplete();
-    if (result == WIFI_SCAN_RUNNING) return;
+    bool scan_succeeded = false;
+    if (!automatic_scan_finished(scan_succeeded)) {
+        if (static_cast<int32_t>(millis() - ap_select_deadline_ms_) < 0) {
+            return;
+        }
+        cancel_automatic_scan();
+    }
 
     // Scan failure recovery
-    if (result == WIFI_SCAN_FAILED) {
+    if (!scan_succeeded) {
         low_rssi_count_ = 0;
 
         if (WiFi.status() == WL_CONNECTED) {
@@ -1274,8 +1379,7 @@ void WifiManager::handle_roam_scan() {
     }
 
     // Candidate selection
-    collect_scan_candidates(result, active_profile);
-    WiFi.scanDelete();
+    collect_scan_candidates(active_profile);
 
     bool should_switch = false;
 
@@ -1435,6 +1539,8 @@ WifiScanStatus WifiManager::manual_scan_status() {
         return WifiScanStatus::RoamInProgress;
     }
 
+    if (automatic_scan_active_) return WifiScanStatus::Running;
+
     if (manual_scan_active_) {
         const int16_t count = WiFi.scanComplete();
         if (count == WIFI_SCAN_RUNNING) {
@@ -1458,6 +1564,12 @@ WifiScanStartResult WifiManager::start_manual_scan() {
         Log::logf(CAT_WIFI, LOG_DEBUG,
                   "manual scan deferred: roaming scan active\n");
         return WifiScanStartResult::RoamInProgress;
+    }
+
+    if (automatic_scan_active_) {
+        Log::logf(CAT_WIFI, LOG_DEBUG,
+                  "manual scan request ignored: automatic scan active\n");
+        return WifiScanStartResult::Running;
     }
 
     if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
