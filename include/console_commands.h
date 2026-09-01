@@ -44,11 +44,17 @@ class WifiManager;
 
 class As11DeviceConsoleCommands final : public ConsoleCommandGroup {
 public:
+    using BleConnectionCommand = bool (*)(void *context, uint32_t now_ms);
+
     As11DeviceConsoleCommands(RpcRequestPort &rpc,
                               RpcPassthroughPort &passthrough,
                               As11DeviceService &device,
+                              As11SettingsManager &settings,
                               TimeSyncService &time_sync,
-                              As11BleRpcLink &ble_link);
+                              As11BleRpcLink &ble_link,
+                              BleConnectionCommand connect_ble,
+                              BleConnectionCommand disconnect_ble,
+                              void *ble_connection_context = nullptr);
 
     bool execute(const String &command,
                  const String &rest,
@@ -58,30 +64,19 @@ public:
     void print_status(Print &out) override;
 
 private:
-    RpcRequestPort &rpc_;
-    RpcPassthroughPort &passthrough_;
-    As11DeviceService &device_;
-    TimeSyncService &time_sync_;
-    As11BleRpcLink &ble_link_;
-};
+    bool execute_rpc(const String &command,
+                     String rest,
+                     Print &out);
 
-class RpcConsoleCommands final : public ConsoleCommandGroup {
-public:
-    RpcConsoleCommands(RpcRequestPort &rpc,
-                       RpcPassthroughPort &passthrough,
-                       As11DeviceService &device,
-                       As11SettingsManager &settings);
-
-    bool execute(const String &command,
-                 const String &rest,
-                 Print &out,
-                 ConsoleCommandSession &session) override;
-
-private:
     RpcRequestPort &rpc_;
     RpcPassthroughPort &passthrough_;
     As11DeviceService &device_;
     As11SettingsManager &settings_;
+    TimeSyncService &time_sync_;
+    As11BleRpcLink &ble_link_;
+    BleConnectionCommand connect_ble_ = nullptr;
+    BleConnectionCommand disconnect_ble_ = nullptr;
+    void *ble_connection_context_ = nullptr;
 };
 
 class StreamConsoleCommands final : public ConsoleCommandGroup {

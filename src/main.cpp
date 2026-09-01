@@ -186,13 +186,14 @@ static HttpRouteModule *web_route_modules[] = {
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
+static bool connect_cpap(void *context, uint32_t now_ms);
+static bool disconnect_cpap(void *context, uint32_t now_ms);
+
 static CanConsoleCommands can_console_commands(
     rpc_transport, can_rpc_link, can_driver, event_broker, stream_broker);
 static As11DeviceConsoleCommands as11_device_console_commands(
-    rpc_transport, rpc_transport, as11_device_service, time_sync_service,
-    as11_ble_rpc_link);
-static RpcConsoleCommands rpc_console_commands(
-    rpc_transport, rpc_transport, as11_device_service, as11_settings_manager);
+    rpc_transport, rpc_transport, as11_device_service, as11_settings_manager,
+    time_sync_service, as11_ble_rpc_link, connect_cpap, disconnect_cpap);
 static StreamConsoleCommands stream_console_commands(stream_broker);
 static NetworkConsoleCommands network_console_commands(wifi_manager,
                                                        tcp_bridge);
@@ -224,7 +225,6 @@ static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
 static ConsoleCommandGroup *console_command_groups[] = {
     &can_console_commands,
     &as11_device_console_commands,
-    &rpc_console_commands,
     &stream_console_commands,
     &network_console_commands,
     &core_console_commands,
@@ -339,13 +339,31 @@ static bool trigger_export_sync(void *, uint32_t) {
 
 static bool disconnect_cpap(void *, uint32_t) {
     if (rpc_link_selector.selected() != As11Transport::Ble ||
-        !rpc_link_selector.status().ready ||
-        rpc_quiesce_coordinator.requested() ||
+        local_poweroff_requested ||
         firmware_installer.active() || resmed_ota_manager.active()) {
+        return false;
+    }
+    if (local_as11_disconnect_requested) return true;
+    if (!rpc_link_selector.status().ready ||
+        rpc_quiesce_coordinator.requested()) {
         return false;
     }
 
     local_as11_disconnect_requested = true;
+    return true;
+}
+
+static bool connect_cpap(void *, uint32_t) {
+    if (rpc_link_selector.selected() != As11Transport::Ble ||
+        local_poweroff_requested || firmware_installer.active() ||
+        resmed_ota_manager.active() ||
+        (rpc_quiesce_coordinator.requested() &&
+         !local_as11_disconnect_requested)) {
+        return false;
+    }
+    if (!as11_ble_rpc_link.request_reconnect()) return false;
+
+    local_as11_disconnect_requested = false;
     return true;
 }
 

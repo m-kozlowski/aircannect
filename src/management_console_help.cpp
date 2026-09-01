@@ -23,7 +23,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config            persistent app configuration");
         out.println("  wifi              Wi-Fi profiles, scan, and reconnect");
         out.println("  log               log levels and sink status");
-        out.println("  as11              AS11 state, polling, and device version");
+        out.println("  as11              AS11 state, RPC, and BLE connection");
         out.println("  therapy           start/stop therapy commands");
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  stream            AS11 stream subscription controls");
@@ -38,10 +38,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  tcp               raw JSON-RPC TCP bridge status");
         out.println("  ota               AirCANnect firmware OTA status");
         out.println("  resmed-ota        AS11 firmware upload/apply workflow");
-        out.println("  get               AS11 Get helper for named fields");
-        out.println("  set               AS11 Set helper for named fields");
-        out.println("  rpc               AS11 method call helper");
-        out.println("  raw               send raw JSON-RPC payload");
         out.println("[HELP] TCP bridge: one JSON-RPC payload per line.");
         return;
     }
@@ -108,7 +104,13 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  as11 status               show cached AS11 state");
         out.println("  as11 poll                 queue status and clock refresh");
         out.println("  as11 version              request AS11 GetVersion");
+        out.println("  as11 get NAME [...]       request named fields");
+        out.println("  as11 set NAME VALUE [...] write named fields");
+        out.println("  as11 rpc METHOD [PARAMS]  call an AS11 RPC method");
+        out.println("  as11 raw JSON             send a raw JSON-RPC payload");
         out.println("  as11 ble status           show BLE link and pairing state");
+        out.println("  as11 ble connect          connect or retry now");
+        out.println("  as11 ble disconnect       quiesce and disconnect");
         out.println("  as11 ble pair             scan for an AS11 to pair");
         out.println("  as11 ble select ADDRESS   select a scanned AS11");
         out.println("  as11 ble passkey CODE     finish pairing with its code");
@@ -247,17 +249,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  TARGET: APCX (default), APPL, CONF, FGBL, or FGCB");
         out.println("  resmed-ota apply plain CONFIRM         queue ApplyUpgrade");
         out.println("  resmed-ota apply authenticated TAG CONFIRM  queue ApplyAuthUpgrade");
-        return;
-    }
-
-    if (topic == "rpc" || topic == "raw" || topic == "get" ||
-        topic == "set") {
-        out.println("[HELP rpc]");
-        out.println("  get NAME [NAME...]        queue AS11 Get for named fields");
-        out.println("  set NAME VALUE [...]      queue AS11 Set for fields");
-        out.println("  set {JSON_PARAMS}         queue AS11 Set with raw params");
-        out.println("  rpc METHOD [JSON_PARAMS]  queue AS11 method call");
-        out.println("  raw JSON                  send raw JSON-RPC payload");
         return;
     }
 

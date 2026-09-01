@@ -312,6 +312,20 @@ As11BlePairingStatus As11BleRpcLink::pairing_status() const {
     return out;
 }
 
+bool As11BleRpcLink::request_reconnect() {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    const bool accepted = config_.enabled && !pairing_status_.active;
+    if (accepted) {
+        reconnect_requested_ = true;
+    }
+    portEXIT_CRITICAL(&mux_);
+    return accepted;
+#else
+    return false;
+#endif
+}
+
 bool As11BleRpcLink::request_pairing_scan() {
     PairingCommand command;
     command.kind = PairingCommandKind::Scan;
@@ -407,6 +421,11 @@ void As11BleRpcLink::task_loop() {
 
         if (controlled_disconnect_started) {
             controlled_disconnect_started = false;
+            next_attempt_ms = 0;
+            reconnect_delay_ms = AC_AS11_BLE_RECONNECT_MIN_MS;
+        }
+
+        if (take_reconnect_request()) {
             next_attempt_ms = 0;
             reconnect_delay_ms = AC_AS11_BLE_RECONNECT_MIN_MS;
         }
@@ -1406,6 +1425,18 @@ bool As11BleRpcLink::reset_requested() const {
     portEXIT_CRITICAL(&mux_);
 #endif
     return requested;
+}
+
+bool As11BleRpcLink::take_reconnect_request() {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    const bool requested = reconnect_requested_;
+    reconnect_requested_ = false;
+    portEXIT_CRITICAL(&mux_);
+    return requested;
+#else
+    return false;
+#endif
 }
 
 bool As11BleRpcLink::controlled_disconnect_requested() const {

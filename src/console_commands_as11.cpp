@@ -353,7 +353,13 @@ void print_as11_ble_status(Print &out, const As11BleRpcLink &link) {
     }
 }
 
-void handle_as11_ble(Print &out, String rest, As11BleRpcLink &link) {
+void handle_as11_ble(
+    Print &out,
+    String rest,
+    As11BleRpcLink &link,
+    As11DeviceConsoleCommands::BleConnectionCommand connect_ble,
+    As11DeviceConsoleCommands::BleConnectionCommand disconnect_ble,
+    void *connection_context) {
     rest.trim();
     if (!rest.length() || rest == "status") {
         print_as11_ble_status(out, link);
@@ -363,6 +369,11 @@ void handle_as11_ble(Print &out, String rest, As11BleRpcLink &link) {
     bool accepted = false;
     if (rest == "pair" || rest == "scan") {
         accepted = link.request_pairing_scan();
+    } else if (rest == "connect") {
+        accepted = connect_ble && connect_ble(connection_context, millis());
+    } else if (rest == "disconnect") {
+        accepted = disconnect_ble &&
+                   disconnect_ble(connection_context, millis());
     } else if (rest == "cancel") {
         accepted = link.cancel_pairing();
     } else if (rest == "forget") {
@@ -378,7 +389,8 @@ void handle_as11_ble(Print &out, String rest, As11BleRpcLink &link) {
     } else {
         print_unknown_command(
             out, "AS11 BLE",
-            "as11 ble status, pair, select ADDRESS, passkey CODE, cancel, forget");
+            "as11 ble status, connect, disconnect, pair, select ADDRESS, "
+            "passkey CODE, cancel, forget");
         return;
     }
 
@@ -392,13 +404,21 @@ As11DeviceConsoleCommands::As11DeviceConsoleCommands(
     RpcRequestPort &rpc,
     RpcPassthroughPort &passthrough,
     As11DeviceService &device,
+    As11SettingsManager &settings,
     TimeSyncService &time_sync,
-    As11BleRpcLink &ble_link)
+    As11BleRpcLink &ble_link,
+    BleConnectionCommand connect_ble,
+    BleConnectionCommand disconnect_ble,
+    void *ble_connection_context)
     : rpc_(rpc),
       passthrough_(passthrough),
       device_(device),
+      settings_(settings),
       time_sync_(time_sync),
-      ble_link_(ble_link) {}
+      ble_link_(ble_link),
+      connect_ble_(connect_ble),
+      disconnect_ble_(disconnect_ble),
+      ble_connection_context_(ble_connection_context) {}
 
 bool As11DeviceConsoleCommands::execute(
     const String &command,
@@ -413,23 +433,34 @@ bool As11DeviceConsoleCommands::execute(
 
     if (command == "as11") {
         rest.trim();
-        if (!rest.length() || rest == "status") {
+        const int split = rest.indexOf(' ');
+        String subcommand = split < 0 ? rest : rest.substring(0, split);
+        String args = split < 0 ? "" : rest.substring(split + 1);
+        subcommand.toLowerCase();
+        args.trim();
+
+        if (!subcommand.length() || subcommand == "status") {
             ConsoleFormat::print_as11_status(out, device_.state());
-        } else if (rest == "ble" || rest.startsWith("ble ")) {
-            handle_as11_ble(out, rest.substring(3), ble_link_);
-        } else if (rest == "poll" || rest == "refresh") {
+        } else if (subcommand == "ble") {
+            handle_as11_ble(out, args, ble_link_, connect_ble_,
+                            disconnect_ble_, ble_connection_context_);
+        } else if (subcommand == "poll" || subcommand == "refresh") {
             device_.request_healthcheck(rpc_, RpcSource::Console, millis());
             out.println("[AS11] healthcheck scheduled");
-        } else if (rest == "version") {
+        } else if (subcommand == "version") {
             if (device_.unavailable()) {
                 out.println("[AS11] unavailable");
             } else {
                 passthrough_.send_request("GetVersion", "",
                                           RpcSource::Console);
             }
+        } else if (subcommand == "get" || subcommand == "set" ||
+                   subcommand == "rpc" || subcommand == "raw") {
+            return execute_rpc(subcommand, args, out);
         } else {
             print_unknown_command(
-                out, "AS11", "as11 status, poll, version, ble");
+                out, "AS11",
+                "as11 status, poll, version, get, set, rpc, raw, ble");
         }
         return true;
     }
@@ -485,31 +516,13 @@ void As11DeviceConsoleCommands::print_status(Print &out) {
     ConsoleFormat::print_time_status(out, device_.state(), time_sync_);
 }
 
-RpcConsoleCommands::RpcConsoleCommands(
-    RpcRequestPort &rpc,
-    RpcPassthroughPort &passthrough,
-    As11DeviceService &device,
-    As11SettingsManager &settings)
-    : rpc_(rpc),
-      passthrough_(passthrough),
-      device_(device),
-      settings_(settings) {}
-
-bool RpcConsoleCommands::execute(const String &command,
-                                 const String &rest_arg,
-                                 Print &out,
-                                 ConsoleCommandSession &) {
-    if (command != "get" && command != "set" && command != "rpc" &&
-        command != "raw") {
-        return false;
-    }
-
-    String rest = rest_arg;
-
+bool As11DeviceConsoleCommands::execute_rpc(const String &command,
+                                            String rest,
+                                            Print &out) {
     if (command == "get") {
         rest.trim();
         if (!rest.length()) {
-            out.println("[RPC] usage: get NAME [NAME...]");
+            out.println("[RPC] usage: as11 get NAME [NAME...]");
         } else {
             passthrough_.send_request("Get", build_get_params(to_std(rest)),
                                       RpcSource::Console);
@@ -521,8 +534,8 @@ bool RpcConsoleCommands::execute(const String &command,
         rest.trim();
         if (!rest.length()) {
             out.println(
-                "[RPC] usage: set NAME VALUE [NAME VALUE...] | "
-                "set {JSON_PARAMS}");
+                "[RPC] usage: as11 set NAME VALUE [NAME VALUE...] | "
+                "as11 set {JSON_PARAMS}");
             return true;
         }
 
@@ -544,8 +557,8 @@ bool RpcConsoleCommands::execute(const String &command,
             while (parse_console_arg(rest, pos, key)) {
                 if (!parse_console_arg(rest, pos, value)) {
                     out.println(
-                        "[RPC] usage: set NAME VALUE [NAME VALUE...] | "
-                        "set {JSON_PARAMS}");
+                        "[RPC] usage: as11 set NAME VALUE [NAME VALUE...] | "
+                        "as11 set {JSON_PARAMS}");
                     return true;
                 }
 
@@ -603,7 +616,7 @@ bool RpcConsoleCommands::execute(const String &command,
         String params = split < 0 ? "" : rest.substring(split + 1);
         params.trim();
         if (!method.length()) {
-            out.println("[RPC] usage: rpc METHOD [JSON_PARAMS]");
+            out.println("[RPC] usage: as11 rpc METHOD [JSON_PARAMS]");
         } else {
             passthrough_.send_request(to_std(method), to_std(params),
                                       RpcSource::Console);
@@ -614,7 +627,7 @@ bool RpcConsoleCommands::execute(const String &command,
     if (command == "raw") {
         rest.trim();
         if (!rest.length()) {
-            out.println("[RPC] usage: raw JSON");
+            out.println("[RPC] usage: as11 raw JSON");
         } else {
             passthrough_.submit_raw_payload(to_std(rest), RpcSource::Console);
         }

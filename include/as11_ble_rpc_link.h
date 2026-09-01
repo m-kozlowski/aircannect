@@ -114,6 +114,7 @@ public:
     void set_credential_store(CredentialStore store, void *context);
     As11BleLinkStatus ble_status() const;
     As11BlePairingStatus pairing_status() const;
+    bool request_reconnect();
 
     // First pairing
     bool request_pairing_scan();
@@ -222,6 +223,7 @@ private:
     Configuration configuration() const;
     bool reset_requested() const;
     void clear_reset_request();
+    bool take_reconnect_request();
     bool controlled_disconnect_requested() const;
     void set_controlled_disconnect_complete(bool complete);
     void set_status(As11BleLinkState state,
@@ -260,6 +262,7 @@ private:
     void *credential_store_context_ = nullptr;
     bool task_started_ = false;
     bool reset_requested_ = false;
+    bool reconnect_requested_ = false;
     bool controlled_disconnect_requested_ = false;
     bool controlled_disconnect_complete_ = false;
     uint8_t queued_requests_ = 0;
