@@ -1,11 +1,13 @@
 #include "management_console_format.h"
 
 #include <stdio.h>
+#include <time.h>
 
 #include "as11_device_state.h"
 #include "board.h"
 #include "debug_log.h"
 #include "event_broker.h"
+#include "time_sync_service.h"
 
 namespace aircannect {
 namespace ConsoleFormat {
@@ -228,6 +230,37 @@ void print_rpc_stats(Print &out,
     out.println(stats.event_drops);
 }
 
+void print_as11_summary(Print &out, const As11DeviceState &state) {
+    out.print("[AS11] state=");
+    out.print(As11DeviceState::availability_name(state.availability()));
+    out.print(" therapy=");
+    out.print(As11DeviceState::therapy_state_name(state.therapy_state()));
+    if (!state.active_therapy_profile().empty()) {
+        out.print(" mode=\"");
+        out.print(state.active_therapy_profile().c_str());
+        out.print('"');
+    }
+    if (state.therapy_command_pending()) {
+        out.print(" pending=");
+        out.print(As11DeviceState::therapy_target_name(
+            state.pending_therapy_target()));
+    }
+    out.println();
+
+    if (state.product_name().empty() && state.serial_number().empty() &&
+        state.software_identifier().empty()) {
+        return;
+    }
+
+    out.print("[AS11] name=\"");
+    out.print(state.product_name().c_str());
+    out.print("\" serial=\"");
+    out.print(state.serial_number().c_str());
+    out.print("\" sid=\"");
+    out.print(state.software_identifier().c_str());
+    out.println("\"");
+}
+
 void print_as11_status(Print &out, const As11DeviceState &state) {
     out.print("[AS11] state=");
     out.print(As11DeviceState::availability_name(state.availability()));
@@ -290,6 +323,63 @@ void print_as11_status(Print &out, const As11DeviceState &state) {
         out.print(" timezone_offset_min=unknown");
     }
     out.println();
+}
+
+void print_time_summary(Print &out,
+                        const As11DeviceState &state,
+                        const TimeSyncService &time_sync) {
+    const time_t now = time(nullptr);
+    struct tm local = {};
+    localtime_r(&now, &local);
+    char local_text[24];
+    strftime(local_text, sizeof(local_text), "%Y-%m-%d %H:%M:%S", &local);
+
+    out.print("[TIME] local=\"");
+    out.print(time_sync.esp_clock_valid() ? local_text : "invalid");
+    out.print("\" source=");
+    out.print(time_sync.esp_clock_source_name());
+    out.print(" as11_offset_ms=");
+    if (state.clock_offset_valid()) {
+        out.print(state.clock_offset_ms());
+    } else {
+        out.print("unknown");
+    }
+    out.println();
+}
+
+void print_time_status(Print &out,
+                       const As11DeviceState &state,
+                       const TimeSyncService &time_sync) {
+    const time_t now = time(nullptr);
+    struct tm utc = {};
+    struct tm local = {};
+    gmtime_r(&now, &utc);
+    localtime_r(&now, &local);
+    char utc_text[24];
+    char local_text[24];
+    strftime(utc_text, sizeof(utc_text), "%Y-%m-%d %H:%M:%S", &utc);
+    strftime(local_text, sizeof(local_text), "%Y-%m-%d %H:%M:%S", &local);
+
+    out.print("[TIME] utc=");
+    out.print(time_sync.esp_clock_valid() ? utc_text : "invalid");
+    out.print(" local=");
+    out.print(time_sync.esp_clock_valid() ? local_text : "invalid");
+    out.print(" epoch=");
+    out.print(static_cast<uint32_t>(now));
+    out.print(" source=");
+    out.print(time_sync.esp_clock_source_name());
+    out.print(" ntp=");
+    out.print(time_sync.ntp_synced() ? "synced" : "not_synced");
+    out.print(" resmed_push=");
+    out.print(time_sync.resmed_time_sync_enabled() ? "on" : "off");
+    out.print(" resmed_offset_ms=");
+    if (state.clock_offset_valid()) {
+        out.print(state.clock_offset_ms());
+    } else {
+        out.print("unknown");
+    }
+    out.print(" status=");
+    out.println(time_sync.last_status());
 }
 
 void print_stream_status(Print &out, const StreamBroker &stream) {
@@ -517,12 +607,37 @@ void print_session_status(Print &out, const SessionStatus &s) {
     out.println();
 }
 
-void print_sink_status(Print &out, const SinkManager &sink_manager) {
+void print_session_summary(Print &out, const SessionStatus &s) {
+    out.print("[SESSION] state=");
+    out.print(SessionManager::state_name(s.state));
+    if (s.state == SessionState::Active) {
+        if (s.start_device_time[0]) {
+            out.print(" started=\"");
+            out.print(s.start_device_time);
+            out.print('"');
+        }
+    } else if (s.end_device_time[0]) {
+        out.print(" last_end=\"");
+        out.print(s.end_device_time);
+        out.print('"');
+        if (s.end_reason[0]) {
+            out.print(" reason=");
+            out.print(s.end_reason);
+        }
+    }
+    out.println();
+}
+
+void print_sink_summary(Print &out, const SinkManager &sink_manager) {
     const LiveChartRuntimeStatus &live = sink_manager.live_chart_status();
 
     out.print("[SINK] live=");
     out.print(live.enabled ? "on" : "off");
     out.println();
+}
+
+void print_sink_status(Print &out, const SinkManager &sink_manager) {
+    const LiveChartRuntimeStatus &live = sink_manager.live_chart_status();
 
     out.print("[SINK live] enabled=");
     out.print(live.enabled ? "yes" : "no");

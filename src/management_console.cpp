@@ -127,11 +127,16 @@ void ManagementConsole::execute_line(String line,
 
     if (command == "status") {
         trim_inplace(rest);
-        if (rest.length()) {
-            print_unknown_command(out, "STATUS", "status");
+        to_lower_inplace(rest);
+        if (!rest.length()) {
+            router.print_summary(out);
             return;
         }
-        router.print_status(out);
+        if (rest == "-v" || rest == "verbose") {
+            router.print_status(out);
+            return;
+        }
+        print_unknown_command(out, "STATUS", "status, status -v");
         return;
     }
 

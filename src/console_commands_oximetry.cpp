@@ -103,6 +103,27 @@ void print_oximetry_status(Print &out,
     out.println("\"");
 }
 
+void print_oximetry_summary(Print &out,
+                            const OximetryHub &hub,
+                            const BleSensorSource &sensor_source) {
+    const OximetryHubSnapshot status = hub.snapshot(millis());
+    const BleSensorStatus sensor = sensor_source.status();
+
+    out.print("[OXI] enabled=");
+    print_yes_no(out, status.enabled);
+    out.print(" source=");
+    out.print(oximetry_source_name(status.source));
+    if (status.reading.valid) {
+        out.print(" spo2=");
+        out.print(status.reading.spo2);
+        out.print(" pulse=");
+        out.print(status.reading.pulse_bpm);
+    }
+    out.print(" sensor=");
+    out.print(sensor_state_text(sensor.state));
+    out.println();
+}
+
 void print_sensor_status(Print &out, const BleSensorSource &sensor) {
     const BleSensorStatus status = sensor.status();
     out.print("[OXI sensor] state=");
@@ -391,6 +412,10 @@ bool OximetryConsoleCommands::execute(const String &command,
     print_unknown_command(out, "OXI",
                           "oxi status, on, off, cpap, sensor, advertise");
     return true;
+}
+
+void OximetryConsoleCommands::print_summary(Print &out) {
+    print_oximetry_summary(out, hub_, sensor_);
 }
 
 void OximetryConsoleCommands::print_status(Print &out) {

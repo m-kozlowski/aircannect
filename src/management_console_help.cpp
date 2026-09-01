@@ -12,7 +12,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (!topic.length()) {
         out.println("[HELP] AirCANnect management console");
         out.println("  help COMMAND      show detailed help for a command");
-        out.println("  status            current CAN, AS11, session, and sink state");
+        out.println("  status            concise current operating state");
         out.println("  stats             CAN, RPC, event, and stream counters");
         out.println("  memory            heap and PSRAM status");
         out.println("  version           AirCANnect firmware version");
@@ -43,6 +43,13 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  rpc               AS11 method call helper");
         out.println("  raw               send raw JSON-RPC payload");
         out.println("[HELP] TCP bridge: one JSON-RPC payload per line.");
+        return;
+    }
+
+    if (topic == "status") {
+        out.println("[HELP status]");
+        out.println("  status                    show concise operating state");
+        out.println("  status -v                 show detailed subsystem state");
         return;
     }
 

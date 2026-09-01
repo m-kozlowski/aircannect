@@ -34,6 +34,9 @@ public:
         (void)session;
     }
 
+    virtual void print_summary(Print &out) {
+        (void)out;
+    }
     virtual void print_status(Print &out) {
         (void)out;
     }
@@ -59,6 +62,7 @@ public:
     void cancel_pending(ConsoleCommandSession &session);
     void stop(ConsoleCommandSession &session);
 
+    void print_summary(Print &out);
     void print_status(Print &out);
     void print_stats(Print &out);
     void reset_stats();

@@ -72,6 +72,14 @@ void ConsoleCommandRouter::ensure_session(ConsoleCommandSession &session) {
     session.id = next_session_id_;
 }
 
+void ConsoleCommandRouter::print_summary(Print &out) {
+    if (!groups_) return;
+
+    for (size_t i = 0; i < group_count_; ++i) {
+        groups_[i]->print_summary(out);
+    }
+}
+
 void ConsoleCommandRouter::print_status(Print &out) {
     if (!groups_) return;
 

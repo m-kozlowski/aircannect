@@ -23,6 +23,17 @@ const char *last_edf_error(const EdfRecorderStatus &status,
     return nullptr;
 }
 
+void print_edf_recorder_summary(Print &out,
+                                const EdfRecorderManager &manager) {
+    const EdfRecorderStatus &status = manager.status();
+
+    out.print("[EDF] enabled=");
+    out.print(status.enabled ? "yes" : "no");
+    out.print(" state=");
+    out.print(status.active ? "recording" : "idle");
+    out.println();
+}
+
 void print_edf_recorder_status(Print &out,
                                const EdfRecorderManager &manager) {
     const EdfRecorderStatus &status = manager.status();
@@ -87,15 +98,14 @@ void print_edf_recorder_status(Print &out,
 
     const bool has_drops = status.frame_drops ||
         status.numeric_record_drops || status.numeric_open_buffer_drops ||
-        status.local_sa2_queue_drops ||
-        storage.queue_drops;
+        status.local_sa2_queue_drops || storage.queue_drops;
     const bool has_faults = status.event_coverage_session_gaps() ||
         status.recording_gate_bad_events || status.mask_bad_events ||
         status.record_enqueue_failures || status.annotation_enqueue_failures ||
         status.str_enqueue_failures || status.file_open_failures ||
         status.attach_failures || status.metadata_failures ||
-        storage.patch_errors ||
-        assembly.timestamp_errors || assembly.unmapped_signal[0] || last_error;
+        storage.patch_errors || assembly.timestamp_errors ||
+        assembly.unmapped_signal[0] || last_error;
 
     if (has_drops || has_faults) {
         out.print("[EDF health] drops=");
@@ -398,6 +408,10 @@ void EdfConsoleCommands::cancel_pending(ConsoleCommandSession &session) {
 
 void EdfConsoleCommands::stop(ConsoleCommandSession &session) {
     cancel_pending(session);
+}
+
+void EdfConsoleCommands::print_summary(Print &out) {
+    print_edf_recorder_summary(out, recorder_);
 }
 
 void EdfConsoleCommands::print_status(Print &out) {

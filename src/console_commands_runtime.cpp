@@ -186,6 +186,11 @@ bool RuntimeConsoleCommands::execute(
     return false;
 }
 
+void RuntimeConsoleCommands::print_summary(Print &out) {
+    ConsoleFormat::print_session_summary(out, session_.status());
+    ConsoleFormat::print_sink_summary(out, sink_);
+}
+
 void RuntimeConsoleCommands::print_status(Print &out) {
     ConsoleFormat::print_session_status(out, session_.status());
     ConsoleFormat::print_sink_status(out, sink_);

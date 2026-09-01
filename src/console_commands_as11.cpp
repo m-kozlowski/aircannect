@@ -282,39 +282,8 @@ void handle_time(Print &out,
     rest.trim();
     rest.toLowerCase();
     if (!rest.length() || rest == "status") {
-        const time_t now = time(nullptr);
-        struct tm utc = {};
-        struct tm local = {};
-        gmtime_r(&now, &utc);
-        localtime_r(&now, &local);
-        char utc_text[24];
-        char local_text[24];
-        strftime(utc_text, sizeof(utc_text), "%Y-%m-%d %H:%M:%S", &utc);
-        strftime(local_text, sizeof(local_text), "%Y-%m-%d %H:%M:%S",
-                 &local);
-
-        out.print("[TIME] utc=");
-        out.print(time_sync.esp_clock_valid() ? utc_text : "invalid");
-        out.print(" local=");
-        out.print(time_sync.esp_clock_valid() ? local_text : "invalid");
-        out.print(" epoch=");
-        out.print(static_cast<uint32_t>(now));
-        out.print(" source=");
-        out.print(time_sync.esp_clock_source_name());
-        out.print(" ntp=");
-        out.print(time_sync.ntp_synced() ? "synced" : "not_synced");
-        out.print(" resmed_push=");
-        out.print(time_sync.resmed_time_sync_enabled() ? "on" : "off");
-        out.print(" resmed_offset_ms=");
-
-        const As11DeviceState &as11 = device.state();
-        if (as11.clock_offset_valid()) {
-            out.print(as11.clock_offset_ms());
-        } else {
-            out.print("unknown");
-        }
-        out.print(" status=");
-        out.println(time_sync.last_status());
+        ConsoleFormat::print_time_status(
+            out, device.state(), time_sync);
         return;
     }
 
@@ -506,8 +475,14 @@ bool As11DeviceConsoleCommands::execute(
     return false;
 }
 
+void As11DeviceConsoleCommands::print_summary(Print &out) {
+    ConsoleFormat::print_as11_summary(out, device_.state());
+    ConsoleFormat::print_time_summary(out, device_.state(), time_sync_);
+}
+
 void As11DeviceConsoleCommands::print_status(Print &out) {
     ConsoleFormat::print_as11_status(out, device_.state());
+    ConsoleFormat::print_time_status(out, device_.state(), time_sync_);
 }
 
 RpcConsoleCommands::RpcConsoleCommands(

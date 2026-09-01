@@ -53,6 +53,7 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    void print_summary(Print &out) override;
     void print_status(Print &out) override;
 
 private:
@@ -163,6 +164,7 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &console_session) override;
+    void print_summary(Print &out) override;
     void print_status(Print &out) override;
 
 private:
@@ -183,6 +185,7 @@ public:
         const ConsoleCommandSession &session) const override;
     void cancel_pending(ConsoleCommandSession &session) override;
     void stop(ConsoleCommandSession &session) override;
+    void print_summary(Print &out) override;
     void print_status(Print &out) override;
 
 private:
@@ -205,6 +208,7 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    void print_summary(Print &out) override;
     void print_status(Print &out) override;
     void print_memory_detail(Print &out) override;
 
