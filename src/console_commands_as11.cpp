@@ -321,6 +321,39 @@ void handle_time(Print &out,
     print_unknown_command(out, "TIME", "time, get, push, pull, ntp");
 }
 
+void handle_therapy(Print &out,
+                    String rest,
+                    As11DeviceService &device,
+                    RpcRequestPort &rpc) {
+    rest.trim();
+    rest.toLowerCase();
+
+    As11TherapyTarget target;
+    const char *queued_message = nullptr;
+    const char *failed_message = nullptr;
+    if (rest == "start" || rest == "on" || rest == "run") {
+        target = As11TherapyTarget::Running;
+        queued_message = "[THERAPY] EnterTherapy queued";
+        failed_message = "[THERAPY] EnterTherapy queue failed";
+    } else if (rest == "stop" || rest == "off" || rest == "standby") {
+        target = As11TherapyTarget::Standby;
+        queued_message = "[THERAPY] EnterStandby queued";
+        failed_message = "[THERAPY] EnterStandby queue failed";
+    } else {
+        print_unknown_command(out, "AS11", "as11 therapy start, stop");
+        return;
+    }
+
+    if (device.unavailable()) {
+        out.println("[THERAPY] AS11 unavailable");
+        return;
+    }
+
+    const bool accepted = device.request_therapy(
+        rpc, target, RpcSource::Console, millis()).accepted();
+    out.println(accepted ? queued_message : failed_message);
+}
+
 void print_as11_ble_status(Print &out, const As11BleRpcLink &link) {
     const As11BleLinkStatus link_status = link.ble_status();
     const As11BlePairingStatus pairing = link.pairing_status();
@@ -425,7 +458,7 @@ bool As11DeviceConsoleCommands::execute(
     const String &rest_arg,
     Print &out,
     ConsoleCommandSession &) {
-    if (command != "as11" && command != "therapy" && command != "time") {
+    if (command != "as11" && command != "time") {
         return false;
     }
 
@@ -444,6 +477,8 @@ bool As11DeviceConsoleCommands::execute(
         } else if (subcommand == "ble") {
             handle_as11_ble(out, args, ble_link_, connect_ble_,
                             disconnect_ble_, ble_connection_context_);
+        } else if (subcommand == "therapy") {
+            handle_therapy(out, args, device_, rpc_);
         } else if (subcommand == "poll" || subcommand == "refresh") {
             device_.request_healthcheck(rpc_, RpcSource::Console, millis());
             out.println("[AS11] healthcheck scheduled");
@@ -460,40 +495,7 @@ bool As11DeviceConsoleCommands::execute(
         } else {
             print_unknown_command(
                 out, "AS11",
-                "as11 status, poll, version, get, set, rpc, raw, ble");
-        }
-        return true;
-    }
-
-    if (command == "therapy") {
-        rest.trim();
-        rest.toLowerCase();
-        if (!rest.length() || rest == "status") {
-            ConsoleFormat::print_as11_status(out, device_.state());
-        } else if (rest == "start" || rest == "on" || rest == "run") {
-            if (device_.unavailable()) {
-                out.println("[THERAPY] AS11 unavailable");
-                return true;
-            }
-            const bool accepted = device_.request_therapy(
-                rpc_, As11TherapyTarget::Running, RpcSource::Console,
-                millis()).accepted();
-            out.println(accepted ? "[THERAPY] EnterTherapy queued"
-                                 : "[THERAPY] EnterTherapy queue failed");
-        } else if (rest == "stop" || rest == "off" ||
-                   rest == "standby") {
-            if (device_.unavailable()) {
-                out.println("[THERAPY] AS11 unavailable");
-                return true;
-            }
-            const bool accepted = device_.request_therapy(
-                rpc_, As11TherapyTarget::Standby, RpcSource::Console,
-                millis()).accepted();
-            out.println(accepted ? "[THERAPY] EnterStandby queued"
-                                 : "[THERAPY] EnterStandby queue failed");
-        } else {
-            print_unknown_command(out, "THERAPY",
-                                  "therapy status, start, stop");
+                "as11 status, poll, version, get, set, rpc, raw, ble, therapy");
         }
         return true;
     }

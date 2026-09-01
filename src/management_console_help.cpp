@@ -23,8 +23,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config            persistent app configuration");
         out.println("  wifi              Wi-Fi profiles, scan, and reconnect");
         out.println("  log               log levels and sink status");
-        out.println("  as11              AS11 state, RPC, and BLE connection");
-        out.println("  therapy           start/stop therapy commands");
+        out.println("  as11              AS11 state, RPC, BLE, and therapy control");
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  stream            AS11 stream subscription controls");
         out.println("  live              live chart stream status");
@@ -34,7 +33,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  storage           persistent storage and writer status");
         out.println("  smb               SMB sync status and share verification");
         out.println("  sleephq           SleepHQ sync status and connectivity check");
-        out.println("  session           therapy session tracking state");
         out.println("  tcp               raw JSON-RPC TCP bridge status");
         out.println("  ota               AirCANnect firmware OTA status");
         out.println("  resmed-ota        AS11 firmware upload/apply workflow");
@@ -108,6 +106,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  as11 set NAME VALUE [...] write named fields");
         out.println("  as11 rpc METHOD [PARAMS]  call an AS11 RPC method");
         out.println("  as11 raw JSON             send a raw JSON-RPC payload");
+        out.println("  as11 therapy start        queue EnterTherapy");
+        out.println("  as11 therapy stop         queue EnterStandby");
         out.println("  as11 ble status           show BLE link and pairing state");
         out.println("  as11 ble connect          connect or retry now");
         out.println("  as11 ble disconnect       quiesce and disconnect");
@@ -116,14 +116,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  as11 ble passkey CODE     finish pairing with its code");
         out.println("  as11 ble cancel           cancel pairing");
         out.println("  as11 ble forget           remove paired credentials");
-        return;
-    }
-
-    if (topic == "therapy") {
-        out.println("[HELP therapy]");
-        out.println("  therapy status            show cached therapy state");
-        out.println("  therapy start             queue EnterTherapy");
-        out.println("  therapy stop              queue EnterStandby");
         return;
     }
 
@@ -256,7 +248,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP stats]");
         out.println("  stats                     show CAN/RPC/event/stream counters");
         out.println("  stats reset               clear those counters");
-        out.println("  use memory, storage, session, edf, oxi, tcp, or log for details");
+        out.println("  use memory, storage, edf, oxi, tcp, or log for details");
         return;
     }
 
@@ -312,12 +304,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP tcp]");
         out.println("  tcp                       show raw JSON-RPC bridge status");
         out.println("  tcp status                show raw JSON-RPC bridge status");
-        return;
-    }
-
-    if (topic == "session") {
-        out.println("[HELP session]");
-        out.println("  session status            show therapy session tracker state");
         return;
     }
 

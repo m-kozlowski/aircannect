@@ -161,20 +161,11 @@ bool RuntimeConsoleCommands::execute(
     Print &out,
     ConsoleCommandSession &console_session) {
     (void)console_session;
-    if (command != "session" && command != "live") return false;
+    if (command != "live") return false;
 
     String rest = rest_arg;
     rest.trim();
     rest.toLowerCase();
-
-    if (command == "session") {
-        if (rest.length() && rest != "status") {
-            print_unknown_command(out, "SESSION", "session status");
-        } else {
-            ConsoleFormat::print_session_status(out, session_.status());
-        }
-        return true;
-    }
 
     if (command == "live") {
         if (rest.length() && rest != "status") {
