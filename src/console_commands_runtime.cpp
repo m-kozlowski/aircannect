@@ -7,7 +7,8 @@
 #include "management_console_utils.h"
 #include "memory_manager.h"
 #include "session_manager.h"
-#include "sink_manager.h"
+#include "live_chart_service.h"
+#include "therapy_telemetry_broker.h"
 #include "tls_memory.h"
 #include "web_ui.h"
 
@@ -150,8 +151,9 @@ bool SystemConsoleCommands::execute(
 }
 
 RuntimeConsoleCommands::RuntimeConsoleCommands(SessionManager &session,
-                                               SinkManager &sink)
-    : session_(session), sink_(sink) {}
+                                               LiveChartService &live,
+                                               TherapyTelemetryBroker &telemetry)
+    : session_(session), live_(live), telemetry_(telemetry) {}
 
 bool RuntimeConsoleCommands::execute(
     const String &command,
@@ -159,7 +161,7 @@ bool RuntimeConsoleCommands::execute(
     Print &out,
     ConsoleCommandSession &console_session) {
     (void)console_session;
-    if (command != "session" && command != "sink") return false;
+    if (command != "session" && command != "live") return false;
 
     String rest = rest_arg;
     rest.trim();
@@ -174,11 +176,11 @@ bool RuntimeConsoleCommands::execute(
         return true;
     }
 
-    if (command == "sink") {
+    if (command == "live") {
         if (rest.length() && rest != "status") {
-            print_unknown_command(out, "SINK", "sink status");
+            print_unknown_command(out, "LIVE", "live status");
         } else {
-            ConsoleFormat::print_sink_status(out, sink_);
+            ConsoleFormat::print_live_status(out, live_);
         }
         return true;
     }
@@ -188,12 +190,13 @@ bool RuntimeConsoleCommands::execute(
 
 void RuntimeConsoleCommands::print_summary(Print &out) {
     ConsoleFormat::print_session_summary(out, session_.status());
-    ConsoleFormat::print_sink_summary(out, sink_);
+    ConsoleFormat::print_live_summary(out, live_);
 }
 
 void RuntimeConsoleCommands::print_status(Print &out) {
     ConsoleFormat::print_session_status(out, session_.status());
-    ConsoleFormat::print_sink_status(out, sink_);
+    ConsoleFormat::print_therapy_telemetry_status(out, telemetry_.status());
+    ConsoleFormat::print_live_status(out, live_);
 }
 
 WebDiagnosticsConsoleCommands::WebDiagnosticsConsoleCommands(WebUI &web_ui)

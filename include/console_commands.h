@@ -20,6 +20,7 @@ class ExportCoordinator;
 class ArduinoOtaSource;
 class FirmwareInstaller;
 class FirmwareUrlSource;
+class LiveChartService;
 class BleSensorSource;
 class OximetryHub;
 class PlxPeripheral;
@@ -32,9 +33,9 @@ class CanControlPort;
 class RpcPassthroughPort;
 class RpcRequestPort;
 class SessionManager;
-class SinkManager;
 class StreamBroker;
 class TcpBridge;
+class TherapyTelemetryBroker;
 class TimeSyncService;
 class UdpOximeterSource;
 class UpdateChecker;
@@ -158,7 +159,9 @@ private:
 
 class RuntimeConsoleCommands final : public ConsoleCommandGroup {
 public:
-    RuntimeConsoleCommands(SessionManager &session, SinkManager &sink);
+    RuntimeConsoleCommands(SessionManager &session,
+                           LiveChartService &live,
+                           TherapyTelemetryBroker &telemetry);
 
     bool execute(const String &command,
                  const String &rest,
@@ -169,7 +172,8 @@ public:
 
 private:
     SessionManager &session_;
-    SinkManager &sink_;
+    LiveChartService &live_;
+    TherapyTelemetryBroker &telemetry_;
 };
 
 class EdfConsoleCommands final : public ConsoleCommandGroup {

@@ -1,6 +1,6 @@
 #pragma once
 
-// SD storage: card config, provisioning paths, write-queue runtime, sink.
+// SD storage: card config, provisioning paths, and write-queue runtime.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -124,5 +124,3 @@ static constexpr uint8_t AC_FILE_LOG_ARCHIVES = 8;
 static constexpr size_t AC_FILE_LOG_TAIL_DEFAULT_LINES = 200;
 static constexpr size_t AC_FILE_LOG_TAIL_MAX_LINES = 1000;
 static constexpr size_t AC_FILE_LOG_TAIL_READ_CHUNK = 512;
-
-static constexpr uint32_t AC_SINK_ATTACH_RETRY_MS = 2000;

@@ -27,7 +27,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  therapy           start/stop therapy commands");
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  stream            AS11 stream subscription controls");
-        out.println("  sink              stream sink status");
+        out.println("  live              live chart stream status");
         out.println("  edf               live EDF recorder status and monitor toggle");
         out.println("  oxi               oximetry source and BLE injector status");
         out.println("  report            therapy report index/cache status");
@@ -182,9 +182,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         return;
     }
 
-    if (topic == "sink") {
-        out.println("[HELP sink]");
-        out.println("  sink status               show stream sink state");
+    if (topic == "live") {
+        out.println("[HELP live]");
+        out.println("  live status               show live chart stream state");
         return;
     }
 
@@ -258,12 +258,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  set {JSON_PARAMS}         queue AS11 Set with raw params");
         out.println("  rpc METHOD [JSON_PARAMS]  queue AS11 method call");
         out.println("  raw JSON                  send raw JSON-RPC payload");
-        return;
-    }
-
-    if (topic == "status") {
-        out.println("[HELP status]");
-        out.println("  status                    show CAN, AS11, session, and sink state");
         return;
     }
 

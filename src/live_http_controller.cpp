@@ -4,7 +4,7 @@
 #include <ESPAsyncWebServer.h>
 
 #include "json_util.h"
-#include "sink_manager.h"
+#include "live_chart_service.h"
 #include "stream_broker.h"
 #include "string_util.h"
 
@@ -61,8 +61,8 @@ void append_live_series(JsonOut &json,
 
 bool build_stream_json(LargeTextBuffer &json,
                        const StreamBroker &stream,
-                       const SinkManager &sink) {
-    const LiveChartRuntimeStatus &live = sink.live_chart_status();
+                       const LiveChartService &live_service) {
+    const LiveChartRuntimeStatus &live = live_service.status();
 
     json = "{";
     json_add_bool(json, "desired", stream.desired_active(), false);
@@ -121,9 +121,10 @@ bool build_stream_json(LargeTextBuffer &json,
 
 }  // namespace
 
-bool LiveHttpController::begin(StreamBroker &stream, SinkManager &sink) {
+bool LiveHttpController::begin(StreamBroker &stream,
+                               LiveChartService &live) {
     stream_ = &stream;
-    sink_ = &sink;
+    live_ = &live;
 
     if (!cache_mutex_) {
         cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
@@ -140,9 +141,9 @@ bool LiveHttpController::begin(StreamBroker &stream, SinkManager &sink) {
 }
 
 void LiveHttpController::stop() {
-    if (sink_) {
-        sink_->set_live_chart_enabled(false);
-        sink_->clear_live_chart_batch();
+    if (live_) {
+        live_->set_enabled(false);
+        live_->clear_batch();
     }
 
     if (lease_mutex_ &&
@@ -169,13 +170,13 @@ void LiveHttpController::register_routes(AsyncWebServer &server) {
 
 void LiveHttpController::poll(size_t healthy_sse_clients,
                               uint32_t now_ms) {
-    if (!stream_ || !sink_) return;
+    if (!stream_ || !live_) return;
 
     const bool live_needed =
         healthy_sse_clients > 0 && live_view_requested(now_ms);
-    sink_->set_live_chart_enabled(live_needed);
+    live_->set_enabled(live_needed);
     if (!live_needed) {
-        sink_->clear_live_chart_batch();
+        live_->clear_batch();
         last_live_send_ms_ = 0;
     } else {
         publish_live_payload(now_ms);
@@ -235,7 +236,7 @@ bool LiveHttpController::live_view_requested(uint32_t now_ms) {
 
 bool LiveHttpController::publish_stream_snapshot() {
     stream_build_json_.clear();
-    if (!build_stream_json(stream_build_json_, *stream_, *sink_)) {
+    if (!build_stream_json(stream_build_json_, *stream_, *live_)) {
         return false;
     }
 
@@ -247,7 +248,7 @@ bool LiveHttpController::publish_stream_snapshot() {
 }
 
 void LiveHttpController::publish_live_payload(uint32_t now_ms) {
-    const LiveChartRuntimeStatus &live = sink_->live_chart_status();
+    const LiveChartRuntimeStatus &live = live_->status();
     if (!live.desired) return;
 
     const bool has_samples =
@@ -298,7 +299,7 @@ void LiveHttpController::publish_live_payload(uint32_t now_ms) {
 
     live_generation_ = next_generation;
     last_live_send_ms_ = now_ms;
-    sink_->mark_live_chart_sent();
+    live_->mark_sent();
 }
 
 void LiveHttpController::send_stream_snapshot(

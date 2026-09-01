@@ -12,6 +12,7 @@
 #include "as11_settings.h"
 #include "as11_settings_manager.h"
 #include "alert_manager.h"
+#include "alert_telemetry_adapter.h"
 #include "audible_alert_sink.h"
 #include "audible_output.h"
 #include "arduino_ota_source.h"
@@ -27,6 +28,7 @@
 #include "device_http_controller.h"
 #include "display_manager.h"
 #include "display_snapshot.h"
+#include "display_telemetry_adapter.h"
 #include "edf_recorder_manager.h"
 #include "event_broker.h"
 #include "export_coordinator.h"
@@ -37,6 +39,7 @@
 #include "firmware_url_source.h"
 #include "http_route_module.h"
 #include "live_http_controller.h"
+#include "live_chart_service.h"
 #include "local_input_controller.h"
 #include "management_console.h"
 #include "memory_manager.h"
@@ -57,7 +60,6 @@
 #include "rpc_link_selector.h"
 #include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
-#include "sink_manager.h"
 #include "settings_http_controller.h"
 #include "storage_http_controller.h"
 #include "storage_upload_http_controller.h"
@@ -66,6 +68,7 @@
 #include "status_http_controller.h"
 #include "string_util.h"
 #include "stream_broker.h"
+#include "therapy_telemetry_broker.h"
 #if AC_STACK_PROFILE_ENABLED
 #include "stack_profiler.h"
 #endif
@@ -138,8 +141,11 @@ static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static DisplayManager display_manager;
 static LocalInputController local_inputs;
-static SinkManager sink_manager;
+static LiveChartService live_chart_service;
+static TherapyTelemetryBroker therapy_telemetry_broker;
+static DisplayTelemetryAdapter display_telemetry_adapter;
 static AlertManager alert_manager;
+static AlertTelemetryAdapter alert_telemetry_adapter;
 static AlertLogSink alert_log_sink;
 static AudibleAlertSink audible_alert_sink;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
@@ -196,7 +202,8 @@ static SystemConsoleCommands system_console_commands(
 static StorageConsoleCommands storage_console_commands(
     config_service, StorageService::read_port());
 static RuntimeConsoleCommands runtime_console_commands(session_manager,
-                                                       sink_manager);
+                                                       live_chart_service,
+                                                       therapy_telemetry_broker);
 static EdfConsoleCommands edf_console_commands(edf_recorder_manager,
                                                config_service);
 static OximetryConsoleCommands oximetry_console_commands(
@@ -621,13 +628,11 @@ static void configure_alerts(const AppConfigData &config, uint32_t now_ms) {
                   "[ALERT] failed to configure high leak rule\n");
     }
 
-    uint8_t telemetry_signals = display_manager.available()
-                                    ? THERAPY_TELEMETRY_PRESSURE
-                                    : THERAPY_TELEMETRY_NONE;
-    if (config.alert_leak_enabled) {
-        telemetry_signals |= THERAPY_TELEMETRY_LEAK;
+    if (!alert_telemetry_adapter.set_leak_enabled(
+            config.alert_leak_enabled)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[ALERT] failed to subscribe to leak telemetry\n");
     }
-    sink_manager.set_therapy_telemetry_signals(telemetry_signals);
 
     AudibleOutput *output = board_audible_output();
     audible_alert_sink.set_volume(
@@ -680,7 +685,7 @@ static void poll_oximetry(bool network_available, uint32_t now_ms) {
     plx_peripheral.poll(after, now_ms);
     const PlxPeripheralStatus peripheral = plx_peripheral.status(now_ms);
 
-    sink_manager.update_local_oximetry(after, peripheral.subscribed);
+    live_chart_service.update_local_oximetry(after, peripheral.subscribed);
 }
 
 static bool store_as11_ble_credentials(void *context,
@@ -1098,7 +1103,7 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
         const DisplaySnapshot display_snapshot = compose_display_snapshot(
             snapshot,
             session_manager.status(),
-            sink_manager.therapy_telemetry_snapshot(snapshot.now_ms),
+            therapy_telemetry_broker.snapshot(snapshot.now_ms),
             export_coordinator.status_snapshot(),
             therapy_mode,
             report_task.display_summary_snapshot());
@@ -1321,8 +1326,20 @@ void setup() {
                                         &stream_broker);
     rpc_transport_generation_seen = rpc_transport.transport_generation();
 
-    sink_manager.begin(stream_broker, as11_device_service.state(),
-                       session_manager);
+    live_chart_service.begin(stream_broker, as11_device_service.state(),
+                             session_manager);
+    therapy_telemetry_broker.begin(stream_broker,
+                                   as11_device_service.state(),
+                                   session_manager);
+    if (!display_telemetry_adapter.begin(
+            therapy_telemetry_broker, display_manager,
+            as11_device_service.state())) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[DISPLAY] failed to subscribe to therapy telemetry\n");
+    }
+    alert_telemetry_adapter.begin(therapy_telemetry_broker,
+                                  alert_manager, session_manager);
+
     (void)alert_manager.add_sink(alert_log_sink);
     if (board_audible_output()) {
         (void)alert_manager.add_sink(audible_alert_sink);
@@ -1462,7 +1479,7 @@ void setup() {
     }
     refresh_status_http_snapshot(millis());
 
-    if (!live_http_controller.begin(stream_broker, sink_manager)) {
+    if (!live_http_controller.begin(stream_broker, live_chart_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] live HTTP controller failed to start\n");
     }
@@ -1579,30 +1596,11 @@ void loop() {
     poll_report_catalog_refresh(now_ms);
     drain_can_rx_after("report_catalog");
 
-    // Live sinks
-    sink_manager.poll(now_ms);
+    // Therapy telemetry and live charts
+    alert_telemetry_adapter.poll(now_ms);
+    therapy_telemetry_broker.poll(now_ms);
+    live_chart_service.poll(now_ms);
     audible_alert_sink.poll(now_ms);
-    alert_manager.set_scope_active(AlertScope::TherapySession,
-                                   session_manager.status().state ==
-                                       SessionState::Active,
-                                   now_ms);
-    if (config_service.data().alert_leak_enabled) {
-        const TherapyTelemetrySnapshot alert_telemetry =
-            sink_manager.therapy_telemetry_snapshot(now_ms);
-        alert_manager.observe(AlertMetric::Leak,
-                              alert_telemetry.leak_valid,
-                              alert_telemetry.leak_l_min,
-                              now_ms);
-    }
-
-    TherapyTelemetrySnapshot telemetry;
-    if (display_manager.available() &&
-        sink_manager.take_therapy_telemetry_update(now_ms, telemetry)) {
-        const int therapy_mode = as11_mode_index_from_value(
-            as11_device_service.state().active_therapy_profile());
-        display_manager.publish_therapy_telemetry(
-            telemetry, therapy_mode);
-    }
 
     // Wi-Fi and network services
     const bool stream_activity_active = stream_broker.activity_active(

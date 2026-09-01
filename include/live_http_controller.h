@@ -13,7 +13,7 @@ class AsyncWebServerRequest;
 
 namespace aircannect {
 
-class SinkManager;
+class LiveChartService;
 class StreamBroker;
 
 struct LiveHttpMemoryStatus {
@@ -25,7 +25,7 @@ struct LiveHttpMemoryStatus {
 
 class LiveHttpController final : public HttpRouteModule {
 public:
-    bool begin(StreamBroker &stream, SinkManager &sink);
+    bool begin(StreamBroker &stream, LiveChartService &live);
     void stop();
     void register_routes(AsyncWebServer &server) override;
     void poll(size_t healthy_sse_clients, uint32_t now_ms);
@@ -50,7 +50,7 @@ private:
     void send_live_view_state(AsyncWebServerRequest *request);
 
     StreamBroker *stream_ = nullptr;
-    SinkManager *sink_ = nullptr;
+    LiveChartService *live_ = nullptr;
 
     StaticSemaphore_t cache_mutex_storage_ = {};
     StaticSemaphore_t lease_mutex_storage_ = {};

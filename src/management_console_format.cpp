@@ -628,18 +628,64 @@ void print_session_summary(Print &out, const SessionStatus &s) {
     out.println();
 }
 
-void print_sink_summary(Print &out, const SinkManager &sink_manager) {
-    const LiveChartRuntimeStatus &live = sink_manager.live_chart_status();
+void print_therapy_telemetry_status(
+    Print &out,
+    const TherapyTelemetryRuntimeStatus &status) {
+    out.print("[TELEMETRY] desired=");
+    out.print(status.desired ? "yes" : "no");
+    out.print(" stream=");
+    out.print(status.attached ? "attached" : "detached");
+    out.print(" handle=");
+    out.print(status.stream_handle);
+    out.print(" subscribers=");
+    out.print(status.subscribers);
+    out.print(" metrics=");
 
-    out.print("[SINK] live=");
-    out.print(live.enabled ? "on" : "off");
+    const char *separator = "";
+    const auto print_metric = [&](TherapyTelemetryMetric metric, const char *name) {
+        if (!(status.requested_metrics & metric)) return;
+        out.print(separator);
+        out.print(name);
+        separator = ",";
+    };
+
+    print_metric(THERAPY_METRIC_PRESSURE, "pressure");
+    print_metric(THERAPY_METRIC_LEAK, "leak");
+    print_metric(THERAPY_METRIC_TIDAL_VOLUME, "tidal_volume");
+    print_metric(THERAPY_METRIC_RESPIRATORY_RATE, "respiratory_rate");
+    print_metric(THERAPY_METRIC_MINUTE_VENTILATION, "minute_ventilation");
+    print_metric(THERAPY_METRIC_FLOW_LIMITATION, "flow_limitation");
+    print_metric(THERAPY_METRIC_INSPIRATORY_DURATION, "inspiratory_duration");
+    print_metric(THERAPY_METRIC_IE_RATIO, "ie_ratio");
+    print_metric(THERAPY_METRIC_SNORE, "snore");
+    if (!separator[0]) out.print("--");
+    out.print(" drops=");
+    out.print(status.queue_drops);
+    out.print(" attach_failures=");
+    out.print(status.attach_failures);
+    if (status.last_frame_ms) {
+        out.print(" last_frame_age_ms=");
+        out.print(millis() - status.last_frame_ms);
+    }
+    if (status.last_error[0]) {
+        out.print(" error=");
+        out.print(status.last_error);
+    }
     out.println();
 }
 
-void print_sink_status(Print &out, const SinkManager &sink_manager) {
-    const LiveChartRuntimeStatus &live = sink_manager.live_chart_status();
+void print_live_summary(Print &out, const LiveChartService &live_service) {
+    const LiveChartRuntimeStatus &live = live_service.status();
 
-    out.print("[SINK live] enabled=");
+    out.print("[LIVE] enabled=");
+    out.print(live.enabled ? "yes" : "no");
+    out.println();
+}
+
+void print_live_status(Print &out, const LiveChartService &live_service) {
+    const LiveChartRuntimeStatus &live = live_service.status();
+
+    out.print("[LIVE] enabled=");
     out.print(live.enabled ? "yes" : "no");
     out.print(" desired=");
     out.print(live.desired ? "yes" : "no");

@@ -1074,7 +1074,8 @@ const char *RpcTransport::source_name(RpcSource source) const {
         case RpcSource::Scheduler: return "scheduler";
         case RpcSource::Internal: return "internal";
         case RpcSource::ResmedOta: return "resmed_ota";
-        case RpcSource::Sink: return "sink";
+        case RpcSource::Live: return "live";
+        case RpcSource::Telemetry: return "telemetry";
         case RpcSource::Report: return "report";
         case RpcSource::EdfRecorder: return "edf_recorder";
         default: return "?";

@@ -15,7 +15,8 @@ enum class RpcSource : uint8_t {
     Scheduler,
     Internal,
     ResmedOta,
-    Sink,
+    Live,
+    Telemetry,
     Report,
     EdfRecorder,
 };
