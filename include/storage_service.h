@@ -111,29 +111,11 @@ public:
     virtual StorageWorkloadSnapshot workload_snapshot() const = 0;
 };
 
-enum class StorageDiagnosticState : uint8_t {
-    Idle,
-    Queued,
-    Writing,
-    Complete,
-    Failed,
-};
-
-struct StorageDiagnosticStatus {
-    bool available = false;
-    StorageDiagnosticState state = StorageDiagnosticState::Idle;
-    size_t bytes = 0;
-    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
-    char error[64] = {};
-};
-
-const char *storage_diagnostic_state_name(StorageDiagnosticState state);
-
 namespace StorageService {
 
 // lifecycle
 void begin();
-bool request_mount_retry();
+bool request_mount();
 
 // EDF file opens
 bool enqueue_edf_open_numeric(const char *path,
@@ -186,12 +168,6 @@ bool take_uploaded_path(char *path, size_t path_size);
 StorageScanPort &scan_port();
 StorageArchivePort &archive_port();
 StorageDeletePort &delete_port();
-
-// Diagnostic writes
-bool request_diagnostic_append(const char *path,
-                               const uint8_t *data,
-                               size_t length);
-StorageDiagnosticStatus diagnostic_status();
 
 // File logging producer
 FileLogSinkPort &file_log_port();

@@ -194,19 +194,21 @@ static CanConsoleCommands can_console_commands(
 static As11DeviceConsoleCommands as11_device_console_commands(
     rpc_transport, rpc_transport, as11_device_service, as11_settings_manager,
     time_sync_service, as11_ble_rpc_link, connect_cpap, disconnect_cpap);
-static StreamConsoleCommands stream_console_commands(stream_broker);
-static NetworkConsoleCommands network_console_commands(wifi_manager,
-                                                       tcp_bridge);
+static NetworkConsoleCommands network_console_commands(wifi_manager);
 static CoreDiagnosticsConsoleCommands core_console_commands;
 static SystemConsoleCommands system_console_commands(
     firmware_installer, rpc_transport, as11_device_service);
 static StorageConsoleCommands storage_console_commands(
-    config_service, StorageService::read_port());
+    config_service,
+    StorageService::read_port(),
+    StorageService::browser_port(),
+    StorageService::path_port(),
+    StorageService::delete_port(),
+    StorageService::status_port());
 static RuntimeConsoleCommands runtime_console_commands(session_manager,
                                                        live_chart_service,
                                                        therapy_telemetry_broker);
-static EdfConsoleCommands edf_console_commands(edf_recorder_manager,
-                                               config_service);
+static EdfConsoleCommands edf_console_commands(edf_recorder_manager);
 static OximetryConsoleCommands oximetry_console_commands(
     oximetry_hub, oximetry_udp_source, oximetry_sensor_source,
     plx_peripheral, config_service);
@@ -225,7 +227,6 @@ static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
 static ConsoleCommandGroup *console_command_groups[] = {
     &can_console_commands,
     &as11_device_console_commands,
-    &stream_console_commands,
     &network_console_commands,
     &core_console_commands,
     &system_console_commands,

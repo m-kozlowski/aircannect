@@ -179,6 +179,12 @@ void LiveChartService::mark_sent() {
     clear_batch();
 }
 
+void LiveChartService::reset_counters() {
+    status_.frames = 0;
+    status_.drops = 0;
+    status_.attach_failures = 0;
+}
+
 bool LiveChartService::should_run() const {
     if (!status_.enabled || !stream_ || !device_state_ || !session_) {
         return false;

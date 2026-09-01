@@ -16,6 +16,10 @@ bool storage_append_child_path(const char *parent,
                                size_t out_size);
 bool storage_valid_child_name(const char *name);
 bool storage_user_path_valid(const char *path);
+bool storage_resolve_user_path(const char *base,
+                               const char *path,
+                               char *out,
+                               size_t out_size);
 void storage_normalize_path(char *path);
 
 }  // namespace aircannect

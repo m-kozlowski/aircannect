@@ -1,6 +1,5 @@
 #include "console_commands.h"
 
-#include "config_service.h"
 #include "edf_recorder_manager.h"
 #include "management_console_utils.h"
 #include "storage_service.h"
@@ -282,29 +281,18 @@ void print_refresh_range(Print &out,
 
 }  // namespace
 
-EdfConsoleCommands::EdfConsoleCommands(EdfRecorderManager &recorder,
-                                       ConfigService &config)
-    : recorder_(recorder), config_(config) {}
+EdfConsoleCommands::EdfConsoleCommands(EdfRecorderManager &recorder)
+    : recorder_(recorder) {}
 
 bool EdfConsoleCommands::execute(const String &command,
                                  const String &rest_arg,
                                  Print &out,
                                  ConsoleCommandSession &session) {
-    (void)session;
     if (command != "edf") return false;
 
     String rest = rest_arg;
     rest.trim();
     rest.toLowerCase();
-    if (!rest.length() || rest == "status") {
-        print_edf_recorder_status(out, recorder_);
-        return true;
-    }
-
-    if (rest == "stats") {
-        print_edf_recorder_stats(out, recorder_);
-        return true;
-    }
 
     if (rest.startsWith("str refresh")) {
         SleepDayId start_day;
@@ -337,25 +325,9 @@ bool EdfConsoleCommands::execute(const String &command,
         return true;
     }
 
-    if (rest == "on" || rest == "enable" || rest == "off" ||
-        rest == "disable") {
-        const bool enabled = rest == "on" || rest == "enable";
-        ConfigTransactionResult transaction;
-        const ConfigFieldUpdate update = config_.set_value(
-            "edf_cap", enabled ? "1" : "0", false, &transaction);
-        if (!update.accepted() || !transaction.persisted) {
-            out.println(enabled
-                            ? "[EDF] warning: failed to persist enabled state"
-                            : "[EDF] warning: failed to persist disabled state");
-        }
-        print_edf_recorder_status(out, recorder_);
-        return true;
-    }
-
     print_unknown_command(
         out,
         "EDF",
-        "edf, edf stats, edf on, edf off, "
         "edf str refresh YYYYMMDD [YYYYMMDD]");
     return true;
 }
@@ -416,6 +388,13 @@ void EdfConsoleCommands::print_summary(Print &out) {
 
 void EdfConsoleCommands::print_status(Print &out) {
     print_edf_recorder_status(out, recorder_);
+}
+
+bool EdfConsoleCommands::print_scoped_stats(const String &scope, Print &out) {
+    if (scope != "edf") return false;
+
+    print_edf_recorder_stats(out, recorder_);
+    return true;
 }
 
 }  // namespace aircannect

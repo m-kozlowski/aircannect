@@ -96,6 +96,15 @@ void ConsoleCommandRouter::print_stats(Print &out) {
     }
 }
 
+bool ConsoleCommandRouter::print_scoped_stats(const String &scope, Print &out) {
+    if (!groups_) return false;
+
+    for (size_t i = 0; i < group_count_; ++i) {
+        if (groups_[i]->print_scoped_stats(scope, out)) return true;
+    }
+    return false;
+}
+
 void ConsoleCommandRouter::reset_stats() {
     if (!groups_) return;
 

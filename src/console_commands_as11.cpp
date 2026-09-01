@@ -11,7 +11,6 @@
 #include "as11_settings_manager.h"
 #include "can_driver.h"
 #include "can_rpc_link.h"
-#include "edf_stream_signal_table.h"
 #include "event_broker.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
@@ -94,185 +93,22 @@ void print_stream_memory_detail(Print &out, const StreamBroker &stream) {
     const size_t frame_pool_bytes =
         frame_pool_slots * sizeof(StreamFrameData) +
         frame_pool_slots * sizeof(StreamFrameData *);
-    size_t queue_total = 0;
-    size_t queue_capacity = 0;
-    size_t queue_worst = 0;
-    uint32_t queue_drops = 0;
 
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        const StreamConsumerHandle handle =
-            static_cast<StreamConsumerHandle>(i);
-        if (!stream.consumer_active(handle)) continue;
+    const size_t queue_slots =
+        AC_STREAM_CONSUMERS_MAX * AC_STREAM_CONSUMER_QUEUE_DEPTH;
+    const size_t queue_bytes =
+        AC_STREAM_CONSUMERS_MAX *
+        sizeof(FixedQueue<StreamFrameRef, AC_STREAM_CONSUMER_QUEUE_DEPTH>);
 
-        const size_t queued = stream.consumer_queue_count(handle);
-        queue_total += queued;
-        queue_capacity += AC_STREAM_CONSUMER_QUEUE_DEPTH;
-        if (queued > queue_worst) queue_worst = queued;
-        queue_drops += stream.consumer_queue_drops(handle);
-    }
-
-    const char *pending = "none";
-    if (stream.pending_start()) pending = "start";
-    else if (stream.pending_stop()) pending = "stop";
-
-    out.print("[MEM stream] desired=");
-    out.print(stream.desired_active() ? "yes" : "no");
-    out.print(" actual=");
-    out.print(stream.actual_active() ? "yes" : "no");
-    out.print(" pending=");
-    out.print(pending);
-    out.print(" consumers=");
-    out.print(static_cast<unsigned long>(stream.consumer_count()));
-    out.print(" q=");
-    out.print(static_cast<unsigned long>(queue_total));
-    out.print('/');
-    out.print(static_cast<unsigned long>(queue_capacity));
-    out.print(" q_worst=");
-    out.print(static_cast<unsigned long>(queue_worst));
-    out.print(" q_drops=");
-    out.println(static_cast<unsigned long>(queue_drops));
-
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        const StreamConsumerHandle handle =
-            static_cast<StreamConsumerHandle>(i);
-        if (!stream.consumer_active(handle)) continue;
-
-        out.print("[MEM stream consumer] id=");
-        out.print(static_cast<unsigned long>(i));
-        out.print(" source=");
-        out.print(static_cast<unsigned long>(stream.consumer_source(handle)));
-        out.print(" q=");
-        out.print(static_cast<unsigned long>(
-            stream.consumer_queue_count(handle)));
-        out.print('/');
-        out.print(static_cast<unsigned long>(AC_STREAM_CONSUMER_QUEUE_DEPTH));
-        out.print(" drops=");
-        out.println(static_cast<unsigned long>(
-            stream.consumer_queue_drops(handle)));
-    }
+    out.print("[MEM owner] stream_queues slots=");
+    out.print(static_cast<unsigned long>(queue_slots));
+    out.print(" bytes=");
+    out.println(static_cast<unsigned long>(queue_bytes));
 
     out.print("[MEM owner] stream_frame_pool slots=");
     out.print(static_cast<unsigned long>(frame_pool_slots));
-    out.print(" in_use=");
-    out.print(static_cast<unsigned long>(stream.frame_pool_in_use()));
-    out.print(" free=");
-    out.print(static_cast<unsigned long>(stream.frame_pool_free()));
-    out.print(" alloc_failures=");
-    out.print(static_cast<unsigned long>(
-        stream.frame_pool_allocation_failures()));
     out.print(" approx_bytes=");
     out.println(static_cast<unsigned long>(frame_pool_bytes));
-}
-
-void handle_stream(Print &out,
-                   String rest,
-                   StreamBroker &stream,
-                   StreamConsumerHandle &handle) {
-    rest.trim();
-
-    if (!rest.length() || rest == "status") {
-        ConsoleFormat::print_stream_status(out, stream);
-        return;
-    }
-
-    if (rest == "stop") {
-        if (stream.consumer_active(handle)) {
-            stream.release(handle);
-            handle = STREAM_CONSUMER_INVALID;
-            out.println("[STREAM] released console subscription");
-        } else {
-            out.println("[STREAM] no console subscription active");
-        }
-        ConsoleFormat::print_stream_status(out, stream);
-        return;
-    }
-
-    if (rest.startsWith("{")) {
-        StreamAcquireResult result;
-        if (stream.consumer_active(handle)) {
-            result = stream.update(handle, to_std(rest));
-        } else {
-            result = stream.acquire(to_std(rest), RpcSource::Console);
-        }
-        if (result.handle >= 0) handle = result.handle;
-
-        if (result.status == StreamAcquireStatus::Incompatible) {
-            out.println("[STREAM] params conflict with another consumer");
-        } else if (result.status == StreamAcquireStatus::Full) {
-            out.println("[STREAM] consumer table full");
-        } else if (result.status == StreamAcquireStatus::Busy) {
-            out.println("[STREAM] control request pending");
-        } else if (result.status == StreamAcquireStatus::Rejected) {
-            out.println("[STREAM] request rejected");
-        } else {
-            out.println("[STREAM] console subscription active");
-        }
-        ConsoleFormat::print_stream_status(out, stream);
-        return;
-    }
-
-    std::string ids = edf_stream_ids_csv();
-    uint32_t sample_ms = 40;
-    uint32_t report_ms = 200;
-
-    if (rest == "edf" || rest == "full" || rest == "default") {
-        ids = edf_stream_ids_csv();
-    } else if (rest.length()) {
-        const int split = rest.indexOf(' ');
-        ids = to_std(split < 0 ? rest : rest.substring(0, split));
-        String tail = split < 0 ? "" : rest.substring(split + 1);
-        tail.trim();
-
-        if (tail.length()) {
-            const int split2 = tail.indexOf(' ');
-            const String sample =
-                split2 < 0 ? tail : tail.substring(0, split2);
-            sample_ms = strtoul(sample.c_str(), nullptr, 0);
-            if (!sample_ms) sample_ms = 200;
-
-            if (split2 >= 0) {
-                String report = tail.substring(split2 + 1);
-                report.trim();
-                report_ms = report.length()
-                                ? strtoul(report.c_str(), nullptr, 0)
-                                : sample_ms * 5;
-            } else {
-                report_ms = sample_ms * 5;
-            }
-        }
-    }
-
-    const std::string params = build_stream_params(ids, sample_ms, report_ms);
-    StreamAcquireResult result;
-    if (stream.consumer_active(handle)) {
-        result = stream.update(handle, params);
-    } else {
-        result = stream.acquire(params, RpcSource::Console);
-    }
-    if (result.handle >= 0) handle = result.handle;
-
-    switch (result.status) {
-        case StreamAcquireStatus::Acquired:
-            out.println("[STREAM] StartStream queued");
-            break;
-        case StreamAcquireStatus::AlreadyActive:
-            out.println("[STREAM] console subscription active");
-            break;
-        case StreamAcquireStatus::Incompatible:
-            out.println("[STREAM] params conflict with another consumer");
-            break;
-        case StreamAcquireStatus::Full:
-            out.println("[STREAM] consumer table full");
-            break;
-        case StreamAcquireStatus::Busy:
-            out.println("[STREAM] control request pending");
-            break;
-        case StreamAcquireStatus::Rejected:
-        default:
-            out.println("[STREAM] request rejected");
-            break;
-    }
-    ConsoleFormat::print_stream_status(out, stream);
 }
 
 void handle_time(Print &out,
@@ -639,53 +475,6 @@ bool As11DeviceConsoleCommands::execute_rpc(const String &command,
     return false;
 }
 
-StreamConsoleCommands::StreamConsoleCommands(StreamBroker &stream)
-    : stream_(stream) {}
-
-StreamConsoleCommands::StreamSessionState *
-StreamConsoleCommands::stream_session(uint32_t session_id, bool create) {
-    StreamSessionState *empty = nullptr;
-    for (StreamSessionState &session : stream_sessions_) {
-        if (session.session_id == session_id) return &session;
-        if (!session.session_id && !empty) empty = &session;
-    }
-    if (!create || !empty) return nullptr;
-
-    empty->session_id = session_id;
-    empty->handle = STREAM_CONSUMER_INVALID;
-    return empty;
-}
-
-bool StreamConsoleCommands::execute(const String &command,
-                                    const String &rest,
-                                    Print &out,
-                                    ConsoleCommandSession &session) {
-    if (command != "stream") return false;
-
-    StreamSessionState *stream_state = stream_session(session.id, true);
-    if (!stream_state) {
-        out.println("[STREAM] console session table full");
-        return true;
-    }
-
-    handle_stream(out, rest, stream_, stream_state->handle);
-    return true;
-}
-
-void StreamConsoleCommands::stop(ConsoleCommandSession &session) {
-    StreamSessionState *stream_state = stream_session(session.id, false);
-    if (!stream_state) return;
-
-    if (stream_.consumer_active(stream_state->handle)) {
-        stream_.release(stream_state->handle);
-    }
-    *stream_state = {};
-}
-
-void StreamConsoleCommands::print_memory_detail(Print &out) {
-    print_stream_memory_detail(out, stream_);
-}
-
 CanConsoleCommands::CanConsoleCommands(
     RpcDiagnosticsPort &diagnostics,
     CanControlPort &can_control,
@@ -751,6 +540,10 @@ void CanConsoleCommands::reset_stats() {
     can_.reset_stats();
     events_.reset_counters();
     stream_.reset_counters();
+}
+
+void CanConsoleCommands::print_memory_detail(Print &out) {
+    print_stream_memory_detail(out, stream_);
 }
 
 }  // namespace aircannect

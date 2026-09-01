@@ -4,141 +4,111 @@
 
 #include "board_report.h"
 #include "management_console_utils.h"
-#include "report_sources.h"
 #include "report_task.h"
 
 namespace aircannect {
 namespace {
 
-const char *report_task_state_name(ReportTaskState state) {
-    switch (state) {
-        case ReportTaskState::LoadingCatalog: return "loading_catalog";
-        case ReportTaskState::Idle: return "idle";
-        case ReportTaskState::RefreshingCatalog: return "refreshing_catalog";
-        case ReportTaskState::Queued: return "queued";
-        case ReportTaskState::LookingUp: return "looking_up";
-        case ReportTaskState::Building: return "building";
-        case ReportTaskState::Publishing: return "publishing";
-        case ReportTaskState::Stopped:
+const char *report_condition_name(ReportTaskCondition condition) {
+    switch (condition) {
+        case ReportTaskCondition::Working: return "working";
+        case ReportTaskCondition::Waiting: return "waiting";
+        case ReportTaskCondition::Complete: return "complete";
+        case ReportTaskCondition::Failed: return "failed";
+        case ReportTaskCondition::Stopped:
         default: return "stopped";
     }
 }
 
-const char *report_engine_state_name(ReportEngineState state) {
-    switch (state) {
-        case ReportEngineState::Queued: return "queued";
-        case ReportEngineState::WaitingForCatalog: return "waiting_catalog";
-        case ReportEngineState::LookingUp: return "looking_up";
-        case ReportEngineState::AcquiringFallback: return "fallback";
-        case ReportEngineState::Executing: return "executing";
-        case ReportEngineState::Publishing: return "publishing";
-        case ReportEngineState::Idle:
-        default: return "idle";
+const char *report_operation_name(ReportTaskOperation operation) {
+    switch (operation) {
+        case ReportTaskOperation::LoadingCatalog: return "loading_catalog";
+        case ReportTaskOperation::RefreshingCatalog:
+            return "refreshing_catalog";
+        case ReportTaskOperation::CheckingSpools: return "checking_spools";
+        case ReportTaskOperation::Reconciling: return "reconciling";
+        case ReportTaskOperation::LookingUp: return "looking_up";
+        case ReportTaskOperation::Building: return "building";
+        case ReportTaskOperation::Publishing: return "publishing";
+        case ReportTaskOperation::LoadingPayload: return "loading_payload";
+        case ReportTaskOperation::CompressingPayload:
+            return "compressing_payload";
+        case ReportTaskOperation::SavingCatalog: return "saving_catalog";
+        case ReportTaskOperation::None:
+        default: return "--";
     }
 }
 
-const char *report_payload_load_state_name(
-    ReportArtifactPayloadLoadState state) {
-    switch (state) {
-        case ReportArtifactPayloadLoadState::Submitting: return "submitting";
-        case ReportArtifactPayloadLoadState::Waiting: return "waiting";
-        case ReportArtifactPayloadLoadState::Copying: return "copying";
-        case ReportArtifactPayloadLoadState::Ready: return "ready";
-        case ReportArtifactPayloadLoadState::Error: return "error";
-        case ReportArtifactPayloadLoadState::Cancelled: return "cancelled";
-        case ReportArtifactPayloadLoadState::Idle:
-        default: return "idle";
+const char *report_wait_reason_name(ReportTaskWaitReason reason) {
+    switch (reason) {
+        case ReportTaskWaitReason::Startup: return "startup";
+        case ReportTaskWaitReason::Queue: return "queue";
+        case ReportTaskWaitReason::Catalog: return "catalog";
+        case ReportTaskWaitReason::Retry: return "retry";
+        case ReportTaskWaitReason::Therapy: return "therapy";
+        case ReportTaskWaitReason::RealtimeStream: return "stream";
+        case ReportTaskWaitReason::ForegroundRequest:
+            return "foreground_request";
+        case ReportTaskWaitReason::Ota: return "ota";
+        case ReportTaskWaitReason::Export: return "export";
+        case ReportTaskWaitReason::As11Unavailable:
+            return "as11_unavailable";
+        case ReportTaskWaitReason::None:
+        default: return "--";
     }
 }
 
-const char *report_catalog_state_name(NightCatalogRefreshState state) {
-    switch (state) {
-        case NightCatalogRefreshState::Scanning: return "scanning";
-        case NightCatalogRefreshState::ReadingEdf: return "reading_edf";
-        case NightCatalogRefreshState::ReadingMetadata:
-            return "reading_metadata";
-        case NightCatalogRefreshState::ReadingFallback:
-            return "reading_fallback";
-        case NightCatalogRefreshState::ReadingStr: return "reading_str";
-        case NightCatalogRefreshState::Building: return "building";
-        case NightCatalogRefreshState::Cancelling: return "cancelling";
-        case NightCatalogRefreshState::Ready: return "ready";
-        case NightCatalogRefreshState::Error: return "error";
-        case NightCatalogRefreshState::Idle:
-        default: return "idle";
-    }
-}
+void print_report_sleep_day(Print &out, SleepDayId sleep_day) {
+    char day[9] = {};
+    if (!sleep_day.format_yyyymmdd(day, sizeof(day))) return;
 
-const char *report_fallback_state_name(
-    ReportFallbackAcquisitionState state) {
-    switch (state) {
-        case ReportFallbackAcquisitionState::Preserving:
-            return "preserving";
-        case ReportFallbackAcquisitionState::Fetching: return "fetching";
-        case ReportFallbackAcquisitionState::Publishing:
-            return "publishing";
-        case ReportFallbackAcquisitionState::Cancelling:
-            return "cancelling";
-        case ReportFallbackAcquisitionState::Ready: return "ready";
-        case ReportFallbackAcquisitionState::Failed: return "failed";
-        case ReportFallbackAcquisitionState::Cancelled:
-            return "cancelled";
-        case ReportFallbackAcquisitionState::Idle:
-        default: return "idle";
-    }
+    out.print(" night=");
+    out.print(day);
 }
 
 void print_report_status(Print &out, const ReportTask &task) {
-    const ReportTaskDiagnosticSnapshot status = task.diagnostic_snapshot();
+    const ReportTaskOperationalSnapshot status =
+        task.operational_snapshot();
 
     out.print("[REPORT] state=");
-    out.print(report_task_state_name(status.state));
-    out.print(" started=");
-    out.print(status.task_started ? "yes" : "no");
-    out.print(" nights=");
-    out.print(static_cast<unsigned long>(status.catalog_nights));
-    out.print(" generation=");
-    out.print(static_cast<unsigned long>(status.catalog_generation));
-    out.print('/');
-    out.print(static_cast<unsigned long>(
-        status.durable_catalog_generation));
-    out.print(" commands=");
+    out.print(report_condition_name(status.condition));
+    if (status.condition == ReportTaskCondition::Working) {
+        out.print(" operation=");
+        out.print(report_operation_name(status.operation));
+    } else if (status.condition == ReportTaskCondition::Waiting) {
+        out.print(" reason=");
+        out.print(report_wait_reason_name(status.wait_reason));
+    }
+
+    print_report_sleep_day(out, status.sleep_day);
+    if (status.retry_in_ms) {
+        out.print(" retry_in_ms=");
+        out.print(static_cast<unsigned long>(status.retry_in_ms));
+    }
+    if (status.condition == ReportTaskCondition::Complete) {
+        out.print(" nights=");
+        out.print(static_cast<unsigned long>(status.catalog_nights));
+    }
+    if (status.error[0]) {
+        out.print(" error=");
+        out.print(status.error);
+    }
+    out.println();
+}
+
+void print_report_stats(Print &out, const ReportTask &task) {
+    const ReportTaskDiagnosticSnapshot status = task.diagnostic_snapshot();
+
+    out.print("[REPORT queue] task=");
     out.print(static_cast<unsigned long>(status.commands_queued));
+    out.print(" engine=");
+    out.print(static_cast<unsigned long>(status.engine_queued));
     out.print(" dropped=");
     out.print(static_cast<unsigned long>(status.command_drops));
     out.print(" failed=");
     out.println(static_cast<unsigned long>(status.command_failures));
 
-    out.print("[REPORT] engine=");
-    out.print(report_engine_state_name(status.engine_state));
-    out.print(" queued=");
-    out.print(static_cast<unsigned long>(status.engine_queued));
-    out.print(" foreground=");
-    out.print(status.foreground_active ? "yes" : "no");
-    out.print(" background=");
-    out.print(status.background_active ? "yes" : "no");
-    out.print(" suspended=");
-    out.print(status.background_suspended ? "yes" : "no");
-    char active_day[9] = {};
-    if (status.engine_sleep_day.format_yyyymmdd(active_day,
-                                                sizeof(active_day))) {
-        out.print(" night=");
-        out.print(active_day);
-    }
-    out.print(" operation=");
-    out.print(static_cast<unsigned long>(
-        status.executor_operation_index));
-    out.print('/');
-    out.print(static_cast<unsigned long>(
-        status.executor_operation_count));
-    out.print(" record=");
-    out.print(static_cast<unsigned long>(status.executor_record_index));
-    out.print('/');
-    out.print(static_cast<unsigned long>(status.executor_record_count));
-    out.print(" last_error=");
-    out.println(status.engine_error[0] ? status.engine_error : "--");
-
-    out.print("[REPORT] payload_cache=");
+    out.print("[REPORT cache] entries=");
     out.print(static_cast<unsigned long>(status.payload_cache_entries));
     out.print('/');
     out.print(static_cast<unsigned long>(
@@ -150,80 +120,85 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.print(" misses=");
     out.print(static_cast<unsigned long>(status.payload_cache_misses));
     out.print(" evictions=");
-    out.print(static_cast<unsigned long>(status.payload_cache_evictions));
-    out.print(" load=");
-    out.print(report_payload_load_state_name(status.payload_load_state));
-    out.print(" loaded=");
-    out.print(static_cast<unsigned long>(status.payload_load_bytes));
-    out.print(" error=");
-    out.println(status.payload_load_error[0]
-                    ? status.payload_load_error
-                    : "--");
+    out.println(static_cast<unsigned long>(status.payload_cache_evictions));
 
-    const ReportSourceDef *fallback_source =
-        report_source_def(status.fallback_source);
-    out.print("[REPORT] fallback=");
-    out.print(report_fallback_state_name(status.fallback_state));
-    out.print(" source=");
-    out.print(fallback_source && fallback_source->spool_type
-                  ? fallback_source->spool_type
-                  : "--");
-    out.print(" sources=");
-    out.print(static_cast<unsigned long>(
-        status.fallback_sources_completed));
-    out.print('/');
-    out.print(static_cast<unsigned long>(status.fallback_sources_total));
-    out.print(" sections=");
-    out.print(static_cast<unsigned long>(status.fallback_sections_added));
-    out.print(" unavailable=");
-    out.print(static_cast<unsigned long>(
-        status.fallback_unavailable_added));
-    out.print(" error=");
-    out.println(status.fallback_error[0] ? status.fallback_error : "--");
-
-    out.print("[REPORT] catalog=");
-    out.print(report_catalog_state_name(status.catalog_state));
+    out.print("[REPORT catalog] nights=");
+    out.print(static_cast<unsigned long>(status.catalog_nights));
     out.print(" files=");
     out.print(static_cast<unsigned long>(status.catalog_files_indexed));
     out.print('/');
     out.print(static_cast<unsigned long>(status.catalog_files_seen));
     out.print(" sessions=");
     out.print(static_cast<unsigned long>(status.catalog_sessions));
-    out.print(" error=");
-    out.println(status.catalog_error[0] ? status.catalog_error : "--");
-}
-
-void print_report_nights(Print &out, const ReportTask &task) {
-    const std::shared_ptr<const NightCatalog> catalog =
-        task.catalog_snapshot();
-    out.println("[REPORT nights]");
-    if (!catalog || !catalog->size()) {
-        out.println("  no therapy nights indexed");
-        return;
-    }
-
-    for (size_t i = 0; i < catalog->size(); ++i) {
-        const NightCatalogRecord *night = catalog->record(i);
-        if (!night) continue;
-
-        char day[9] = {};
-        night->sleep_day.format_yyyymmdd(day, sizeof(day));
-        out.print("  ");
-        out.print(day);
-        out.print(" duration_min=");
-        out.print(static_cast<unsigned long>(
-            night_catalog_duration_minutes(*catalog, *night)));
-        out.print(" sessions=");
-        out.print(static_cast<unsigned long>(night->session_count));
-        out.print(" sources=0x");
-        out.println(static_cast<unsigned>(night->source_flags), HEX);
-    }
+    out.print(" generation=");
+    out.print(static_cast<unsigned long>(status.catalog_generation));
+    out.print('/');
+    out.println(static_cast<unsigned long>(
+        status.durable_catalog_generation));
 }
 
 bool parse_report_sleep_day(String value, SleepDayId &sleep_day) {
     value.trim();
     return value.length() == 8 &&
            SleepDayId::from_yyyymmdd(value.c_str(), sleep_day);
+}
+
+const NightCatalogRecord *select_report_night(const NightCatalog &catalog,
+                                              const String &selector,
+                                              bool &valid_selector) {
+    valid_selector = true;
+    if (selector == "latest") return catalog.record(0);
+
+    SleepDayId sleep_day;
+    if (!parse_report_sleep_day(selector, sleep_day)) {
+        valid_selector = false;
+        return nullptr;
+    }
+    return catalog.find(sleep_day);
+}
+
+void print_report_night(Print &out,
+                        const NightCatalog &catalog,
+                        const NightCatalogRecord &night) {
+    char day[9] = {};
+    night.sleep_day.format_yyyymmdd(day, sizeof(day));
+    out.print("  ");
+    out.print(day);
+    out.print(" duration_min=");
+    out.print(static_cast<unsigned long>(
+        night_catalog_duration_minutes(catalog, night)));
+    out.print(" sessions=");
+    out.print(static_cast<unsigned long>(night.session_count));
+    out.print(" sources=0x");
+    out.println(static_cast<unsigned>(night.source_flags), HEX);
+}
+
+void print_report_nights(Print &out,
+                         const NightCatalog &catalog,
+                         const NightCatalogRecord *selected = nullptr) {
+    out.println("[REPORT nights]");
+    if (selected) {
+        print_report_night(out, catalog, *selected);
+        return;
+    }
+    if (!catalog.size()) {
+        out.println("  no therapy nights indexed");
+        return;
+    }
+
+    for (size_t i = 0; i < catalog.size(); ++i) {
+        const NightCatalogRecord *night = catalog.record(i);
+        if (night) print_report_night(out, catalog, *night);
+    }
+}
+
+std::shared_ptr<const NightCatalog> report_catalog(
+    const ReportTask &task,
+    Print &out) {
+    const std::shared_ptr<const NightCatalog> catalog =
+        task.catalog_snapshot();
+    if (!catalog) out.println("[REPORT] night catalog unavailable");
+    return catalog;
 }
 
 }  // namespace
@@ -246,45 +221,75 @@ bool ReportConsoleCommands::execute(const String &command,
         return true;
     }
     if (rest == "nights" || rest == "list") {
-        print_report_nights(out, report_);
+        const std::shared_ptr<const NightCatalog> catalog =
+            report_catalog(report_, out);
+        if (!catalog) return true;
+
+        print_report_nights(out, *catalog);
+        return true;
+    }
+    const bool selected_nights = rest.startsWith("nights ") ||
+        rest.startsWith("list ");
+    if (selected_nights) {
+        const int separator = rest.indexOf(' ');
+        String selector = rest.substring(separator + 1);
+        selector.trim();
+
+        const std::shared_ptr<const NightCatalog> catalog =
+            report_catalog(report_, out);
+        if (!catalog) return true;
+
+        bool valid_selector = false;
+        const NightCatalogRecord *night = select_report_night(
+            *catalog, selector, valid_selector);
+        if (!valid_selector) {
+            out.println("[REPORT] usage: report nights [latest|YYYYMMDD]");
+        } else if (!night) {
+            out.println("[REPORT] night not found");
+        } else {
+            print_report_nights(out, *catalog, night);
+        }
         return true;
     }
     if (rest == "result") {
-        out.println("[REPORT] usage: report result latest|YYYYMMDD");
+        out.println(
+            "[REPORT] usage: report result latest|YYYYMMDD [--force]");
         return true;
     }
     if (!rest.startsWith("result ")) {
         print_unknown_command(
             out, "REPORT",
-            "report, report status, report nights, "
-            "report result latest|YYYYMMDD");
+            "report, report status, report nights [latest|YYYYMMDD], "
+            "report result latest|YYYYMMDD [--force]");
         return true;
     }
 
-    String value = rest.substring(strlen("result "));
-    value.trim();
+    const String args = rest.substring(strlen("result "));
+    int position = 0;
+    String selector;
+    String option;
+    String extra;
+    if (!parse_console_arg(args, position, selector) ||
+        (parse_console_arg(args, position, option) && option != "--force") ||
+        parse_console_arg(args, position, extra)) {
+        out.println(
+            "[REPORT] usage: report result latest|YYYYMMDD [--force]");
+        return true;
+    }
+    const bool force_rebuild = option == "--force";
 
     const std::shared_ptr<const NightCatalog> catalog =
-        report_.catalog_snapshot();
-    if (!catalog) {
-        out.println("[REPORT] night catalog unavailable");
+        report_catalog(report_, out);
+    if (!catalog) return true;
+
+    bool valid_selector = false;
+    const NightCatalogRecord *night = select_report_night(
+        *catalog, selector, valid_selector);
+    if (!valid_selector) {
+        out.println(
+            "[REPORT] usage: report result latest|YYYYMMDD [--force]");
         return true;
     }
-
-    SleepDayId sleep_day;
-    if (value == "latest") {
-        const NightCatalogRecord *latest = catalog->record(0);
-        if (!latest) {
-            out.println("[REPORT] no indexed nights");
-            return true;
-        }
-        sleep_day = latest->sleep_day;
-    } else if (!parse_report_sleep_day(value, sleep_day)) {
-        out.println("[REPORT] usage: report result latest|YYYYMMDD");
-        return true;
-    }
-
-    const NightCatalogRecord *night = catalog->find(sleep_day);
     if (!night) {
         out.println("[REPORT] night not found");
         return true;
@@ -294,15 +299,27 @@ bool ReportConsoleCommands::execute(const String &command,
     if (!request_generation_) ++request_generation_;
 
     const OperationAdmission admitted = report_.request_artifact(
-        ReportArtifactKey::result(sleep_day, night->source_revision),
-        ReportRequestPriority::Foreground, request_generation_);
+        ReportArtifactKey::result(night->sleep_day, night->source_revision),
+        ReportRequestPriority::Foreground,
+        request_generation_,
+        force_rebuild);
     if (admitted == OperationAdmission::Accepted) {
-        out.println("[REPORT] result requested");
+        out.println(force_rebuild
+                        ? "[REPORT] result rebuild requested"
+                        : "[REPORT] result requested");
     } else if (admitted == OperationAdmission::Busy) {
         out.println("[REPORT] request queue busy");
     } else {
         out.println("[REPORT] request rejected");
     }
+    return true;
+}
+
+bool ReportConsoleCommands::print_scoped_stats(const String &scope,
+                                               Print &out) {
+    if (scope != "report") return false;
+
+    print_report_stats(out, report_);
     return true;
 }
 

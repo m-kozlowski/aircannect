@@ -74,14 +74,15 @@ void handle_smb(Print &out, String rest, ExportCoordinator &exports) {
         return;
     }
 
-    if (rest == "sync") {
+    if (rest == "run") {
         const bool queued = exports.request_smb_sync();
         out.print("[SMB] sync ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
 
-    print_unknown_command(out, "SMB", "smb status, smb verify, smb sync");
+    print_unknown_command(out, "SMB",
+                          "sync smb status, sync smb verify, sync smb run");
 }
 
 void handle_sleephq(Print &out,
@@ -143,15 +144,15 @@ void handle_sleephq(Print &out,
         return;
     }
 
-    if (rest == "sync") {
+    if (rest == "run") {
         const bool queued = exports.request_sleephq_sync();
         out.print("[SLEEPHQ] sync ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
 
-    if (rest.startsWith("sync ")) {
-        String day = rest.substring(5);
+    if (rest.startsWith("run ")) {
+        String day = rest.substring(4);
         trim_inplace(day);
         if (!storage_export_is_datalog_day_name(day.c_str())) {
             out.println("[SLEEPHQ] bad day; use YYYYMMDD");
@@ -166,9 +167,44 @@ void handle_sleephq(Print &out,
         return;
     }
 
-    print_unknown_command(out, "SLEEPHQ",
-                          "sleephq status, sleephq check, sleephq sync, "
-                          "sleephq sync YYYYMMDD");
+    print_unknown_command(
+        out, "SLEEPHQ",
+        "sync sleephq status, sync sleephq check, sync sleephq run, "
+        "sync sleephq run YYYYMMDD");
+}
+
+void handle_sync(Print &out, String rest, ExportCoordinator &exports) {
+    trim_inplace(rest);
+
+    if (!rest.length()) {
+        handle_smb(out, "status", exports);
+        handle_sleephq(out, "status", exports);
+        return;
+    }
+
+    int position = 0;
+    String endpoint;
+    if (!parse_console_arg(rest, position, endpoint)) return;
+    endpoint.toLowerCase();
+
+    String action = rest.substring(position);
+    trim_inplace(action);
+    if (endpoint == "status" && !action.length()) {
+        handle_smb(out, "status", exports);
+        handle_sleephq(out, "status", exports);
+        return;
+    }
+    if (endpoint == "smb") {
+        handle_smb(out, action, exports);
+        return;
+    }
+    if (endpoint == "sleephq") {
+        handle_sleephq(out, action, exports);
+        return;
+    }
+
+    print_unknown_command(out, "SYNC",
+                          "sync status, sync smb ..., sync sleephq ...");
 }
 
 }  // namespace
@@ -182,12 +218,8 @@ bool ExportConsoleCommands::execute(const String &command,
                                     ConsoleCommandSession &session) {
     (void)session;
 
-    if (command == "smb") {
-        handle_smb(out, rest, exports_);
-        return true;
-    }
-    if (command == "sleephq") {
-        handle_sleephq(out, rest, exports_);
+    if (command == "sync") {
+        handle_sync(out, rest, exports_);
         return true;
     }
     return false;

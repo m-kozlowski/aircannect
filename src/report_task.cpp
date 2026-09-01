@@ -71,6 +71,7 @@ struct ReportTaskCommand {
     ReportArtifactKey artifact;
     ReportArtifactPayloadDescriptor payload;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
+    bool force_rebuild = false;
     uint32_t generation = 0;
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
@@ -151,6 +152,10 @@ bool deadline_due(uint32_t now_ms, uint32_t deadline_ms) {
            static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
 
+uint32_t deadline_remaining(uint32_t now_ms, uint32_t deadline_ms) {
+    return deadline_due(now_ms, deadline_ms) ? 0 : deadline_ms - now_ms;
+}
+
 }  // namespace
 
 struct ReportTask::Runtime {
@@ -188,6 +193,12 @@ struct ReportTask::Runtime {
             if (command.kind == ReportTaskCommandKind::Artifact &&
                 queued.kind == command.kind &&
                 same_artifact_identity(queued.artifact, command.artifact)) {
+                command.force_rebuild =
+                    command.force_rebuild || queued.force_rebuild;
+                if (report_request_priority_higher(
+                        queued.priority, command.priority)) {
+                    command.priority = queued.priority;
+                }
                 queued = command;
                 unlock();
                 wake();
@@ -1365,6 +1376,221 @@ struct ReportTask::Runtime {
         return true;
     }
 
+    ReportTaskWaitReason activity_wait_reason() const {
+        if (activity.therapy_active) return ReportTaskWaitReason::Therapy;
+        if (activity.realtime_stream_active) {
+            return ReportTaskWaitReason::RealtimeStream;
+        }
+        if (activity.foreground_report_demand) {
+            return ReportTaskWaitReason::ForegroundRequest;
+        }
+        if (activity.ota_install_active) return ReportTaskWaitReason::Ota;
+        if (activity.export_work_claimed) return ReportTaskWaitReason::Export;
+        if (!activity.as11_rpc_available) {
+            return ReportTaskWaitReason::As11Unavailable;
+        }
+        return ReportTaskWaitReason::None;
+    }
+
+    ReportTaskOperationalSnapshot build_operational_status(
+        const ReportTaskStatus &current) const {
+        ReportTaskOperationalSnapshot out;
+        out.catalog_nights = current.catalog_nights;
+
+        if (!current.initialized) return out;
+
+        const ReportEngineStatus &engine_status = current.engine;
+        const ReportArtifactPayloadLoadStatus &payload_status =
+            current.payload_load;
+
+        out.condition = ReportTaskCondition::Working;
+        if (catalog_store.active()) {
+            out.operation = store_purpose == CatalogStorePurpose::Save
+                ? ReportTaskOperation::SavingCatalog
+                : ReportTaskOperation::LoadingCatalog;
+            return out;
+        }
+
+        if (summary_acquisition.active() || catalog_refresh.active()) {
+            out.operation = ReportTaskOperation::RefreshingCatalog;
+            out.sleep_day = refresh_target.sleep_day;
+            return out;
+        }
+
+        switch (engine_status.state) {
+            case ReportEngineState::LookingUp:
+                out.operation = ReportTaskOperation::LookingUp;
+                out.sleep_day = engine_status.active_request.artifact.sleep_day;
+                return out;
+            case ReportEngineState::AcquiringFallback:
+            case ReportEngineState::Executing:
+                out.operation = ReportTaskOperation::Building;
+                out.sleep_day = engine_status.active_request.artifact.sleep_day;
+                return out;
+            case ReportEngineState::Publishing:
+                out.operation = ReportTaskOperation::Publishing;
+                out.sleep_day = engine_status.active_request.artifact.sleep_day;
+                return out;
+            case ReportEngineState::Idle:
+            case ReportEngineState::Queued:
+            case ReportEngineState::WaitingForCatalog:
+                break;
+        }
+
+        if (payload_status.active()) {
+            out.operation = ReportTaskOperation::LoadingPayload;
+            out.sleep_day = payload_status.payload.artifact.key.sleep_day;
+            return out;
+        }
+
+        if (payload_deflater.active()) {
+            out.operation = ReportTaskOperation::CompressingPayload;
+            out.sleep_day = payload_deflater.payload().artifact.key.sleep_day;
+            return out;
+        }
+
+        if (spool_availability_probe.status().active()) {
+            out.operation = ReportTaskOperation::CheckingSpools;
+            return out;
+        }
+
+        out.condition = ReportTaskCondition::Waiting;
+        if (engine_status.state == ReportEngineState::WaitingForCatalog) {
+            out.wait_reason = ReportTaskWaitReason::Catalog;
+            out.sleep_day = engine_status.active_request.artifact.sleep_day;
+            return out;
+        }
+        if (current.commands_queued || engine_status.queued ||
+            engine_status.state == ReportEngineState::Queued) {
+            out.wait_reason = ReportTaskWaitReason::Queue;
+            return out;
+        }
+
+        out.wait_reason = activity_wait_reason();
+        if (out.wait_reason != ReportTaskWaitReason::None) return out;
+
+        if (idle_pass_failed && idle_retry_at_ms != 0) {
+            out.wait_reason = ReportTaskWaitReason::Retry;
+            out.retry_in_ms = deadline_remaining(last_step_ms,
+                                                 idle_retry_at_ms);
+            out.sleep_day =
+                engine_status.last_completion.request.artifact.sleep_day;
+            copy_cstr(out.error, sizeof(out.error),
+                      engine_status.last_completion.error);
+            return out;
+        }
+
+        const ReportSpoolAvailabilityProbeStatus probe =
+            spool_availability_probe.status();
+        if (spool_availability_needed &&
+            spool_availability_retry_at_ms != 0) {
+            out.wait_reason = ReportTaskWaitReason::Retry;
+            out.retry_in_ms = deadline_remaining(
+                last_step_ms, spool_availability_retry_at_ms);
+            copy_cstr(out.error, sizeof(out.error), probe.error);
+            return out;
+        }
+
+        if ((pending_refresh.valid() || refresh_generation != 0) &&
+            catalog_refresh_retry_at_ms != 0) {
+            out.wait_reason = ReportTaskWaitReason::Retry;
+            out.retry_in_ms = deadline_remaining(
+                last_step_ms, catalog_refresh_retry_at_ms);
+            out.sleep_day = refresh_target.sleep_day;
+            copy_cstr(out.error, sizeof(out.error),
+                      current.catalog_refresh.error);
+            return out;
+        }
+
+        if ((catalog_load_pending || pending_catalog_save) &&
+            catalog_store_retry_at_ms != 0) {
+            out.wait_reason = ReportTaskWaitReason::Retry;
+            out.retry_in_ms = deadline_remaining(
+                last_step_ms, catalog_store_retry_at_ms);
+            copy_cstr(out.error, sizeof(out.error),
+                      current.catalog_store.error);
+            return out;
+        }
+
+        if (payload_load_error[0]) {
+            out.condition = ReportTaskCondition::Failed;
+            out.wait_reason = ReportTaskWaitReason::None;
+            out.sleep_day = payload_load_failed.artifact.key.sleep_day;
+            copy_cstr(out.error, sizeof(out.error), payload_load_error);
+            return out;
+        }
+
+        const ReportEngineCompletion &completion =
+            engine_status.last_completion;
+        if (completion.valid() &&
+            completion.request.priority == ReportRequestPriority::Foreground &&
+            completion.outcome.disposition == OperationDisposition::Failed) {
+            out.condition = ReportTaskCondition::Failed;
+            out.wait_reason = ReportTaskWaitReason::None;
+            out.sleep_day = completion.request.artifact.sleep_day;
+            copy_cstr(out.error, sizeof(out.error), completion.error);
+            return out;
+        }
+
+        if (current.catalog_refresh.state ==
+                NightCatalogRefreshState::Error &&
+            !current.catalog_refresh.retryable) {
+            out.condition = ReportTaskCondition::Failed;
+            out.wait_reason = ReportTaskWaitReason::None;
+            out.sleep_day = refresh_target.sleep_day;
+            copy_cstr(out.error, sizeof(out.error),
+                      current.catalog_refresh.error);
+            return out;
+        }
+
+        if (!startup_idle_grace_complete) {
+            out.wait_reason = ReportTaskWaitReason::Startup;
+            out.retry_in_ms = deadline_remaining(
+                last_step_ms, AC_RUNTIME_STARTUP_IDLE_GRACE_MS);
+            return out;
+        }
+
+        if (catalog_load_pending) {
+            out.condition = ReportTaskCondition::Working;
+            out.operation = ReportTaskOperation::LoadingCatalog;
+            return out;
+        }
+
+        if (pending_refresh.valid() || refresh_generation != 0 ||
+            engine.catalog_update_required()) {
+            out.condition = ReportTaskCondition::Working;
+            out.operation = ReportTaskOperation::RefreshingCatalog;
+            out.sleep_day = pending_refresh.valid()
+                ? pending_refresh.target.sleep_day
+                : refresh_target.sleep_day;
+            return out;
+        }
+
+        if (pending_catalog_save) {
+            out.condition = ReportTaskCondition::Working;
+            out.operation = ReportTaskOperation::SavingCatalog;
+            return out;
+        }
+
+        if (spool_availability_needed) {
+            out.condition = ReportTaskCondition::Working;
+            out.operation = ReportTaskOperation::CheckingSpools;
+            return out;
+        }
+
+        if (catalog && idle_cursor < idle_catalog_limit()) {
+            out.condition = ReportTaskCondition::Working;
+            out.operation = ReportTaskOperation::Reconciling;
+            const NightCatalogRecord *night = catalog->record(idle_cursor);
+            if (night) out.sleep_day = night->sleep_day;
+            return out;
+        }
+
+        out.condition = ReportTaskCondition::Complete;
+        out.wait_reason = ReportTaskWaitReason::None;
+        return out;
+    }
+
     void publish_status() {
         size_t queued = 0;
         uint32_t drops = 0;
@@ -1450,6 +1676,7 @@ struct ReportTask::Runtime {
             next.payload_load.active() || payload_deflater.active() ||
             (next.state != ReportTaskState::Stopped &&
              next.state != ReportTaskState::Idle);
+        next.operational = build_operational_status(next);
 
         if (!lock()) return;
         status = next;
@@ -1638,7 +1865,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
 OperationAdmission ReportTask::request_artifact(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
-    uint32_t generation) {
+    uint32_t generation,
+    bool force_rebuild) {
     if (!runtime_ || !runtime_->initialized || !artifact.valid() ||
         generation == 0) {
         return OperationAdmission::Rejected;
@@ -1648,6 +1876,7 @@ OperationAdmission ReportTask::request_artifact(
     command.kind = ReportTaskCommandKind::Artifact;
     command.artifact = artifact;
     command.priority = priority;
+    command.force_rebuild = force_rebuild;
     command.generation = generation;
     return runtime_->enqueue(command);
 }
@@ -1727,6 +1956,14 @@ ReportTaskControlSnapshot ReportTask::control_snapshot() const {
     out.catalog_refresh_retryable =
         runtime_->status.catalog_refresh.retryable;
 
+    runtime_->unlock();
+    return out;
+}
+
+ReportTaskOperationalSnapshot ReportTask::operational_snapshot() const {
+    if (!runtime_ || !runtime_->lock(20)) return {};
+
+    const ReportTaskOperationalSnapshot out = runtime_->status.operational;
     runtime_->unlock();
     return out;
 }
@@ -2012,7 +2249,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
 
                 ReportArtifactAvailability available;
-                if (runtime.artifact_index &&
+                if (!command.force_rebuild && runtime.artifact_index &&
                     runtime.artifact_index->availability(
                         command.artifact, available)) {
                     break;
@@ -2021,7 +2258,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 const ReportRequestEnqueueResult queued =
                     runtime.engine.request(command.artifact,
                                            command.priority,
-                                           command.generation);
+                                           command.generation,
+                                           command.force_rebuild);
                 if (queued.status == ReportRequestEnqueueStatus::Full ||
                     queued.status == ReportRequestEnqueueStatus::Invalid) {
                     runtime.command_failures++;

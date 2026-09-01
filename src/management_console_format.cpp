@@ -213,8 +213,27 @@ void print_rpc_stats(Print &out,
     out.print(stream.truncated_frames());
     out.print(" frame_pool=");
     out.print(stream.frame_pool_in_use());
-    out.print("/");
-    out.println(stream.frame_pool_capacity());
+    out.print('/');
+    out.print(stream.frame_pool_capacity());
+    out.print(" pool_alloc_failures=");
+    out.println(stream.frame_pool_allocation_failures());
+
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        const StreamConsumerHandle handle =
+            static_cast<StreamConsumerHandle>(i);
+        if (!stream.consumer_active(handle)) continue;
+
+        out.print("[STREAM consumer] id=");
+        out.print(i);
+        out.print(" source=");
+        out.print(static_cast<unsigned>(stream.consumer_source(handle)));
+        out.print(" queue=");
+        out.print(stream.consumer_queue_count(handle));
+        out.print('/');
+        out.print(AC_STREAM_CONSUMER_QUEUE_DEPTH);
+        out.print(" drops=");
+        out.println(stream.consumer_queue_drops(handle));
+    }
 
     out.print("[EVENT stats] subscribed=");
     out.print(event_status.subscription_active ? "yes" : "no");
@@ -380,63 +399,6 @@ void print_time_status(Print &out,
     }
     out.print(" status=");
     out.println(time_sync.last_status());
-}
-
-void print_stream_status(Print &out, const StreamBroker &stream) {
-    out.print("[STREAM] consumers=");
-    out.print(stream.consumer_count());
-    out.print(" subscribed=");
-    out.print(stream.actual_active() ? "yes" : "no");
-    out.print(" start_pending=");
-    out.print(stream.pending_start() ? "yes" : "no");
-    out.print(" stop_pending=");
-    out.print(stream.pending_stop() ? "yes" : "no");
-    out.print(" error=");
-    out.print(stream.error() ? "yes" : "no");
-    out.print(" payloads=");
-    out.print(stream.published_payloads());
-    if (stream.last_notification_ms()) {
-        out.print(" last_age_ms=");
-        out.print(millis() - stream.last_notification_ms());
-    }
-    if (stream.last_stream_id()) {
-        out.print(" stream_id=");
-        out.print(stream.last_stream_id());
-    }
-    if (!stream.last_start_time().empty()) {
-        out.print(" startTime=\"");
-        out.print(stream.last_start_time().c_str());
-        out.print("\"");
-    }
-    out.println();
-    if (!stream.params_json().empty()) {
-        out.print("[STREAM] params=");
-        out.println(stream.params_json().c_str());
-    }
-    out.print("[STREAM] frame_pool used=");
-    out.print(stream.frame_pool_in_use());
-    out.print(" free=");
-    out.print(stream.frame_pool_free());
-    out.print(" capacity=");
-    out.print(stream.frame_pool_capacity());
-    out.print(" parse_errors=");
-    out.print(stream.parse_errors());
-    out.print(" pool_exhaustions=");
-    out.print(stream.pool_exhaustions());
-    out.print(" truncated=");
-    out.println(stream.truncated_frames());
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        StreamConsumerHandle handle = static_cast<StreamConsumerHandle>(i);
-        if (!stream.consumer_active(handle)) continue;
-        out.print("[STREAM consumer ");
-        out.print(i);
-        out.print("] source=");
-        out.print(static_cast<unsigned>(stream.consumer_source(handle)));
-        out.print(" q=");
-        out.print(stream.consumer_queue_count(handle));
-        out.print(" drops=");
-        out.println(stream.consumer_queue_drops(handle));
-    }
 }
 
 void print_log_status(Print &out) {
@@ -674,68 +636,15 @@ void print_therapy_telemetry_status(
     out.println();
 }
 
-void print_live_summary(Print &out, const LiveChartService &live_service) {
+void print_live_stats(Print &out, const LiveChartService &live_service) {
     const LiveChartRuntimeStatus &live = live_service.status();
 
-    out.print("[LIVE] enabled=");
-    out.print(live.enabled ? "yes" : "no");
-    out.println();
-}
-
-void print_live_status(Print &out, const LiveChartService &live_service) {
-    const LiveChartRuntimeStatus &live = live_service.status();
-
-    out.print("[LIVE] enabled=");
-    out.print(live.enabled ? "yes" : "no");
-    out.print(" desired=");
-    out.print(live.desired ? "yes" : "no");
-    out.print(" stream=");
-    out.print(live.attached ? "attached" : "detached");
-    out.print(" handle=");
-    out.print(live.handle);
-    out.print(" frames=");
+    out.print("[LIVE stats] frames=");
     out.print(live.frames);
     out.print(" drops=");
     out.print(live.drops);
     out.print(" attach_failures=");
-    out.print(live.attach_failures);
-    if (live.last_frame_ms) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - live.last_frame_ms);
-    }
-    if (live.last_error[0]) {
-        out.print(" error=");
-        out.print(live.last_error);
-    }
-    out.println();
-}
-
-void print_tcp_status(Print &out, TcpBridge &tcp_bridge) {
-    out.print("[TCP] started=");
-    out.print(tcp_bridge.started() ? "yes" : "no");
-    out.print(" port=");
-    out.print(tcp_bridge.port());
-    out.print(" clients=");
-    out.println(tcp_bridge.connected_count());
-
-    TcpBridgeClientStatus clients[AC_MAX_TCP_CLIENTS];
-    const size_t count = tcp_bridge.client_statuses(clients,
-                                                    AC_MAX_TCP_CLIENTS);
-    for (size_t i = 0; i < count; ++i) {
-        if (!clients[i].connected) continue;
-        out.print("[TCP ");
-        out.print(i);
-        out.print("] remote=");
-        out.print(clients[i].remote_ip);
-        out.print(" protocol=");
-        out.print(tcp_bridge_client_protocol_name(clients[i].protocol));
-        out.print(" line_buf=");
-        out.print(clients[i].line_buffer_len);
-        out.print(" out_q=");
-        out.print(clients[i].output_queue_count);
-        out.print(" out_current=");
-        out.println(clients[i].output_current_len);
-    }
+    out.println(live.attach_failures);
 }
 
 void print_wifi_status(Print &out, const WifiManager &wifi_manager) {

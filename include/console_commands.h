@@ -2,6 +2,9 @@
 
 #include "board_net.h"
 #include "console_command_router.h"
+#include "storage_browser_port.h"
+#include "storage_delete_port.h"
+#include "storage_path_port.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -33,8 +36,8 @@ class CanControlPort;
 class RpcPassthroughPort;
 class RpcRequestPort;
 class SessionManager;
+class StorageStatusPort;
 class StreamBroker;
-class TcpBridge;
 class TherapyTelemetryBroker;
 class TimeSyncService;
 class UdpOximeterSource;
@@ -79,29 +82,6 @@ private:
     void *ble_connection_context_ = nullptr;
 };
 
-class StreamConsoleCommands final : public ConsoleCommandGroup {
-public:
-    explicit StreamConsoleCommands(StreamBroker &stream);
-
-    bool execute(const String &command,
-                 const String &rest,
-                 Print &out,
-                 ConsoleCommandSession &session) override;
-    void stop(ConsoleCommandSession &session) override;
-    void print_memory_detail(Print &out) override;
-
-private:
-    struct StreamSessionState {
-        uint32_t session_id = 0;
-        int8_t handle = -1;
-    };
-
-    StreamSessionState *stream_session(uint32_t session_id, bool create);
-
-    StreamBroker &stream_;
-    StreamSessionState stream_sessions_[AC_CONSOLE_COMMAND_SESSION_CAPACITY];
-};
-
 class CanConsoleCommands final : public ConsoleCommandGroup {
 public:
     CanConsoleCommands(RpcDiagnosticsPort &diagnostics,
@@ -117,6 +97,7 @@ public:
     void print_status(Print &out) override;
     void print_stats(Print &out) override;
     void reset_stats() override;
+    void print_memory_detail(Print &out) override;
 
 private:
     RpcDiagnosticsPort &diagnostics_;
@@ -164,6 +145,8 @@ public:
                  ConsoleCommandSession &console_session) override;
     void print_summary(Print &out) override;
     void print_status(Print &out) override;
+    void print_stats(Print &out) override;
+    void reset_stats() override;
 
 private:
     SessionManager &session_;
@@ -173,7 +156,7 @@ private:
 
 class EdfConsoleCommands final : public ConsoleCommandGroup {
 public:
-    EdfConsoleCommands(EdfRecorderManager &recorder, ConfigService &config);
+    explicit EdfConsoleCommands(EdfRecorderManager &recorder);
 
     bool execute(const String &command,
                  const String &rest,
@@ -186,10 +169,10 @@ public:
     void stop(ConsoleCommandSession &session) override;
     void print_summary(Print &out) override;
     void print_status(Print &out) override;
+    bool print_scoped_stats(const String &scope, Print &out) override;
 
 private:
     EdfRecorderManager &recorder_;
-    ConfigService &config_;
     uint32_t refresh_generation_ = 0;
     uint32_t refresh_session_id_ = 0;
     uint32_t refresh_wait_generation_ = 0;
@@ -227,6 +210,7 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    bool print_scoped_stats(const String &scope, Print &out) override;
 
 private:
     ReportTask &report_;
@@ -236,7 +220,11 @@ private:
 class StorageConsoleCommands final : public ConsoleCommandGroup {
 public:
     StorageConsoleCommands(ConfigService &config,
-                           StorageReadPort &storage_read);
+                           StorageReadPort &storage_read,
+                           StorageBrowserPort &storage_browser,
+                           StoragePathPort &storage_path,
+                           StorageDeletePort &storage_delete,
+                           StorageStatusPort &storage_status);
 
     bool execute(const String &command,
                  const String &rest,
@@ -249,24 +237,54 @@ public:
     void stop(ConsoleCommandSession &session) override;
 
 private:
-    struct TailSessionState {
+    enum class StorageOperation : uint8_t {
+        None,
+        List,
+        ChangeDirectory,
+        Rename,
+        Delete,
+    };
+
+    struct CommandSessionState {
         uint32_t session_id = 0;
-        OperationTicket ticket;
-        StoragePreparedRead prepared;
-        size_t offset = 0;
-        uint32_t generation = 0;
+        char cwd[AC_STORAGE_PATH_MAX] = {};
+
+        OperationTicket tail_ticket;
+        StoragePreparedRead tail_prepared;
+        size_t tail_offset = 0;
+        uint32_t tail_generation = 0;
+
+        StorageOperation storage_operation = StorageOperation::None;
+        OperationTicket storage_ticket;
+        uint32_t storage_generation = 0;
+        uint32_t delete_id = 0;
+        std::shared_ptr<const StorageDirectorySnapshot> listing_snapshot;
+        size_t listing_offset = 0;
+        char operation_path[AC_STORAGE_PATH_MAX] = {};
+        char operation_destination[AC_STORAGE_PATH_MAX] = {};
 
         bool pending() const {
-            return ticket.valid() || prepared.valid();
+            return tail_ticket.valid() || tail_prepared.valid() ||
+                   storage_operation != StorageOperation::None;
         }
     };
 
-    TailSessionState *tail_session(uint32_t session_id, bool create);
-    const TailSessionState *tail_session(uint32_t session_id) const;
+    CommandSessionState *command_session(uint32_t session_id, bool create);
+    const CommandSessionState *command_session(uint32_t session_id) const;
+
+    void execute_storage(String rest,
+                         Print &out,
+                         CommandSessionState &state);
+    void poll_storage(Print &out, CommandSessionState &state);
+    void cancel_storage(CommandSessionState &state);
 
     ConfigService &config_;
     StorageReadPort &storage_read_;
-    TailSessionState tail_sessions_[AC_CONSOLE_COMMAND_SESSION_CAPACITY];
+    StorageBrowserPort &storage_browser_;
+    StoragePathPort &storage_path_;
+    StorageDeletePort &storage_delete_;
+    StorageStatusPort &storage_status_;
+    CommandSessionState command_sessions_[AC_CONSOLE_COMMAND_SESSION_CAPACITY];
 };
 
 class ExportConsoleCommands final : public ConsoleCommandGroup {
@@ -284,7 +302,7 @@ private:
 
 class NetworkConsoleCommands final : public ConsoleCommandGroup {
 public:
-    NetworkConsoleCommands(WifiManager &wifi, TcpBridge &tcp);
+    explicit NetworkConsoleCommands(WifiManager &wifi);
 
     bool execute(const String &command,
                  const String &rest,
@@ -293,7 +311,6 @@ public:
 
 private:
     WifiManager &wifi_;
-    TcpBridge &tcp_;
 };
 
 class ConfigConsoleCommands final : public ConsoleCommandGroup {

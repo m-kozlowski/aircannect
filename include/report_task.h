@@ -28,6 +28,52 @@ enum class ReportTaskState : uint8_t {
     Publishing,
 };
 
+enum class ReportTaskCondition : uint8_t {
+    Stopped,
+    Working,
+    Waiting,
+    Complete,
+    Failed,
+};
+
+enum class ReportTaskOperation : uint8_t {
+    None,
+    LoadingCatalog,
+    RefreshingCatalog,
+    CheckingSpools,
+    Reconciling,
+    LookingUp,
+    Building,
+    Publishing,
+    LoadingPayload,
+    CompressingPayload,
+    SavingCatalog,
+};
+
+enum class ReportTaskWaitReason : uint8_t {
+    None,
+    Startup,
+    Queue,
+    Catalog,
+    Retry,
+    Therapy,
+    RealtimeStream,
+    ForegroundRequest,
+    Ota,
+    Export,
+    As11Unavailable,
+};
+
+struct ReportTaskOperationalSnapshot {
+    ReportTaskCondition condition = ReportTaskCondition::Stopped;
+    ReportTaskOperation operation = ReportTaskOperation::None;
+    ReportTaskWaitReason wait_reason = ReportTaskWaitReason::None;
+    SleepDayId sleep_day;
+    size_t catalog_nights = 0;
+    uint32_t retry_in_ms = 0;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+};
+
 struct ReportTaskStatus {
     bool initialized = false;
     bool task_started = false;
@@ -47,6 +93,7 @@ struct ReportTaskStatus {
     ReportArtifactPayloadCacheStatus payload_cache;
     ReportArtifactPayloadLoadStatus payload_load;
     ReportEngineStatus engine;
+    ReportTaskOperationalSnapshot operational;
 };
 
 struct ReportTaskControlSnapshot {
@@ -165,7 +212,8 @@ public:
     OperationAdmission request_artifact(
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
-        uint32_t generation);
+        uint32_t generation,
+        bool force_rebuild = false);
     OperationAdmission request_payload_cache(
         const ReportArtifactPayloadDescriptor &payload,
         uint32_t generation);
@@ -180,6 +228,7 @@ public:
     void publish_activity(const ActivitySnapshot &activity);
 
     ReportTaskControlSnapshot control_snapshot() const;
+    ReportTaskOperationalSnapshot operational_snapshot() const;
     ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
 #ifndef ARDUINO
     ReportTaskStatus status() const;

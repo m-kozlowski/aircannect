@@ -66,18 +66,24 @@ OperationTicket ReportRequestQueue::next_ticket(uint32_t generation) {
 ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
-    uint32_t generation) {
+    uint32_t generation,
+    bool force_rebuild) {
     if (!artifact.valid() || generation == 0 || !slots_) return {};
 
     bool replaced = false;
     const size_t existing = find_artifact(artifact);
     if (existing < count_) {
         if (slots_[existing].artifact == artifact) {
-            if (report_request_priority_higher(
-                    priority, slots_[existing].priority)) {
-                ReportArtifactRequest &request = slots_[existing];
+            ReportArtifactRequest &request = slots_[existing];
+            const bool priority_upgrade = report_request_priority_higher(
+                priority, request.priority);
+            const bool rebuild_upgrade =
+                force_rebuild && !request.force_rebuild;
+            if (priority_upgrade || rebuild_upgrade) {
                 request.ticket = next_ticket(generation);
-                request.priority = priority;
+                if (priority_upgrade) request.priority = priority;
+                request.force_rebuild =
+                    request.force_rebuild || force_rebuild;
                 request.ready_at_ms = 0;
                 request.attempts = 0;
                 return {ReportRequestEnqueueStatus::Replaced,
@@ -105,6 +111,7 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     request.artifact = artifact;
     request.ticket = next_ticket(generation);
     request.priority = priority;
+    request.force_rebuild = force_rebuild;
 
     return {replaced ? ReportRequestEnqueueStatus::Replaced
                      : ReportRequestEnqueueStatus::Queued,

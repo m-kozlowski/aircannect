@@ -25,15 +25,10 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  log               log levels and sink status");
         out.println("  as11              AS11 state, RPC, BLE, and therapy control");
         out.println("  time              ESP and AS11 clock sync commands");
-        out.println("  stream            AS11 stream subscription controls");
-        out.println("  live              live chart stream status");
-        out.println("  edf               live EDF recorder status and monitor toggle");
         out.println("  oxi               oximetry source and BLE injector status");
         out.println("  report            therapy report index/cache status");
         out.println("  storage           persistent storage and writer status");
-        out.println("  smb               SMB sync status and share verification");
-        out.println("  sleephq           SleepHQ sync status and connectivity check");
-        out.println("  tcp               raw JSON-RPC TCP bridge status");
+        out.println("  sync              SMB and SleepHQ export operations");
         out.println("  ota               AirCANnect firmware OTA status");
         out.println("  resmed-ota        AS11 firmware upload/apply workflow");
         out.println("[HELP] TCP bridge: one JSON-RPC payload per line.");
@@ -129,40 +124,28 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         return;
     }
 
-    if (topic == "stream") {
-        out.println("[HELP stream]");
-        out.println("  stream                    show stream broker state");
-        out.println("  stream status             show stream broker state");
-        out.println("  stream edf|full|default   subscribe EDF-oriented stream set");
-        out.println("  stream stop               release console stream consumer");
-        out.println("  stream IDS [SAMPLE] [REP] subscribe custom IDs and intervals");
-        out.println("  stream {JSON_PARAMS}      subscribe with raw StartStream params");
-        return;
-    }
-
     if (topic == "storage") {
         out.println("[HELP storage]");
         out.println("  storage status            show mounted storage state");
-        out.println("  storage retry             retry storage mount");
-        out.println("  storage write-test P T    append text in the background");
-        out.println("  storage write-test status show background test result");
+        out.println("  storage mount             mount storage if unavailable");
+        out.println("  storage pwd               show the current directory");
+        out.println("  storage ls [PATH]         list a directory");
+        out.println("  storage cd PATH           change the current directory");
+        out.println("  storage rm PATH           remove a file or directory");
+        out.println("  storage rename PATH NAME  rename within its directory");
         return;
     }
 
-    if (topic == "smb") {
-        out.println("[HELP smb]");
-        out.println("  smb status                show SMB sync status");
-        out.println("  smb verify                queue SMB share/recent-files verification");
-        out.println("  smb sync                  queue manual SMB export sync");
-        return;
-    }
-
-    if (topic == "sleephq") {
-        out.println("[HELP sleephq]");
-        out.println("  sleephq status            show SleepHQ sync status");
-        out.println("  sleephq check             queue OAuth/API connectivity check");
-        out.println("  sleephq sync              queue manual SleepHQ export sync");
-        out.println("  sleephq sync YYYYMMDD     sync one DATALOG day");
+    if (topic == "sync") {
+        out.println("[HELP sync]");
+        out.println("  sync                      show SMB and SleepHQ status");
+        out.println("  sync smb [status]         show SMB sync status");
+        out.println("  sync smb verify           verify the SMB destination");
+        out.println("  sync smb run              queue an SMB sync");
+        out.println("  sync sleephq [status]     show SleepHQ sync status");
+        out.println("  sync sleephq check        check SleepHQ connectivity");
+        out.println("  sync sleephq run          queue a SleepHQ sync");
+        out.println("  sync sleephq run YYYYMMDD sync one DATALOG day");
         return;
     }
 
@@ -170,24 +153,14 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP report]");
         out.println("  report                    show report task status");
         out.println("  report status             show report task status");
-        out.println("  report nights             list canonical report nights");
-        out.println("  report result latest      request latest result artifact");
-        out.println("  report result YYYYMMDD    request result artifact by sleep day");
-        return;
-    }
-
-    if (topic == "live") {
-        out.println("[HELP live]");
-        out.println("  live status               show live chart stream state");
+        out.println("  report nights [latest|YYYYMMDD]  list report nights or one night");
+        out.println("  report result latest [--force]   request latest result artifact");
+        out.println("  report result YYYYMMDD [--force] request result by sleep day");
         return;
     }
 
     if (topic == "edf") {
         out.println("[HELP edf]");
-        out.println("  edf                       show live EDF recorder state");
-        out.println("  edf status                show live EDF recorder state");
-        out.println("  edf stats                 show detailed capture counters");
-        out.println("  edf on|off                enable/disable recorder monitor");
         out.println("  edf str refresh YYYYMMDD [YYYYMMDD]");
         out.println("                            refresh Summary fields in existing STR records");
         return;
@@ -247,8 +220,10 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "stats") {
         out.println("[HELP stats]");
         out.println("  stats                     show CAN/RPC/event/stream counters");
-        out.println("  stats reset               clear those counters");
-        out.println("  use memory, storage, edf, oxi, tcp, or log for details");
+        out.println("  stats edf                 show detailed EDF capture counters");
+        out.println("  stats report              show report queue/cache counters");
+        out.println("  stats reset               clear general counters");
+        out.println("  use memory, storage, stats edf, oxi, or log for details");
         return;
     }
 
@@ -297,13 +272,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  version                   firmware version and build date");
         out.println("  restart [ac|fg MODE]      restart AirCANnect or AS11");
         out.println("  can restart               restart CAN controller");
-        return;
-    }
-
-    if (topic == "tcp") {
-        out.println("[HELP tcp]");
-        out.println("  tcp                       show raw JSON-RPC bridge status");
-        out.println("  tcp status                show raw JSON-RPC bridge status");
         return;
     }
 

@@ -149,7 +149,9 @@ void ManagementConsole::execute_line(String line,
             return;
         }
         if (rest.length() && rest != "status") {
-            print_unknown_command(out, "STATS", "stats, stats reset");
+            if (router.print_scoped_stats(rest, out)) return;
+            print_unknown_command(out, "STATS",
+                                  "stats, stats edf, stats report, stats reset");
             return;
         }
         router.print_stats(out);

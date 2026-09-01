@@ -160,34 +160,28 @@ bool RuntimeConsoleCommands::execute(
     const String &rest_arg,
     Print &out,
     ConsoleCommandSession &console_session) {
+    (void)command;
+    (void)rest_arg;
+    (void)out;
     (void)console_session;
-    if (command != "live") return false;
-
-    String rest = rest_arg;
-    rest.trim();
-    rest.toLowerCase();
-
-    if (command == "live") {
-        if (rest.length() && rest != "status") {
-            print_unknown_command(out, "LIVE", "live status");
-        } else {
-            ConsoleFormat::print_live_status(out, live_);
-        }
-        return true;
-    }
-
     return false;
 }
 
 void RuntimeConsoleCommands::print_summary(Print &out) {
     ConsoleFormat::print_session_summary(out, session_.status());
-    ConsoleFormat::print_live_summary(out, live_);
 }
 
 void RuntimeConsoleCommands::print_status(Print &out) {
     ConsoleFormat::print_session_status(out, session_.status());
     ConsoleFormat::print_therapy_telemetry_status(out, telemetry_.status());
-    ConsoleFormat::print_live_status(out, live_);
+}
+
+void RuntimeConsoleCommands::print_stats(Print &out) {
+    ConsoleFormat::print_live_stats(out, live_);
+}
+
+void RuntimeConsoleCommands::reset_stats() {
+    live_.reset_counters();
 }
 
 WebDiagnosticsConsoleCommands::WebDiagnosticsConsoleCommands(WebUI &web_ui)

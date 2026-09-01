@@ -53,6 +53,7 @@ public:
     const LiveChartRuntimeStatus &status() const { return status_; }
     void clear_batch();
     void mark_sent();
+    void reset_counters();
 
 private:
     bool should_run() const;

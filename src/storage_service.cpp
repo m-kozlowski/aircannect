@@ -265,7 +265,6 @@ uint8_t storage_resource_retry_attempt = 0;
 uint32_t mount_retry_at_ms = 0;
 uint8_t mount_retry_attempt = 0;
 
-static constexpr size_t AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY = 512;
 static constexpr uint32_t STORAGE_RESOURCE_RETRY_MIN_MS = 1000;
 static constexpr uint32_t STORAGE_RESOURCE_RETRY_MAX_MS = 30000;
 static constexpr uint32_t STORAGE_MOUNT_RETRY_MIN_MS = 5000;
@@ -283,10 +282,6 @@ enum class ForegroundOperation : uint8_t {
 
 static constexpr size_t FOREGROUND_OPERATION_COUNT =
     static_cast<size_t>(ForegroundOperation::Count);
-StorageDiagnosticStatus diagnostic;
-uint8_t *diagnostic_payload = nullptr;
-size_t diagnostic_payload_length = 0;
-
 bool claim_maintenance(MaintenanceOwner owner) {
     MaintenanceOwner expected = MaintenanceOwner::None;
     return maintenance_owner.compare_exchange_strong(expected, owner);
@@ -967,32 +962,8 @@ bool allocate_slots() {
     return true;
 }
 
-bool allocate_diagnostic_payload() {
-    if (diagnostic_payload) {
-        diagnostic.available = true;
-        return true;
-    }
-
-    diagnostic_payload = static_cast<uint8_t *>(
-        Memory::alloc_large(AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY, false));
-    diagnostic.available = diagnostic_payload != nullptr;
-    if (!diagnostic.available) {
-        diagnostic.state = StorageDiagnosticState::Failed;
-        copy_cstr(diagnostic.error, sizeof(diagnostic.error),
-                  "allocation_failed");
-        return false;
-    }
-
-    if (strcmp(diagnostic.error, "allocation_failed") == 0) {
-        diagnostic.state = StorageDiagnosticState::Idle;
-        diagnostic.error[0] = '\0';
-    }
-    return true;
-}
-
 bool initialize_storage_resources() {
     bool ready = allocate_slots();
-    if (!allocate_diagnostic_payload()) ready = false;
 #if AC_FILE_LOG_ENABLED
     if (!file_log_sink.begin(wake_service_task)) ready = false;
 #endif
@@ -2116,49 +2087,6 @@ bool process_foreground_step() {
     return false;
 }
 
-bool process_diagnostic_step() {
-    if (!lock_queue(20)) return false;
-    if (diagnostic.state != StorageDiagnosticState::Queued) {
-        unlock_queue();
-        return false;
-    }
-
-    diagnostic.state = StorageDiagnosticState::Writing;
-    const size_t payload_length = diagnostic_payload_length;
-    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
-    copy_cstr(path, sizeof(path), diagnostic.path);
-    unlock_queue();
-
-    size_t written = 0;
-    bool opened = false;
-    {
-        File file = Storage::open(path, "a");
-        opened = static_cast<bool>(file);
-        if (opened) {
-            written = file.write(diagnostic_payload, payload_length);
-            file.close();
-        }
-    }
-
-    if (queue_lock && xSemaphoreTake(queue_lock, portMAX_DELAY) == pdTRUE) {
-        diagnostic.bytes = written;
-        if (!opened) {
-            diagnostic.state = StorageDiagnosticState::Failed;
-            copy_cstr(diagnostic.error, sizeof(diagnostic.error),
-                      "open_failed");
-        } else if (written != payload_length) {
-            diagnostic.state = StorageDiagnosticState::Failed;
-            copy_cstr(diagnostic.error, sizeof(diagnostic.error),
-                      "short_write");
-        } else {
-            diagnostic.state = StorageDiagnosticState::Complete;
-            diagnostic.error[0] = '\0';
-        }
-        unlock_queue();
-    }
-    return true;
-}
-
 void process_job(JobSlot &job) {
     switch (job.type) {
         case JobType::Open:
@@ -2236,8 +2164,6 @@ void task_entry(void *) {
                 } else if (process_foreground_step()) {
                     did_work = true;
                     file_log_burst = 0;
-                } else if (process_diagnostic_step()) {
-                    did_work = true;
                 } else if (atomic_write_service.step(
                                StorageAtomicWriteLane::Maintenance)) {
                     did_work = true;
@@ -2395,7 +2321,6 @@ void begin() {
                                     AC_STORAGE_SERVICE_TASK_CORE);
         if (created != pdPASS || !task) {
             service_state.available = false;
-            diagnostic.available = false;
             set_storage_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
@@ -2417,7 +2342,7 @@ void begin() {
               storage_resources_ready ? "ready" : "recovering");
 }
 
-bool request_mount_retry() {
+bool request_mount() {
     if (!service_state.initialized || !service_state.available) return false;
 
     bool expected = false;
@@ -2640,44 +2565,6 @@ StorageDeletePort &delete_port() {
     return delete_service;
 }
 
-bool request_diagnostic_append(const char *path,
-                               const uint8_t *data,
-                               size_t length) {
-    if (!path || path[0] != '/' || !data || length == 0 ||
-        length > AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY ||
-        strlen(path) >= AC_STORAGE_WRITE_PATH_MAX) {
-        return false;
-    }
-    if (!service_state.initialized) begin();
-    if (!lock_queue(20)) return false;
-
-    const bool busy = diagnostic.state == StorageDiagnosticState::Queued ||
-                      diagnostic.state == StorageDiagnosticState::Writing;
-    if (!service_state.available || !diagnostic.available || busy) {
-        unlock_queue();
-        return false;
-    }
-
-    copy_cstr(diagnostic.path, sizeof(diagnostic.path), path);
-    memcpy(diagnostic_payload, data, length);
-    diagnostic_payload_length = length;
-    diagnostic.bytes = length;
-    diagnostic.error[0] = '\0';
-    diagnostic.state = StorageDiagnosticState::Queued;
-    unlock_queue();
-
-    wake_service_task();
-    return true;
-}
-
-StorageDiagnosticStatus diagnostic_status() {
-    StorageDiagnosticStatus out;
-    if (!lock_queue(20)) return out;
-    out = diagnostic;
-    unlock_queue();
-    return out;
-}
-
 FileLogSinkPort &file_log_port() {
     (void)file_log_sink.begin(wake_service_task);
     return file_log_sink;
@@ -2718,9 +2605,7 @@ StorageWorkloadSnapshot workload_snapshot() {
 
     out.valid = true;
     out.available = service_state.available;
-    out.busy = processing_job || processing_read || upload_active ||
-               diagnostic.state == StorageDiagnosticState::Queued ||
-               diagnostic.state == StorageDiagnosticState::Writing;
+    out.busy = processing_job || processing_read || upload_active;
     out.maintenance_active =
         maintenance_owner.load() != MaintenanceOwner::None;
     out.edf_queued = queued;
@@ -2735,9 +2620,7 @@ StorageEdfStatusSnapshot edf_status_snapshot() {
 
     if (!lock_queue()) return out;
 
-    out.busy = processing_job || processing_read || upload_active ||
-               diagnostic.state == StorageDiagnosticState::Queued ||
-               diagnostic.state == StorageDiagnosticState::Writing;
+    out.busy = processing_job || processing_read || upload_active;
     out.capacity = service_state.edf_capacity;
     out.queued = queued;
     out.open_file_count = service_state.open_file_count;
@@ -2793,16 +2676,5 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
 }
 
 }  // namespace StorageService
-
-const char *storage_diagnostic_state_name(StorageDiagnosticState state) {
-    switch (state) {
-        case StorageDiagnosticState::Queued: return "queued";
-        case StorageDiagnosticState::Writing: return "writing";
-        case StorageDiagnosticState::Complete: return "complete";
-        case StorageDiagnosticState::Failed: return "failed";
-        case StorageDiagnosticState::Idle:
-        default: return "idle";
-    }
-}
 
 }  // namespace aircannect

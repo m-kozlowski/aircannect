@@ -8,7 +8,6 @@
 #include "session_manager.h"
 #include "live_chart_service.h"
 #include "storage_manager.h"
-#include "tcp_bridge.h"
 #include "therapy_telemetry_broker.h"
 #include "wifi_manager.h"
 
@@ -36,7 +35,6 @@ void print_time_summary(Print &out,
 void print_time_status(Print &out,
                        const As11DeviceState &state,
                        const TimeSyncService &time_sync);
-void print_stream_status(Print &out, const StreamBroker &stream);
 void print_log_status(Print &out);
 void print_memory_status(Print &out, const MemoryStatus &status);
 void print_memory_detail_status(Print &out,
@@ -47,9 +45,7 @@ void print_session_status(Print &out, const SessionStatus &status);
 void print_therapy_telemetry_status(
     Print &out,
     const TherapyTelemetryRuntimeStatus &status);
-void print_live_summary(Print &out, const LiveChartService &live_service);
-void print_live_status(Print &out, const LiveChartService &live_service);
-void print_tcp_status(Print &out, TcpBridge &tcp_bridge);
+void print_live_stats(Print &out, const LiveChartService &live_service);
 void print_wifi_status(Print &out, const WifiManager &wifi_manager);
 
 }  // namespace ConsoleFormat

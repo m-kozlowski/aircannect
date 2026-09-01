@@ -26,17 +26,6 @@ enum class TcpBridgeClientProtocol : uint8_t {
     Service,
 };
 
-const char *tcp_bridge_client_protocol_name(TcpBridgeClientProtocol protocol);
-
-struct TcpBridgeClientStatus {
-    bool connected = false;
-    IPAddress remote_ip;
-    TcpBridgeClientProtocol protocol = TcpBridgeClientProtocol::Unknown;
-    size_t line_buffer_len = 0;
-    size_t output_queue_count = 0;
-    size_t output_current_len = 0;
-};
-
 class TcpBridge : private LineProtocolServerBase {
 public:
     explicit TcpBridge(As11ServiceManager &service) : service_(service) {}
@@ -53,11 +42,9 @@ public:
                                   void *context);
 
     // Status
-    int connected_count();
     bool raw_client_connected();
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
-    size_t client_statuses(TcpBridgeClientStatus *out, size_t max);
 
 private:
     void accept_clients();

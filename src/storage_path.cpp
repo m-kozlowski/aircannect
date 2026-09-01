@@ -58,6 +58,62 @@ bool storage_user_path_valid(const char *path) {
     return true;
 }
 
+bool storage_resolve_user_path(const char *base,
+                               const char *path,
+                               char *out,
+                               size_t out_size) {
+    if (!base || !storage_user_path_valid(base) || !path || !out ||
+        out_size < 2) {
+        return false;
+    }
+
+    out[0] = '/';
+    out[1] = '\0';
+    size_t out_length = 1;
+
+    auto consume = [&](const char *input) {
+        const char *cursor = input;
+        while (*cursor) {
+            while (*cursor == '/') cursor++;
+            if (!*cursor) break;
+
+            const char *segment = cursor;
+            while (*cursor && *cursor != '/') cursor++;
+            const size_t length = static_cast<size_t>(cursor - segment);
+            if (length == 1 && segment[0] == '.') continue;
+            if (length == 2 && segment[0] == '.' && segment[1] == '.') {
+                if (out_length > 1) {
+                    char *slash = strrchr(out, '/');
+                    out_length = slash == out
+                        ? 1
+                        : static_cast<size_t>(slash - out);
+                    out[out_length] = '\0';
+                }
+                continue;
+            }
+
+            for (size_t i = 0; i < length; ++i) {
+                if (static_cast<unsigned char>(segment[i]) < 0x20 ||
+                    segment[i] == '\\') {
+                    return false;
+                }
+            }
+
+            const size_t separator = out_length > 1 ? 1 : 0;
+            if (out_length + separator + length >= out_size) return false;
+            if (separator) out[out_length++] = '/';
+            memcpy(out + out_length, segment, length);
+            out_length += length;
+            out[out_length] = '\0';
+        }
+        return true;
+    };
+
+    if (path[0] != '/' && !consume(base)) return false;
+    if (!consume(path)) return false;
+    return storage_user_path_valid(out);
+}
+
 void storage_normalize_path(char *path) {
     if (!path) return;
     size_t len = strlen(path);

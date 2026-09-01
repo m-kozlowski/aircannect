@@ -8,16 +8,6 @@
 
 namespace aircannect {
 
-const char *tcp_bridge_client_protocol_name(
-    TcpBridgeClientProtocol protocol) {
-    switch (protocol) {
-        case TcpBridgeClientProtocol::Unknown: return "unknown";
-        case TcpBridgeClientProtocol::Rpc: return "rpc";
-        case TcpBridgeClientProtocol::Service: return "service";
-    }
-    return "unknown";
-}
-
 bool TcpBridge::begin(uint16_t port) {
     return begin_line_server(port, "BRIDGE");
 }
@@ -68,14 +58,6 @@ void TcpBridge::set_raw_request_observer(TcpRawRequestObserver observer,
     raw_request_observer_context_ = context;
 }
 
-int TcpBridge::connected_count() {
-    int count = 0;
-    for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
-        if (clients_[i] && clients_[i].connected()) count++;
-    }
-    return count;
-}
-
 bool TcpBridge::raw_client_connected() {
     if (!started()) return false;
 
@@ -86,35 +68,6 @@ bool TcpBridge::raw_client_connected() {
         }
     }
     return false;
-}
-
-size_t TcpBridge::client_statuses(TcpBridgeClientStatus *out, size_t max) {
-    if (!out || max == 0) return 0;
-    const size_t count = max < AC_MAX_TCP_CLIENTS ? max : AC_MAX_TCP_CLIENTS;
-    for (size_t i = 0; i < count; ++i) {
-        TcpBridgeClientStatus &dst = out[i];
-        dst = TcpBridgeClientStatus();
-        dst.connected = clients_[i] && clients_[i].connected();
-        if (!dst.connected) continue;
-
-        dst.remote_ip = clients_[i].remoteIP();
-        dst.protocol = protocols_[i];
-        dst.line_buffer_len = lines_[i].length();
-        dst.output_queue_count = output_queues_[i].count();
-        if (protocols_[i] == TcpBridgeClientProtocol::Service &&
-            service_output_) {
-            const size_t total = service_output_->size();
-            dst.output_current_len =
-                service_output_pos_ < total
-                    ? total - service_output_pos_
-                    : 0;
-        } else if (output_current_[i]) {
-            const size_t total = output_current_[i]->size() + 1;
-            dst.output_current_len =
-                output_pos_[i] < total ? total - output_pos_[i] : 0;
-        }
-    }
-    return count;
 }
 
 void TcpBridge::accept_clients() {

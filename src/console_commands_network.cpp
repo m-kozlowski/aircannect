@@ -3,7 +3,6 @@
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "string_util.h"
-#include "tcp_bridge.h"
 #include "wifi_manager.h"
 
 namespace aircannect {
@@ -208,31 +207,20 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
 
 }  // namespace
 
-NetworkConsoleCommands::NetworkConsoleCommands(WifiManager &wifi,
-                                               TcpBridge &tcp)
-    : wifi_(wifi), tcp_(tcp) {}
+NetworkConsoleCommands::NetworkConsoleCommands(WifiManager &wifi)
+    : wifi_(wifi) {}
 
 bool NetworkConsoleCommands::execute(const String &command,
                                      const String &rest_arg,
                                      Print &out,
                                      ConsoleCommandSession &session) {
     (void)session;
-    if (command != "wifi" && command != "tcp") return false;
+    if (command != "wifi") return false;
 
     String rest = rest_arg;
 
     if (command == "wifi") {
         handle_wifi(out, rest, wifi_);
-        return true;
-    }
-    if (command == "tcp") {
-        trim_inplace(rest);
-        to_lower_inplace(rest);
-        if (rest.length() && rest != "status") {
-            print_unknown_command(out, "TCP", "tcp status");
-        } else {
-            ConsoleFormat::print_tcp_status(out, tcp_);
-        }
         return true;
     }
     return false;

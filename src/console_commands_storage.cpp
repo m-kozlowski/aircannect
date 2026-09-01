@@ -1,6 +1,9 @@
 #include "console_commands.h"
 
+#include <algorithm>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "app_config_registry.h"
 #include "board.h"
@@ -10,6 +13,7 @@
 #include "management_console_utils.h"
 #include "storage_manager.h"
 #include "storage_service.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -26,66 +30,52 @@ const AppConfigFieldDescriptor *log_level_config_field(log_cat_t category) {
     return nullptr;
 }
 
-void print_storage_test_status(Print &out,
-                               const StorageDiagnosticStatus &status) {
-    out.print("[STORAGE_TEST] state=");
-    out.print(storage_diagnostic_state_name(status.state));
-    out.print(" path=");
-    out.print(status.path[0] ? status.path : "--");
-    out.print(" bytes=");
-    out.print(status.bytes);
-    if (status.error[0]) {
-        out.print(" error=");
-        out.print(status.error);
+bool split_storage_console_path(const char *path,
+                                char *parent,
+                                size_t parent_size,
+                                const char *&name) {
+    name = nullptr;
+    if (!path || strcmp(path, "/") == 0 || !parent || !parent_size) {
+        return false;
     }
-    out.println();
+
+    const char *slash = strrchr(path, '/');
+    if (!slash || !storage_valid_child_name(slash + 1)) return false;
+
+    const size_t parent_length = slash == path
+        ? 1
+        : static_cast<size_t>(slash - path);
+    if (parent_length >= parent_size) return false;
+
+    memcpy(parent, path, parent_length);
+    parent[parent_length] = '\0';
+    name = slash + 1;
+    return true;
 }
 
-void handle_storage(Print &out, String rest) {
-    rest.trim();
-    String lower = rest;
-    lower.toLowerCase();
-    if (!lower.length() || lower == "status") {
-        ConsoleFormat::print_storage_status(out, Storage::status());
-        return;
-    }
-    if (lower == "retry") {
-        out.print("[STORAGE] mount retry ");
-        out.println(StorageService::request_mount_retry()
-                        ? "queued"
-                        : "rejected");
-        ConsoleFormat::print_storage_status(out, Storage::status());
-        return;
-    }
-    if (lower == "write-test status") {
-        print_storage_test_status(out, StorageService::diagnostic_status());
-        return;
-    }
-    if (lower == "write-test" || lower.startsWith("write-test ")) {
-        String args = rest;
-        args.remove(0, String("write-test").length());
-        int pos = 0;
-        String path = "/aircannect-write-test.txt";
-        String text = "AirCANnect storage write test";
-        String parsed;
-        if (parse_console_arg(args, pos, parsed)) {
-            path = parsed;
-            if (parse_console_arg(args, pos, parsed)) text = parsed;
-        }
-        text += '\n';
-
-        const bool queued = StorageService::request_diagnostic_append(
-            path.c_str(), reinterpret_cast<const uint8_t *>(text.c_str()),
-            text.length());
-        out.print("[STORAGE_TEST] ");
-        out.println(queued ? "queued" : "rejected");
-        print_storage_test_status(out, StorageService::diagnostic_status());
+void print_storage_listing_entry(Print &out,
+                                 const StorageDirectoryEntryView &entry) {
+    out.print(entry.directory ? "[DIR] " : "[FILE] ");
+    out.print(entry.name);
+    if (entry.directory) {
+        out.println("/");
         return;
     }
 
-    print_unknown_command(out, "STORAGE",
-                          "storage status, retry, "
-                          "write-test [status|P T]");
+    out.print(" bytes=");
+    char size[24] = {};
+    snprintf(size, sizeof(size), "%llu",
+             static_cast<unsigned long long>(entry.size));
+    out.println(size);
+}
+
+void print_storage_listing_header(
+    Print &out,
+    const StorageDirectorySnapshot &snapshot) {
+    out.print("[STORAGE] path=");
+    out.print(snapshot.path());
+    out.print(" entries=");
+    out.println(static_cast<unsigned long>(snapshot.size()));
 }
 
 void handle_log(Print &out,
@@ -300,130 +290,492 @@ void handle_log(Print &out,
 
 StorageConsoleCommands::StorageConsoleCommands(
     ConfigService &config,
-    StorageReadPort &storage_read)
-    : config_(config), storage_read_(storage_read) {}
+    StorageReadPort &storage_read,
+    StorageBrowserPort &storage_browser,
+    StoragePathPort &storage_path,
+    StorageDeletePort &storage_delete,
+    StorageStatusPort &storage_status)
+    : config_(config),
+      storage_read_(storage_read),
+      storage_browser_(storage_browser),
+      storage_path_(storage_path),
+      storage_delete_(storage_delete),
+      storage_status_(storage_status) {}
 
-StorageConsoleCommands::TailSessionState *
-StorageConsoleCommands::tail_session(uint32_t session_id, bool create) {
-    TailSessionState *empty = nullptr;
-    for (TailSessionState &session : tail_sessions_) {
+StorageConsoleCommands::CommandSessionState *
+StorageConsoleCommands::command_session(uint32_t session_id, bool create) {
+    CommandSessionState *empty = nullptr;
+    for (CommandSessionState &session : command_sessions_) {
         if (session.session_id == session_id) return &session;
         if (!session.session_id && !empty) empty = &session;
     }
     if (!create || !empty) return nullptr;
 
+    *empty = {};
     empty->session_id = session_id;
+    copy_cstr(empty->cwd, sizeof(empty->cwd), "/");
     return empty;
 }
 
-const StorageConsoleCommands::TailSessionState *
-StorageConsoleCommands::tail_session(uint32_t session_id) const {
-    for (const TailSessionState &session : tail_sessions_) {
+const StorageConsoleCommands::CommandSessionState *
+StorageConsoleCommands::command_session(uint32_t session_id) const {
+    for (const CommandSessionState &session : command_sessions_) {
         if (session.session_id == session_id) return &session;
     }
     return nullptr;
+}
+
+void StorageConsoleCommands::execute_storage(
+    String rest,
+    Print &out,
+    CommandSessionState &state) {
+    rest.trim();
+
+    int position = 0;
+    String command;
+    if (!parse_console_arg(rest, position, command)) command = "status";
+    command.toLowerCase();
+
+    String first;
+    String second;
+    String extra;
+    const bool has_first = parse_console_arg(rest, position, first);
+    const bool has_second = parse_console_arg(rest, position, second);
+    const bool has_extra = parse_console_arg(rest, position, extra);
+
+    if (command == "status" && !has_first) {
+        ConsoleFormat::print_storage_status(out, Storage::status());
+        return;
+    }
+    if (command == "mount" && !has_first) {
+        out.print("[STORAGE] mount ");
+        out.println(StorageService::request_mount()
+                        ? "queued"
+                        : "rejected");
+        return;
+    }
+    if (command == "pwd" && !has_first) {
+        out.println(state.cwd);
+        return;
+    }
+    if (command == "ls" && has_second) {
+        out.println("[STORAGE] usage: storage ls [PATH]");
+        return;
+    }
+    if (command == "cd" && (!has_first || has_second)) {
+        out.println("[STORAGE] usage: storage cd PATH");
+        return;
+    }
+    if (command != "ls" && command != "cd" && command != "rm" &&
+        command != "rename") {
+        print_unknown_command(
+            out, "STORAGE",
+            "storage status, mount, pwd, ls [PATH], cd PATH, "
+            "rm PATH, rename PATH NEW_NAME");
+        return;
+    }
+
+    if (state.storage_operation != StorageOperation::None) {
+        out.println("[STORAGE] operation pending");
+        return;
+    }
+    if (!storage_status_.mounted()) {
+        out.println("[STORAGE] storage unavailable");
+        return;
+    }
+
+    if (command == "ls" && !has_second) {
+        const String requested = has_first ? first : String();
+        char path[AC_STORAGE_PATH_MAX] = {};
+        if (!storage_resolve_user_path(
+                state.cwd, requested.c_str(), path, sizeof(path))) {
+            out.println("[STORAGE] bad path");
+            return;
+        }
+
+        std::shared_ptr<const StorageDirectorySnapshot> snapshot;
+        char error[AC_STORAGE_ERROR_MAX] = {};
+        const StorageListingRead read = storage_browser_.listing(
+            path, true, snapshot, error, sizeof(error));
+        if (read == StorageListingRead::Error) {
+            out.print("[STORAGE] list failed: ");
+            out.println(error[0] ? error : "error");
+            return;
+        }
+        state.storage_operation = StorageOperation::List;
+        state.listing_snapshot = snapshot;
+        state.listing_offset = 0;
+        copy_cstr(state.operation_path, sizeof(state.operation_path), path);
+        if (read == StorageListingRead::Preparing) {
+            out.print("[STORAGE] listing ");
+            out.println(path);
+        } else if (state.listing_snapshot) {
+            print_storage_listing_header(out, *state.listing_snapshot);
+        }
+        return;
+    }
+
+    if (command == "cd" && has_first && !has_second) {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        if (!storage_resolve_user_path(
+                state.cwd, first.c_str(), path, sizeof(path))) {
+            out.println("[STORAGE] bad path");
+            return;
+        }
+
+        state.storage_generation++;
+        if (!state.storage_generation) state.storage_generation++;
+
+        StoragePathCommand request;
+        request.operation = StoragePathOperation::Stat;
+        request.source = path;
+        request.generation = state.storage_generation;
+        const OperationSubmission submission = storage_path_.request(request);
+        if (!submission.accepted()) {
+            out.println("[STORAGE] path lookup rejected");
+            return;
+        }
+
+        state.storage_operation = StorageOperation::ChangeDirectory;
+        state.storage_ticket = submission.ticket;
+        copy_cstr(state.operation_path, sizeof(state.operation_path), path);
+        return;
+    }
+
+    if ((command == "rm" || command == "rename") &&
+        (!has_first || has_extra ||
+         (command == "rm" && has_second) ||
+         (command == "rename" && !has_second))) {
+        out.println(command == "rm"
+            ? "[STORAGE] usage: storage rm PATH"
+            : "[STORAGE] usage: storage rename PATH NEW_NAME");
+        return;
+    }
+
+    if (command == "rm" || command == "rename") {
+        const StorageWorkloadSnapshot workload =
+            storage_status_.workload_snapshot();
+        if (!workload.valid || !workload.available || workload.busy ||
+            workload.maintenance_active || workload.edf_queued > 0 ||
+            workload.open_file_count > 0) {
+            out.println("[STORAGE] storage busy");
+            return;
+        }
+
+        char path[AC_STORAGE_PATH_MAX] = {};
+        if (!storage_resolve_user_path(
+                state.cwd, first.c_str(), path, sizeof(path))) {
+            out.println("[STORAGE] bad path");
+            return;
+        }
+
+        char parent[AC_STORAGE_PATH_MAX] = {};
+        const char *name = nullptr;
+        if (!split_storage_console_path(
+                path, parent, sizeof(parent), name)) {
+            out.println("[STORAGE] cannot modify root");
+            return;
+        }
+
+        if (command == "rm") {
+            const char *names[] = {name};
+            char error[AC_STORAGE_ERROR_MAX] = {};
+            uint32_t id = 0;
+            if (!storage_delete_.start_selected(
+                    parent, names, 1, &id, error, sizeof(error))) {
+                out.print("[STORAGE] remove rejected: ");
+                out.println(error[0] ? error : "error");
+                return;
+            }
+
+            state.storage_operation = StorageOperation::Delete;
+            state.delete_id = id;
+            copy_cstr(state.operation_path,
+                      sizeof(state.operation_path), path);
+            out.print("[STORAGE] removing ");
+            out.println(path);
+            return;
+        }
+
+        if (!storage_valid_child_name(second.c_str()) ||
+            second.length() >= AC_STORAGE_NAME_MAX) {
+            out.println("[STORAGE] bad new name");
+            return;
+        }
+
+        char destination[AC_STORAGE_PATH_MAX] = {};
+        if (!storage_append_child_path(
+                parent, second.c_str(), destination, sizeof(destination)) ||
+            strcmp(path, destination) == 0) {
+            out.println("[STORAGE] bad destination");
+            return;
+        }
+
+        state.storage_generation++;
+        if (!state.storage_generation) state.storage_generation++;
+
+        StoragePathCommand request;
+        request.operation = StoragePathOperation::Move;
+        request.source = path;
+        request.destination = destination;
+        request.generation = state.storage_generation;
+        const OperationSubmission submission = storage_path_.request(request);
+        if (!submission.accepted()) {
+            out.println("[STORAGE] rename rejected");
+            return;
+        }
+
+        state.storage_operation = StorageOperation::Rename;
+        state.storage_ticket = submission.ticket;
+        copy_cstr(state.operation_path, sizeof(state.operation_path), path);
+        copy_cstr(state.operation_destination,
+                  sizeof(state.operation_destination), destination);
+        out.print("[STORAGE] renaming ");
+        out.print(path);
+        out.print(" -> ");
+        out.println(destination);
+        return;
+    }
+
+}
+
+void StorageConsoleCommands::poll_storage(
+    Print &out,
+    CommandSessionState &state) {
+    if (state.storage_operation == StorageOperation::None) return;
+
+    if (state.storage_operation == StorageOperation::List) {
+        if (!state.listing_snapshot) {
+            char error[AC_STORAGE_ERROR_MAX] = {};
+            const StorageListingRead read = storage_browser_.listing(
+                state.operation_path,
+                false,
+                state.listing_snapshot,
+                error,
+                sizeof(error));
+            if (read == StorageListingRead::Preparing) return;
+            if (read != StorageListingRead::Ready ||
+                !state.listing_snapshot) {
+                out.print("[STORAGE] list failed: ");
+                out.println(error[0] ? error : "error");
+                state.storage_operation = StorageOperation::None;
+                state.operation_path[0] = '\0';
+                return;
+            }
+
+            print_storage_listing_header(out, *state.listing_snapshot);
+        }
+
+        static constexpr size_t ENTRIES_PER_POLL = 8;
+        const size_t end = std::min(
+            state.listing_offset + ENTRIES_PER_POLL,
+            state.listing_snapshot->size());
+        while (state.listing_offset < end) {
+            StorageDirectoryEntryView entry;
+            if (state.listing_snapshot->entry(
+                    state.listing_offset, entry)) {
+                print_storage_listing_entry(out, entry);
+            }
+            state.listing_offset++;
+        }
+        if (state.listing_offset < state.listing_snapshot->size()) return;
+
+        state.storage_operation = StorageOperation::None;
+        state.listing_snapshot.reset();
+        state.listing_offset = 0;
+        state.operation_path[0] = '\0';
+        return;
+    }
+
+    if (state.storage_operation == StorageOperation::Delete) {
+        StorageDeleteStatus status;
+        if (!storage_delete_.status(status)) return;
+        if (status.id != state.delete_id) {
+            out.println("[STORAGE] remove status unavailable");
+            state.storage_operation = StorageOperation::None;
+            state.delete_id = 0;
+            state.operation_path[0] = '\0';
+            return;
+        }
+        if (status.state == StorageDeleteState::Deleting) {
+            return;
+        }
+
+        if (status.state == StorageDeleteState::Done) {
+            out.print("[STORAGE] removed ");
+            out.print(state.operation_path);
+            out.print(" files=");
+            out.print(status.files_deleted);
+            out.print(" dirs=");
+            out.println(status.dirs_deleted);
+        } else {
+            out.print("[STORAGE] remove failed: ");
+            out.println(status.error[0] ? status.error : "error");
+        }
+
+        state.storage_operation = StorageOperation::None;
+        state.delete_id = 0;
+        state.operation_path[0] = '\0';
+        return;
+    }
+
+    StoragePathCompletion completion;
+    if (!storage_path_.take_completion(
+            state.storage_ticket, completion)) {
+        return;
+    }
+
+    if (state.storage_operation == StorageOperation::ChangeDirectory) {
+        if (completion.outcome.disposition ==
+                OperationDisposition::Succeeded &&
+            completion.exists && completion.directory) {
+            copy_cstr(state.cwd, sizeof(state.cwd), state.operation_path);
+            out.println(state.cwd);
+        } else {
+            out.print("[STORAGE] cd failed: ");
+            out.println(completion.error[0]
+                ? completion.error
+                : completion.exists ? "not_directory" : "not_found");
+        }
+    } else if (state.storage_operation == StorageOperation::Rename) {
+        if (completion.outcome.disposition ==
+            OperationDisposition::Succeeded) {
+            out.print("[STORAGE] renamed ");
+            out.println(state.operation_destination);
+        } else {
+            out.print("[STORAGE] rename failed: ");
+            out.println(completion.error[0] ? completion.error : "error");
+        }
+    }
+
+    state.storage_operation = StorageOperation::None;
+    state.storage_ticket = {};
+    state.operation_path[0] = '\0';
+    state.operation_destination[0] = '\0';
+}
+
+void StorageConsoleCommands::cancel_storage(CommandSessionState &state) {
+    if (state.storage_ticket.valid()) {
+        (void)storage_path_.abandon(state.storage_ticket);
+    }
+
+    state.storage_operation = StorageOperation::None;
+    state.storage_ticket = {};
+    state.delete_id = 0;
+    state.listing_snapshot.reset();
+    state.listing_offset = 0;
+    state.operation_path[0] = '\0';
+    state.operation_destination[0] = '\0';
 }
 
 bool StorageConsoleCommands::execute(const String &command,
                                      const String &rest,
                                      Print &out,
                                      ConsoleCommandSession &session) {
+    if (command != "storage" && command != "log") return false;
+
+    CommandSessionState *state = command_session(session.id, true);
+    if (!state) {
+        out.println("[CLI] console session table full");
+        return true;
+    }
+
     if (command == "storage") {
-        handle_storage(out, rest);
+        execute_storage(rest, out, *state);
         return true;
     }
     if (command == "log") {
-        TailSessionState *tail = tail_session(session.id, true);
-        if (!tail) {
-            out.println("[LOG] console session table full");
-            return true;
-        }
-
-        handle_log(out, rest, config_, storage_read_, tail->ticket,
-                   tail->prepared, tail->offset, tail->generation);
+        handle_log(out, rest, config_, storage_read_, state->tail_ticket,
+                   state->tail_prepared, state->tail_offset,
+                   state->tail_generation);
         return true;
     }
-    return false;
+    return true;
 }
 
 void StorageConsoleCommands::poll_pending(Print &out,
                                           ConsoleCommandSession &session) {
-    TailSessionState *tail = tail_session(session.id, false);
-    if (!tail) return;
+    CommandSessionState *state = command_session(session.id, false);
+    if (!state) return;
 
-    if (tail->ticket.valid()) {
+    poll_storage(out, *state);
+
+    if (state->tail_ticket.valid()) {
         StorageReadCompletion completion;
-        if (!storage_read_.take_completion(tail->ticket, completion)) {
+        if (!storage_read_.take_completion(
+                state->tail_ticket, completion)) {
             return;
         }
 
-        tail->ticket = {};
+        state->tail_ticket = {};
         if (completion.outcome.disposition !=
                 OperationDisposition::Succeeded ||
             !completion.prepared.valid()) {
             out.println("[LOG] file log unavailable");
             return;
         }
-        tail->prepared = completion.prepared;
-        tail->offset = 0;
-        if (!tail->prepared.length) {
+        state->tail_prepared = completion.prepared;
+        state->tail_offset = 0;
+        if (!state->tail_prepared.length) {
             out.println("[LOG] file log empty");
-            storage_read_.release_prepared(tail->prepared);
-            tail->prepared = {};
+            storage_read_.release_prepared(state->tail_prepared);
+            state->tail_prepared = {};
             return;
         }
     }
 
-    if (!tail->prepared.valid()) return;
+    if (!state->tail_prepared.valid()) return;
 
     uint8_t buffer[AC_FILE_LOG_TAIL_READ_CHUNK];
     const PreparedByteRead read = storage_read_.read_prepared(
-        tail->prepared, tail->offset, buffer, sizeof(buffer));
+        state->tail_prepared, state->tail_offset, buffer, sizeof(buffer));
     if (read.state == PreparedByteReadState::Retry) return;
     if (read.state != PreparedByteReadState::Data) {
-        storage_read_.release_prepared(tail->prepared);
-        tail->prepared = {};
-        tail->offset = 0;
+        storage_read_.release_prepared(state->tail_prepared);
+        state->tail_prepared = {};
+        state->tail_offset = 0;
         return;
     }
 
     out.write(buffer, read.bytes);
-    tail->offset += read.bytes;
-    if (tail->offset >= tail->prepared.length) {
-        storage_read_.release_prepared(tail->prepared);
-        tail->prepared = {};
-        tail->offset = 0;
+    state->tail_offset += read.bytes;
+    if (state->tail_offset >= state->tail_prepared.length) {
+        storage_read_.release_prepared(state->tail_prepared);
+        state->tail_prepared = {};
+        state->tail_offset = 0;
     }
 }
 
 bool StorageConsoleCommands::pending_output(
     const ConsoleCommandSession &session) const {
-    const TailSessionState *tail = tail_session(session.id);
-    return tail && tail->pending();
+    const CommandSessionState *state = command_session(session.id);
+    return state && state->pending();
 }
 
 void StorageConsoleCommands::cancel_pending(
     ConsoleCommandSession &session) {
-    TailSessionState *tail = tail_session(session.id, false);
-    if (!tail) return;
+    CommandSessionState *state = command_session(session.id, false);
+    if (!state) return;
 
-    if (tail->ticket.valid()) {
-        (void)storage_read_.abandon(tail->ticket);
+    cancel_storage(*state);
+
+    if (state->tail_ticket.valid()) {
+        (void)storage_read_.abandon(state->tail_ticket);
     }
-    if (tail->prepared.valid()) {
-        storage_read_.release_prepared(tail->prepared);
+    if (state->tail_prepared.valid()) {
+        storage_read_.release_prepared(state->tail_prepared);
     }
 
-    tail->ticket = {};
-    tail->prepared = {};
-    tail->offset = 0;
+    state->tail_ticket = {};
+    state->tail_prepared = {};
+    state->tail_offset = 0;
 }
 
 void StorageConsoleCommands::stop(ConsoleCommandSession &session) {
     cancel_pending(session);
 
-    TailSessionState *tail = tail_session(session.id, false);
-    if (tail) *tail = {};
+    CommandSessionState *state = command_session(session.id, false);
+    if (state) *state = {};
 }
 
 }  // namespace aircannect

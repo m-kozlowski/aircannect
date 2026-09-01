@@ -43,6 +43,11 @@ public:
     virtual void print_stats(Print &out) {
         (void)out;
     }
+    virtual bool print_scoped_stats(const String &scope, Print &out) {
+        (void)scope;
+        (void)out;
+        return false;
+    }
     virtual void reset_stats() {}
     virtual void print_memory_detail(Print &out) {
         (void)out;
@@ -65,6 +70,7 @@ public:
     void print_summary(Print &out);
     void print_status(Print &out);
     void print_stats(Print &out);
+    bool print_scoped_stats(const String &scope, Print &out);
     void reset_stats();
     void print_memory_detail(Print &out);
 
