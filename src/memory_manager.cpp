@@ -13,6 +13,8 @@ namespace Memory {
 namespace {
 
 #ifdef ARDUINO
+constexpr size_t DEFAULT_ALLOCATION_INTERNAL_LIMIT = 1024;
+
 bool initialized = false;
 bool psram_detected = false;
 
@@ -30,6 +32,10 @@ void ensure_begin() {
 void begin() {
 #ifdef ARDUINO
     psram_detected = detect_psram();
+    if (psram_detected) {
+        heap_caps_malloc_extmem_enable(
+            DEFAULT_ALLOCATION_INTERNAL_LIMIT);
+    }
     initialized = true;
 #endif
 }
