@@ -87,13 +87,20 @@ void handle_log(Print &out,
                 size_t &tail_offset,
                 uint32_t &tail_generation) {
     rest.trim();
-    if (!rest.length() || rest == "status") {
+
+    int action_position = 0;
+    String action;
+    if (!parse_console_arg(rest, action_position, action)) action = "status";
+    action.toLowerCase();
+
+    String args = rest.substring(action_position);
+    args.trim();
+    if (action == "status" && !args.length()) {
         ConsoleFormat::print_log_status(out);
         return;
     }
 
-    if (rest.startsWith("level ")) {
-        String args = rest.substring(6);
+    if (action == "level") {
         int pos = 0;
         String first;
         if (!parse_console_arg(args, pos, first)) {
@@ -158,10 +165,10 @@ void handle_log(Print &out,
         return;
     }
 
-    if (rest.startsWith("syslog")) {
-        String args = rest.length() > 6 ? rest.substring(6) : "";
-        args.trim();
-        if (!args.length() || args == "status") {
+    if (action == "syslog") {
+        String args_lower = args;
+        args_lower.toLowerCase();
+        if (!args.length() || args_lower == "status") {
             ConsoleFormat::print_log_status(out);
             return;
         }
@@ -216,11 +223,9 @@ void handle_log(Print &out,
         return;
     }
 
-    if (rest == "tail" || rest.startsWith("tail ")) {
+    if (action == "tail") {
         size_t lines = AC_FILE_LOG_TAIL_DEFAULT_LINES;
-        if (rest.length() > 4) {
-            String args = rest.substring(4);
-            args.trim();
+        if (args.length()) {
             int pos = 0;
             String lines_text;
             if (!parse_console_arg(args, pos, lines_text)) {
@@ -273,8 +278,8 @@ void handle_log(Print &out,
         return;
     }
 
-    if (rest == "test" || rest.startsWith("test ")) {
-        String text = rest.length() > 4 ? rest.substring(5) : "test";
+    if (action == "test") {
+        String text = args.length() ? args : "test";
         text.trim();
         if (!text.length()) text = "test";
         Log::logf(CAT_CLI, LOG_INFO, "[LOG] %s\n", text.c_str());

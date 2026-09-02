@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "as11_transport.h"
 #include "can_driver.h"
 #include "memory_manager.h"
 #include "rpc_transport_ports.h"
@@ -27,8 +28,12 @@ void print_rpc_stats(Print &out,
                      const CanDriver &can_driver,
                      const EventBroker &events,
                      const StreamBroker &stream);
-void print_as11_summary(Print &out, const As11DeviceState &state);
-void print_as11_status(Print &out, const As11DeviceState &state);
+void print_as11_summary(Print &out,
+                        const As11DeviceState &state,
+                        As11Transport transport);
+void print_as11_status(Print &out,
+                       const As11DeviceState &state,
+                       As11Transport transport);
 void print_time_summary(Print &out,
                         const As11DeviceState &state,
                         const TimeSyncService &time_sync);

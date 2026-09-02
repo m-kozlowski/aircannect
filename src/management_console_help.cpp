@@ -16,7 +16,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  stats             CAN, RPC, event, and stream counters");
         out.println("  memory            heap and PSRAM status");
         out.println("  version           AirCANnect firmware version");
-        out.println("  restart           restart AirCANnect or the AS11");
+        out.println("  restart           restart AirCANnect");
 #if AC_CAN_ENABLED
         out.println("  can               CAN controller recovery helpers");
 #endif
@@ -26,12 +26,11 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  as11              AS11 state, RPC, BLE, and therapy control");
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  oxi               oximetry source and BLE injector status");
-        out.println("  report            therapy report index/cache status");
-        out.println("  storage           persistent storage and writer status");
+        out.println("  report            therapy report preparation and catalog");
+        out.println("  storage           persistent storage and file operations");
         out.println("  sync              SMB and SleepHQ export operations");
         out.println("  ota               AirCANnect firmware OTA status");
         out.println("  resmed-ota        AS11 firmware upload/apply workflow");
-        out.println("[HELP] TCP bridge: one JSON-RPC payload per line.");
         return;
     }
 
@@ -49,6 +48,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config KEY VALUE          set one exact NVS key");
         out.println("  config reset              reset app config, keep Wi-Fi profiles");
         out.println("  config factory-reset      reset app config and Wi-Fi profiles");
+        out.println("  config keybindings        show button action bindings");
+        out.println("  config keybindings reset  restore hardware defaults");
+        out.println("  config keybindings BUTTON[+BUTTON] short|long ACTION|default");
         out.println("  keys are not aliased or normalized: use the NVS key exactly");
         out.println("  common keys:");
         out.println("    host tcp_en tcp_port softap_mode wifi_ctry tz resmed_time");
@@ -103,6 +105,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  as11 raw JSON             send a raw JSON-RPC payload");
         out.println("  as11 therapy start        queue EnterTherapy");
         out.println("  as11 therapy stop         queue EnterStandby");
+        out.println("  as11 restart [fast|power|watchdog]");
+        out.println("                            reset the AS11");
         out.println("  as11 ble status           show BLE link and pairing state");
         out.println("  as11 ble connect          connect or retry now");
         out.println("  as11 ble disconnect       quiesce and disconnect");
@@ -244,10 +248,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP restart]");
         out.println("  restart                   restart AirCANnect");
         out.println("  restart ac                restart AirCANnect");
-        out.println("  restart fg                fast-reset the AS11");
-        out.println("  restart fg fast           fast-reset the AS11");
-        out.println("  restart fg power          simulate AS11 power loss");
-        out.println("  restart fg wd             trigger AS11 watchdog reset");
         return;
     }
 
@@ -260,18 +260,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 #else
         out.println("  CAN is unavailable in this build");
 #endif
-        return;
-    }
-
-    if (topic == "system") {
-        out.println("[HELP system]");
-        out.println("  status                    current high-level runtime state");
-        out.println("  stats                     CAN/RPC/event/stream counters");
-        out.println("  stats reset               clear those counters");
-        out.println("  memory                    heap and PSRAM status");
-        out.println("  version                   firmware version and build date");
-        out.println("  restart [ac|fg MODE]      restart AirCANnect or AS11");
-        out.println("  can restart               restart CAN controller");
         return;
     }
 

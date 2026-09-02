@@ -249,9 +249,13 @@ void print_rpc_stats(Print &out,
     out.println(stats.event_drops);
 }
 
-void print_as11_summary(Print &out, const As11DeviceState &state) {
+void print_as11_summary(Print &out,
+                        const As11DeviceState &state,
+                        As11Transport transport) {
     out.print("[AS11] state=");
     out.print(As11DeviceState::availability_name(state.availability()));
+    out.print(" transport=");
+    out.print(as11_transport_name(transport));
     out.print(" therapy=");
     out.print(As11DeviceState::therapy_state_name(state.therapy_state()));
     if (!state.active_therapy_profile().empty()) {
@@ -280,9 +284,13 @@ void print_as11_summary(Print &out, const As11DeviceState &state) {
     out.println("\"");
 }
 
-void print_as11_status(Print &out, const As11DeviceState &state) {
+void print_as11_status(Print &out,
+                       const As11DeviceState &state,
+                       As11Transport transport) {
     out.print("[AS11] state=");
     out.print(As11DeviceState::availability_name(state.availability()));
+    out.print(" transport=");
+    out.print(as11_transport_name(transport));
     out.print(" status=");
     out.print(state.status_valid() ? "known" : "unknown");
     if (state.status_valid()) {

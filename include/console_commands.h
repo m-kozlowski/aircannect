@@ -33,6 +33,7 @@ class ResmedFirmwarePreparer;
 class ResmedOtaManager;
 class RpcDiagnosticsPort;
 class CanControlPort;
+class RpcLinkSelector;
 class RpcPassthroughPort;
 class RpcRequestPort;
 class SessionManager;
@@ -55,6 +56,7 @@ public:
                               As11SettingsManager &settings,
                               TimeSyncService &time_sync,
                               As11BleRpcLink &ble_link,
+                              RpcLinkSelector &link_selector,
                               BleConnectionCommand connect_ble,
                               BleConnectionCommand disconnect_ble,
                               void *ble_connection_context = nullptr);
@@ -77,6 +79,7 @@ private:
     As11SettingsManager &settings_;
     TimeSyncService &time_sync_;
     As11BleRpcLink &ble_link_;
+    RpcLinkSelector &link_selector_;
     BleConnectionCommand connect_ble_ = nullptr;
     BleConnectionCommand disconnect_ble_ = nullptr;
     void *ble_connection_context_ = nullptr;
@@ -118,9 +121,7 @@ public:
 
 class SystemConsoleCommands final : public ConsoleCommandGroup {
 public:
-    SystemConsoleCommands(FirmwareInstaller &installer,
-                          RpcRequestPort &rpc,
-                          As11DeviceService &device);
+    explicit SystemConsoleCommands(FirmwareInstaller &installer);
 
     bool execute(const String &command,
                  const String &rest,
@@ -129,8 +130,6 @@ public:
 
 private:
     FirmwareInstaller &installer_;
-    RpcRequestPort &rpc_;
-    As11DeviceService &device_;
 };
 
 class RuntimeConsoleCommands final : public ConsoleCommandGroup {

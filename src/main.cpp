@@ -193,11 +193,11 @@ static CanConsoleCommands can_console_commands(
     rpc_transport, can_rpc_link, can_driver, event_broker, stream_broker);
 static As11DeviceConsoleCommands as11_device_console_commands(
     rpc_transport, rpc_transport, as11_device_service, as11_settings_manager,
-    time_sync_service, as11_ble_rpc_link, connect_cpap, disconnect_cpap);
+    time_sync_service, as11_ble_rpc_link, rpc_link_selector,
+    connect_cpap, disconnect_cpap);
 static NetworkConsoleCommands network_console_commands(wifi_manager);
 static CoreDiagnosticsConsoleCommands core_console_commands;
-static SystemConsoleCommands system_console_commands(
-    firmware_installer, rpc_transport, as11_device_service);
+static SystemConsoleCommands system_console_commands(firmware_installer);
 static StorageConsoleCommands storage_console_commands(
     config_service,
     StorageService::read_port(),

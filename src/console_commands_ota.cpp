@@ -182,8 +182,10 @@ void handle_resmed_ota(Print &out,
                        ResmedOtaManager &resmed_ota,
                        ResmedFirmwareRepository &repository) {
     trim_inplace(rest);
+    String command = rest;
+    to_lower_inplace(command);
 
-    if (!rest.length() || rest == "status") {
+    if (!rest.length() || command == "status") {
         const ResmedFirmwarePrepareStatus prepare = preparer.status();
         const ResmedOtaStatus status = resmed_ota.status();
         out.print("[RESMED OTA] phase=");
@@ -253,7 +255,7 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest == "check") {
+    if (command == "check") {
         if (resmed_ota.request_check()) {
             out.println("[RESMED OTA] CheckUpgradeFile queued");
         } else {
@@ -264,14 +266,14 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest == "abort") {
+    if (command == "abort") {
         preparer.cancel();
         resmed_ota.abort("aborted_by_console");
         out.println("[RESMED OTA] aborted");
         return;
     }
 
-    if (rest == "dump") {
+    if (command == "dump") {
         if (resmed_ota.request_firmware_dump()) {
             out.println("[RESMED OTA] firmware dump queued");
         } else {
@@ -286,7 +288,7 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest.startsWith("dump confirm ")) {
+    if (command.startsWith("dump confirm ")) {
         String confirm = rest.substring(strlen("dump confirm "));
         trim_inplace(confirm);
         if (resmed_ota.confirm_dump_bootloader(confirm)) {
@@ -303,7 +305,7 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest == "repository" || rest == "repository list") {
+    if (command == "repository" || command == "repository list") {
         const ResmedFirmwareRepositoryStatus status = repository.status();
         const std::shared_ptr<const ResmedFirmwareCatalogSnapshot> snapshot =
             repository.snapshot();
@@ -340,7 +342,7 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest == "repository refresh") {
+    if (command == "repository refresh") {
         if (repository.request_refresh(true)) {
             out.println("[RESMED repository] refresh queued");
         } else {
@@ -349,7 +351,7 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest.startsWith("repository remove ")) {
+    if (command.startsWith("repository remove ")) {
         String path = rest.substring(strlen("repository remove "));
         trim_inplace(path);
         if (!path.length()) {
@@ -363,9 +365,9 @@ void handle_resmed_ota(Print &out,
     }
 
     const char *install_prefix = nullptr;
-    if (rest.startsWith("repository install ")) {
+    if (command.startsWith("repository install ")) {
         install_prefix = "repository install ";
-    } else if (rest.startsWith("install ")) {
+    } else if (command.startsWith("install ")) {
         install_prefix = "install ";
     }
     if (install_prefix) {
@@ -418,7 +420,7 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    if (rest.startsWith("apply ")) {
+    if (command.startsWith("apply ")) {
         String args = rest.substring(6);
         int pos = 0;
         String mode;

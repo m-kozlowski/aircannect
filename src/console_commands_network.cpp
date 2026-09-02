@@ -62,12 +62,19 @@ void print_wifi_scan(Print &out, WifiManager &wifi) {
 void handle_wifi(Print &out, String rest, WifiManager &wifi) {
     trim_inplace(rest);
 
-    if (!rest.length() || rest == "status") {
+    int position = 0;
+    String action;
+    if (!parse_console_arg(rest, position, action)) action = "status";
+    action.toLowerCase();
+
+    String args = rest.substring(position);
+    trim_inplace(args);
+    if (action == "status" && !args.length()) {
         ConsoleFormat::print_wifi_status(out, wifi);
         return;
     }
 
-    if (rest == "list") {
+    if (action == "list" && !args.length()) {
         out.print("[WiFi profiles] count=");
         out.print(wifi.profile_count());
         out.print(" active=");
@@ -92,12 +99,12 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
         return;
     }
 
-    if (rest == "scan") {
+    if (action == "scan" && !args.length()) {
         print_wifi_scan(out, wifi);
         return;
     }
 
-    if (rest == "restart" || rest == "reconnect") {
+    if ((action == "restart" || action == "reconnect") && !args.length()) {
         out.println("[WiFi] reconnecting...");
         const bool started = wifi.reconnect();
         if (!started) {
@@ -109,15 +116,14 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
         return;
     }
 
-    if (rest == "clear") {
+    if (action == "clear" && !args.length()) {
         out.println("[WiFi] clearing stored STA credentials");
         wifi.clear_sta_config();
         ConsoleFormat::print_wifi_status(out, wifi);
         return;
     }
 
-    if (rest.startsWith("set ")) {
-        String args = rest.substring(4);
+    if (action == "set") {
         int pos = 0;
         String ssid;
         String password;
@@ -141,8 +147,7 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
         return;
     }
 
-    if (rest.startsWith("add ")) {
-        String args = rest.substring(4);
+    if (action == "add") {
         int pos = 0;
         String ssid;
         String password;
@@ -163,8 +168,7 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
         return;
     }
 
-    if (rest.startsWith("open ")) {
-        String args = rest.substring(5);
+    if (action == "open") {
         int pos = 0;
         String ssid;
         if (!parse_console_arg(args, pos, ssid) || !ssid.length()) {
@@ -185,10 +189,9 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
         return;
     }
 
-    if (rest.startsWith("remove ")) {
-        String index_text = rest.substring(7);
+    if (action == "remove") {
         size_t index = 0;
-        if (!parse_index_arg(index_text, wifi.profile_count(), index)) {
+        if (!parse_index_arg(args, wifi.profile_count(), index)) {
             out.println("[WiFi] usage: wifi remove INDEX");
             return;
         }

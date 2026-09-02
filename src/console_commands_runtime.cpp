@@ -1,13 +1,10 @@
 #include "console_commands.h"
 
-#include "as11_device_service.h"
-#include "debug_log.h"
 #include "firmware_installer.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
-#include "memory_manager.h"
-#include "session_manager.h"
 #include "live_chart_service.h"
+#include "session_manager.h"
 #include "therapy_telemetry_broker.h"
 #include "tls_memory.h"
 #include "web_ui.h"
@@ -89,10 +86,8 @@ void CoreDiagnosticsConsoleCommands::print_memory_detail(Print &out) {
     out.println(static_cast<unsigned long>(tls.frees));
 }
 
-SystemConsoleCommands::SystemConsoleCommands(FirmwareInstaller &installer,
-                                             RpcRequestPort &rpc,
-                                             As11DeviceService &device)
-    : installer_(installer), rpc_(rpc), device_(device) {}
+SystemConsoleCommands::SystemConsoleCommands(FirmwareInstaller &installer)
+    : installer_(installer) {}
 
 bool SystemConsoleCommands::execute(
     const String &command,
@@ -102,51 +97,19 @@ bool SystemConsoleCommands::execute(
     if (command != "restart") return false;
 
     String target;
-    String mode;
     String extra;
     int position = 0;
     const bool has_target = parse_console_arg(rest_arg, position, target);
-    const bool has_mode = parse_console_arg(rest_arg, position, mode);
     const bool has_extra = parse_console_arg(rest_arg, position, extra);
     target.toLowerCase();
-    mode.toLowerCase();
 
-    if ((!has_target || target == "ac") && !has_mode && !has_extra) {
+    if ((!has_target || target == "ac") && !has_extra) {
         installer_.schedule_reboot(500);
         out.println("[SYSTEM] AirCANnect restart scheduled");
         return true;
     }
 
-    if (target != "fg" || has_extra) {
-        print_unknown_command(
-            out, "SYSTEM", "restart [ac|fg [fast|power|wd]]");
-        return true;
-    }
-
-    As11ResetMode reset_mode = As11ResetMode::Fast;
-    const char *reset_type = "Fast";
-    if (has_mode && mode == "power") {
-        reset_mode = As11ResetMode::PowerLoss;
-        reset_type = "TriggerPowerLoss";
-    } else if (has_mode && mode == "wd") {
-        reset_mode = As11ResetMode::Watchdog;
-        reset_type = "TriggerWatchdog";
-    } else if (has_mode && mode != "fast") {
-        print_unknown_command(
-            out, "SYSTEM", "restart [ac|fg [fast|power|wd]]");
-        return true;
-    }
-
-    const OperationSubmission submitted = device_.request_reset(
-        rpc_, reset_mode, RpcSource::Console);
-    if (submitted.accepted()) {
-        out.print("[AS11] ResetDevice queued type=");
-        out.println(reset_type);
-    } else if (submitted.admission == OperationAdmission::Busy) {
-        out.println("[AS11] ResetDevice already pending");
-    } else {
-        out.println("[AS11] ResetDevice queue failed");
-    }
+    print_unknown_command(out, "SYSTEM", "restart [ac]");
     return true;
 }
 

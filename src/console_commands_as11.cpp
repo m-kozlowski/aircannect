@@ -14,6 +14,7 @@
 #include "event_broker.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
+#include "rpc_link_selector.h"
 #include "rpc_request_port.h"
 #include "rpc_transport_ports.h"
 #include "stream_broker.h"
@@ -190,6 +191,41 @@ void handle_therapy(Print &out,
     out.println(accepted ? queued_message : failed_message);
 }
 
+void handle_as11_restart(Print &out,
+                         String rest,
+                         As11DeviceService &device,
+                         RpcRequestPort &rpc) {
+    rest.trim();
+    rest.toLowerCase();
+
+    As11ResetMode reset_mode = As11ResetMode::Fast;
+    const char *reset_type = "Fast";
+    if (!rest.length() || rest == "fast") {
+        reset_mode = As11ResetMode::Fast;
+    } else if (rest == "power") {
+        reset_mode = As11ResetMode::PowerLoss;
+        reset_type = "TriggerPowerLoss";
+    } else if (rest == "watchdog") {
+        reset_mode = As11ResetMode::Watchdog;
+        reset_type = "TriggerWatchdog";
+    } else {
+        print_unknown_command(
+            out, "AS11", "as11 restart [fast|power|watchdog]");
+        return;
+    }
+
+    const OperationSubmission submitted = device.request_reset(
+        rpc, reset_mode, RpcSource::Console);
+    if (submitted.accepted()) {
+        out.print("[AS11] ResetDevice queued type=");
+        out.println(reset_type);
+    } else if (submitted.admission == OperationAdmission::Busy) {
+        out.println("[AS11] ResetDevice already pending");
+    } else {
+        out.println("[AS11] ResetDevice queue failed");
+    }
+}
+
 void print_as11_ble_status(Print &out, const As11BleRpcLink &link) {
     const As11BleLinkStatus link_status = link.ble_status();
     const As11BlePairingStatus pairing = link.pairing_status();
@@ -230,31 +266,35 @@ void handle_as11_ble(
     As11DeviceConsoleCommands::BleConnectionCommand disconnect_ble,
     void *connection_context) {
     rest.trim();
-    if (!rest.length() || rest == "status") {
+
+    int position = 0;
+    String action;
+    if (!parse_console_arg(rest, position, action)) action = "status";
+    action.toLowerCase();
+
+    String args = rest.substring(position);
+    args.trim();
+    if (action == "status" && !args.length()) {
         print_as11_ble_status(out, link);
         return;
     }
 
     bool accepted = false;
-    if (rest == "pair" || rest == "scan") {
+    if ((action == "pair" || action == "scan") && !args.length()) {
         accepted = link.request_pairing_scan();
-    } else if (rest == "connect") {
+    } else if (action == "connect" && !args.length()) {
         accepted = connect_ble && connect_ble(connection_context, millis());
-    } else if (rest == "disconnect") {
+    } else if (action == "disconnect" && !args.length()) {
         accepted = disconnect_ble &&
                    disconnect_ble(connection_context, millis());
-    } else if (rest == "cancel") {
+    } else if (action == "cancel" && !args.length()) {
         accepted = link.cancel_pairing();
-    } else if (rest == "forget") {
+    } else if (action == "forget" && !args.length()) {
         accepted = link.forget_pairing();
-    } else if (rest.startsWith("select ")) {
-        String address = rest.substring(7);
-        address.trim();
-        accepted = link.request_pairing_device(address.c_str());
-    } else if (rest.startsWith("passkey ")) {
-        String passkey = rest.substring(8);
-        passkey.trim();
-        accepted = link.submit_pairing_passkey(passkey.c_str());
+    } else if (action == "select" && args.length()) {
+        accepted = link.request_pairing_device(args.c_str());
+    } else if (action == "passkey" && args.length()) {
+        accepted = link.submit_pairing_passkey(args.c_str());
     } else {
         print_unknown_command(
             out, "AS11 BLE",
@@ -276,6 +316,7 @@ As11DeviceConsoleCommands::As11DeviceConsoleCommands(
     As11SettingsManager &settings,
     TimeSyncService &time_sync,
     As11BleRpcLink &ble_link,
+    RpcLinkSelector &link_selector,
     BleConnectionCommand connect_ble,
     BleConnectionCommand disconnect_ble,
     void *ble_connection_context)
@@ -285,6 +326,7 @@ As11DeviceConsoleCommands::As11DeviceConsoleCommands(
       settings_(settings),
       time_sync_(time_sync),
       ble_link_(ble_link),
+      link_selector_(link_selector),
       connect_ble_(connect_ble),
       disconnect_ble_(disconnect_ble),
       ble_connection_context_(ble_connection_context) {}
@@ -309,12 +351,15 @@ bool As11DeviceConsoleCommands::execute(
         args.trim();
 
         if (!subcommand.length() || subcommand == "status") {
-            ConsoleFormat::print_as11_status(out, device_.state());
+            ConsoleFormat::print_as11_status(
+                out, device_.state(), link_selector_.selected());
         } else if (subcommand == "ble") {
             handle_as11_ble(out, args, ble_link_, connect_ble_,
                             disconnect_ble_, ble_connection_context_);
         } else if (subcommand == "therapy") {
             handle_therapy(out, args, device_, rpc_);
+        } else if (subcommand == "restart") {
+            handle_as11_restart(out, args, device_, rpc_);
         } else if (subcommand == "poll" || subcommand == "refresh") {
             device_.request_healthcheck(rpc_, RpcSource::Console, millis());
             out.println("[AS11] healthcheck scheduled");
@@ -331,7 +376,8 @@ bool As11DeviceConsoleCommands::execute(
         } else {
             print_unknown_command(
                 out, "AS11",
-                "as11 status, poll, version, get, set, rpc, raw, ble, therapy");
+                "as11 status, poll, version, get, set, rpc, raw, ble, "
+                "therapy, restart");
         }
         return true;
     }
@@ -345,12 +391,14 @@ bool As11DeviceConsoleCommands::execute(
 }
 
 void As11DeviceConsoleCommands::print_summary(Print &out) {
-    ConsoleFormat::print_as11_summary(out, device_.state());
+    ConsoleFormat::print_as11_summary(
+        out, device_.state(), link_selector_.selected());
     ConsoleFormat::print_time_summary(out, device_.state(), time_sync_);
 }
 
 void As11DeviceConsoleCommands::print_status(Print &out) {
-    ConsoleFormat::print_as11_status(out, device_.state());
+    ConsoleFormat::print_as11_status(
+        out, device_.state(), link_selector_.selected());
     ConsoleFormat::print_time_status(out, device_.state(), time_sync_);
 }
 
