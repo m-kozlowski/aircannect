@@ -7,6 +7,7 @@
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "ota_url_client.h"
+#include "tls_memory.h"
 #include "version.h"
 
 namespace aircannect {
@@ -20,6 +21,8 @@ struct UpdateCheckContext {
 bool deadline_due(uint32_t now, uint32_t deadline) {
     return deadline != 0 && static_cast<int32_t>(now - deadline) >= 0;
 }
+
+static constexpr uint32_t UPDATE_HEAP_RETRY_MS = 10 * 1000;
 
 }  // namespace
 
@@ -37,6 +40,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
                          bool check_allowed,
                          bool install_active) {
     bool start = false;
+    bool log_heap_deferred = false;
     const uint32_t now = millis();
 
     if (!lock()) return;
@@ -55,6 +59,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         network_online_ = false;
         network_since_ms_ = 0;
         next_check_ms_ = 0;
+        heap_retry_at_ms_ = 0;
         last_check_ms_ = 0;
         config_dirty_ = false;
     }
@@ -98,10 +103,28 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     }
 
     const bool schedule_ready = manual_requested_ || network_settled;
-    start = status_.pending && schedule_ready && check_allowed && !task_;
+    log_heap_deferred = heap_retry_at_ms_ == 0;
+    const bool heap_retry_ready = heap_retry_at_ms_ == 0 ||
+        deadline_due(now, heap_retry_at_ms_);
+    start = status_.pending && schedule_ready && check_allowed && !task_ &&
+        heap_retry_ready;
     unlock();
 
-    if (start) start_check();
+    if (!start) return;
+
+    if (!tls_heap_available(log_heap_deferred)) {
+        if (lock()) {
+            heap_retry_at_ms_ = millis() + UPDATE_HEAP_RETRY_MS;
+            unlock();
+        }
+        return;
+    }
+
+    if (lock()) {
+        heap_retry_at_ms_ = 0;
+        unlock();
+    }
+    start_check();
 }
 
 void UpdateChecker::mark_config_dirty() {
@@ -124,6 +147,11 @@ bool UpdateChecker::request_check(bool install_active) {
     }
     if (install_active || status_.pending || status_.active || task_) {
         status_.error = "ota_busy";
+        unlock();
+        return false;
+    }
+    if (!tls_heap_available(false)) {
+        status_.error = "tls_heap_guard";
         unlock();
         return false;
     }
@@ -234,9 +262,17 @@ bool UpdateChecker::start_check() {
     status_.active = true;
     status_.error = "";
 
-    const BaseType_t result = xTaskCreatePinnedToCore(
-        task_entry, "ota_check", AC_OTA_URL_TASK_STACK_BYTES, this,
-        AC_OTA_URL_TASK_PRIORITY, &task_, AC_OTA_URL_TASK_CORE);
+    BaseType_t result = pdFAIL;
+    if (Memory::psram_available()) {
+        result = xTaskCreatePinnedToCoreWithCaps(
+            task_entry, "ota_check", AC_OTA_URL_TASK_STACK_BYTES, this,
+            AC_OTA_URL_TASK_PRIORITY, &task_, AC_OTA_URL_TASK_CORE,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    } else {
+        result = xTaskCreatePinnedToCore(
+            task_entry, "ota_check", AC_OTA_URL_TASK_STACK_BYTES, this,
+            AC_OTA_URL_TASK_PRIORITY, &task_, AC_OTA_URL_TASK_CORE);
+    }
     if (result != pdPASS) {
         check_url_ = nullptr;
         task_ = nullptr;
@@ -252,6 +288,22 @@ bool UpdateChecker::start_check() {
 
     unlock();
     return true;
+}
+
+bool UpdateChecker::tls_heap_available(bool log_deferred) const {
+    const TlsMemoryAdmission admission = TlsMemory::admission();
+    if (admission.available) return true;
+
+    if (log_deferred) {
+        Log::logf(CAT_OTA, LOG_DEBUG,
+                  "firmware update check deferred: TLS heap guard "
+                  "free=%u max_alloc=%u min_free=%u min_max_alloc=%u\n",
+                  static_cast<unsigned>(admission.internal_free),
+                  static_cast<unsigned>(admission.internal_largest),
+                  static_cast<unsigned>(admission.minimum_free),
+                  static_cast<unsigned>(admission.minimum_largest));
+    }
+    return false;
 }
 
 void UpdateChecker::task_entry(void *ctx) {

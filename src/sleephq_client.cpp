@@ -34,11 +34,6 @@ static constexpr size_t SLEEPHQ_TOKEN_RESERVE = 2048;
 static constexpr size_t SLEEPHQ_RESPONSE_BODY_INITIAL_RESERVE = 512;
 static constexpr size_t SLEEPHQ_AUTH_BODY_RESERVE = 384;
 static constexpr size_t SLEEPHQ_CREATE_IMPORT_BODY_RESERVE = 96;
-static constexpr size_t SLEEPHQ_MIN_INTERNAL_FREE = 60 * 1024;
-static constexpr size_t SLEEPHQ_MIN_INTERNAL_MAX_ALLOC = 36 * 1024;
-static constexpr size_t SLEEPHQ_MIN_INTERNAL_FREE_WITH_PSRAM_TLS = 48 * 1024;
-static constexpr size_t SLEEPHQ_MIN_INTERNAL_MAX_ALLOC_WITH_PSRAM_TLS = 8 * 1024;
-
 // SleepHQ currently serves a Google Trust Services WE1 chain rooted at GTS
 // Root R4. This intentionally fails closed if SleepHQ changes CA families; do
 // not replace it with setInsecure().
@@ -110,29 +105,18 @@ void SleepHqClient::disconnect() {
 }
 
 bool SleepHqClient::tls_heap_available() {
-    const MemoryStatus mem = Memory::status();
-    const TlsMemoryStatus tls = TlsMemory::status();
-    const bool psram_tls =
-        tls.installed && tls.psram_enabled && tls.install_result == 0;
-    const size_t min_free =
-        psram_tls ? SLEEPHQ_MIN_INTERNAL_FREE_WITH_PSRAM_TLS
-                  : SLEEPHQ_MIN_INTERNAL_FREE;
-    const size_t min_max_alloc =
-        psram_tls ? SLEEPHQ_MIN_INTERNAL_MAX_ALLOC_WITH_PSRAM_TLS
-                  : SLEEPHQ_MIN_INTERNAL_MAX_ALLOC;
-    if (mem.heap_free >= min_free &&
-        mem.heap_max_alloc >= min_max_alloc) {
-        return true;
-    }
+    const TlsMemoryAdmission admission = TlsMemory::admission();
+    if (admission.available) return true;
+
     set_error("tls_heap_guard");
     Log::logf(CAT_EXPORT, LOG_WARN,
               "[SLEEPHQ] TLS heap guard free=%u max_alloc=%u min_free=%u "
               "min_max_alloc=%u psram_tls=%u\n",
-              static_cast<unsigned>(mem.heap_free),
-              static_cast<unsigned>(mem.heap_max_alloc),
-              static_cast<unsigned>(min_free),
-              static_cast<unsigned>(min_max_alloc),
-              psram_tls ? 1u : 0u);
+              static_cast<unsigned>(admission.internal_free),
+              static_cast<unsigned>(admission.internal_largest),
+              static_cast<unsigned>(admission.minimum_free),
+              static_cast<unsigned>(admission.minimum_largest),
+              admission.psram_allocator ? 1u : 0u);
     return false;
 }
 

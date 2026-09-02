@@ -19,10 +19,20 @@ struct TlsMemoryStatus {
     uint32_t frees = 0;
 };
 
+struct TlsMemoryAdmission {
+    bool available = false;
+    bool psram_allocator = false;
+    size_t internal_free = 0;
+    size_t internal_largest = 0;
+    size_t minimum_free = 0;
+    size_t minimum_largest = 0;
+};
+
 namespace TlsMemory {
 
 bool begin();
 TlsMemoryStatus status();
+TlsMemoryAdmission admission();
 
 }  // namespace TlsMemory
 }  // namespace aircannect

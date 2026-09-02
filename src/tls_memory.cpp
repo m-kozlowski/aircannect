@@ -13,6 +13,10 @@ namespace TlsMemory {
 namespace {
 
 static constexpr size_t TLS_LARGE_ALLOC_THRESHOLD = 4096;
+static constexpr size_t TLS_MIN_INTERNAL_FREE = 60 * 1024;
+static constexpr size_t TLS_MIN_INTERNAL_LARGEST = 36 * 1024;
+static constexpr size_t TLS_MIN_INTERNAL_FREE_WITH_PSRAM = 48 * 1024;
+static constexpr size_t TLS_MIN_INTERNAL_LARGEST_WITH_PSRAM = 8 * 1024;
 
 std::atomic<bool> installed{false};
 std::atomic<bool> psram_enabled{false};
@@ -111,6 +115,26 @@ TlsMemoryStatus status() {
     out.small_internal = small_internal.load(std::memory_order_relaxed);
     out.small_fail = small_fail.load(std::memory_order_relaxed);
     out.frees = frees.load(std::memory_order_relaxed);
+    return out;
+}
+
+TlsMemoryAdmission admission() {
+    const MemoryStatus memory = Memory::status();
+    const TlsMemoryStatus tls = status();
+
+    TlsMemoryAdmission out;
+    out.psram_allocator =
+        tls.installed && tls.psram_enabled && tls.install_result == 0;
+    out.internal_free = memory.heap_free;
+    out.internal_largest = memory.heap_max_alloc;
+    out.minimum_free = out.psram_allocator
+        ? TLS_MIN_INTERNAL_FREE_WITH_PSRAM
+        : TLS_MIN_INTERNAL_FREE;
+    out.minimum_largest = out.psram_allocator
+        ? TLS_MIN_INTERNAL_LARGEST_WITH_PSRAM
+        : TLS_MIN_INTERNAL_LARGEST;
+    out.available = out.internal_free >= out.minimum_free &&
+        out.internal_largest >= out.minimum_largest;
     return out;
 }
 

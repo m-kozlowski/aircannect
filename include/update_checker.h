@@ -64,6 +64,7 @@ private:
     };
 
     bool start_check();
+    bool tls_heap_available(bool log_deferred) const;
     static void task_entry(void *ctx);
     void run_task();
     void finish_task(char *url,
@@ -91,6 +92,7 @@ private:
     bool cancel_requested_ = false;
     uint32_t network_since_ms_ = 0;
     uint32_t next_check_ms_ = 0;
+    uint32_t heap_retry_at_ms_ = 0;
     uint32_t last_check_ms_ = 0;
     uint32_t config_generation_ = 1;
     uint32_t task_generation_ = 0;
