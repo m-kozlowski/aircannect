@@ -187,7 +187,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  edf status                show live EDF recorder state");
         out.println("  edf stats                 show detailed capture counters");
         out.println("  edf on|off                enable/disable recorder monitor");
-        out.println("  edf str refresh DAY [DAY] refresh existing STR records");
+        out.println("  edf str refresh YYYYMMDD [YYYYMMDD]");
+        out.println("                            refresh Summary fields in existing STR records");
         return;
     }
 
