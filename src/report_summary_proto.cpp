@@ -36,7 +36,7 @@ void set_error(char *error, size_t error_len, const char *message) {
 }
 
 float summary_index_value(uint64_t value) {
-    return static_cast<float>(value) / 10.0f;
+    return static_cast<float>(value) / 100.0f;
 }
 
 bool set_summary_field_value(ReportSummaryRecord &record,
@@ -57,8 +57,8 @@ struct SummaryScalarFieldMap {
 };
 
 static constexpr SummaryScalarFieldMap SUMMARY_SCALAR_FIELD_MAP[] = {
-    {34, ReportSummaryField::TubeConnected},
-    {35, ReportSummaryField::HumidifierConnected},
+    {34, ReportSummaryField::HumidifierConnected},
+    {35, ReportSummaryField::TubeConnected},
     {17, ReportSummaryField::Spo2ThresholdMinutes},
     {18, ReportSummaryField::SpontaneousTriggerPercent},
     {19, ReportSummaryField::SpontaneousCyclePercent},
@@ -355,6 +355,9 @@ bool report_summary_field_physical_value(const ReportSummaryRecord &record,
     switch (report_summary_field_encoding(field)) {
         case ReportSummaryValueEncoding::Hundredths:
             out = static_cast<float>(raw) / 100.0f;
+            return true;
+        case ReportSummaryValueEncoding::Thousandths:
+            out = static_cast<float>(raw) / 1000.0f;
             return true;
         case ReportSummaryValueEncoding::Tenths:
             out = static_cast<float>(raw) / 10.0f;

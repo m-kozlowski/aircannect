@@ -80,17 +80,17 @@ bool report_daily_metrics_from_summary(const ReportSummaryRecord &record,
     out.source = ReportMetricSource::Summary;
 
     out.has_ahi = record.has_ahi;
-    out.ahi = record.ahi / 10.0f;
+    out.ahi = record.ahi;
     out.has_oa_index = record.has_oa_index;
-    out.oa_index = record.oa_index / 10.0f;
+    out.oa_index = record.oa_index;
     out.has_ca_index = record.has_ca_index;
-    out.ca_index = record.ca_index / 10.0f;
+    out.ca_index = record.ca_index;
     out.has_ua_index = record.has_ua_index;
-    out.ua_index = record.ua_index / 10.0f;
+    out.ua_index = record.ua_index;
     out.has_hypopnea_index = record.has_hypopnea_index;
-    out.hypopnea_index = record.hypopnea_index / 10.0f;
+    out.hypopnea_index = record.hypopnea_index;
     out.has_arousal_index = record.has_rera_index;
-    out.arousal_index = record.rera_index / 10.0f;
+    out.arousal_index = record.rera_index;
 
     out.has_mask_pressure_50 =
         summary_scaled_value(record,

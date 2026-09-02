@@ -3,16 +3,16 @@
 namespace aircannect {
 namespace {
 
-static constexpr uint32_t SCHEMA_SUMMARY_V1 = 1;
+static constexpr uint32_t SCHEMA_SUMMARY_V2 = 2;
 static constexpr uint32_t SCHEMA_USAGE_EVENTS_V1 = 1;
 static constexpr uint32_t SCHEMA_RESPIRATORY_EVENTS_V1 = 1;
-static constexpr uint32_t SCHEMA_THERAPY_ONE_MINUTE_V1 = 1;
+static constexpr uint32_t SCHEMA_THERAPY_ONE_MINUTE_V2 = 2;
 static constexpr uint32_t SCHEMA_RC03_SIGNAL_V1 = 1;
 
 const ReportSourceDef SOURCES[] = {
     {ReportSourceId::Summary,
      "Summary",
-     SCHEMA_SUMMARY_V1,
+     SCHEMA_SUMMARY_V2,
      REPORT_SOURCE_SUMMARY},
     {ReportSourceId::UsageEvents,
      "UsageEvents-TherapyStatusEvents",
@@ -24,7 +24,7 @@ const ReportSourceDef SOURCES[] = {
      REPORT_SOURCE_EVENT_FLAGS},
     {ReportSourceId::TherapyOneMinute,
      "TherapyOneMinutePeriodic",
-     SCHEMA_THERAPY_ONE_MINUTE_V1,
+     SCHEMA_THERAPY_ONE_MINUTE_V2,
      REPORT_SOURCE_TREND_SERIES},
     {ReportSourceId::RespiratoryFlow6p25Hz,
      "RespiratoryFlow6p25Hz",

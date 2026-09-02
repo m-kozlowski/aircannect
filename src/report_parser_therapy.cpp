@@ -19,9 +19,9 @@ const TherapyOneMinuteSignalSpec *therapy_1minute_spec(uint32_t field) {
         {1, ReportSignalId::Leak, 60.0 / 50.0, 4},
         {2, ReportSignalId::InspiratoryPressure, 1.0 / 5.0, 4},
         {3, ReportSignalId::ExpiratoryPressure, 1.0 / 5.0, 2},
-        {4, ReportSignalId::MinuteVentilation, 1.0 / 8.0, 8},
-        {5, ReportSignalId::InspiratoryDuration, 1.0 / 50.0, 4},
-        {6, ReportSignalId::RespiratoryRate, 1.0, 4},
+        {4, ReportSignalId::RespiratoryRate, 1.0 / 4.0, 8},
+        {5, ReportSignalId::InspiratoryDuration, 1.0 / 25.0, 4},
+        {6, ReportSignalId::MinuteVentilation, 2.0 / 5.0, 4},
         {7, ReportSignalId::IeRatio, 4.0, 4},
     };
 

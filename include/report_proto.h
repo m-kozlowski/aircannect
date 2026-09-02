@@ -10,6 +10,7 @@ static constexpr size_t AC_REPORT_SUMMARY_SESSION_MAX = 16;
 enum class ReportSummaryValueEncoding : uint8_t {
     EnumIndex,
     Hundredths,
+    Thousandths,
     Tenths,
     Integer,
 };
