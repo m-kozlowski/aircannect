@@ -250,32 +250,27 @@ bool ReportConsoleCommands::execute(const String &command,
         }
         return true;
     }
-    if (rest == "result") {
-        out.println(
-            "[REPORT] usage: report result latest|YYYYMMDD [--force]");
+    if (rest == "rebuild") {
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
         return true;
     }
-    if (!rest.startsWith("result ")) {
+    if (!rest.startsWith("rebuild ")) {
         print_unknown_command(
             out, "REPORT",
             "report, report status, report nights [latest|YYYYMMDD], "
-            "report result latest|YYYYMMDD [--force]");
+            "report rebuild latest|YYYYMMDD");
         return true;
     }
 
-    const String args = rest.substring(strlen("result "));
+    const String args = rest.substring(strlen("rebuild "));
     int position = 0;
     String selector;
-    String option;
     String extra;
     if (!parse_console_arg(args, position, selector) ||
-        (parse_console_arg(args, position, option) && option != "--force") ||
         parse_console_arg(args, position, extra)) {
-        out.println(
-            "[REPORT] usage: report result latest|YYYYMMDD [--force]");
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
         return true;
     }
-    const bool force_rebuild = option == "--force";
 
     const std::shared_ptr<const NightCatalog> catalog =
         report_catalog(report_, out);
@@ -285,8 +280,7 @@ bool ReportConsoleCommands::execute(const String &command,
     const NightCatalogRecord *night = select_report_night(
         *catalog, selector, valid_selector);
     if (!valid_selector) {
-        out.println(
-            "[REPORT] usage: report result latest|YYYYMMDD [--force]");
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
         return true;
     }
     if (!night) {
@@ -301,18 +295,14 @@ bool ReportConsoleCommands::execute(const String &command,
         ReportArtifactKey::result(night->sleep_day, night->source_revision),
         ReportRequestPriority::Foreground,
         request_generation_,
-        force_rebuild);
+        true);
     if (admitted == OperationAdmission::Accepted) {
-        if (force_rebuild) {
-            request_session_id_ = session.id;
-            request_wait_generation_ = request_generation_;
-            request_wait_artifact_ = ReportArtifactKey::result(
-                night->sleep_day, night->source_revision);
-        }
+        request_session_id_ = session.id;
+        request_wait_generation_ = request_generation_;
+        request_wait_artifact_ = ReportArtifactKey::result(
+            night->sleep_day, night->source_revision);
 
-        out.print(force_rebuild
-                      ? "[REPORT] result rebuild requested"
-                      : "[REPORT] result requested");
+        out.print("[REPORT] rebuild requested");
         print_report_sleep_day(out, night->sleep_day);
         out.println();
     } else if (admitted == OperationAdmission::Busy) {
@@ -338,9 +328,9 @@ void ReportConsoleCommands::poll_pending(
 
     if (completion.outcome.disposition ==
         OperationDisposition::Succeeded) {
-        out.print("[REPORT] result rebuild complete");
+        out.print("[REPORT] rebuild complete");
     } else {
-        out.print("[REPORT] result rebuild failed");
+        out.print("[REPORT] rebuild failed");
     }
     print_report_sleep_day(out, request_wait_artifact_.sleep_day);
     if (completion.outcome.disposition !=
