@@ -309,8 +309,14 @@ StorageConsoleCommands::StorageConsoleCommands(
 
 StorageConsoleCommands::CommandSessionState *
 StorageConsoleCommands::command_session(uint32_t session_id, bool create) {
+    if (!command_sessions_.size() &&
+        (!create || !ensure_command_sessions())) {
+        return nullptr;
+    }
+
     CommandSessionState *empty = nullptr;
-    for (CommandSessionState &session : command_sessions_) {
+    for (size_t i = 0; i < command_sessions_.size(); ++i) {
+        CommandSessionState &session = command_sessions_.data()[i];
         if (session.session_id == session_id) return &session;
         if (!session.session_id && !empty) empty = &session;
     }
@@ -324,10 +330,23 @@ StorageConsoleCommands::command_session(uint32_t session_id, bool create) {
 
 const StorageConsoleCommands::CommandSessionState *
 StorageConsoleCommands::command_session(uint32_t session_id) const {
-    for (const CommandSessionState &session : command_sessions_) {
+    for (size_t i = 0; i < command_sessions_.size(); ++i) {
+        const CommandSessionState &session = command_sessions_.data()[i];
         if (session.session_id == session_id) return &session;
     }
     return nullptr;
+}
+
+bool StorageConsoleCommands::ensure_command_sessions() {
+    if (command_sessions_.size()) return true;
+    if (!command_sessions_.allocate(AC_CONSOLE_COMMAND_SESSION_CAPACITY)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < AC_CONSOLE_COMMAND_SESSION_CAPACITY; ++i) {
+        if (!command_sessions_.append()) return false;
+    }
+    return true;
 }
 
 void StorageConsoleCommands::execute_storage(
@@ -681,7 +700,7 @@ bool StorageConsoleCommands::execute(const String &command,
 
     CommandSessionState *state = command_session(session.id, true);
     if (!state) {
-        out.println("[CLI] console session table full");
+        out.println("[CLI] console session state unavailable");
         return true;
     }
 

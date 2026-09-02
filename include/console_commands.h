@@ -2,6 +2,7 @@
 
 #include "board_net.h"
 #include "console_command_router.h"
+#include "large_scratch_array.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_path_port.h"
@@ -270,6 +271,7 @@ private:
 
     CommandSessionState *command_session(uint32_t session_id, bool create);
     const CommandSessionState *command_session(uint32_t session_id) const;
+    bool ensure_command_sessions();
 
     void execute_storage(String rest,
                          Print &out,
@@ -283,7 +285,7 @@ private:
     StoragePathPort &storage_path_;
     StorageDeletePort &storage_delete_;
     StorageStatusPort &storage_status_;
-    CommandSessionState command_sessions_[AC_CONSOLE_COMMAND_SESSION_CAPACITY];
+    LargeScratchArray<CommandSessionState> command_sessions_;
 };
 
 class ExportConsoleCommands final : public ConsoleCommandGroup {
