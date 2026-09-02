@@ -3,6 +3,7 @@
 #include "board_net.h"
 #include "console_command_router.h"
 #include "large_scratch_array.h"
+#include "report_artifact_key.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_path_port.h"
@@ -210,11 +211,19 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    void poll_pending(Print &out, ConsoleCommandSession &session) override;
+    bool pending_output(
+        const ConsoleCommandSession &session) const override;
+    void cancel_pending(ConsoleCommandSession &session) override;
+    void stop(ConsoleCommandSession &session) override;
     bool print_scoped_stats(const String &scope, Print &out) override;
 
 private:
     ReportTask &report_;
     uint32_t request_generation_ = 0;
+    uint32_t request_session_id_ = 0;
+    uint32_t request_wait_generation_ = 0;
+    ReportArtifactKey request_wait_artifact_;
 };
 
 class StorageConsoleCommands final : public ConsoleCommandGroup {

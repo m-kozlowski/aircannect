@@ -210,7 +210,6 @@ bool ReportConsoleCommands::execute(const String &command,
                                     const String &rest_arg,
                                     Print &out,
                                     ConsoleCommandSession &session) {
-    (void)session;
     if (command != "report") return false;
 
     String rest = rest_arg;
@@ -304,15 +303,77 @@ bool ReportConsoleCommands::execute(const String &command,
         request_generation_,
         force_rebuild);
     if (admitted == OperationAdmission::Accepted) {
-        out.println(force_rebuild
-                        ? "[REPORT] result rebuild requested"
-                        : "[REPORT] result requested");
+        if (force_rebuild) {
+            request_session_id_ = session.id;
+            request_wait_generation_ = request_generation_;
+            request_wait_artifact_ = ReportArtifactKey::result(
+                night->sleep_day, night->source_revision);
+        }
+
+        out.print(force_rebuild
+                      ? "[REPORT] result rebuild requested"
+                      : "[REPORT] result requested");
+        print_report_sleep_day(out, night->sleep_day);
+        out.println();
     } else if (admitted == OperationAdmission::Busy) {
         out.println("[REPORT] request queue busy");
     } else {
         out.println("[REPORT] request rejected");
     }
     return true;
+}
+
+void ReportConsoleCommands::poll_pending(
+    Print &out,
+    ConsoleCommandSession &session) {
+    if (!request_session_id_ || session.id != request_session_id_) return;
+
+    const ReportEngineCompletion completion =
+        report_.last_artifact_completion();
+    if (!completion.valid() ||
+        completion.request.ticket.generation != request_wait_generation_ ||
+        completion.request.artifact != request_wait_artifact_) {
+        return;
+    }
+
+    if (completion.outcome.disposition ==
+        OperationDisposition::Succeeded) {
+        out.print("[REPORT] result rebuild complete");
+    } else {
+        out.print("[REPORT] result rebuild failed");
+    }
+    print_report_sleep_day(out, request_wait_artifact_.sleep_day);
+    if (completion.outcome.disposition !=
+        OperationDisposition::Succeeded) {
+        out.print(" error=");
+        out.print(completion.error[0]
+                      ? completion.error
+                      : "report_build_failed");
+    }
+    out.println();
+
+    request_session_id_ = 0;
+    request_wait_generation_ = 0;
+    request_wait_artifact_ = {};
+}
+
+bool ReportConsoleCommands::pending_output(
+    const ConsoleCommandSession &session) const {
+    return request_session_id_ && request_wait_generation_ &&
+        session.id == request_session_id_;
+}
+
+void ReportConsoleCommands::cancel_pending(
+    ConsoleCommandSession &session) {
+    if (session.id != request_session_id_) return;
+
+    request_session_id_ = 0;
+    request_wait_generation_ = 0;
+    request_wait_artifact_ = {};
+}
+
+void ReportConsoleCommands::stop(ConsoleCommandSession &session) {
+    cancel_pending(session);
 }
 
 bool ReportConsoleCommands::print_scoped_stats(const String &scope,

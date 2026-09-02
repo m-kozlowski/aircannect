@@ -230,6 +230,7 @@ public:
     ReportTaskControlSnapshot control_snapshot() const;
     ReportTaskOperationalSnapshot operational_snapshot() const;
     ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
+    ReportEngineCompletion last_artifact_completion() const;
 #ifndef ARDUINO
     ReportTaskStatus status() const;
     bool artifact_availability(

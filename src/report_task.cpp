@@ -2029,6 +2029,15 @@ ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
     return out;
 }
 
+ReportEngineCompletion ReportTask::last_artifact_completion() const {
+    if (!runtime_ || !runtime_->lock(20)) return {};
+
+    const ReportEngineCompletion out =
+        runtime_->status.engine.last_completion;
+    runtime_->unlock();
+    return out;
+}
+
 #ifndef ARDUINO
 ReportTaskStatus ReportTask::status() const {
     if (!runtime_ || !runtime_->lock(20)) return {};
