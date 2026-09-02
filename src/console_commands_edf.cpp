@@ -222,6 +222,54 @@ void print_edf_recorder_stats(Print &out,
     out.println();
 }
 
+bool parse_refresh_range(const String &rest,
+                         SleepDayId &start_day,
+                         SleepDayId &end_day) {
+    int position = 0;
+    String edf_object;
+    String action;
+    String start;
+    String end;
+    String extra;
+    if (!parse_console_arg(rest, position, edf_object) ||
+        !parse_console_arg(rest, position, action) ||
+        !parse_console_arg(rest, position, start) ||
+        edf_object != "str" || action != "refresh" ||
+        start.length() != 8 ||
+        !SleepDayId::from_yyyymmdd(start.c_str(), start_day)) {
+        return false;
+    }
+
+    if (!parse_console_arg(rest, position, end)) {
+        end_day = start_day;
+        return true;
+    }
+    if (end.length() != 8 ||
+        !SleepDayId::from_yyyymmdd(end.c_str(), end_day) ||
+        end_day < start_day) {
+        return false;
+    }
+    return !parse_console_arg(rest, position, extra);
+}
+
+void print_refresh_range(Print &out,
+                         const char *prefix,
+                         SleepDayId start_day,
+                         SleepDayId end_day) {
+    char start[9] = {};
+    char end[9] = {};
+    (void)start_day.format_yyyymmdd(start, sizeof(start));
+    (void)end_day.format_yyyymmdd(end, sizeof(end));
+
+    out.print(prefix);
+    out.print(start);
+    if (end_day != start_day) {
+        out.print("..");
+        out.print(end);
+    }
+    out.println();
+}
+
 }  // namespace
 
 EdfConsoleCommands::EdfConsoleCommands(EdfRecorderManager &recorder,
@@ -248,6 +296,37 @@ bool EdfConsoleCommands::execute(const String &command,
         return true;
     }
 
+    if (rest.startsWith("str refresh")) {
+        SleepDayId start_day;
+        SleepDayId end_day;
+        if (!parse_refresh_range(rest, start_day, end_day)) {
+            out.println("[EDF] usage: edf str refresh YYYYMMDD [YYYYMMDD]");
+            return true;
+        }
+
+        refresh_generation_++;
+        if (refresh_generation_ == 0) refresh_generation_++;
+        const OperationAdmission admission =
+            recorder_.request_str_summary_refresh(
+                start_day, end_day, refresh_generation_);
+        if (admission == OperationAdmission::Busy) {
+            out.println("[EDF] STR refresh busy");
+            return true;
+        }
+        if (admission != OperationAdmission::Accepted) {
+            out.println("[EDF] STR refresh rejected");
+            return true;
+        }
+
+        refresh_session_id_ = session.id;
+        refresh_wait_generation_ = refresh_generation_;
+        print_refresh_range(out,
+                            "[EDF] STR refresh started ",
+                            start_day,
+                            end_day);
+        return true;
+    }
+
     if (rest == "on" || rest == "enable" || rest == "off" ||
         rest == "disable") {
         const bool enabled = rest == "on" || rest == "enable";
@@ -263,8 +342,62 @@ bool EdfConsoleCommands::execute(const String &command,
         return true;
     }
 
-    print_unknown_command(out, "EDF", "edf, edf stats, edf on, edf off");
+    print_unknown_command(
+        out,
+        "EDF",
+        "edf, edf stats, edf on, edf off, "
+        "edf str refresh YYYYMMDD [YYYYMMDD]");
     return true;
+}
+
+void EdfConsoleCommands::poll_pending(Print &out,
+                                      ConsoleCommandSession &session) {
+    if (!refresh_session_id_ || session.id != refresh_session_id_) return;
+
+    const EdfStrSummaryRefreshStatus &status =
+        recorder_.str_summary_refresh_status();
+    if (status.generation != refresh_wait_generation_ || status.active()) {
+        return;
+    }
+
+    if (status.state == EdfStrSummaryRefreshState::Complete) {
+        out.print("[EDF] STR refresh complete matched=");
+        out.print(static_cast<unsigned long>(status.matched));
+        out.print(" updated=");
+        out.print(static_cast<unsigned long>(status.updated));
+        out.print(" unchanged=");
+        out.print(static_cast<unsigned long>(status.unchanged));
+        out.print(" missing=");
+        out.println(static_cast<unsigned long>(status.missing));
+    } else if (status.state == EdfStrSummaryRefreshState::Failed) {
+        out.print("[EDF] STR refresh failed error=");
+        out.println(status.error[0] ? status.error : "unknown");
+    }
+
+    refresh_session_id_ = 0;
+    refresh_wait_generation_ = 0;
+}
+
+bool EdfConsoleCommands::pending_output(
+    const ConsoleCommandSession &session) const {
+    if (!refresh_session_id_ || session.id != refresh_session_id_) {
+        return false;
+    }
+
+    const EdfStrSummaryRefreshStatus &status =
+        recorder_.str_summary_refresh_status();
+    return status.generation == refresh_wait_generation_ && status.active();
+}
+
+void EdfConsoleCommands::cancel_pending(ConsoleCommandSession &session) {
+    if (session.id != refresh_session_id_) return;
+
+    refresh_session_id_ = 0;
+    refresh_wait_generation_ = 0;
+}
+
+void EdfConsoleCommands::stop(ConsoleCommandSession &session) {
+    cancel_pending(session);
 }
 
 void EdfConsoleCommands::print_status(Print &out) {

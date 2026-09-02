@@ -112,6 +112,7 @@ bool edf_event_record_is_therapy_stop(const As11EventFrame &frame,
 
 struct EdfRecorderManager::ColdState {
     EdfSessionMetadataPublisher metadata_publisher;
+    EdfStrSummaryRefresh str_summary_refresh;
     EdfSessionMetadata segment_metadata;
     EdfSessionMetadata pending_final_metadata;
     EdfSessionMetadataPublication metadata_open_publication;
@@ -126,7 +127,9 @@ void EdfRecorderManager::begin(EventBroker &events,
                                const As11DeviceState &device_state,
                                SessionManager &session,
                                TimeSyncService &time_sync,
+                               StorageReadPort &storage_read,
                                StorageAtomicWritePort &metadata_storage,
+                               StoragePathPort &storage_path,
                                ReportSpoolPort &report_spool) {
     if (initialized_) return;
 
@@ -146,6 +149,10 @@ void EdfRecorderManager::begin(EventBroker &events,
     time_sync_ = &time_sync;
     report_spool_ = &report_spool;
     cold_->metadata_publisher.begin(metadata_storage);
+    cold_->str_summary_refresh.begin(report_spool,
+                                     storage_read,
+                                     metadata_storage,
+                                     storage_path);
 
     // EdfRecorderManager is a program-lifetime singleton; this observer hook
     // intentionally stays registered until reboot.
@@ -167,6 +174,16 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
 
     (void)queue_pending_final_metadata();
     cold_->metadata_publisher.poll(now_ms);
+
+    const bool therapy_starting =
+        !status_.active && session_->status().state == SessionState::Active;
+    EdfStrSummaryRefresh &str_refresh = cold_->str_summary_refresh;
+    if (therapy_starting && str_refresh.status().active() &&
+        str_refresh.status().state != EdfStrSummaryRefreshState::WritingFile) {
+        str_refresh.abort("str_refresh_therapy_started");
+    }
+    cold_->str_summary_refresh.poll();
+    if (therapy_starting && str_refresh.status().active()) return;
 
     poll_rpc_completions();
     poll_str_summary_fetch(now_ms);
@@ -220,6 +237,26 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     if (!sync_numeric_open_status(now_ms)) return;
     drain_stream(now_ms);
     drain_local_sa2();
+}
+
+OperationAdmission EdfRecorderManager::request_str_summary_refresh(
+    SleepDayId start_day,
+    SleepDayId end_day,
+    uint32_t generation) {
+    if (!initialized_ || !cold_ || status_.active ||
+        str_record_pending_write_ || str_summary_.active()) {
+        return OperationAdmission::Busy;
+    }
+
+    return cold_->str_summary_refresh.request(start_day,
+                                              end_day,
+                                              generation);
+}
+
+const EdfStrSummaryRefreshStatus &
+EdfRecorderManager::str_summary_refresh_status() const {
+    static const EdfStrSummaryRefreshStatus unavailable;
+    return cold_ ? cold_->str_summary_refresh.status() : unavailable;
 }
 
 void EdfRecorderManager::set_enabled(bool enabled) {

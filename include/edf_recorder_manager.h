@@ -10,6 +10,7 @@
 #include "edf_series.h"
 #include "edf_session_metadata.h"
 #include "edf_storage_catalog.h"
+#include "edf_str_summary_refresh.h"
 #include "edf_str_session.h"
 #include "edf_stream_assembler.h"
 #include "event_broker.h"
@@ -130,7 +131,9 @@ public:
                const As11DeviceState &device_state,
                SessionManager &session,
                TimeSyncService &time_sync,
+               StorageReadPort &storage_read,
                StorageAtomicWritePort &metadata_storage,
+               StoragePathPort &storage_path,
                ReportSpoolPort &report_spool);
     void poll(uint32_t now_ms);
 
@@ -143,6 +146,11 @@ public:
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }
+    OperationAdmission request_str_summary_refresh(
+        SleepDayId start_day,
+        SleepDayId end_day,
+        uint32_t generation);
+    const EdfStrSummaryRefreshStatus &str_summary_refresh_status() const;
 
     // device events
     void handle_event_frame(const As11EventFrame &frame, uint32_t now_ms);

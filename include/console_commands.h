@@ -178,11 +178,19 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    void poll_pending(Print &out, ConsoleCommandSession &session) override;
+    bool pending_output(
+        const ConsoleCommandSession &session) const override;
+    void cancel_pending(ConsoleCommandSession &session) override;
+    void stop(ConsoleCommandSession &session) override;
     void print_status(Print &out) override;
 
 private:
     EdfRecorderManager &recorder_;
     ConfigService &config_;
+    uint32_t refresh_generation_ = 0;
+    uint32_t refresh_session_id_ = 0;
+    uint32_t refresh_wait_generation_ = 0;
 };
 
 class OximetryConsoleCommands final : public ConsoleCommandGroup {

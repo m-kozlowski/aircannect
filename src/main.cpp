@@ -1123,7 +1123,9 @@ void setup() {
     edf_recorder_manager.begin(event_broker, stream_broker,
                                as11_device_service.state(), session_manager,
                                time_sync_service,
+                               StorageService::read_port(),
                                StorageService::atomic_write_port(),
+                               StorageService::path_port(),
                                report_spool_service);
     oximetry_hub.set_sample_observer(route_oximetry_sample,
                                      &edf_recorder_manager);
