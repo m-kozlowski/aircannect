@@ -249,7 +249,7 @@ bool LiveHttpController::publish_stream_snapshot() {
 
 void LiveHttpController::publish_live_payload(uint32_t now_ms) {
     const LiveChartRuntimeStatus &live = live_->status();
-    if (!live.desired) return;
+    if (!live.desired && !live.state_dirty) return;
 
     const bool has_samples =
         live.pressure.count || live.flow.count || live.leak.count ||
