@@ -108,6 +108,42 @@ bool edf_event_record_is_therapy_stop(const As11EventFrame &frame,
             record.name == "StandbyStarted");
 }
 
+void format_sleep_day(SleepDayId day, char (&text)[9]) {
+    if (!day.format_yyyymmdd(text, sizeof(text))) {
+        snprintf(text, sizeof(text), "invalid");
+    }
+}
+
+void log_str_refresh_result(const EdfStrSummaryRefreshStatus &status) {
+    char start[9] = {};
+    char end[9] = {};
+    format_sleep_day(status.start_day, start);
+    format_sleep_day(status.end_day, end);
+
+    if (status.state == EdfStrSummaryRefreshState::Complete) {
+        Log::logf(CAT_EDF,
+                  LOG_INFO,
+                  "STR refresh complete start=%s end=%s matched=%lu "
+                  "updated=%lu unchanged=%lu missing=%lu",
+                  start,
+                  end,
+                  static_cast<unsigned long>(status.matched),
+                  static_cast<unsigned long>(status.updated),
+                  static_cast<unsigned long>(status.unchanged),
+                  static_cast<unsigned long>(status.missing));
+        return;
+    }
+
+    if (status.state == EdfStrSummaryRefreshState::Failed) {
+        Log::logf(CAT_EDF,
+                  LOG_WARN,
+                  "STR refresh failed start=%s end=%s error=%s",
+                  start,
+                  end,
+                  status.error[0] ? status.error : "unknown");
+    }
+}
+
 }  // namespace
 
 struct EdfRecorderManager::ColdState {
@@ -178,11 +214,15 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     const bool therapy_starting =
         !status_.active && session_->status().state == SessionState::Active;
     EdfStrSummaryRefresh &str_refresh = cold_->str_summary_refresh;
+    const bool str_refresh_was_active = str_refresh.status().active();
     if (therapy_starting && str_refresh.status().active() &&
         str_refresh.status().state != EdfStrSummaryRefreshState::WritingFile) {
         str_refresh.abort("str_refresh_therapy_started");
     }
-    cold_->str_summary_refresh.poll();
+    str_refresh.poll();
+    if (str_refresh_was_active && !str_refresh.status().active()) {
+        log_str_refresh_result(str_refresh.status());
+    }
     if (therapy_starting && str_refresh.status().active()) return;
 
     poll_rpc_completions();
@@ -248,9 +288,20 @@ OperationAdmission EdfRecorderManager::request_str_summary_refresh(
         return OperationAdmission::Busy;
     }
 
-    return cold_->str_summary_refresh.request(start_day,
-                                              end_day,
-                                              generation);
+    const OperationAdmission admission = cold_->str_summary_refresh.request(
+        start_day, end_day, generation);
+    if (admission != OperationAdmission::Accepted) return admission;
+
+    char start[9] = {};
+    char end[9] = {};
+    format_sleep_day(start_day, start);
+    format_sleep_day(end_day, end);
+    Log::logf(CAT_EDF,
+              LOG_INFO,
+              "STR refresh started start=%s end=%s",
+              start,
+              end);
+    return admission;
 }
 
 const EdfStrSummaryRefreshStatus &

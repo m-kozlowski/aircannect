@@ -356,9 +356,13 @@ void EdfConsoleCommands::poll_pending(Print &out,
 
     const EdfStrSummaryRefreshStatus &status =
         recorder_.str_summary_refresh_status();
-    if (status.generation != refresh_wait_generation_ || status.active()) {
+    if (status.generation != refresh_wait_generation_) {
+        out.println("[EDF] STR refresh failed error=result_superseded");
+        refresh_session_id_ = 0;
+        refresh_wait_generation_ = 0;
         return;
     }
+    if (status.active()) return;
 
     if (status.state == EdfStrSummaryRefreshState::Complete) {
         out.print("[EDF] STR refresh complete matched=");
@@ -380,13 +384,9 @@ void EdfConsoleCommands::poll_pending(Print &out,
 
 bool EdfConsoleCommands::pending_output(
     const ConsoleCommandSession &session) const {
-    if (!refresh_session_id_ || session.id != refresh_session_id_) {
-        return false;
-    }
-
-    const EdfStrSummaryRefreshStatus &status =
-        recorder_.str_summary_refresh_status();
-    return status.generation == refresh_wait_generation_ && status.active();
+    return refresh_session_id_ &&
+        refresh_wait_generation_ &&
+        session.id == refresh_session_id_;
 }
 
 void EdfConsoleCommands::cancel_pending(ConsoleCommandSession &session) {
