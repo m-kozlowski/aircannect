@@ -15,6 +15,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  status            concise current operating state");
         out.println("  stats             CAN, RPC, event, and stream counters");
         out.println("  memory            heap and PSRAM status");
+        out.println("  crash             retained panic diagnostics");
         out.println("  version           AirCANnect firmware version");
         out.println("  restart           restart AirCANnect");
 #if AC_CAN_ENABLED
@@ -227,6 +228,15 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP memory]");
         out.println("  memory                    show heap and PSRAM usage");
         out.println("  memory detail             show heap regions and owned buffers");
+        return;
+    }
+
+    if (topic == "crash") {
+        out.println("[HELP crash]");
+        out.println("  crash                     show retained panic state");
+        out.println("  crash summary             show panic details and backtrace");
+        out.println("  crash clear               erase retained diagnostics");
+        out.println("  GET /api/crash/dump       download the retained core dump");
         return;
     }
 

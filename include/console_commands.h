@@ -19,6 +19,7 @@ class As11BleRpcLink;
 class As11SettingsManager;
 class CanDriver;
 class ConfigService;
+class CrashDiagnostics;
 class EdfRecorderManager;
 class EventBroker;
 class ExportCoordinator;
@@ -114,11 +115,16 @@ private:
 
 class CoreDiagnosticsConsoleCommands final : public ConsoleCommandGroup {
 public:
+    explicit CoreDiagnosticsConsoleCommands(CrashDiagnostics &crash);
+
     bool execute(const String &command,
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
     void print_memory_detail(Print &out) override;
+
+private:
+    CrashDiagnostics &crash_;
 };
 
 class SystemConsoleCommands final : public ConsoleCommandGroup {

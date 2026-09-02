@@ -24,6 +24,8 @@
 #include "config_service.h"
 #include "console_command_router.h"
 #include "console_commands.h"
+#include "crash_diagnostics.h"
+#include "crash_http_controller.h"
 #include "debug_log.h"
 #include "device_http_controller.h"
 #include "display_manager.h"
@@ -130,6 +132,8 @@ static WifiManager wifi_manager;
 static TcpBridge tcp_bridge(as11_service_manager);
 static TelnetConsole telnet_console;
 static ConfigService config_service;
+static CrashDiagnostics crash_diagnostics;
+static CrashHttpController crash_http_controller(crash_diagnostics);
 static WebUI web_ui;
 static TimeSyncService time_sync_service;
 static FirmwareInstaller firmware_installer;
@@ -181,6 +185,7 @@ static HttpRouteModule *web_route_modules[] = {
     &device_http_controller,
     &oximetry_http_controller,
     &wifi_http_controller,
+    &crash_http_controller,
     &status_http_controller,
     &live_http_controller,
 };
@@ -196,7 +201,8 @@ static As11DeviceConsoleCommands as11_device_console_commands(
     time_sync_service, as11_ble_rpc_link, rpc_link_selector,
     connect_cpap, disconnect_cpap);
 static NetworkConsoleCommands network_console_commands(wifi_manager);
-static CoreDiagnosticsConsoleCommands core_console_commands;
+static CoreDiagnosticsConsoleCommands core_console_commands(
+    crash_diagnostics);
 static SystemConsoleCommands system_console_commands(firmware_installer);
 static StorageConsoleCommands storage_console_commands(
     config_service,
@@ -1212,6 +1218,7 @@ void setup() {
     // Core services
     Memory::begin();
     Log::init();
+    const bool crash_diagnostics_ready = crash_diagnostics.begin();
     Log::bind_file_log_sink(StorageService::file_log_port());
 
     const bool tls_allocator_ready = TlsMemory::begin();
@@ -1279,6 +1286,13 @@ void setup() {
               aircannect_version(),
               aircannect_build_date(),
               system_reset_reason_name());
+
+    if (!crash_diagnostics_ready) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] crash diagnostics failed to start\n");
+    } else {
+        crash_diagnostics.log_previous_crash();
+    }
 
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[INIT] chip=%s heap_free=%u heap_total=%u\n",

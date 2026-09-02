@@ -1,10 +1,12 @@
 #include "console_commands.h"
 
+#include "crash_diagnostics.h"
 #include "firmware_installer.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "live_chart_service.h"
 #include "session_manager.h"
+#include "string_util.h"
 #include "therapy_telemetry_broker.h"
 #include "tls_memory.h"
 #include "web_ui.h"
@@ -50,16 +52,109 @@ void print_web_memory_detail(Print &out, WebUI &web_ui) {
 
 }  // namespace
 
+CoreDiagnosticsConsoleCommands::CoreDiagnosticsConsoleCommands(
+    CrashDiagnostics &crash)
+    : crash_(crash) {}
+
 bool CoreDiagnosticsConsoleCommands::execute(
     const String &command,
-    const String &rest,
+    const String &rest_arg,
     Print &out,
-    ConsoleCommandSession &session) {
-    (void)command;
-    (void)rest;
-    (void)out;
-    (void)session;
-    return false;
+    ConsoleCommandSession &) {
+    if (command != "crash") return false;
+
+    String rest = rest_arg;
+    trim_inplace(rest);
+    to_lower_inplace(rest);
+
+    if (!rest.length() || rest == "status" || rest == "summary") {
+        CrashDiagnosticsSnapshot snapshot;
+        if (!crash_.copy_snapshot(snapshot)) {
+            out.println("[CRASH] diagnostics busy");
+            return true;
+        }
+
+        out.print("[CRASH] dump=");
+        out.print(crash_dump_state_name(snapshot.dump_state));
+        if (snapshot.dump_size) {
+            out.print(" bytes=");
+            out.print(static_cast<unsigned long>(snapshot.dump_size));
+        }
+        if (snapshot.dump_error[0]) {
+            out.print(" error=");
+            out.print(snapshot.dump_error);
+        }
+        out.print(" rtc=");
+        out.println(snapshot.rtc_panic_available ? "available" : "empty");
+
+        if (rest != "summary") return true;
+
+        if (snapshot.summary_available) {
+            out.print("[CRASH] task=");
+            out.print(snapshot.task[0] ? snapshot.task : "--");
+            out.print(" pc=0x");
+            out.print(snapshot.exception_pc, HEX);
+            out.print(" cause=");
+            out.print(snapshot.exception_cause);
+            out.print(" address=0x");
+            out.println(snapshot.exception_address, HEX);
+
+            out.print("[CRASH] reason=");
+            out.println(snapshot.reason[0] ? snapshot.reason : "--");
+            out.print("[CRASH] elf_sha=");
+            out.print(snapshot.elf_sha[0] ? snapshot.elf_sha : "--");
+            out.print(" backtrace_corrupt=");
+            out.println(snapshot.backtrace_corrupt ? "yes" : "no");
+
+            out.print("[CRASH] backtrace=");
+            for (size_t i = 0; i < snapshot.backtrace_depth; ++i) {
+                if (i) out.print(' ');
+                out.print("0x");
+                out.print(snapshot.backtrace[i], HEX);
+            }
+            out.println();
+        }
+
+        if (snapshot.rtc_panic_available) {
+            out.print("[CRASH RTC] firmware=");
+            out.print(snapshot.rtc_firmware[0]
+                          ? snapshot.rtc_firmware
+                          : "--");
+            out.print(" core=");
+            out.print(static_cast<int>(snapshot.rtc_core));
+            out.print(" pc=0x");
+            out.print(snapshot.rtc_pc, HEX);
+            out.print(" backtrace_corrupt=");
+            out.print(snapshot.rtc_backtrace_corrupt ? "yes" : "no");
+            out.print(" continues=");
+            out.println(snapshot.rtc_backtrace_continues ? "yes" : "no");
+
+            out.print("[CRASH RTC] backtrace=");
+            for (size_t i = 0; i < snapshot.rtc_backtrace_depth; ++i) {
+                if (i) out.print(' ');
+                out.print("0x");
+                out.print(snapshot.rtc_backtrace[i], HEX);
+            }
+            out.println();
+        }
+        return true;
+    }
+
+    if (rest == "clear") {
+        char error[AC_CRASH_ERROR_MAX] = {};
+        if (!crash_.clear(error, sizeof(error))) {
+            out.print("[CRASH] clear failed error=");
+            out.println(error[0] ? error : "unknown");
+            return true;
+        }
+
+        out.println("[CRASH] diagnostics cleared");
+        return true;
+    }
+
+    print_unknown_command(out, "CRASH",
+                          "crash [status|summary|clear]");
+    return true;
 }
 
 void CoreDiagnosticsConsoleCommands::print_memory_detail(Print &out) {
