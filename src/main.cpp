@@ -458,9 +458,27 @@ static void sync_rpc_transport_generation(uint32_t now_ms) {
 #if AC_STACK_PROFILE_ENABLED
 static void poll_stack_profiler(uint32_t now_ms) {
     static TaskHandle_t async_tcp_task = nullptr;
+    static TaskHandle_t nimble_host_task = nullptr;
+    static TaskHandle_t as11_ble_task = nullptr;
+    static TaskHandle_t report_task_handle = nullptr;
+    static TaskHandle_t display_task = nullptr;
+
     if (!async_tcp_task) {
         async_tcp_task = xTaskGetHandle("async_tcp");
     }
+    if (!nimble_host_task) {
+        nimble_host_task = xTaskGetHandle("nimble_host");
+    }
+    if (!as11_ble_task) {
+        as11_ble_task = xTaskGetHandle("as11_ble");
+    }
+    if (!report_task_handle) {
+        report_task_handle = xTaskGetHandle("ac_report");
+    }
+    if (!display_task) {
+        display_task = xTaskGetHandle("ac_display");
+    }
+
     const uint32_t oxi_stack =
         oximetry_sensor_source.task_stack_high_water_bytes();
 
@@ -469,10 +487,26 @@ static void poll_stack_profiler(uint32_t now_ms) {
         {StackProfileTask::AsyncTcp,
          async_tcp_task != nullptr,
          async_tcp_task ? uxTaskGetStackHighWaterMark(async_tcp_task) : 0},
+        {StackProfileTask::NimbleHost,
+         nimble_host_task != nullptr,
+         nimble_host_task
+             ? uxTaskGetStackHighWaterMark(nimble_host_task)
+             : 0},
+        {StackProfileTask::As11Ble,
+         as11_ble_task != nullptr,
+         as11_ble_task ? uxTaskGetStackHighWaterMark(as11_ble_task) : 0},
+        {StackProfileTask::ReportTask,
+         report_task_handle != nullptr,
+         report_task_handle
+             ? uxTaskGetStackHighWaterMark(report_task_handle)
+             : 0},
+        {StackProfileTask::DisplayTask,
+         display_task != nullptr,
+         display_task ? uxTaskGetStackHighWaterMark(display_task) : 0},
         {StackProfileTask::ExportTask,
          true,
          export_task.stack_high_water_bytes()},
-        {StackProfileTask::EdfStorage,
+        {StackProfileTask::StorageTask,
          true,
          StorageService::stack_high_water_bytes()},
         {StackProfileTask::OximetrySensor, oxi_stack != 0, oxi_stack},

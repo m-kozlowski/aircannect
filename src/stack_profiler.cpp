@@ -24,11 +24,19 @@ struct StackProfileDef {
 #define CONFIG_ARDUINO_LOOP_STACK_SIZE 8192
 #endif
 
+#ifndef CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE
+#define CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE 5120
+#endif
+
 constexpr StackProfileDef STACK_PROFILE_DEFS[] = {
     {"loop", CONFIG_ARDUINO_LOOP_STACK_SIZE},
     {"async_tcp", CONFIG_ASYNC_TCP_STACK_SIZE},
+    {"nimble_host", CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE},
+    {"as11_ble", AC_AS11_BLE_TASK_STACK},
+    {"report", AC_REPORT_TASK_STACK},
+    {"display", AC_DISPLAY_TASK_STACK},
     {"export", AC_EXPORT_TASK_STACK},
-    {"edf_storage", AC_EDF_STORAGE_TASK_STACK},
+    {"storage", AC_STORAGE_SERVICE_TASK_STACK},
     {"oximetry", AC_OXIMETRY_SENSOR_TASK_STACK},
 };
 
@@ -100,7 +108,7 @@ void StackProfiler::log_sample(StackProfileTask task,
 }
 
 void StackProfiler::log_summary() const {
-    char line[256];
+    char line[384];
     size_t used = snprintf(line, sizeof(line), "[STACK] summary");
     for (size_t i = 0;
          i < static_cast<size_t>(StackProfileTask::Count) && used < sizeof(line);

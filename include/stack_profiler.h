@@ -11,8 +11,12 @@ namespace aircannect {
 enum class StackProfileTask : uint8_t {
     Loop,
     AsyncTcp,
+    NimbleHost,
+    As11Ble,
+    ReportTask,
+    DisplayTask,
     ExportTask,
-    EdfStorage,
+    StorageTask,
     OximetrySensor,
     Count,
 };
