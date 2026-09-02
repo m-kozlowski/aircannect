@@ -25,6 +25,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include "debug_log.h"
 #include "memory_manager.h"
 #endif
 
@@ -56,6 +57,12 @@ enum class PayloadLoadStartResult : uint8_t {
     Superseded,
     TooLarge,
     MemoryUnavailable,
+    Rejected,
+};
+
+enum class PayloadCacheInsertResult : uint8_t {
+    Cached,
+    Retry,
     Rejected,
 };
 
@@ -731,9 +738,15 @@ struct ReportTask::Runtime {
                          : PayloadLoadStartResult::MemoryUnavailable;
     }
 
-    bool cache_payload(const ReportArtifactPayloadDescriptor &payload,
-                       std::shared_ptr<const LargeByteBuffer> bytes) {
-        if (!payload.valid() || !bytes || !lock(20)) return false;
+    PayloadCacheInsertResult cache_payload_result(
+        const ReportArtifactPayloadDescriptor &payload,
+        std::shared_ptr<const LargeByteBuffer> bytes) {
+        if (!payload.valid() || !bytes) {
+            return PayloadCacheInsertResult::Rejected;
+        }
+        if (!lock(20)) {
+            return PayloadCacheInsertResult::Retry;
+        }
 
 #ifdef ARDUINO
         MemoryStatus memory = Memory::status();
@@ -746,18 +759,27 @@ struct ReportTask::Runtime {
         if (!memory.psram_available ||
             memory.psram_free < AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE) {
             unlock();
-            return false;
+            return PayloadCacheInsertResult::Rejected;
         }
 #endif
 
         const bool inserted = payload_cache.insert(payload, std::move(bytes));
         unlock();
-        return inserted;
+        return inserted ? PayloadCacheInsertResult::Cached
+                        : PayloadCacheInsertResult::Rejected;
     }
 
-    bool cache_bundle(
+    bool cache_payload(const ReportArtifactPayloadDescriptor &payload,
+                       std::shared_ptr<const LargeByteBuffer> bytes) {
+        return cache_payload_result(payload, std::move(bytes)) ==
+            PayloadCacheInsertResult::Cached;
+    }
+
+    PayloadCacheInsertResult cache_bundle(
         const std::shared_ptr<const ReportArtifactBundle> &bundle) {
-        if (!bundle || !bundle->valid()) return false;
+        if (!bundle || !bundle->valid()) {
+            return PayloadCacheInsertResult::Rejected;
+        }
 
         if (bundle->key.kind == ReportArtifactKind::Result) {
             ReportArtifactDescriptor result;
@@ -771,7 +793,7 @@ struct ReportTask::Runtime {
             overview.size = bundle->overview->size();
             overview.crc32 = bundle->overview_crc32;
             overview.prefix_crc32 = bundle->overview_prefix_crc32;
-            if (!lock(20)) return false;
+            if (!lock(20)) return PayloadCacheInsertResult::Retry;
 
 #ifdef ARDUINO
             MemoryStatus memory = Memory::status();
@@ -785,14 +807,15 @@ struct ReportTask::Runtime {
                 memory.psram_free <
                     AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE) {
                 unlock();
-                return false;
+                return PayloadCacheInsertResult::Rejected;
             }
 #endif
 
             const bool cached = payload_cache.insert_pair(
                 result, bundle->result, overview, bundle->overview);
             unlock();
-            return cached;
+            return cached ? PayloadCacheInsertResult::Cached
+                          : PayloadCacheInsertResult::Rejected;
         }
 
         if (bundle->key.kind == ReportArtifactKind::RangeTile) {
@@ -801,11 +824,35 @@ struct ReportTask::Runtime {
             tile.size = bundle->range_tile->size();
             tile.crc32 = bundle->range_tile_crc32;
             tile.prefix_crc32 = bundle->range_tile_prefix_crc32;
-            return cache_payload(
+            return cache_payload_result(
                 ReportArtifactPayloadDescriptor::whole(tile),
                 bundle->range_tile);
         }
-        return false;
+        return PayloadCacheInsertResult::Rejected;
+    }
+
+    bool finish_built_bundle_cache() {
+        if (!pending_built_bundle) return false;
+
+        const PayloadCacheInsertResult result =
+            cache_bundle(pending_built_bundle);
+        if (result == PayloadCacheInsertResult::Retry) return false;
+
+        if (result == PayloadCacheInsertResult::Rejected) {
+#ifdef ARDUINO
+            char day[9] = {};
+            pending_built_bundle->key.sleep_day.format_yyyymmdd(
+                day, sizeof(day));
+
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "rebuilt payload cache unavailable night=%s",
+                      day[0] ? day : "invalid");
+#endif
+        }
+
+        pending_built_bundle.reset();
+        return true;
     }
 
     PayloadLoadStartResult start_exact_payload_load(
@@ -1071,9 +1118,34 @@ struct ReportTask::Runtime {
             completion.request.ticket == observed_engine_completion) {
             return;
         }
+        if (pending_built_bundle) return;
+
         if (!lock(20)) return;
 
         observed_engine_completion = completion.request.ticket;
+        if (completion.request.force_rebuild) {
+#ifdef ARDUINO
+            char day[9] = {};
+            completion.request.artifact.sleep_day.format_yyyymmdd(
+                day, sizeof(day));
+
+            if (completion.outcome.disposition ==
+                OperationDisposition::Succeeded) {
+                Log::logf(CAT_REPORT,
+                          LOG_INFO,
+                          "rebuild complete night=%s",
+                          day[0] ? day : "invalid");
+            } else {
+                Log::logf(CAT_REPORT,
+                          LOG_WARN,
+                          "rebuild failed night=%s error=%s",
+                          day[0] ? day : "invalid",
+                          completion.error[0]
+                              ? completion.error
+                              : "report_build_failed");
+            }
+#endif
+        }
         if (completion.request.priority !=
                 ReportRequestPriority::Foreground) {
             if (strcmp(completion.error,
@@ -1630,6 +1702,9 @@ struct ReportTask::Runtime {
         next.payload_cache = payload_cache_status;
         next.payload_load = payload_loader.status();
         next.engine = engine.status();
+        if (pending_built_bundle) {
+            next.engine.last_completion = {};
+        }
         next.foreground_active =
             foreground_command || next.engine.foreground_active ||
             (next.payload_load.active() &&
@@ -1645,6 +1720,8 @@ struct ReportTask::Runtime {
                    refresh_generation != 0 ||
                    engine.catalog_update_required()) {
             next.state = ReportTaskState::RefreshingCatalog;
+        } else if (pending_built_bundle) {
+            next.state = ReportTaskState::Publishing;
         } else {
             switch (next.engine.state) {
                 case ReportEngineState::Publishing:
@@ -1672,6 +1749,7 @@ struct ReportTask::Runtime {
             static_cast<bool>(pending_catalog_save);
         next.background_active =
             queued > 0 || catalog_commit_pending ||
+            static_cast<bool>(pending_built_bundle) ||
             spool_availability_probe.status().active() ||
             next.payload_load.active() || payload_deflater.active() ||
             (next.state != ReportTaskState::Stopped &&
@@ -1688,6 +1766,7 @@ struct ReportTask::Runtime {
     ReportArtifactPayloadCache payload_cache;
     ReportArtifactPayloadLoader payload_loader;
     ReportPayloadDeflater payload_deflater;
+    std::shared_ptr<const ReportArtifactBundle> pending_built_bundle;
     ReportNightArtifactBuilder builder;
     ReportSummaryAcquisition summary_acquisition;
     ReportSpoolAvailabilityProbe spool_availability_probe;
@@ -2272,10 +2351,25 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 if (queued.status == ReportRequestEnqueueStatus::Full ||
                     queued.status == ReportRequestEnqueueStatus::Invalid) {
                     runtime.command_failures++;
-                } else if (command.priority ==
-                           ReportRequestPriority::Foreground) {
-                    worked =
-                        runtime.preempt_background_for_foreground() || worked;
+                } else {
+                    if (command.force_rebuild &&
+                        queued.ticket.generation == command.generation) {
+#ifdef ARDUINO
+                        char day[9] = {};
+                        command.artifact.sleep_day.format_yyyymmdd(
+                            day, sizeof(day));
+
+                        Log::logf(CAT_REPORT,
+                                  LOG_INFO,
+                                  "rebuild started night=%s",
+                                  day[0] ? day : "invalid");
+#endif
+                    }
+                    if (command.priority ==
+                        ReportRequestPriority::Foreground) {
+                        worked = runtime.preempt_background_for_foreground() ||
+                            worked;
+                    }
                 }
                 break;
             }
@@ -2650,12 +2744,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }
 
-    worked = runtime.engine.poll(now_ms, record_budget) || worked;
+    worked = runtime.finish_built_bundle_cache() || worked;
+    if (!runtime.pending_built_bundle) {
+        worked = runtime.engine.poll(now_ms, record_budget) || worked;
+    }
 
     std::shared_ptr<const ReportArtifactBundle> built_bundle =
         runtime.engine.take_built_bundle();
     if (built_bundle) {
-        (void)runtime.cache_bundle(built_bundle);
+        if (runtime.pending_built_bundle) {
+            runtime.command_failures++;
+        } else {
+            runtime.pending_built_bundle = std::move(built_bundle);
+        }
         worked = true;
     }
 
@@ -2668,6 +2769,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
+    worked = runtime.finish_built_bundle_cache() || worked;
     runtime.observe_engine_completion(now_ms);
 
     runtime.publish_status();
