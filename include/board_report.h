@@ -10,7 +10,7 @@
 // New report pipeline owner. It shares core 0 with storage at the same low
 // priority and yields after every bounded decode step, so storage's EDF lane
 // and the main loop remain responsive.
-static constexpr uint32_t AC_REPORT_TASK_STACK = 8192;
+static constexpr uint32_t AC_REPORT_TASK_STACK = 12288;
 static constexpr uint8_t AC_REPORT_TASK_PRIO = 1;
 static constexpr uint8_t AC_REPORT_TASK_CORE = 0;
 static constexpr uint32_t AC_REPORT_TASK_WORK_TICK_MS = 1;
