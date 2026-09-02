@@ -173,10 +173,10 @@ void print_report_night(Print &out,
     out.println(static_cast<unsigned>(night.source_flags), HEX);
 }
 
-void print_report_nights(Print &out,
-                         const NightCatalog &catalog,
-                         const NightCatalogRecord *selected = nullptr) {
-    out.println("[REPORT nights]");
+void print_report_list(Print &out,
+                       const NightCatalog &catalog,
+                       const NightCatalogRecord *selected = nullptr) {
+    out.println("[REPORT list]");
     if (selected) {
         print_report_night(out, catalog, *selected);
         return;
@@ -219,17 +219,15 @@ bool ReportConsoleCommands::execute(const String &command,
         print_report_status(out, report_);
         return true;
     }
-    if (rest == "nights" || rest == "list") {
+    if (rest == "list") {
         const std::shared_ptr<const NightCatalog> catalog =
             report_catalog(report_, out);
         if (!catalog) return true;
 
-        print_report_nights(out, *catalog);
+        print_report_list(out, *catalog);
         return true;
     }
-    const bool selected_nights = rest.startsWith("nights ") ||
-        rest.startsWith("list ");
-    if (selected_nights) {
+    if (rest.startsWith("list ")) {
         const int separator = rest.indexOf(' ');
         String selector = rest.substring(separator + 1);
         selector.trim();
@@ -242,11 +240,11 @@ bool ReportConsoleCommands::execute(const String &command,
         const NightCatalogRecord *night = select_report_night(
             *catalog, selector, valid_selector);
         if (!valid_selector) {
-            out.println("[REPORT] usage: report nights [latest|YYYYMMDD]");
+            out.println("[REPORT] usage: report list [latest|YYYYMMDD]");
         } else if (!night) {
             out.println("[REPORT] night not found");
         } else {
-            print_report_nights(out, *catalog, night);
+            print_report_list(out, *catalog, night);
         }
         return true;
     }
@@ -257,7 +255,7 @@ bool ReportConsoleCommands::execute(const String &command,
     if (!rest.startsWith("rebuild ")) {
         print_unknown_command(
             out, "REPORT",
-            "report, report status, report nights [latest|YYYYMMDD], "
+            "report, report status, report list [latest|YYYYMMDD], "
             "report rebuild latest|YYYYMMDD");
         return true;
     }

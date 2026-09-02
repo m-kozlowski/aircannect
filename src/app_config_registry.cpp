@@ -108,6 +108,18 @@ static constexpr AppConfigEnumValue DISPLAY_ORIENTATION_VALUES[] = {
     {"270", "270 degrees"},
 };
 
+static constexpr AppConfigEnumValue LOG_LEVEL_VALUES[] = {
+    {"ERROR", "Error"},
+    {"WARN", "Warn"},
+    {"INFO", "Info"},
+    {"DEBUG", "Debug"},
+};
+
+static constexpr AppConfigEnumValue BOOL_VALUES[] = {
+    {"on", "On"},
+    {"off", "Off"},
+};
+
 static constexpr AppConfigFieldFlags PROVISIONABLE =
     AC_CONFIG_FIELD_PROVISIONABLE;
 static constexpr AppConfigFieldFlags SECRET_PROVISIONABLE =
@@ -698,6 +710,38 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::Count: break;
     }
     return "Unknown";
+}
+
+const char *app_config_field_type_name(AppConfigFieldType type) {
+    switch (type) {
+        case AppConfigFieldType::Bool: return "bool";
+        case AppConfigFieldType::UInt16: return "number";
+        case AppConfigFieldType::String: return "text";
+        case AppConfigFieldType::Secret: return "password";
+        case AppConfigFieldType::Enum:
+        case AppConfigFieldType::LogLevel:
+            return "enum";
+        case AppConfigFieldType::Keybindings:
+            return "keybindings";
+    }
+    return "text";
+}
+
+const AppConfigEnumValue *app_config_field_allowed_values(
+    const AppConfigFieldDescriptor &field,
+    size_t &count) {
+    if (field.type == AppConfigFieldType::Bool) {
+        count = sizeof(BOOL_VALUES) / sizeof(BOOL_VALUES[0]);
+        return BOOL_VALUES;
+    }
+
+    if (field.type == AppConfigFieldType::LogLevel) {
+        count = sizeof(LOG_LEVEL_VALUES) / sizeof(LOG_LEVEL_VALUES[0]);
+        return LOG_LEVEL_VALUES;
+    }
+
+    count = field.enum_value_count;
+    return field.enum_values;
 }
 
 bool app_config_field_is_secret(const AppConfigFieldDescriptor &field) {

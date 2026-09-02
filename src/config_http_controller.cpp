@@ -27,13 +27,6 @@ static constexpr size_t CONFIG_JSON_RESERVE_SYNC_SECTION = 640;
 static constexpr size_t CONFIG_JSON_RESERVE_SMALL_SECTION = 384;
 static constexpr size_t CONFIG_SCHEMA_JSON_RESERVE = 12 * 1024;
 
-static constexpr AppConfigEnumValue WEB_LOG_LEVEL_VALUES[] = {
-    {"ERROR", "Error"},
-    {"WARN", "Warn"},
-    {"INFO", "Info"},
-    {"DEBUG", "Debug"},
-};
-
 size_t section_index(const char *section) {
     constexpr size_t count = AC_CONFIG_GROUP_COUNT;
     if (!section || !section[0] || strcmp(section, "all") == 0) {
@@ -65,21 +58,6 @@ size_t config_json_reserve(const char *section) {
         return CONFIG_JSON_RESERVE_SYNC_SECTION;
     }
     return CONFIG_JSON_RESERVE_SMALL_SECTION;
-}
-
-const char *field_type_name(AppConfigFieldType type) {
-    switch (type) {
-        case AppConfigFieldType::Bool: return "bool";
-        case AppConfigFieldType::UInt16: return "number";
-        case AppConfigFieldType::String: return "text";
-        case AppConfigFieldType::Secret: return "password";
-        case AppConfigFieldType::Enum:
-        case AppConfigFieldType::LogLevel:
-            return "enum";
-        case AppConfigFieldType::Keybindings:
-            return "keybindings";
-    }
-    return "text";
 }
 
 bool config_value_text(JsonVariantConst value,
@@ -322,12 +300,14 @@ bool parse_keybindings_update(JsonVariantConst value,
 
 void append_schema_enum(LargeTextBuffer &json,
                         const AppConfigFieldDescriptor &field) {
-    const AppConfigEnumValue *values = field.enum_values;
-    size_t count = field.enum_value_count;
-    if (field.type == AppConfigFieldType::LogLevel) {
-        values = WEB_LOG_LEVEL_VALUES;
-        count = sizeof(WEB_LOG_LEVEL_VALUES) / sizeof(WEB_LOG_LEVEL_VALUES[0]);
+    if (field.type != AppConfigFieldType::Enum &&
+        field.type != AppConfigFieldType::LogLevel) {
+        return;
     }
+
+    size_t count = 0;
+    const AppConfigEnumValue *values =
+        app_config_field_allowed_values(field, count);
     if (!values || !count) return;
 
     json += ",\"enum\":[";
@@ -432,7 +412,8 @@ void build_schema_json(LargeTextBuffer &json) {
         json += '{';
         json_add_string(json, "key", field.key, false);
         json_add_string(json, "label", field.label);
-        json_add_string(json, "type", field_type_name(field.type));
+        json_add_string(json, "type",
+                        app_config_field_type_name(field.type));
         json_add_bool(json, "secret", app_config_field_is_secret(field));
         json_add_bool(json, "provisionable",
                       (field.flags & AC_CONFIG_FIELD_PROVISIONABLE) != 0);

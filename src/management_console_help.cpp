@@ -44,6 +44,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "config") {
         out.println("[HELP config]");
         out.println("  config                    show persistent config with exact NVS keys");
+        out.println("  config show               show persistent config with exact NVS keys");
+        out.println("  config help [KEY]         list keys or describe one key");
         out.println("  config KEY                show one exact NVS key");
         out.println("  config KEY VALUE          set one exact NVS key");
         out.println("  config reset              reset app config, keep Wi-Fi profiles");
@@ -52,16 +54,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config keybindings reset  restore hardware defaults");
         out.println("  config keybindings BUTTON[+BUTTON] short|long ACTION|default");
         out.println("  keys are not aliased or normalized: use the NVS key exactly");
-        out.println("  common keys:");
-        out.println("    host tcp_en tcp_port softap_mode wifi_ctry tz resmed_time");
-        out.println("    oxi_en oxi_udp oxi_adv edf_cap");
-        out.println("    smb_ep smb_user smb_pass");
-        out.println("    shq_id shq_secret shq_team shq_device");
-        out.println("    http_user http_pass auth_wl telnet_en telnet_port ota_pass");
-        out.println("    syslog_en syslog_host syslog_port file_log_en");
-        out.println("    log_general log_can log_ble log_rpc log_tcp log_cli");
-        out.println("    log_wifi log_stream log_ota log_oxi log_storage");
-        out.println("    log_export log_report log_edf log_config");
         return;
     }
 
@@ -157,7 +149,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP report]");
         out.println("  report                    show report task status");
         out.println("  report status             show report task status");
-        out.println("  report nights [latest|YYYYMMDD]  list report nights or one night");
+        out.println("  report list [latest|YYYYMMDD]    list report nights or one night");
         out.println("  report rebuild latest            rebuild latest result");
         out.println("  report rebuild YYYYMMDD          rebuild result by sleep day");
         return;
@@ -170,7 +162,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         return;
     }
 
-    if (topic == "oxi" || topic == "oximetry") {
+    if (topic == "oxi") {
         out.println("[HELP oxi]");
         out.println("  oxi status                show oximetry source and BLE state");
         out.println("  oxi on|off                enable/disable oximetry bridge");
@@ -247,7 +239,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "restart") {
         out.println("[HELP restart]");
         out.println("  restart                   restart AirCANnect");
-        out.println("  restart ac                restart AirCANnect");
         return;
     }
 

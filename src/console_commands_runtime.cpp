@@ -96,20 +96,19 @@ bool SystemConsoleCommands::execute(
     ConsoleCommandSession &) {
     if (command != "restart") return false;
 
-    String target;
+    String argument;
     String extra;
     int position = 0;
-    const bool has_target = parse_console_arg(rest_arg, position, target);
+    const bool has_argument = parse_console_arg(rest_arg, position, argument);
     const bool has_extra = parse_console_arg(rest_arg, position, extra);
-    target.toLowerCase();
 
-    if ((!has_target || target == "ac") && !has_extra) {
+    if (!has_argument && !has_extra) {
         installer_.schedule_reboot(500);
         out.println("[SYSTEM] AirCANnect restart scheduled");
         return true;
     }
 
-    print_unknown_command(out, "SYSTEM", "restart [ac]");
+    print_unknown_command(out, "SYSTEM", "restart");
     return true;
 }
 

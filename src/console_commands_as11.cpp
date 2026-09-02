@@ -360,7 +360,7 @@ bool As11DeviceConsoleCommands::execute(
             handle_therapy(out, args, device_, rpc_);
         } else if (subcommand == "restart") {
             handle_as11_restart(out, args, device_, rpc_);
-        } else if (subcommand == "poll" || subcommand == "refresh") {
+        } else if (subcommand == "poll") {
             device_.request_healthcheck(rpc_, RpcSource::Console, millis());
             out.println("[AS11] healthcheck scheduled");
         } else if (subcommand == "version") {

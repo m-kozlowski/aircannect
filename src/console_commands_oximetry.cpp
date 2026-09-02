@@ -227,7 +227,7 @@ bool OximetryConsoleCommands::execute(const String &command,
                                       Print &out,
                                       ConsoleCommandSession &session) {
     (void)session;
-    if (command != "oxi" && command != "oximetry") return false;
+    if (command != "oxi") return false;
 
     String rest = rest_arg;
     rest.trim();

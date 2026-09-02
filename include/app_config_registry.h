@@ -167,6 +167,10 @@ const AppConfigFieldDescriptor *app_config_fields(size_t &count);
 const AppConfigFieldDescriptor *app_config_find_field(const char *key);
 const char *app_config_group_id(AppConfigGroup group);
 const char *app_config_group_label(AppConfigGroup group);
+const char *app_config_field_type_name(AppConfigFieldType type);
+const AppConfigEnumValue *app_config_field_allowed_values(
+    const AppConfigFieldDescriptor &field,
+    size_t &count);
 bool app_config_field_is_secret(const AppConfigFieldDescriptor &field);
 bool app_config_field_is_user_visible(
     const AppConfigFieldDescriptor &field);

@@ -186,6 +186,80 @@ void print_config(Print &out, const AppConfigData &config) {
     }
 }
 
+void print_config_help_values(Print &out,
+                              const AppConfigFieldDescriptor &field) {
+    size_t count = 0;
+    const AppConfigEnumValue *values =
+        app_config_field_allowed_values(field, count);
+    if (!values || !count) return;
+
+    out.print("  values: ");
+    for (size_t i = 0; i < count; ++i) {
+        if (i) out.print(", ");
+        out.print(values[i].value);
+    }
+    out.println();
+}
+
+void print_config_help(Print &out, String key) {
+    trim_inplace(key);
+    if (key.length()) {
+        const AppConfigFieldDescriptor *field =
+            app_config_find_field(key.c_str());
+        if (!field || !app_config_field_is_user_visible(*field)) {
+            out.println("[CONFIG] unknown key");
+            return;
+        }
+
+        out.print("[CONFIG help] ");
+        out.println(field->key);
+        out.print("  type: ");
+        out.println(app_config_field_type_name(field->type));
+        out.print("  description: ");
+        out.println(field->help);
+        print_config_help_values(out, *field);
+        return;
+    }
+
+    out.println("[CONFIG help]");
+    size_t count = 0;
+    const AppConfigFieldDescriptor *fields = app_config_fields(count);
+    AppConfigGroup last_group = AppConfigGroup::Device;
+    bool have_group = false;
+    for (size_t i = 0; i < count; ++i) {
+        const AppConfigFieldDescriptor &field = fields[i];
+        if (!app_config_field_is_user_visible(field)) continue;
+
+        if (!have_group || field.group != last_group) {
+            out.print("  [");
+            out.print(app_config_group_label(field.group));
+            out.println("]");
+            last_group = field.group;
+            have_group = true;
+        }
+
+        out.print("  ");
+        out.print(field.key);
+        out.print(" (");
+        out.print(app_config_field_type_name(field.type));
+        out.println(")");
+    }
+}
+
+bool handle_config_help(Print &out, String rest) {
+    if (rest != "help" && !rest.startsWith("help ")) return false;
+
+    rest.remove(0, strlen("help"));
+    trim_inplace(rest);
+    if (rest.indexOf(' ') >= 0) {
+        out.println("[CONFIG] usage: config help [KEY]");
+        return true;
+    }
+
+    print_config_help(out, rest);
+    return true;
+}
+
 bool print_config_value(Print &out,
                         const AppConfigData &config,
                         String key) {
@@ -287,7 +361,7 @@ void handle_config(Print &out,
                    WifiManager &wifi) {
     trim_inplace(rest);
 
-    if (!rest.length() || rest == "show" || rest == "dump") {
+    if (!rest.length() || rest == "show") {
         print_config(out, config.data());
         return;
     }
@@ -314,12 +388,15 @@ void handle_config(Print &out,
         return;
     }
 
+    if (handle_config_help(out, rest)) return;
+
     if (handle_keybindings(out, rest, config)) return;
 
     if (handle_config_key(out, rest, config)) return;
 
     print_unknown_command(out, "CONFIG",
-                          "config, config KEY [VALUE], config keybindings "
+                          "config, config show, config help [KEY], "
+                          "config KEY [VALUE], config keybindings "
                           "[reset|BUTTON[+BUTTON] GESTURE "
                           "ACTION|default], reset, "
                           "factory-reset");
