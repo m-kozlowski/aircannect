@@ -456,6 +456,38 @@ static void sync_rpc_transport_generation(uint32_t now_ms) {
 }
 
 #if AC_STACK_PROFILE_ENABLED
+static void log_memory_profile_checkpoint(const char *phase) {
+    static MemoryDetailStatus previous = {};
+    static bool previous_valid = false;
+
+    const MemoryDetailStatus current = Memory::detail_status();
+    const int internal_delta = previous_valid
+        ? static_cast<int>(current.internal_8bit.free_bytes) -
+              static_cast<int>(previous.internal_8bit.free_bytes)
+        : 0;
+    const int psram_delta = previous_valid
+        ? static_cast<int>(current.psram_8bit.free_bytes) -
+              static_cast<int>(previous.psram_8bit.free_bytes)
+        : 0;
+
+    Log::logf(CAT_GENERAL,
+              LOG_INFO,
+              "[HEAP] init phase=%s internal_free=%u delta=%d "
+              "internal_allocated=%u internal_blocks=%u psram_free=%u "
+              "delta=%d psram_allocated=%u\n",
+              phase ? phase : "?",
+              static_cast<unsigned>(current.internal_8bit.free_bytes),
+              internal_delta,
+              static_cast<unsigned>(current.internal_8bit.allocated_bytes),
+              static_cast<unsigned>(current.internal_8bit.allocated_blocks),
+              static_cast<unsigned>(current.psram_8bit.free_bytes),
+              psram_delta,
+              static_cast<unsigned>(current.psram_8bit.allocated_bytes));
+
+    previous = current;
+    previous_valid = true;
+}
+
 static void poll_stack_profiler(uint32_t now_ms) {
     static TaskHandle_t async_tcp_task = nullptr;
     static TaskHandle_t nimble_host_task = nullptr;
@@ -515,6 +547,8 @@ static void poll_stack_profiler(uint32_t now_ms) {
 }
 
 #else
+static void log_memory_profile_checkpoint(const char *) {}
+
 static void poll_stack_profiler(uint32_t now_ms) {
     (void)now_ms;
 }
@@ -1196,10 +1230,12 @@ void setup() {
     as11_ble_rpc_link.set_credential_store(
         store_as11_ble_credentials, &config_service);
     time_sync_service.initialize_timezone(config_service.data());
+    log_memory_profile_checkpoint("core");
 
     if (!ble_runtime.begin()) {
         Log::logf(CAT_BLE, LOG_ERROR, "runtime init failed\n");
     }
+    log_memory_profile_checkpoint("ble_runtime");
 
     display_manager.configure(config_service.data().display_orientation,
                               config_service.data().display_auto_rotate);
@@ -1233,6 +1269,7 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] local inputs failed to start\n");
     }
+    log_memory_profile_checkpoint("display_inputs");
 
     // Boot diagnostics
     const MemoryStatus mem = Memory::status();
@@ -1261,10 +1298,12 @@ void setup() {
         Log::logf(CAT_RPC, LOG_WARN,
                   "[INIT] datagram reassembly buffer prealloc failed\n");
     }
+    log_memory_profile_checkpoint("rpc_buffers");
 
     // Persistent storage
     Storage::begin();
     StorageService::begin();
+    log_memory_profile_checkpoint("storage");
 
     const StorageStatus storage = Storage::status();
 
@@ -1355,6 +1394,7 @@ void setup() {
                                wifi_manager,
                                StorageService::read_port(),
                                StorageService::path_port());
+    log_memory_profile_checkpoint("storage_services");
 
     // Device/session/report managers
     session_manager.begin();
@@ -1447,6 +1487,7 @@ void setup() {
                   "report task failed to start\n");
     }
     report_http_controller.begin(report_task);
+    log_memory_profile_checkpoint("therapy_reports");
 
     if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,
                                   as11_service_manager,
@@ -1498,6 +1539,7 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] oximetry HTTP controller failed to start\n");
     }
+    log_memory_profile_checkpoint("http_controllers");
     // Network configuration
     wifi_manager.set_hostname(config_service.data().hostname);
     wifi_manager.set_softap_mode(config_service.data().softap_mode);
@@ -1509,8 +1551,10 @@ void setup() {
                   "[INIT] AS11 transport failed to start; management CLI "
                   "still active on serial\n");
     }
+    log_memory_profile_checkpoint("as11_transport");
 
     wifi_manager.begin();
+    log_memory_profile_checkpoint("wifi");
     if (!wifi_http_controller.begin(wifi_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] Wi-Fi HTTP controller failed to start\n");
@@ -1541,6 +1585,7 @@ void setup() {
                  config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
+    log_memory_profile_checkpoint("web");
 }
 
 void loop() {

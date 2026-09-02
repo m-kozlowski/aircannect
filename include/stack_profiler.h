@@ -42,10 +42,13 @@ private:
     Slot slots_[static_cast<size_t>(StackProfileTask::Count)];
     uint32_t next_sample_ms_ = 0;
     uint32_t next_summary_ms_ = 0;
+    size_t task_inventory_count_ = 0;
 
     void log_sample(StackProfileTask task,
                     uint32_t free_bytes,
                     const char *reason) const;
+    void log_heap() const;
+    void log_task_inventory() const;
     void log_summary() const;
 };
 
