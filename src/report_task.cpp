@@ -69,6 +69,7 @@ struct ReportTaskCommand {
     ReportArtifactKey artifact;
     ReportArtifactPayloadDescriptor payload;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
+    bool force_rebuild = false;
     uint32_t generation = 0;
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
@@ -184,6 +185,12 @@ struct ReportTask::Runtime {
             if (command.kind == ReportTaskCommandKind::Artifact &&
                 queued.kind == command.kind &&
                 same_artifact_identity(queued.artifact, command.artifact)) {
+                command.force_rebuild =
+                    command.force_rebuild || queued.force_rebuild;
+                if (report_request_priority_higher(
+                        queued.priority, command.priority)) {
+                    command.priority = queued.priority;
+                }
                 queued = command;
                 unlock();
                 wake();
@@ -1512,7 +1519,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
 OperationAdmission ReportTask::request_artifact(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
-    uint32_t generation) {
+    uint32_t generation,
+    bool force_rebuild) {
     if (!runtime_ || !runtime_->initialized || !artifact.valid() ||
         generation == 0) {
         return OperationAdmission::Rejected;
@@ -1522,6 +1530,7 @@ OperationAdmission ReportTask::request_artifact(
     command.kind = ReportTaskCommandKind::Artifact;
     command.artifact = artifact;
     command.priority = priority;
+    command.force_rebuild = force_rebuild;
     command.generation = generation;
     return runtime_->enqueue(command);
 }
@@ -1655,6 +1664,15 @@ ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
     out.catalog_sessions = catalog.sessions;
     copy_cstr(out.catalog_error, sizeof(out.catalog_error), catalog.error);
 
+    runtime_->unlock();
+    return out;
+}
+
+ReportEngineCompletion ReportTask::last_artifact_completion() const {
+    if (!runtime_ || !runtime_->lock(20)) return {};
+
+    const ReportEngineCompletion out =
+        runtime_->status.engine.last_completion;
     runtime_->unlock();
     return out;
 }
@@ -1879,7 +1897,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
 
                 ReportArtifactAvailability available;
-                if (runtime.artifact_index &&
+                if (!command.force_rebuild && runtime.artifact_index &&
                     runtime.artifact_index->availability(
                         command.artifact, available)) {
                     break;
@@ -1888,7 +1906,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 const ReportRequestEnqueueResult queued =
                     runtime.engine.request(command.artifact,
                                            command.priority,
-                                           command.generation);
+                                           command.generation,
+                                           command.force_rebuild);
                 if (queued.status == ReportRequestEnqueueStatus::Full ||
                     queued.status == ReportRequestEnqueueStatus::Invalid) {
                     runtime.command_failures++;

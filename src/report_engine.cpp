@@ -150,11 +150,12 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
 
         ReportArtifactRequest resumed = active_request_;
         resumed.artifact.source_revision = night->source_revision;
+        resumed.force_rebuild = false;
         fallback_acquisition_.reset();
         active_plan_.reset();
         awaited_fallback_identity_ = 0;
         phase_ = ActivePhase::Idle;
-        (void)start_request(resumed);
+        (void)start_request(resumed, 0);
         return;
     }
 
@@ -189,19 +190,22 @@ void ReportEngine::catalog_update_failed(const char *error) {
 ReportRequestEnqueueResult ReportEngine::request(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
-    uint32_t generation) {
+    uint32_t generation,
+    bool force_rebuild) {
     const ReportArtifactKey canonical = build_key(artifact);
     if (!canonical.valid() || generation == 0) return {};
     if (catalog_ && !artifact_current(canonical)) return {};
 
     if (phase_ != ActivePhase::Idle &&
         same_build(active_request_.artifact, canonical)) {
-        if (active_request_.artifact == canonical &&
+        const bool rebuild_upgrade = active_request_.artifact == canonical &&
+            force_rebuild && !active_request_.force_rebuild;
+        if (!rebuild_upgrade && active_request_.artifact == canonical &&
             report_request_priority_higher(
                 priority, active_request_.priority)) {
             active_request_.priority = priority;
         }
-        if (active_request_.artifact == canonical) {
+        if (!rebuild_upgrade && active_request_.artifact == canonical) {
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     active_request_.ticket};
         }
@@ -209,7 +213,7 @@ ReportRequestEnqueueResult ReportEngine::request(
     }
 
     const ReportRequestEnqueueResult queued =
-        queue_.enqueue(canonical, priority, generation);
+        queue_.enqueue(canonical, priority, generation, force_rebuild);
     const bool accepted =
         queued.status != ReportRequestEnqueueStatus::Full &&
         queued.status != ReportRequestEnqueueStatus::Invalid;
@@ -222,7 +226,8 @@ ReportRequestEnqueueResult ReportEngine::request(
     const ReportRequestEnqueueResult restored = queue_.enqueue(
         active_request_.artifact,
         active_request_.priority,
-        active_request_.ticket.generation);
+        active_request_.ticket.generation,
+        active_request_.force_rebuild);
     if (restored.status != ReportRequestEnqueueStatus::Full &&
         restored.status != ReportRequestEnqueueStatus::Invalid) {
         cancel_active_work();
@@ -399,13 +404,18 @@ bool ReportEngine::start_next(uint32_t now_ms) {
                         "report_artifact_revision_stale");
         return true;
     }
-    return start_request(request);
+    return start_request(request, now_ms);
 }
 
-bool ReportEngine::start_request(ReportArtifactRequest request) {
+bool ReportEngine::start_request(ReportArtifactRequest request,
+                                 uint32_t now_ms) {
     active_request_ = request;
     active_availability_ = {};
     active_availability_.request = request.artifact;
+
+    if (request.force_rebuild) {
+        return start_build(request.artifact, now_ms);
+    }
 
     const OperationAdmission admitted = lookup_.start(
         request.artifact,

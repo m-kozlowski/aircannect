@@ -161,7 +161,8 @@ public:
     OperationAdmission request_artifact(
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
-        uint32_t generation);
+        uint32_t generation,
+        bool force_rebuild = false);
     OperationAdmission request_payload_cache(
         const ReportArtifactPayloadDescriptor &payload,
         uint32_t generation);
@@ -176,6 +177,7 @@ public:
 
     ReportTaskControlSnapshot control_snapshot() const;
     ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
+    ReportEngineCompletion last_artifact_completion() const;
 #ifndef ARDUINO
     ReportTaskStatus status() const;
     bool artifact_availability(

@@ -78,7 +78,8 @@ public:
     ReportRequestEnqueueResult request(
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
-        uint32_t generation);
+        uint32_t generation,
+        bool force_rebuild = false);
     size_t cancel_background();
     void clear();
 
@@ -103,7 +104,7 @@ private:
 
     bool artifact_current(const ReportArtifactKey &artifact) const;
     bool start_next(uint32_t now_ms);
-    bool start_request(ReportArtifactRequest request);
+    bool start_request(ReportArtifactRequest request, uint32_t now_ms);
     bool finish_lookup(uint32_t now_ms);
     bool start_build(const ReportArtifactKey &artifact, uint32_t now_ms);
     bool finish_fallback_acquisition();

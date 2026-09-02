@@ -170,8 +170,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  report                    show report task status");
         out.println("  report status             show report task status");
         out.println("  report nights             list canonical report nights");
-        out.println("  report result latest      request latest result artifact");
-        out.println("  report result YYYYMMDD    request result artifact by sleep day");
+        out.println("  report rebuild latest     rebuild latest result");
+        out.println("  report rebuild YYYYMMDD   rebuild result by sleep day");
         return;
     }
 

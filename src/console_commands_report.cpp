@@ -226,6 +226,14 @@ bool parse_report_sleep_day(String value, SleepDayId &sleep_day) {
            SleepDayId::from_yyyymmdd(value.c_str(), sleep_day);
 }
 
+void print_report_sleep_day(Print &out, SleepDayId sleep_day) {
+    char day[9] = {};
+    if (!sleep_day.format_yyyymmdd(day, sizeof(day))) return;
+
+    out.print(" night=");
+    out.print(day);
+}
+
 }  // namespace
 
 ReportConsoleCommands::ReportConsoleCommands(ReportTask &report)
@@ -235,7 +243,6 @@ bool ReportConsoleCommands::execute(const String &command,
                                     const String &rest_arg,
                                     Print &out,
                                     ConsoleCommandSession &session) {
-    (void)session;
     if (command != "report") return false;
 
     String rest = rest_arg;
@@ -249,19 +256,19 @@ bool ReportConsoleCommands::execute(const String &command,
         print_report_nights(out, report_);
         return true;
     }
-    if (rest == "result") {
-        out.println("[REPORT] usage: report result latest|YYYYMMDD");
+    if (rest == "rebuild") {
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
         return true;
     }
-    if (!rest.startsWith("result ")) {
+    if (!rest.startsWith("rebuild ")) {
         print_unknown_command(
             out, "REPORT",
             "report, report status, report nights, "
-            "report result latest|YYYYMMDD");
+            "report rebuild latest|YYYYMMDD");
         return true;
     }
 
-    String value = rest.substring(strlen("result "));
+    String value = rest.substring(strlen("rebuild "));
     value.trim();
 
     const std::shared_ptr<const NightCatalog> catalog =
@@ -280,7 +287,7 @@ bool ReportConsoleCommands::execute(const String &command,
         }
         sleep_day = latest->sleep_day;
     } else if (!parse_report_sleep_day(value, sleep_day)) {
-        out.println("[REPORT] usage: report result latest|YYYYMMDD");
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
         return true;
     }
 
@@ -295,15 +302,77 @@ bool ReportConsoleCommands::execute(const String &command,
 
     const OperationAdmission admitted = report_.request_artifact(
         ReportArtifactKey::result(sleep_day, night->source_revision),
-        ReportRequestPriority::Foreground, request_generation_);
+        ReportRequestPriority::Foreground,
+        request_generation_,
+        true);
     if (admitted == OperationAdmission::Accepted) {
-        out.println("[REPORT] result requested");
+        request_session_id_ = session.id;
+        request_wait_generation_ = request_generation_;
+        request_wait_artifact_ = ReportArtifactKey::result(
+            sleep_day, night->source_revision);
+
+        out.print("[REPORT] rebuild requested");
+        print_report_sleep_day(out, sleep_day);
+        out.println();
     } else if (admitted == OperationAdmission::Busy) {
         out.println("[REPORT] request queue busy");
     } else {
         out.println("[REPORT] request rejected");
     }
     return true;
+}
+
+void ReportConsoleCommands::poll_pending(
+    Print &out,
+    ConsoleCommandSession &session) {
+    if (!request_session_id_ || session.id != request_session_id_) return;
+
+    const ReportEngineCompletion completion =
+        report_.last_artifact_completion();
+    if (!completion.valid() ||
+        completion.request.ticket.generation != request_wait_generation_ ||
+        completion.request.artifact != request_wait_artifact_) {
+        return;
+    }
+
+    if (completion.outcome.disposition ==
+        OperationDisposition::Succeeded) {
+        out.print("[REPORT] rebuild complete");
+    } else {
+        out.print("[REPORT] rebuild failed");
+    }
+    print_report_sleep_day(out, request_wait_artifact_.sleep_day);
+    if (completion.outcome.disposition !=
+        OperationDisposition::Succeeded) {
+        out.print(" error=");
+        out.print(completion.error[0]
+                      ? completion.error
+                      : "report_build_failed");
+    }
+    out.println();
+
+    request_session_id_ = 0;
+    request_wait_generation_ = 0;
+    request_wait_artifact_ = {};
+}
+
+bool ReportConsoleCommands::pending_output(
+    const ConsoleCommandSession &session) const {
+    return request_session_id_ && request_wait_generation_ &&
+        session.id == request_session_id_;
+}
+
+void ReportConsoleCommands::cancel_pending(
+    ConsoleCommandSession &session) {
+    if (session.id != request_session_id_) return;
+
+    request_session_id_ = 0;
+    request_wait_generation_ = 0;
+    request_wait_artifact_ = {};
+}
+
+void ReportConsoleCommands::stop(ConsoleCommandSession &session) {
+    cancel_pending(session);
 }
 
 }  // namespace aircannect
