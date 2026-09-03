@@ -1370,3 +1370,36 @@
         AirCANnect.ui.message("storageMsg", error.message, false, true);
       }
     }
+
+    AirCANnect.actions.register("storage.up", () => storageUp());
+    AirCANnect.actions.register("storage.upload-choose", () =>
+      storageChooseUpload());
+    AirCANnect.actions.register("storage.refresh", () =>
+      loadStorageList(true));
+    AirCANnect.actions.register("storage.upload-files", (_event, element) =>
+      storageFilesSelected(element));
+    AirCANnect.actions.register("storage.upload-cancel", () =>
+      storageCancelUpload());
+    AirCANnect.actions.register("storage.select-all", (_event, element) =>
+      storageToggleSelectAll(element.checked));
+    AirCANnect.actions.register("storage.delete-selected", () =>
+      storageDeleteSelected());
+    AirCANnect.actions.register("storage.archive-selected", () =>
+      storageArchiveSelected());
+    AirCANnect.actions.register("storage.prev", () => storagePrevPage());
+    AirCANnect.actions.register("storage.next", () => storageNextPage());
+    AirCANnect.actions.register("sync.smb-start", () => smbStartSync());
+    AirCANnect.actions.register("sync.smb-verify", () => smbVerifyRecent());
+    AirCANnect.actions.register("sync.sleephq-start", () =>
+      sleepHqStartSync());
+    AirCANnect.actions.register("sync.sleephq-check", () =>
+      sleepHqCheckAccount());
+    AirCANnect.pages.onLoad("edf", () => {
+      loadEdfOverview();
+      loadSmbSyncStatus();
+      loadSleepHqSyncStatus();
+    });
+    AirCANnect.pages.onLoad("storage", (refresh) => {
+      loadStorageList(refresh);
+      loadSmbSyncStatus();
+    });

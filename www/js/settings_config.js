@@ -2651,3 +2651,54 @@
         if (save) save.disabled = false;
       }
     }
+
+    AirCANnect.actions.register("settings.save", () => saveSettings());
+    AirCANnect.actions.register("settings.revert", () =>
+      revertSettingsDraft());
+    AirCANnect.actions.register("settings.refresh", () => loadSettings(true));
+    AirCANnect.actions.register("wifi.add", () => wifiAdd());
+    AirCANnect.actions.register("wifi.command", (_event, element) =>
+      wifiAction(element.dataset.value));
+    AirCANnect.actions.register("ota.check", () => otaCheckForUpdates());
+    AirCANnect.actions.register("ota.install-update", () =>
+      otaInstallAvailableUpdate());
+    AirCANnect.actions.register("ota.source", (_event, element) =>
+      otaSourceChanged(element.dataset.value));
+    AirCANnect.actions.register("ota.install", () => otaInstall());
+    AirCANnect.actions.register("resmed.transport", () => loadOta());
+    AirCANnect.actions.register("resmed.repository-choose", () =>
+      resmedRepositoryChooseFiles());
+    AirCANnect.actions.register("resmed.dump", () => resmedOtaDump());
+    AirCANnect.actions.register("resmed.repository-refresh", () =>
+      loadResmedRepository(true));
+    AirCANnect.actions.register("resmed.dump-confirm", () =>
+      resmedOtaConfirmBootloader());
+    AirCANnect.actions.register(
+      "resmed.repository-files", (_event, element) =>
+        resmedRepositoryFilesSelected(element));
+    AirCANnect.actions.register("resmed.repository-cancel", () =>
+      resmedRepositoryCancelUpload());
+    AirCANnect.actions.register("resmed.install", () => resmedOtaInstall());
+    AirCANnect.actions.register("resmed.cancel", () => resmedOtaCancel());
+    AirCANnect.actions.register("config.save", () => saveConfig());
+    AirCANnect.actions.register(
+      "config.endpoint-toggle", (_event, element) =>
+        toggleEndpointConfig(element.dataset.value));
+    AirCANnect.actions.register(
+      "config.endpoint-save", (_event, element) =>
+        saveEndpointConfig(element.dataset.value));
+    AirCANnect.actions.register(
+      "config.endpoint-cancel", (_event, element) =>
+        cancelEndpointConfig(element.dataset.value));
+    AirCANnect.actions.register("console.send", () => sendConsoleCommand());
+    AirCANnect.actions.register("console.clear", () => clearConsoleLog());
+    AirCANnect.pages.onLoad("clinical", (refresh) => loadSettings(refresh));
+    AirCANnect.pages.onLoad("wifi", () => loadWifi());
+    AirCANnect.pages.onLoad("ota", () => loadOta());
+    AirCANnect.pages.onLoad("console", (refresh) => {
+      loadConsole();
+      if (!refresh) {
+        setTimeout(() => document.getElementById("consoleInput").focus(), 0);
+      }
+    });
+    AirCANnect.pages.onLoad("config", () => loadConfig());

@@ -43,7 +43,7 @@
         <small id="ver">--</small>
         <small id="built">--</small>
         <a id="updateNotice" class="update-notice" href="#ota" hidden
-           onclick="showTab('ota')"></a>
+           data-action="app.show-tab" data-value="ota"></a>
       </div>
 
       <nav>
@@ -90,7 +90,7 @@
           <span id="uptime">Up: --</span>
           <span id="wifiTop">WiFi: --</span>
           <span id="heap">-- free</span>
-          <button class="btn" onclick="refreshActive()">Refresh</button>
+          <button class="btn" data-action="app.refresh">Refresh</button>
         </div>
       </div>
 
@@ -116,7 +116,7 @@
                 <div class="connection-control">
                   <span class="value" id="as11Connection">--</span>
                   <button class="btn" id="as11PairButton" hidden
-                          onclick="startAs11PairingFromDashboard()">
+                          data-action="as11.pair-dashboard">
                     Pair
                   </button>
                 </div>
@@ -130,10 +130,10 @@
                 <span class="value" id="motorHours">--</span>
               </div>
               <div class="btns">
-                <button class="btn" id="therapyStart" onclick="therapy('start')">
+                <button class="btn" id="therapyStart" data-action="therapy.command" data-value="start">
                   Therapy
                 </button>
-                <button class="btn" id="therapyStop" onclick="therapy('stop')">
+                <button class="btn" id="therapyStop" data-action="therapy.command" data-value="stop">
                   Standby
                 </button>
               </div>
@@ -156,11 +156,11 @@
                 <span class="value" id="timeSync">--</span>
               </div>
               <div class="btns">
-                <button class="btn" onclick="timeAction('ntp_sync')">NTP</button>
-                <button class="btn" onclick="timeAction('sync_to_resmed')">
+                <button class="btn" data-action="time.command" data-value="ntp_sync">NTP</button>
+                <button class="btn" data-action="time.command" data-value="sync_to_resmed">
                   To ResMed
                 </button>
-                <button class="btn" onclick="timeAction('sync_from_resmed')">
+                <button class="btn" data-action="time.command" data-value="sync_from_resmed">
                   From ResMed
                 </button>
               </div>
@@ -302,28 +302,28 @@
             <div class="report-actions">
               <div class="night-picker">
                 <button class="btn np-arrow" id="reportPrevNight"
-                        title="Older night" onclick="stepReportNight(1)">&larr;</button>
+                        title="Older night" data-action="report.step-night" data-value="1">&larr;</button>
                 <button class="btn np-date" id="reportDateBtn"
-                        onclick="toggleReportCalendar()">--</button>
+                        data-action="report.toggle-calendar">--</button>
                 <button class="btn np-arrow" id="reportNextNight"
-                        title="Newer night" onclick="stepReportNight(-1)">&rarr;</button>
+                        title="Newer night" data-action="report.step-night" data-value="-1">&rarr;</button>
                 <button class="btn np-arrow" id="reportLatestNight"
-                        title="Latest night" onclick="selectLatestReportNight()">&#8677;</button>
+                        title="Latest night" data-action="report.latest">&#8677;</button>
                 <div class="np-pop" id="reportCalPop">
                   <div class="np-head">
-                    <button class="btn" onclick="stepReportCalMonth(-1)">&lsaquo;</button>
+                    <button class="btn" data-action="report.step-month" data-value="-1">&lsaquo;</button>
                     <span id="reportCalMonth">--</span>
-                    <button class="btn" onclick="stepReportCalMonth(1)">&rsaquo;</button>
+                    <button class="btn" data-action="report.step-month" data-value="1">&rsaquo;</button>
                   </div>
                   <div class="np-grid" id="reportCalGrid"></div>
                 </div>
               </div>
               <button class="btn np-arrow" id="reportZoomOut"
-                      title="Zoom out" onclick="zoomReportWindow(2)">-</button>
+                      title="Zoom out" data-action="report.zoom" data-value="2">-</button>
               <button class="btn np-arrow" id="reportZoomIn"
-                      title="Zoom in" onclick="zoomReportWindow(0.5)">+</button>
+                      title="Zoom in" data-action="report.zoom" data-value="0.5">+</button>
               <button class="btn" id="reportZoomReset"
-                      onclick="resetReportZoom()">
+                      data-action="report.reset-zoom">
                 Reset Zoom
               </button>
             </div>
@@ -425,16 +425,16 @@
                 <span class="value wrap" id="edfSyncCurrent">--</span>
               </div>
               <div class="btns">
-                <button class="btn primary" id="edfSyncBtn" onclick="smbStartSync()">Sync SMB</button>
-                <button class="btn" id="edfVerifyBtn" onclick="smbVerifyRecent()">Verify Share</button>
-                <button class="btn" id="edfSmbEditBtn" onclick="toggleEndpointConfig('smb')">Edit</button>
+                <button class="btn primary" id="edfSyncBtn" data-action="sync.smb-start">Sync SMB</button>
+                <button class="btn" id="edfVerifyBtn" data-action="sync.smb-verify">Verify Share</button>
+                <button class="btn" id="edfSmbEditBtn" data-action="config.endpoint-toggle" data-value="smb">Edit</button>
               </div>
               <div class="msg" id="edfSmbMsg"></div>
               <div class="endpoint-config" id="edfSmbConfig" hidden>
                 <div id="edfSmbConfigFields"></div>
                 <div class="btns">
-                  <button class="btn primary" id="edfSmbSaveBtn" onclick="saveEndpointConfig('smb')">Save</button>
-                  <button class="btn" onclick="cancelEndpointConfig('smb')">Cancel</button>
+                  <button class="btn primary" id="edfSmbSaveBtn" data-action="config.endpoint-save" data-value="smb">Save</button>
+                  <button class="btn" data-action="config.endpoint-cancel" data-value="smb">Cancel</button>
                 </div>
                 <div class="msg" id="edfSmbConfigMsg"></div>
               </div>
@@ -466,16 +466,16 @@
                 <span class="value wrap" id="edfSleepHqCurrent">--</span>
               </div>
               <div class="btns">
-                <button class="btn primary" id="edfSleepHqSyncBtn" onclick="sleepHqStartSync()">Sync SleepHQ</button>
-                <button class="btn" id="edfSleepHqCheckBtn" onclick="sleepHqCheckAccount()">Check Account</button>
-                <button class="btn" id="edfSleepHqEditBtn" onclick="toggleEndpointConfig('sleephq')">Edit</button>
+                <button class="btn primary" id="edfSleepHqSyncBtn" data-action="sync.sleephq-start">Sync SleepHQ</button>
+                <button class="btn" id="edfSleepHqCheckBtn" data-action="sync.sleephq-check">Check Account</button>
+                <button class="btn" id="edfSleepHqEditBtn" data-action="config.endpoint-toggle" data-value="sleephq">Edit</button>
               </div>
               <div class="msg" id="edfSleepHqMsg"></div>
               <div class="endpoint-config" id="edfSleepHqConfig" hidden>
                 <div id="edfSleepHqConfigFields"></div>
                 <div class="btns">
-                  <button class="btn primary" id="edfSleepHqSaveBtn" onclick="saveEndpointConfig('sleephq')">Save</button>
-                  <button class="btn" onclick="cancelEndpointConfig('sleephq')">Cancel</button>
+                  <button class="btn primary" id="edfSleepHqSaveBtn" data-action="config.endpoint-save" data-value="sleephq">Save</button>
+                  <button class="btn" data-action="config.endpoint-cancel" data-value="sleephq">Cancel</button>
                 </div>
                 <div class="msg" id="edfSleepHqConfigMsg"></div>
               </div>
@@ -492,11 +492,11 @@
             <div class="storage-toolbar">
               <div class="storage-path" id="storagePath">/</div>
               <div class="btns" style="margin-top: 0">
-                <button class="btn" id="storageUpBtn" onclick="storageUp()">Up</button>
-                <button class="btn primary" id="storageUploadBtn" onclick="storageChooseUpload()">Upload</button>
-                <button class="btn" onclick="loadStorageList(true)">Refresh</button>
+                <button class="btn" id="storageUpBtn" data-action="storage.up">Up</button>
+                <button class="btn primary" id="storageUploadBtn" data-action="storage.upload-choose">Upload</button>
+                <button class="btn" data-action="storage.refresh">Refresh</button>
                 <input id="storageUploadInput" type="file" multiple hidden
-                  onchange="storageFilesSelected(this)">
+                  data-change-action="storage.upload-files">
               </div>
             </div>
             <div class="storage-upload-progress" id="storageUploadProgress" hidden>
@@ -506,22 +506,22 @@
               </div>
               <progress id="storageUploadBar" max="1" value="0"></progress>
               <button class="btn" id="storageUploadCancelBtn"
-                onclick="storageCancelUpload()">Cancel</button>
+                data-action="storage.upload-cancel">Cancel</button>
             </div>
             <div class="storage-selection-bar">
               <label class="storage-select">
-                <input type="checkbox" id="storageSelectAll" onchange="storageToggleSelectAll(this.checked)">
+                <input type="checkbox" id="storageSelectAll" data-change-action="storage.select-all">
               </label>
               <div class="storage-selection-label">Select all</div>
               <div class="btns" style="margin-top: 0">
-                <button class="btn danger" id="storageDeleteBtn" onclick="storageDeleteSelected()">Delete Selected</button>
-                <button class="btn primary" id="storageArchiveBtn" onclick="storageArchiveSelected()">Download Selected</button>
+                <button class="btn danger" id="storageDeleteBtn" data-action="storage.delete-selected">Delete Selected</button>
+                <button class="btn primary" id="storageArchiveBtn" data-action="storage.archive-selected">Download Selected</button>
               </div>
             </div>
             <div class="storage-list" id="storageList"></div>
             <div class="btns">
-              <button class="btn" id="storagePrevBtn" onclick="storagePrevPage()">Prev</button>
-              <button class="btn" id="storageNextBtn" onclick="storageNextPage()">Next</button>
+              <button class="btn" id="storagePrevBtn" data-action="storage.prev">Prev</button>
+              <button class="btn" id="storageNextBtn" data-action="storage.next">Next</button>
             </div>
             <div class="msg" id="storageMsg"></div>
           </div>
@@ -574,7 +574,7 @@
               </div>
               <div class="row">
                 <label>Advertising Mode</label>
-                <select id="oxiAdvertiseMode" onchange="saveOximetryAdvertiseConfig()">
+                <select id="oxiAdvertiseMode" data-change-action="oximetry.advertise-config">
                   <option value="auto">Auto</option>
                   <option value="manual">Manual</option>
                 </select>
@@ -588,16 +588,16 @@
                 <span class="value" id="oxiTabPeer">--</span>
               </div>
               <div class="btns">
-                <button class="btn primary" id="oxiPairBtn" onclick="oxiPairToggle()">
+                <button class="btn primary" id="oxiPairBtn" data-action="oximetry.pair-toggle">
                   Pair AirSense
                 </button>
-                <button class="btn" id="oxiAdvStartBtn" onclick="oxiAction('advertise_start')">
+                <button class="btn" id="oxiAdvStartBtn" data-action="oximetry.command" data-value="advertise_start">
                   Advertise
                 </button>
-                <button class="btn" id="oxiAdvStopBtn" onclick="oxiAction('advertise_stop')">
+                <button class="btn" id="oxiAdvStopBtn" data-action="oximetry.command" data-value="advertise_stop">
                   Stop Adv
                 </button>
-                <button class="btn danger" id="oxiForgetBtn" onclick="oxiForget()">
+                <button class="btn danger" id="oxiForgetBtn" data-action="oximetry.forget">
                   Forget AirSense
                 </button>
               </div>
@@ -611,10 +611,10 @@
               <span class="badge" id="oxiSensorBadge">Idle</span>
             </div>
             <div class="btns">
-              <button class="btn primary" id="oxiSensorScanBtn" onclick="oxiSensorScan()">
+              <button class="btn primary" id="oxiSensorScanBtn" data-action="oximetry.sensor-scan">
                 Scan
               </button>
-              <button class="btn" id="oxiSensorDisconnectBtn" onclick="oxiSensorDisconnect()">
+              <button class="btn" id="oxiSensorDisconnectBtn" data-action="oximetry.sensor-disconnect">
                 Disconnect
               </button>
             </div>
@@ -642,18 +642,18 @@
             ></div>
             <div id="settingsFields"></div>
             <div class="btns">
-              <button class="btn primary" id="settingsSave" onclick="saveSettings()">
+              <button class="btn primary" id="settingsSave" data-action="settings.save">
                 Save
               </button>
               <button
                 class="btn"
                 id="settingsRevert"
                 style="display: none"
-                onclick="revertSettingsDraft()"
+                data-action="settings.revert"
               >
                 Revert
               </button>
-              <button class="btn" onclick="loadSettings(true)">Refresh</button>
+              <button class="btn" data-action="settings.refresh">Refresh</button>
             </div>
             <div class="msg" id="settingsMsg"></div>
           </div>
@@ -676,11 +676,11 @@
               <input id="wifiPass" type="password">
             </div>
             <div class="btns">
-              <button class="btn primary" onclick="wifiAdd()">Add</button>
-              <button class="btn" onclick="wifiAction('reconnect')">
+              <button class="btn primary" data-action="wifi.add">Add</button>
+              <button class="btn" data-action="wifi.command" data-value="reconnect">
                 Reconnect
               </button>
-              <button class="btn danger" onclick="wifiAction('clear')">
+              <button class="btn danger" data-action="wifi.command" data-value="clear">
                 Clear
               </button>
             </div>
@@ -701,9 +701,9 @@
             </div>
             <div class="btns">
               <button class="btn" id="otaCheckUpdate"
-                      onclick="otaCheckForUpdates()">Check for updates</button>
+                      data-action="ota.check">Check for updates</button>
               <button class="btn primary" id="otaInstallUpdate" hidden
-                      onclick="otaInstallAvailableUpdate()">Install update</button>
+                      data-action="ota.install-update">Install update</button>
             </div>
             <div class="msg" id="otaUpdateMsg"></div>
             <div class="section-title">Install firmware</div>
@@ -714,19 +714,19 @@
             <div class="row">
               <label>Firmware URL</label>
               <input id="otaUrl" type="url" placeholder="https://..."
-                     oninput="otaSourceChanged('url')">
+                     data-input-action="ota.source" data-value="url">
             </div>
             <div class="row">
               <label>Firmware image</label>
               <input id="otaFile" type="file" accept=".bin,.zlib,.deflate"
-                     onchange="otaSourceChanged('file')">
+                     data-change-action="ota.source" data-value="file">
             </div>
             <div class="progress" id="otaUploadProgress">
               <div class="bar" id="otaUploadBar"></div>
             </div>
             <div class="btns">
               <button class="btn primary" id="otaInstall"
-                      onclick="otaInstall()">Install</button>
+                      data-action="ota.install">Install</button>
             </div>
             <div class="msg" id="otaMsg"></div>
           </div>
@@ -747,7 +747,7 @@
             </div>
             <div class="row">
               <label>Installation method</label>
-              <select id="resmedOtaTransport" onchange="loadOta()">
+              <select id="resmedOtaTransport" data-change-action="resmed.transport">
                 <option value="rpc" selected>Native RPC</option>
                 <option value="service">Patched Bootloader</option>
               </select>
@@ -769,19 +769,19 @@
               </span>
               <div class="btns">
                 <button class="btn primary" id="resmedRepositoryAddBtn"
-                        onclick="resmedRepositoryChooseFiles()">Add</button>
+                        data-action="resmed.repository-choose">Add</button>
                 <button class="btn" id="resmedOtaDumpBtn"
-                        onclick="resmedOtaDump()">Dump current</button>
+                        data-action="resmed.dump">Dump current</button>
                 <button class="btn" id="resmedRepositoryRefreshBtn"
-                        onclick="loadResmedRepository(true)">Refresh</button>
+                        data-action="resmed.repository-refresh">Refresh</button>
                 <button class="btn danger" id="resmedOtaDumpConfirmBtn"
-                        hidden onclick="resmedOtaConfirmBootloader()">
+                        hidden data-action="resmed.dump-confirm">
                   Install patched bootloader and retry
                 </button>
               </div>
               <input id="resmedRepositoryInput" type="file" multiple hidden
                      accept=".abc,.bin,.img"
-                     onchange="resmedRepositoryFilesSelected(this)">
+                     data-change-action="resmed.repository-files">
             </div>
             <div class="storage-upload-progress"
                  id="resmedRepositoryUploadProgress" hidden>
@@ -792,7 +792,7 @@
               <progress id="resmedRepositoryUploadBar" max="1" value="0">
               </progress>
               <button class="btn" id="resmedRepositoryUploadCancelBtn"
-                      onclick="resmedRepositoryCancelUpload()">Cancel</button>
+                      data-action="resmed.repository-cancel">Cancel</button>
             </div>
             <div class="storage-list" id="resmedRepositoryList">
               <div class="storage-empty">Loading</div>
@@ -808,14 +808,14 @@
             </div>
             <div class="btns">
               <button class="btn primary" id="resmedOtaInstallBtn"
-                      onclick="resmedOtaInstall()">
+                      data-action="resmed.install">
                 Install
               </button>
               <button
                 class="btn danger"
                 id="resmedOtaCancelBtn"
                 style="display: none"
-                onclick="resmedOtaCancel()"
+                data-action="resmed.cancel"
               >
                 Cancel
               </button>
@@ -829,7 +829,7 @@
             <h3>Device Config</h3>
             <div id="configFields"></div>
             <div class="btns">
-              <button class="btn primary" onclick="saveConfig()">Save</button>
+              <button class="btn primary" data-action="config.save">Save</button>
             </div>
             <div class="msg" id="configMsg"></div>
           </div>
@@ -861,10 +861,10 @@
                 type="text"
                 style="flex: 1; width: auto; font-family: 'SF Mono', Consolas, monospace"
                 placeholder="command"
-                onkeydown="if (event.key === 'Enter') sendConsoleCommand()"
+                data-enter-action="console.send"
               >
-              <button class="btn primary" onclick="sendConsoleCommand()">Send</button>
-              <button class="btn" onclick="clearConsoleLog()">Clear</button>
+              <button class="btn primary" data-action="console.send">Send</button>
+              <button class="btn" data-action="console.clear">Clear</button>
             </div>
           </div>
         </section>

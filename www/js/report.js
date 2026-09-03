@@ -1,3 +1,4 @@
+(() => {
     function fmtDuration(seconds) {
       const value = Number(seconds);
       if (!Number.isFinite(value) || value < 0) return "";
@@ -2814,3 +2815,156 @@
     async function refreshReportSummary(loadNight) {
       await loadReportSummary(loadNight !== false);
     }
+
+    AirCANnect.actions.register("report.step-night", (_event, element) =>
+      stepReportNight(Number(element.dataset.value)));
+    AirCANnect.actions.register("report.toggle-calendar", () =>
+      toggleReportCalendar());
+    AirCANnect.actions.register("report.latest", () =>
+      selectLatestReportNight());
+    AirCANnect.actions.register("report.step-month", (_event, element) =>
+      stepReportCalMonth(Number(element.dataset.value)));
+    AirCANnect.actions.register("report.zoom", (_event, element) =>
+      zoomReportWindow(Number(element.dataset.value)));
+    AirCANnect.actions.register("report.reset-zoom", () => resetReportZoom());
+    AirCANnect.pages.onLoad("report", (refresh) => {
+      if (refresh) {
+        refreshReportSummary(true);
+      } else {
+        loadReportSummary(true);
+        scheduleReportDrawAfterReveal();
+      }
+    });
+    AirCANnect.pages.onLeave("report", () => cancelReportRequests());
+    window.addEventListener("resize", () => scheduleReportDraw());
+
+    let reportSummary = null;
+    let reportPollTimer = null;
+    let reportLoadToken = 0;
+    let reportLoadAbortController = null;
+    let reportSummaryEtag = "";
+    let reportResult = null;
+    const reportResultClientCache = new Map();
+    let reportSeries = {};
+    let reportEvents = [];
+    const reportHiddenSessions = new Set();
+    let reportDrawItems = [];
+    let reportDrawPending = false;
+    let reportDrawRetryCount = 0;
+    let reportResizeObserver = null;
+    const reportPlotClientCache = new Map();
+    let reportZoom = null;
+    let reportBaseSeries = {};
+    let reportBaseEvents = [];
+    let reportBasePlotIndex = null;
+    const reportBaseLoadedCharts = new Set();
+    const reportBaseChartPromises = new Map();
+    let reportCurrentNightId = "";
+    let reportCurrentRevision = "";
+    let reportCurrentPlotEtag = "";
+    const reportRangeCache = new Map();
+    let reportRangeActiveKey = "";
+    let reportRangeToken = 0;
+    let reportRangeAbortController = null;
+    let reportHoverTime = null;
+    let reportDrag = null;
+    let reportSelectedNightId = "";
+    let reportCalView = null;
+
+    const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
+    const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
+    const REPORT_PLOT_CLIENT_CACHE_MAX = 32;
+    const REPORT_RANGE_CACHE_MAX = 24;
+    const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
+    const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
+    const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
+    const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
+    const REPORT_POLL_DELAY_MS = 300;
+    const REPORT_RANGE_POLL_DELAY_MS = 250;
+    const REPORT_CHART_PREFERENCES_KEY = "aircannect.reportCharts.v1";
+    const reportChartDefs = [
+      {key: "events", title: "Event Flags", type: "events"},
+      {key: "flow", title: "Flow", color: "#8b5cf6", unit: "L/min"},
+      {
+        key: "pressure",
+        title: "Pressure",
+        unit: "cmH2O",
+        series: [
+          {key: "inspiratory_pressure", label: "IPAP", color: "#22c55e"},
+          {key: "expiratory_pressure", label: "EPAP", color: "#f97316"},
+        ],
+      },
+      {key: "leak", title: "Leak", color: "#fb923c", unit: "L/min"},
+      {
+        key: "flow_limitation",
+        title: "Flow Limit",
+        color: "#ec4899",
+        unit: "",
+      },
+      {
+        key: "minute_ventilation",
+        title: "Minute Vent",
+        color: "#a78bfa",
+        unit: "L/min",
+      },
+      {key: "snore", title: "Snore", color: "#38bdf8", unit: ""},
+      {
+        key: "tidal_volume",
+        title: "Tidal Volume",
+        color: "#c084fc",
+        unit: "L",
+      },
+      {
+        key: "mask_pressure",
+        title: "Mask Pressure",
+        color: "#22d3ee",
+        unit: "cmH2O",
+      },
+      {
+        key: "inspiratory_duration",
+        title: "Insp. Duration",
+        color: "#f59e0b",
+        unit: "s",
+      },
+      {
+        key: "respiratory_rate",
+        title: "Resp. Rate",
+        color: "#06b6d4",
+        unit: "/min",
+      },
+      {key: "ie_ratio", title: "I:E", color: "#f43f5e", unit: ""},
+      {
+        key: "spo2",
+        title: "SpO2",
+        color: "#22c55e",
+        unit: "%",
+        optional: true,
+      },
+      {
+        key: "pulse",
+        title: "Pulse",
+        color: "#ef4444",
+        unit: "bpm",
+        optional: true,
+      },
+    ];
+    let reportChartPreferences = {
+      order: reportChartDefs.map((definition) => definition.key),
+      collapsed: new Set(),
+    };
+    const reportEventDefs = [
+      {code: 7, key: "CSR", label: "CSR", color: "#2563eb"},
+      {code: 3, key: "CA", label: "Central Apnea", color: "#d946ef"},
+      {code: 4, key: "OA", label: "Obstructive Apnea", color: "#22d3ee"},
+      {code: 5, key: "UA", label: "Apnea", color: "#a78bfa"},
+      {code: 2, key: "H", label: "Hypopnea", color: "#fb923c"},
+      {code: 6, key: "Ar", label: "Arousal", color: "#cbd5e1"},
+    ];
+    const reportEventCountFields = [
+      {key: "CA", field: "ca_count"},
+      {key: "OA", field: "oa_count"},
+      {key: "UA", field: "ua_count"},
+      {key: "H", field: "hypopnea_count"},
+      {key: "Ar", field: "arousal_count"},
+    ];
+})();

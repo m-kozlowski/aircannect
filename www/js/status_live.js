@@ -1239,3 +1239,27 @@
         AirCANnect.ui.message("oxiTabMsg", error.message, false);
       }
     }
+
+    AirCANnect.actions.register("as11.pair-dashboard", () =>
+      startAs11PairingFromDashboard());
+    AirCANnect.actions.register("therapy.command", (_event, element) =>
+      therapy(element.dataset.value));
+    AirCANnect.actions.register("time.command", (_event, element) =>
+      timeAction(element.dataset.value));
+    AirCANnect.actions.register("oximetry.advertise-config", () =>
+      saveOximetryAdvertiseConfig());
+    AirCANnect.actions.register("oximetry.pair-toggle", () => oxiPairToggle());
+    AirCANnect.actions.register("oximetry.command", (_event, element) =>
+      oxiAction(element.dataset.value));
+    AirCANnect.actions.register("oximetry.forget", () => oxiForget());
+    AirCANnect.actions.register("oximetry.sensor-scan", () => oxiSensorScan());
+    AirCANnect.actions.register("oximetry.sensor-disconnect", () =>
+      oxiSensorDisconnect());
+    AirCANnect.pages.onLoad("dash", () => loadStatus());
+    AirCANnect.pages.onLoad("edf", () => loadStatus());
+    AirCANnect.pages.onLoad("oxi", () => {
+      loadStatus();
+      loadOximetrySensors();
+    });
+    window.addEventListener("resize", () => updateCharts());
+    updateCharts();

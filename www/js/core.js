@@ -27,42 +27,14 @@
     }
 
     function loadTabContent(id, refresh) {
-      if (id === "dash") loadStatus();
-      if (id === "report") {
-        if (refresh) {
-          refreshReportSummary(true);
-        } else {
-          loadReportSummary(true);
-          scheduleReportDrawAfterReveal();
-        }
-      }
-      if (id === "edf") {
-        loadStatus();
-        loadEdfOverview();
-        loadSmbSyncStatus();
-        loadSleepHqSyncStatus();
-      }
-      if (id === "storage") {
-        loadStorageList(refresh);
-        loadSmbSyncStatus();
-      }
-      if (id === "oxi") {
-        loadStatus();
-        loadOximetrySensors();
-      }
-      if (id === "clinical") loadSettings(refresh);
-      if (id === "wifi") loadWifi();
-      if (id === "ota") loadOta();
-      if (id === "console") {
-        loadConsole();
-        if (!refresh) {
-          setTimeout(() => document.getElementById("consoleInput").focus(), 0);
-        }
-      }
-      if (id === "config") loadConfig();
+      AirCANnect.pages.load(id, refresh);
     }
 
     function showTab(id) {
+      const previousPane = document.querySelector(".pane.active");
+      const previous = previousPane ? previousPane.id.replace(/^p-/, "") : "";
+      if (previous && previous !== id) AirCANnect.pages.leave(previous);
+
       Object.keys(tabs).forEach((tab) => {
         document.getElementById("p-" + tab).classList.toggle("active", tab === id);
       });
@@ -73,7 +45,6 @@
       document.getElementById("title").textContent = tabs[id];
       location.hash = id;
       updateLiveViewState(id);
-      if (id !== "report") cancelReportRequests();
 
       loadTabContent(id, false);
     }
@@ -118,3 +89,9 @@
       const minutes = ((seconds % 3600) / 60) | 0;
       return (days ? days + "d " : "") + hours + "h " + minutes + "m";
     }
+
+    AirCANnect.actions.register("app.show-tab", (event, element) => {
+      event.preventDefault();
+      showTab(element.dataset.value);
+    });
+    AirCANnect.actions.register("app.refresh", () => refreshActive());
