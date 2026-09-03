@@ -2466,29 +2466,6 @@
       }
     }
 
-    function configFieldApplied(data, key, value) {
-      if (!data) return false;
-      const field = configFieldByKey[key];
-      if (field && field.type === "keybindings") {
-        return JSON.stringify(normalizedKeybindingOverrides(data[key])) ===
-          JSON.stringify(normalizedKeybindingOverrides(value));
-      }
-      if (field && field.secret) {
-        if (value === "********") return true;
-        const setKey = key + "_set";
-        const expectedSet = String(value || "").length > 0;
-        return !!data[setKey] === expectedSet;
-      }
-      if (typeof value === "boolean") return !!data[key] === value;
-      if (typeof value === "number") return Number(data[key]) === value;
-      return String(data[key] || "") === String(value || "");
-    }
-
-    function configChangesApplied(data, changes) {
-      return Object.keys(changes).every((key) =>
-        configFieldApplied(data, key, changes[key]));
-    }
-
     async function fetchConfigSections(sectionIds) {
       await ensureConfigSchema();
       const parts = await Promise.all(sectionIds.map((sectionId) =>
@@ -2505,17 +2482,35 @@
       return ids;
     }
 
-    async function waitForConfigChanges(changes, sectionIds) {
-      const started = Date.now();
-      let latest = null;
-      while (Date.now() - started < 5000) {
-        const fetched = sectionIds && sectionIds.length ?
-          await fetchConfigSections(sectionIds) : await fetchConfigData();
-        latest = Object.assign({}, configData || {}, fetched);
-        if (configChangesApplied(latest, changes)) return latest;
-        await new Promise(resolve => setTimeout(resolve, 250));
+    function waitForConfigUpdate(revision) {
+      const expected = Number(revision || 0);
+      if (!expected) {
+        return Promise.reject(new Error("missing config update revision"));
       }
-      return latest;
+
+      return new Promise((resolve, reject) => {
+        let timeout = null;
+        const finish = (data) => {
+          if (!data || Number(data.revision || 0) !== expected) return false;
+
+          window.removeEventListener(CONFIG_UPDATE_EVENT, onUpdate);
+          if (timeout) clearTimeout(timeout);
+          if (data.ok) {
+            resolve(data);
+          } else {
+            reject(new Error(data.error || "config update failed"));
+          }
+          return true;
+        };
+        const onUpdate = (event) => finish(event.detail);
+
+        if (finish(configUpdateData)) return;
+        window.addEventListener(CONFIG_UPDATE_EVENT, onUpdate);
+        timeout = setTimeout(() => {
+          window.removeEventListener(CONFIG_UPDATE_EVENT, onUpdate);
+          reject(new Error("config update timed out"));
+        }, 5000);
+      });
     }
 
     function normalizeSmbEndpoint(value) {
@@ -2626,31 +2621,13 @@
     }
 
     async function postConfigChanges(changes) {
-      await ensureConfigSchema();
-      const sections = {};
-      Object.keys(changes).forEach((key) => {
-        const section = configSectionByKey[key] || "device";
-        if (!sections[section]) sections[section] = {};
-        sections[section][key] = changes[key];
+      const response = await api("/api/config", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(changes),
       });
-      const sectionOrder = configSections
-        .map((section) => section.id)
-        .filter((id) => id !== "access");
-      sectionOrder.push("access");
-
-      let queued = false;
-      for (const section of sectionOrder) {
-        if (!sections[section]) continue;
-        const response = await api("/api/config/" +
-          encodeURIComponent(section), {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(sections[section]),
-        });
-        const data = await response.json();
-        queued = queued || !!data.queued || data.result === "queued";
-      }
-      return queued;
+      const data = await response.json();
+      return Number(data.revision || 0);
     }
 
     async function saveConfigFields(root, messageId, reload) {
@@ -2665,23 +2642,16 @@
 
       try {
         const sectionIds = configSectionsForChanges(changes);
-        const queued = await postConfigChanges(changes);
+        const revision = await postConfigChanges(changes);
+        await waitForConfigUpdate(revision);
 
-        if (queued) {
-          const latest = await waitForConfigChanges(changes, sectionIds);
-          if (latest) {
-            configData = Object.assign({}, configData || {}, latest);
-          }
-          if (reload) await reload();
-          msg(messageId,
-            latest && configChangesApplied(latest, changes) ?
-              "Saved" : "Config update queued", true);
+        if (reload) {
+          await reload();
         } else {
           const latest = await fetchConfigSections(sectionIds);
           configData = Object.assign({}, configData || {}, latest);
-          if (reload) await reload();
-          msg(messageId, "Saved", true);
         }
+        msg(messageId, "Saved", true);
         return true;
       } catch (error) {
         msg(messageId, error.message, false);

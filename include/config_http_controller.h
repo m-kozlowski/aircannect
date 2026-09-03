@@ -4,6 +4,7 @@
 #include <freertos/semphr.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <atomic>
 #include <string>
 
 #include "app_config_registry.h"
@@ -25,6 +26,12 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
+    uint32_t update_revision() const {
+        return completed_update_revision_;
+    }
+    bool copy_update_snapshot(LargeTextBuffer &out,
+                              uint32_t &revision) const;
+
 private:
     enum class CommandKind : uint8_t {
         Update,
@@ -33,6 +40,7 @@ private:
 
     struct Command {
         CommandKind kind = CommandKind::Update;
+        uint32_t update_revision = 0;
         std::string body;
         std::string onboarding_user;
         std::string onboarding_password;
@@ -42,10 +50,15 @@ private:
 
     static constexpr size_t SectionCount = AC_CONFIG_GROUP_COUNT;
     static constexpr size_t CommandQueueDepth = 4;
-    static constexpr size_t CommandsPerPoll = 2;
+    static constexpr size_t CommandsPerPoll = 1;
 
     bool enqueue(Command &&command);
     void execute(Command &command);
+    uint32_t next_update_revision();
+    void publish_update_result(uint32_t update_revision,
+                               bool persisted,
+                               uint32_t config_revision,
+                               const char *error = nullptr);
     bool publish_snapshots();
 
     void send_config(AsyncWebServerRequest *request,
@@ -64,7 +77,10 @@ private:
     LargeTextBuffer all_json_;
     LargeTextBuffer section_json_[SectionCount];
     LargeTextBuffer schema_json_;
+    LargeTextBuffer update_json_;
     uint32_t published_revision_ = 0;
+    std::atomic<uint32_t> next_update_revision_{1};
+    uint32_t completed_update_revision_ = 0;
 };
 
 }  // namespace aircannect

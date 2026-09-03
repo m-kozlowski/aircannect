@@ -9,6 +9,8 @@
     let settingsCatalogPromise = null;
     let settingsCatalogRevision = 0;
     let configData = null;
+    let configUpdateData = null;
+    const CONFIG_UPDATE_EVENT = "aircannect-config-update";
     let configSections = [];
     let as11BlePairTimer = null;
     let as11BlePairStartDeadline = 0;

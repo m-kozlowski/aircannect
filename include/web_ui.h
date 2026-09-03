@@ -18,6 +18,7 @@ class AsyncWebServer;
 
 namespace aircannect {
 
+class ConfigHttpController;
 class HttpRouteModule;
 class ExportHttpController;
 class LiveHttpController;
@@ -42,6 +43,7 @@ struct WebUiMemoryStatus {
     bool started = false;
     WebUiBufferMemoryStatus status;
     WebUiBufferMemoryStatus exports;
+    WebUiBufferMemoryStatus config;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -58,6 +60,7 @@ public:
     // lifecycle
     bool begin(StatusHttpController &status,
                ExportHttpController &exports,
+               ConfigHttpController &config_http,
                LiveHttpController &live,
                ConsoleCommandRouter &console_router,
                const AppConfigData &config,
@@ -133,6 +136,7 @@ private:
     // snapshot masks
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
     static constexpr uint16_t SNAPSHOT_EXPORTS = 1u << 1;
+    static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 2;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
     static constexpr uint16_t SNAPSHOT_PERIODIC = SNAPSHOT_ALL;
@@ -140,6 +144,7 @@ private:
     // subsystem owners
     StatusHttpController *status_ = nullptr;
     ExportHttpController *exports_ = nullptr;
+    ConfigHttpController *config_ = nullptr;
     LiveHttpController *live_ = nullptr;
     ConsoleCommandRouter *console_router_ = nullptr;
 
@@ -176,6 +181,8 @@ private:
     LargeTextBuffer next_status_json_;
     LargeTextBuffer cached_exports_json_;
     LargeTextBuffer next_exports_json_;
+    LargeTextBuffer cached_config_json_;
+    LargeTextBuffer next_config_json_;
 
     // cached auth config
     bool cached_http_auth_required_ = true;
@@ -190,6 +197,8 @@ private:
 
     // snapshot state
     uint32_t observed_status_revision_ = 0;
+    uint32_t observed_config_revision_ = 0;
+    uint32_t sent_config_revision_ = 0;
     uint32_t observed_live_generation_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;

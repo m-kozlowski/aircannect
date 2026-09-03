@@ -7,6 +7,7 @@
 
 #include "auth_utils.h"
 #include "board.h"
+#include "config_http_controller.h"
 #include "debug_log.h"
 #include "export_http_controller.h"
 #include "http_route_module.h"
@@ -50,6 +51,7 @@ void send_web_ui(AsyncWebServerRequest *request) {
 
 bool WebUI::begin(StatusHttpController &status,
                   ExportHttpController &exports,
+                  ConfigHttpController &config_http,
                   LiveHttpController &live,
                   ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
@@ -60,6 +62,7 @@ bool WebUI::begin(StatusHttpController &status,
     stop();
     status_ = &status;
     exports_ = &exports;
+    config_ = &config_http;
     live_ = &live;
     console_router_ = &console_router;
 
@@ -116,6 +119,8 @@ void WebUI::reserve_cached_json() {
     next_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     cached_exports_json_.reserve(WEB_EXPORT_STATUS_JSON_RESERVE);
     next_exports_json_.reserve(WEB_EXPORT_STATUS_JSON_RESERVE);
+    cached_config_json_.reserve(256);
+    next_config_json_.reserve(256);
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -162,6 +167,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     }
     out.status = capture(cached_status_json_);
     out.exports = capture(cached_exports_json_);
+    out.config = capture(cached_config_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -215,12 +221,15 @@ void WebUI::stop() {
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_status_revision_ = 0;
+    observed_config_revision_ = 0;
+    sent_config_revision_ = 0;
     observed_live_generation_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
     status_ = nullptr;
     exports_ = nullptr;
+    config_ = nullptr;
     live_ = nullptr;
     console_router_ = nullptr;
     started_ = false;
@@ -232,6 +241,10 @@ void WebUI::poll(PollCheckpoint checkpoint) {
 
     if (status_ && observed_status_revision_ != status_->revision()) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
+    }
+    if (config_ &&
+        observed_config_revision_ != config_->update_revision()) {
+        mark_snapshots_dirty(SNAPSHOT_CONFIG);
     }
 
     if (console_router_ && web_console_.pending_output(*console_router_)) {
@@ -285,6 +298,17 @@ void WebUI::poll(PollCheckpoint checkpoint) {
             send_sse_to_clients(cached_exports_json_.c_str(), "exports",
                                 event_id, false) == SseSendResult::Failed) {
             sse_backpressure = true;
+        }
+
+        if (cached_config_json_.length() &&
+            sent_config_revision_ != observed_config_revision_) {
+            const SseSendResult config_result = send_sse_to_clients(
+                cached_config_json_.c_str(), "config", event_id, false);
+            if (config_result == SseSendResult::Failed) {
+                sse_backpressure = true;
+            } else if (config_result == SseSendResult::Sent) {
+                sent_config_revision_ = observed_config_revision_;
+            }
         }
 
         const char *stream_payload = nullptr;
@@ -721,7 +745,7 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
 
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
-    if (mask & SNAPSHOT_STATUS) request_sse_push();
+    if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG)) request_sse_push();
 }
 
 void WebUI::request_sse_push() {
@@ -831,6 +855,7 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
 
     next_status_json_.clear();
     next_exports_json_.clear();
+    next_config_json_.clear();
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -848,6 +873,15 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.exports_copy");
     }
+    if (rebuild_mask & SNAPSHOT_CONFIG) {
+        uint32_t revision = observed_config_revision_;
+        if (config_ &&
+            config_->copy_update_snapshot(next_config_json_, revision)) {
+            observed_config_revision_ = revision;
+            completed_mask |= SNAPSHOT_CONFIG;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.config_copy");
+    }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
@@ -858,6 +892,9 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     }
     if (completed_mask & SNAPSHOT_EXPORTS) {
         cached_exports_json_.swap(next_exports_json_);
+    }
+    if (completed_mask & SNAPSHOT_CONFIG) {
+        cached_config_json_.swap(next_config_json_);
     }
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;

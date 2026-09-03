@@ -44,6 +44,7 @@ void print_web_memory_detail(Print &out, WebUI &web_ui) {
 
     print_web_buffer_memory(out, "status", web.status, total_capacity);
     print_web_buffer_memory(out, "exports", web.exports, total_capacity);
+    print_web_buffer_memory(out, "config", web.config, total_capacity);
     print_web_buffer_memory(out, "stream", web.stream, total_capacity);
     print_web_buffer_memory(out, "console", web.console, total_capacity);
     print_web_buffer_memory(out, "live", web.live, total_capacity);

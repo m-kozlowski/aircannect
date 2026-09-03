@@ -26,6 +26,7 @@ static constexpr size_t CONFIG_JSON_RESERVE_LARGE_SECTION = 2048;
 static constexpr size_t CONFIG_JSON_RESERVE_SYNC_SECTION = 640;
 static constexpr size_t CONFIG_JSON_RESERVE_SMALL_SECTION = 384;
 static constexpr size_t CONFIG_SCHEMA_JSON_RESERVE = 12 * 1024;
+static constexpr size_t CONFIG_UPDATE_JSON_RESERVE = 192;
 
 size_t section_index(const char *section) {
     constexpr size_t count = AC_CONFIG_GROUP_COUNT;
@@ -445,6 +446,7 @@ bool ConfigHttpController::begin(ConfigService &config) {
     schema_json_.reserve(CONFIG_SCHEMA_JSON_RESERVE);
     build_schema_json(schema_json_);
     if (schema_json_.overflowed()) return false;
+    if (!update_json_.reserve(CONFIG_UPDATE_JSON_RESERVE)) return false;
 
     return publish_snapshots();
 }
@@ -530,10 +532,23 @@ void ConfigHttpController::execute(Command &command) {
     }
 
     JsonDocument doc;
-    if (deserializeJson(doc, command.body.c_str())) return;
+    if (deserializeJson(doc, command.body.c_str())) {
+        publish_update_result(command.update_revision, false,
+                              config_->revision(), "bad_json");
+        return;
+    }
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
-    if (root.isNull() || !config_->begin_transaction()) return;
+    if (root.isNull()) {
+        publish_update_result(command.update_revision, false,
+                              config_->revision(), "bad_json");
+        return;
+    }
+    if (!config_->begin_transaction()) {
+        publish_update_result(command.update_revision, false,
+                              config_->revision(), "transaction_busy");
+        return;
+    }
 
     for (JsonPairConst pair : root) {
         const char *key = pair.key().c_str();
@@ -581,6 +596,42 @@ void ConfigHttpController::execute(Command &command) {
         Log::logf(CAT_CONFIG, LOG_WARN,
                   "failed to persist one or more web config values\n");
     }
+    publish_update_result(command.update_revision, result.persisted,
+                          result.revision,
+                          result.persisted ? nullptr : "persist_failed");
+}
+
+uint32_t ConfigHttpController::next_update_revision() {
+    uint32_t revision = next_update_revision_.fetch_add(
+        1, std::memory_order_relaxed);
+    if (revision != 0) return revision;
+
+    revision = next_update_revision_.fetch_add(1, std::memory_order_relaxed);
+    return revision == 0 ? 1 : revision;
+}
+
+void ConfigHttpController::publish_update_result(
+    uint32_t update_revision,
+    bool persisted,
+    uint32_t config_revision,
+    const char *error) {
+    if (update_revision == 0) return;
+
+    LargeTextBuffer next;
+    next.reserve(CONFIG_UPDATE_JSON_RESERVE);
+    next = "{";
+    json_add_uint64(next, "revision", update_revision, false);
+    json_add_bool(next, "ok", persisted);
+    json_add_uint64(next, "config_revision", config_revision);
+    if (!persisted) {
+        json_add_string(next, "error",
+                        error && error[0] ? error : "update_failed");
+    }
+    next += '}';
+    if (next.overflowed()) return;
+
+    update_json_.swap(next);
+    completed_update_revision_ = update_revision;
 }
 
 bool ConfigHttpController::publish_snapshots() {
@@ -609,6 +660,16 @@ bool ConfigHttpController::publish_snapshots() {
     published_revision_ = revision;
     xSemaphoreGive(cache_mutex_);
     return true;
+}
+
+bool ConfigHttpController::copy_update_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    const uint32_t available = update_revision();
+    if (available == 0 || available == revision) return false;
+    out = update_json_.c_str();
+    const bool copied = !out.overflowed();
+    if (copied) revision = available;
+    return copied;
 }
 
 void ConfigHttpController::send_config(AsyncWebServerRequest *request,
@@ -665,11 +726,22 @@ void ConfigHttpController::send_update(AsyncWebServerRequest *request) {
     }
 
     Command command;
+    const uint32_t update_revision = next_update_revision();
+    command.update_revision = update_revision;
     command.body = std::move(body);
     const bool queued = enqueue(std::move(command));
-    request->send(queued ? 202 : 503, "application/json",
-                  queued ? "{\"ok\":true,\"result\":\"queued\"}"
-                         : "{\"ok\":false,\"error\":\"queue_full\"}");
+    if (!queued) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"queue_full\"}");
+        return;
+    }
+
+    char response[112] = {};
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"queued\":true,\"result\":\"queued\","
+             "\"revision\":%lu}",
+             static_cast<unsigned long>(update_revision));
+    request->send(202, "application/json", response);
 }
 
 void ConfigHttpController::send_onboarding_complete(

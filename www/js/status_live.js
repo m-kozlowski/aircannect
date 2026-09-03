@@ -1109,6 +1109,13 @@
           if (data.sleephq) applySleepHqSyncStatus(data.sleephq);
         } catch (error) {}
       });
+      evtSrc.addEventListener("config", (event) => {
+        try {
+          configUpdateData = JSON.parse(event.data);
+          window.dispatchEvent(new CustomEvent(
+            CONFIG_UPDATE_EVENT, {detail: configUpdateData}));
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });
