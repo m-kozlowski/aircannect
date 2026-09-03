@@ -29,6 +29,9 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
+    uint32_t revision() const { return snapshot_revision_; }
+    bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
+
 private:
     enum class CommandKind : uint8_t {
         Enable,
@@ -72,6 +75,8 @@ private:
     StaticSemaphore_t cache_mutex_storage_ = {};
     SemaphoreHandle_t cache_mutex_ = nullptr;
     LargeTextBuffer snapshot_json_;
+    LargeTextBuffer snapshot_build_json_;
+    uint32_t snapshot_revision_ = 0;
     uint32_t last_snapshot_ms_ = 0;
     bool snapshot_dirty_ = true;
 };

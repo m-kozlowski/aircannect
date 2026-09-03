@@ -16,6 +16,7 @@
 #include "json_util.h"
 #include "live_http_controller.h"
 #include "memory_manager.h"
+#include "oximetry_http_controller.h"
 #include "rpc_transport_ports.h"
 #include "status_http_controller.h"
 #include "string_util.h"
@@ -54,6 +55,7 @@ bool WebUI::begin(StatusHttpController &status,
                   ExportHttpController &exports,
                   ConfigHttpController &config_http,
                   DeviceHttpController &device_http,
+                  OximetryHttpController &oximetry_http,
                   LiveHttpController &live,
                   ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
@@ -66,6 +68,7 @@ bool WebUI::begin(StatusHttpController &status,
     exports_ = &exports;
     config_ = &config_http;
     device_ = &device_http;
+    oximetry_ = &oximetry_http;
     live_ = &live;
     console_router_ = &console_router;
 
@@ -126,6 +129,8 @@ void WebUI::reserve_cached_json() {
     next_config_json_.reserve(256);
     cached_as11_ble_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
     next_as11_ble_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
+    cached_oximetry_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
+    next_oximetry_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -174,6 +179,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.exports = capture(cached_exports_json_);
     out.config = capture(cached_config_json_);
     out.as11_ble = capture(cached_as11_ble_json_);
+    out.oximetry = capture(cached_oximetry_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -231,6 +237,8 @@ void WebUI::stop() {
     sent_config_revision_ = 0;
     observed_as11_ble_revision_ = 0;
     sent_as11_ble_revision_ = 0;
+    observed_oximetry_revision_ = 0;
+    sent_oximetry_revision_ = 0;
     observed_live_generation_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
@@ -239,6 +247,7 @@ void WebUI::stop() {
     exports_ = nullptr;
     config_ = nullptr;
     device_ = nullptr;
+    oximetry_ = nullptr;
     live_ = nullptr;
     console_router_ = nullptr;
     started_ = false;
@@ -258,6 +267,10 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (device_ &&
         observed_as11_ble_revision_ != device_->ble_pairing_revision()) {
         mark_snapshots_dirty(SNAPSHOT_AS11_BLE);
+    }
+    if (oximetry_ &&
+        observed_oximetry_revision_ != oximetry_->revision()) {
+        mark_snapshots_dirty(SNAPSHOT_OXIMETRY);
     }
 
     if (console_router_ && web_console_.pending_output(*console_router_)) {
@@ -332,6 +345,17 @@ void WebUI::poll(PollCheckpoint checkpoint) {
                 sse_backpressure = true;
             } else if (pairing_result == SseSendResult::Sent) {
                 sent_as11_ble_revision_ = observed_as11_ble_revision_;
+            }
+        }
+
+        if (cached_oximetry_json_.length() &&
+            sent_oximetry_revision_ != observed_oximetry_revision_) {
+            const SseSendResult oximetry_result = send_sse_to_clients(
+                cached_oximetry_json_.c_str(), "oximetry", event_id, false);
+            if (oximetry_result == SseSendResult::Failed) {
+                sse_backpressure = true;
+            } else if (oximetry_result == SseSendResult::Sent) {
+                sent_oximetry_revision_ = observed_oximetry_revision_;
             }
         }
 
@@ -769,7 +793,8 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
 
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
-    if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE)) {
+    if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE |
+                SNAPSHOT_OXIMETRY)) {
         request_sse_push();
     }
 }
@@ -883,6 +908,7 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     next_exports_json_.clear();
     next_config_json_.clear();
     next_as11_ble_json_.clear();
+    next_oximetry_json_.clear();
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -918,6 +944,15 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.as11_ble_copy");
     }
+    if (rebuild_mask & SNAPSHOT_OXIMETRY) {
+        uint32_t revision = observed_oximetry_revision_;
+        if (oximetry_ && oximetry_->copy_snapshot(
+                              next_oximetry_json_, revision)) {
+            observed_oximetry_revision_ = revision;
+            completed_mask |= SNAPSHOT_OXIMETRY;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.oximetry_copy");
+    }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
@@ -934,6 +969,9 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     }
     if (completed_mask & SNAPSHOT_AS11_BLE) {
         cached_as11_ble_json_.swap(next_as11_ble_json_);
+    }
+    if (completed_mask & SNAPSHOT_OXIMETRY) {
+        cached_oximetry_json_.swap(next_oximetry_json_);
     }
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;

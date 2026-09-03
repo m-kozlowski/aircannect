@@ -1121,6 +1121,15 @@
           renderAs11BlePairing(JSON.parse(event.data));
         } catch (error) {}
       });
+      evtSrc.addEventListener("oximetry", (event) => {
+        try {
+          oxiSensorData = JSON.parse(event.data);
+          const pane = document.getElementById("p-oxi");
+          if (pane && pane.classList.contains("active")) {
+            renderOximetrySensorManager(oxiSensorData);
+          }
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });
@@ -1186,10 +1195,6 @@
         });
         const data = await response.json();
         msg(msgId || "oxiTabMsg", data.result || "Queued", data.ok);
-        setTimeout(loadStatus, 500);
-        setTimeout(loadStatus, 1500);
-        setTimeout(loadOximetrySensors, 700);
-        setTimeout(loadOximetrySensors, 2500);
       } catch (error) {
         msg(msgId || "oxiTabMsg", error.message, false);
       }

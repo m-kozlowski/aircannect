@@ -16,7 +16,4 @@
       if (document.getElementById("p-dash").classList.contains("active")) {
         updateLiveViewState("dash");
       }
-      if (document.getElementById("p-oxi").classList.contains("active")) {
-        loadOximetrySensors();
-      }
     }, 5000);

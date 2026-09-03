@@ -123,6 +123,7 @@ bool OximetryHttpController::begin(OximetryHub &hub,
     if (!cache_mutex_) return false;
 
     snapshot_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
+    snapshot_build_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
     return publish_snapshot();
 }
 
@@ -223,16 +224,39 @@ void OximetryHttpController::execute(Command &command) {
 }
 
 bool OximetryHttpController::publish_snapshot() {
-    LargeTextBuffer next;
-    next.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
-    if (!build_sensor_json(next, *hub_, *sensor_, *peripheral_)) return false;
+    snapshot_build_json_.clear();
+    if (!build_sensor_json(snapshot_build_json_, *hub_, *sensor_,
+                           *peripheral_)) {
+        return false;
+    }
 
     if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
-    snapshot_json_.swap(next);
+    const bool changed =
+        snapshot_json_.length() != snapshot_build_json_.length() ||
+        memcmp(snapshot_json_.c_str(), snapshot_build_json_.c_str(),
+               snapshot_json_.length()) != 0;
+    if (changed) {
+        snapshot_json_.swap(snapshot_build_json_);
+        snapshot_revision_++;
+    }
     last_snapshot_ms_ = millis();
     snapshot_dirty_ = false;
     xSemaphoreGive(cache_mutex_);
     return true;
+}
+
+bool OximetryHttpController::copy_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    out.clear();
+    const bool copied = out.append(snapshot_json_.c_str(),
+                                   snapshot_json_.length());
+    if (copied) revision = snapshot_revision_;
+    xSemaphoreGive(cache_mutex_);
+    return copied;
 }
 
 void OximetryHttpController::send_snapshot(

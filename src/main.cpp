@@ -1597,6 +1597,7 @@ void setup() {
 
     web_ui.begin(status_http_controller, export_http_controller,
                  config_http_controller, device_http_controller,
+                 oximetry_http_controller,
                  live_http_controller, console_router, config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
