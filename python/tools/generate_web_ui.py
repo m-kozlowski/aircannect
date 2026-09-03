@@ -1,14 +1,43 @@
-"""
-Pre-build script: minify + gzip www/index.html -> src/web_ui_html.h.
-"""
+"""Pre-build script: minify and gzip the WebUI into a C header."""
 
-import gzip
 import base64
+import gzip
+import importlib.util
 import mimetypes
 import os
 import re
 
+
 Import("env")
+
+
+project_dir = env.get("PROJECT_DIR", ".")
+rjs_min_path = os.path.abspath(os.path.join(
+    project_dir,
+    "third_party",
+    "rjsmin",
+    "rjsmin.py",
+))
+
+
+def load_js_minifier():
+    spec = importlib.util.spec_from_file_location(
+        "aircannect_rjsmin",
+        rjs_min_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load JavaScript minifier: {rjs_min_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if module.__version__ != "1.2.5":
+        raise RuntimeError(
+            f"unsupported rjsmin version {module.__version__}; expected 1.2.5"
+        )
+    return module._make_jsmin(python_only=True)
+
+
+js_minify = load_js_minifier()
 
 
 def inline_assets(html, base_dir):
@@ -114,7 +143,7 @@ def minify_html(html):
         return "<style>" + css + "</style>"
 
     def minify_js(match):
-        js = match.group(1).strip()
+        js = js_minify(match.group(1))
         return "<script>" + js + "</script>"
 
     html = re.sub(
@@ -136,7 +165,6 @@ def minify_html(html):
     return html
 
 
-project_dir = env.get("PROJECT_DIR", ".")
 html_path = os.path.join(project_dir, "www", "index.html")
 web_dir = os.path.dirname(html_path)
 header_path = os.path.join(project_dir, "src", "web_ui_html.h")
@@ -152,6 +180,7 @@ if os.path.exists(html_path):
         not os.path.exists(header_path)
         or os.path.getmtime(html_path) > os.path.getmtime(header_path)
         or os.path.getmtime(generator_path) > os.path.getmtime(header_path)
+        or os.path.getmtime(rjs_min_path) > os.path.getmtime(header_path)
         or any(os.path.getmtime(dep) > os.path.getmtime(header_path)
                for dep in deps)
     )
@@ -171,7 +200,7 @@ if os.path.exists(html_path):
             f.write("};\n")
         print(
             f"[web_ui] {html_path} ({len(raw)} -> "
-            f"{len(inlined)} inline -> {len(minified)} -> "
+            f"{len(inlined)} inline -> {len(minified)} minified -> "
             f"{len(compressed)} gz)"
         )
 else:
