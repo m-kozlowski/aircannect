@@ -30,6 +30,7 @@ bool source_kind(ReportReadOperationKind operation_kind,
 
 bool fallback_kind(ReportReadOperationKind kind) {
     return kind == ReportReadOperationKind::FallbackSeries ||
+           kind == ReportReadOperationKind::FallbackSeriesSlice ||
            kind == ReportReadOperationKind::FallbackEvents;
 }
 
@@ -176,15 +177,18 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
                 plan_->fallback_file(*operation);
             const NightCatalogFallbackSection *section =
                 plan_->fallback_section(*operation);
-            if (!file || !section || operation->offset != section->data_offset ||
-                operation->length != section->data_size ||
+            if (!file || !section ||
                 operation->first_record > section->record_count ||
                 operation->record_count >
                     section->record_count - operation->first_record) {
                 return false;
             }
 
-            if (operation->kind == ReportReadOperationKind::FallbackSeries) {
+            const bool series =
+                operation->kind == ReportReadOperationKind::FallbackSeries ||
+                operation->kind ==
+                    ReportReadOperationKind::FallbackSeriesSlice;
+            if (series) {
                 if (section->kind != ReportFallbackSectionKind::Series ||
                     operation->record_count == 0 ||
                     !mappings || mapping_count != 1 ||
@@ -196,7 +200,34 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
                     operation->event_mask != 0) {
                     return false;
                 }
-            } else if (operation->first_record != 0 ||
+
+                if (operation->kind ==
+                        ReportReadOperationKind::FallbackSeriesSlice) {
+                    uint32_t slice_offset = 0;
+                    uint32_t slice_size = 0;
+                    if (plan_->key().kind != ReportArtifactKind::RangeTile ||
+                        section->payload_schema !=
+                            REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 ||
+                        !report_series_v2_uniform_unmasked_slice(
+                            section->record_count,
+                            section->data_size,
+                            operation->first_record,
+                            operation->record_count,
+                            slice_offset,
+                            slice_size) ||
+                        section->data_offset > UINT64_MAX - slice_offset ||
+                        operation->offset !=
+                            section->data_offset + slice_offset ||
+                        operation->length != slice_size) {
+                        return false;
+                    }
+                } else if (operation->offset != section->data_offset ||
+                           operation->length != section->data_size) {
+                    return false;
+                }
+            } else if (operation->offset != section->data_offset ||
+                       operation->length != section->data_size ||
+                       operation->first_record != 0 ||
                        operation->record_count != section->record_count ||
                        section->kind != ReportFallbackSectionKind::Events ||
                        mapping_count != 0 ||
@@ -317,7 +348,10 @@ bool ReportExecutor::submit_read() {
             return true;
         }
 
-        active_fallback_ = find_cached_fallback(*file, *section);
+        if (operation->kind !=
+            ReportReadOperationKind::FallbackSeriesSlice) {
+            active_fallback_ = find_cached_fallback(*file, *section);
+        }
         if (active_fallback_) {
             if (!prepare_operation()) {
                 finish(ReportExecutorState::Failed,
@@ -561,7 +595,10 @@ bool ReportExecutor::decode_fallback_operation() {
                    ReportExecutorError::StorageShortRead);
             return false;
         }
-        if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
+        const bool direct_slice = operation->kind ==
+            ReportReadOperationKind::FallbackSeriesSlice;
+        if (!direct_slice &&
+            crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
             finish(ReportExecutorState::Failed,
                    ReportExecutorError::DecodeFailed);
             return false;
@@ -569,12 +606,13 @@ bool ReportExecutor::decode_fallback_operation() {
 
         data = record_buffer_;
         data_size = read.bytes;
-        cache_fallback(*file, *section, data);
+        if (!direct_slice) cache_fallback(*file, *section, data);
     }
 
     sink_rejected_ = false;
     callback_operation_ = operation;
-    if (operation->kind == ReportReadOperationKind::FallbackSeries) {
+    if (operation->kind == ReportReadOperationKind::FallbackSeries ||
+        operation->kind == ReportReadOperationKind::FallbackSeriesSlice) {
         size_t mapping_count = 0;
         const ReportReadMapping *mappings =
             plan_->mappings(*operation, mapping_count);
@@ -585,16 +623,28 @@ bool ReportExecutor::decode_fallback_operation() {
         }
 
         callback_mapping_ = mappings;
-        if (!report_for_each_series_sample_range(
-                section->payload_schema,
-                section->coverage.start_ms,
-                data,
-                data_size,
-                section->record_count,
-                operation->first_record,
-                operation->record_count,
-                emit_series,
-                this)) {
+        const bool decoded = operation->kind ==
+                ReportReadOperationKind::FallbackSeriesSlice
+            ? report_for_each_series_v2_uniform_unmasked_slice(
+                  section->coverage.start_ms,
+                  section->sample_interval_ms,
+                  operation->first_record,
+                  data,
+                  data_size,
+                  operation->record_count,
+                  emit_series,
+                  this)
+            : report_for_each_series_sample_range(
+                  section->payload_schema,
+                  section->coverage.start_ms,
+                  data,
+                  data_size,
+                  section->record_count,
+                  operation->first_record,
+                  operation->record_count,
+                  emit_series,
+                  this);
+        if (!decoded) {
             finish(ReportExecutorState::Failed,
                    sink_rejected_
                        ? ReportExecutorError::SinkRejected

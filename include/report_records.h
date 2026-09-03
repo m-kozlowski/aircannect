@@ -49,6 +49,13 @@ using ReportSeriesSampleCallback =
 
 size_t report_series_v2_uniform_wire_size(uint32_t sample_count,
                                           size_t missing_bitmap_bytes);
+bool report_series_v2_uniform_unmasked_slice(
+    uint32_t record_count,
+    size_t payload_size,
+    uint32_t first_sample,
+    uint32_t sample_count,
+    uint32_t &payload_offset,
+    uint32_t &slice_size);
 size_t report_event_record_wire_size();
 
 uint8_t report_event_source_mask(const ReportEventRecord &event);
@@ -102,6 +109,15 @@ bool report_for_each_series_sample_range(
     size_t len,
     uint32_t record_count,
     uint32_t first_sample,
+    uint32_t sample_count,
+    ReportSeriesSampleCallback callback,
+    void *context);
+bool report_for_each_series_v2_uniform_unmasked_slice(
+    int64_t chunk_start_ms,
+    uint32_t interval_ms,
+    uint32_t first_sample,
+    const uint8_t *values_milli_le,
+    size_t values_milli_bytes,
     uint32_t sample_count,
     ReportSeriesSampleCallback callback,
     void *context);

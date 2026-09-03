@@ -79,6 +79,7 @@ const ReportReadOperation *ReportReadPlan::operation(size_t index) const {
 const NightCatalogSourceFile *ReportReadPlan::source_file(
     const ReportReadOperation &operation) const {
     if (operation.kind == ReportReadOperationKind::FallbackSeries ||
+        operation.kind == ReportReadOperationKind::FallbackSeriesSlice ||
         operation.kind == ReportReadOperationKind::FallbackEvents) {
         return nullptr;
     }
@@ -93,6 +94,7 @@ const NightCatalogSourceFile *ReportReadPlan::source_file(
 const NightCatalogFallbackFile *ReportReadPlan::fallback_file(
     const ReportReadOperation &operation) const {
     if (operation.kind != ReportReadOperationKind::FallbackSeries &&
+        operation.kind != ReportReadOperationKind::FallbackSeriesSlice &&
         operation.kind != ReportReadOperationKind::FallbackEvents) {
         return nullptr;
     }

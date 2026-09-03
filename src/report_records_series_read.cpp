@@ -125,4 +125,43 @@ bool report_for_each_series_sample_range(
     return true;
 }
 
+bool report_for_each_series_v2_uniform_unmasked_slice(
+    int64_t chunk_start_ms,
+    uint32_t interval_ms,
+    uint32_t first_sample,
+    const uint8_t *values_milli_le,
+    size_t values_milli_bytes,
+    uint32_t sample_count,
+    ReportSeriesSampleCallback callback,
+    void *context) {
+    if (!callback || !values_milli_le || !valid_timestamp(chunk_start_ms) ||
+        interval_ms == 0 || sample_count == 0 ||
+        first_sample > UINT32_MAX - (sample_count - 1u) ||
+        static_cast<size_t>(sample_count) > SIZE_MAX / sizeof(int32_t) ||
+        values_milli_bytes !=
+            static_cast<size_t>(sample_count) * sizeof(int32_t)) {
+        return false;
+    }
+
+    const uint64_t last_sample =
+        static_cast<uint64_t>(first_sample) + sample_count - 1u;
+    if (last_sample > static_cast<uint64_t>(INT64_MAX - chunk_start_ms) /
+            interval_ms) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < sample_count; ++i) {
+        const uint32_t sample_index = first_sample + i;
+        ReportSeriesSample sample;
+        sample.timestamp_ms = chunk_start_ms +
+            static_cast<int64_t>(sample_index) * interval_ms;
+        sample.value_milli = static_cast<int32_t>(
+            get_le32(values_milli_le + static_cast<size_t>(i) * 4u));
+
+        if (!callback(context, sample)) return false;
+    }
+
+    return true;
+}
+
 }  // namespace aircannect

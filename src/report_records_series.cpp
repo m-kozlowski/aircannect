@@ -33,6 +33,34 @@ size_t report_series_v2_uniform_wire_size(uint32_t sample_count,
                : 0;
 }
 
+bool report_series_v2_uniform_unmasked_slice(
+    uint32_t record_count,
+    size_t payload_size,
+    uint32_t first_sample,
+    uint32_t sample_count,
+    uint32_t &payload_offset,
+    uint32_t &slice_size) {
+    payload_offset = 0;
+    slice_size = 0;
+
+    const size_t expected_size =
+        report_series_v2_uniform_wire_size(record_count, 0);
+    if (expected_size == 0 || payload_size != expected_size ||
+        sample_count == 0 || first_sample > record_count ||
+        sample_count > record_count - first_sample) {
+        return false;
+    }
+
+    const size_t offset = SERIES_V2_HEADER_SIZE +
+        static_cast<size_t>(first_sample) * sizeof(int32_t);
+    const size_t size = static_cast<size_t>(sample_count) * sizeof(int32_t);
+    if (offset > UINT32_MAX || size > UINT32_MAX) return false;
+
+    payload_offset = static_cast<uint32_t>(offset);
+    slice_size = static_cast<uint32_t>(size);
+    return true;
+}
+
 size_t report_series_payload_v2_uniform_slice_size(
     const ReportSeriesV2UniformView &view,
     uint32_t first_sample,

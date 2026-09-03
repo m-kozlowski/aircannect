@@ -5,6 +5,7 @@
 
 #include "checked_size.h"
 #include "large_scratch_array.h"
+#include "report_records.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -948,6 +949,7 @@ bool append_fallback_series_operations(
     const NightCatalog &catalog,
     const NightCatalogRecord &night,
     const SelectedSource &selected,
+    bool direct_range_slice,
     LargeScratchArray<PendingOperation> &pending) {
     size_t file_count = 0;
     const NightCatalogFallbackFile *files =
@@ -997,8 +999,6 @@ bool append_fallback_series_operations(
 
         PendingOperation *entry = pending.append();
         if (!entry) return false;
-        entry->operation.offset = section.data_offset;
-        entry->operation.length = section.data_size;
         entry->operation.first_record = bounded_first;
         entry->operation.record_count = bounded_end - bounded_first;
         entry->operation.session_index = selected.session_index;
@@ -1006,7 +1006,31 @@ bool append_fallback_series_operations(
             selected.catalog_file_index;
         entry->operation.fallback_section_index =
             static_cast<uint16_t>(i);
-        entry->operation.kind = ReportReadOperationKind::FallbackSeries;
+
+        uint32_t slice_offset = 0;
+        uint32_t slice_size = 0;
+        const bool direct_slice =
+            direct_range_slice &&
+            section.payload_schema ==
+                REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 &&
+            report_series_v2_uniform_unmasked_slice(
+                section.record_count,
+                section.data_size,
+                entry->operation.first_record,
+                entry->operation.record_count,
+                slice_offset,
+                slice_size) &&
+            section.data_offset <= UINT64_MAX - slice_offset;
+        if (direct_slice) {
+            entry->operation.offset = section.data_offset + slice_offset;
+            entry->operation.length = slice_size;
+            entry->operation.kind =
+                ReportReadOperationKind::FallbackSeriesSlice;
+        } else {
+            entry->operation.offset = section.data_offset;
+            entry->operation.length = section.data_size;
+            entry->operation.kind = ReportReadOperationKind::FallbackSeries;
+        }
         entry->mapping = mapping;
         entry->has_mapping = true;
     }
@@ -1016,6 +1040,7 @@ bool append_fallback_series_operations(
 bool append_numeric_operations(const NightCatalog &catalog,
                                const NightCatalogRecord &night,
                                const SelectedSource &selected,
+                               bool direct_range_slice,
                                LargeScratchArray<PendingOperation> &pending) {
     return selected.storage == SelectedStorage::Edf
         ? append_edf_numeric_operations(catalog,
@@ -1025,6 +1050,7 @@ bool append_numeric_operations(const NightCatalog &catalog,
         : append_fallback_series_operations(catalog,
                                             night,
                                             selected,
+                                            direct_range_slice,
                                             pending);
 }
 
@@ -1466,6 +1492,8 @@ ReportPlanResult ReportPlanner::build(
         if (!append_numeric_operations(*catalog,
                                        *night,
                                        selected.data()[i],
+                                       request.artifact.kind ==
+                                           ReportArtifactKind::RangeTile,
                                        pending)) {
             result.status = ReportPlanStatus::InvalidCatalog;
             return result;
