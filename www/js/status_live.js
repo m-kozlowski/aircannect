@@ -761,15 +761,21 @@
       renderStatus(data);
     }
 
+    function applyStatusSnapshot(data) {
+      statusData = data;
+      statusLoaded = true;
+      renderStatus(statusData);
+      document.dispatchEvent(new CustomEvent(
+        STATUS_SNAPSHOT_EVENT, {detail: statusData}));
+      return statusData;
+    }
+
     async function loadStatus() {
       if (statusLoadPromise) return statusLoadPromise;
 
       statusLoadPromise = (async () => {
         const response = await api("/api/status");
-        statusData = await response.json();
-        statusLoaded = true;
-        renderStatus(statusData);
-        return statusData;
+        return applyStatusSnapshot(await response.json());
       })();
 
       try {
@@ -1093,8 +1099,7 @@
       evtSrc = new EventSource("/api/events");
       evtSrc.addEventListener("status", (event) => {
         try {
-          statusData = JSON.parse(event.data);
-          renderStatus(statusData);
+          applyStatusSnapshot(JSON.parse(event.data));
         } catch (error) {}
       });
       evtSrc.addEventListener("exports", (event) => {

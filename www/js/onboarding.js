@@ -245,6 +245,30 @@
       await as11BleAction("cancel");
     }
 
+    function waitForOnboardingCompletion() {
+      if (statusData && statusData.onboarding_complete) {
+        return Promise.resolve();
+      }
+
+      return new Promise((resolve, reject) => {
+        let timeout = null;
+        const finish = (error) => {
+          document.removeEventListener(STATUS_SNAPSHOT_EVENT, onStatus);
+          if (timeout !== null) clearTimeout(timeout);
+          if (error) reject(error); else resolve();
+        };
+        const onStatus = (event) => {
+          if (event.detail && event.detail.onboarding_complete) finish();
+        };
+
+        document.addEventListener(STATUS_SNAPSHOT_EVENT, onStatus);
+        timeout = setTimeout(() => finish(new Error(
+          "Onboarding completion was not persisted")), 5000);
+
+        if (statusData && statusData.onboarding_complete) finish();
+      });
+    }
+
     async function onboardingComplete() {
       const body = {};
       if (onboardingUser !== null) body.http_user = onboardingUser;
@@ -257,14 +281,8 @@
       await response.json();
 
       if (onboardingUser !== null || onboardingPassword !== null) return true;
-
-      const started = Date.now();
-      while (Date.now() - started < 5000) {
-        const status = await loadStatus();
-        if (status && status.onboarding_complete) return true;
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      throw new Error("Onboarding completion was not persisted");
+      await waitForOnboardingCompletion();
+      return true;
     }
 
     function onboardingRenderFinish() {

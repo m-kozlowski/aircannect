@@ -1,6 +1,7 @@
     let statusData = {};
     let statusLoaded = false;
     let statusLoadPromise = null;
+    const STATUS_SNAPSHOT_EVENT = "aircannect-status-snapshot";
     let streamData = {};
     let settingsData = null;
     let settingsCatalog = [];
