@@ -4,6 +4,7 @@
 #include <new>
 #include <utility>
 
+#include "board_report.h"
 #include "crc32.h"
 #include "memory_manager.h"
 #include "report_records.h"
@@ -52,6 +53,7 @@ ReportExecutor::~ReportExecutor() {
 
 void ReportExecutor::begin(StorageReadPort &read_port) {
     reset();
+    clear_fallback_cache();
     read_port_ = &read_port;
 }
 
@@ -176,13 +178,15 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
                 plan_->fallback_section(*operation);
             if (!file || !section || operation->offset != section->data_offset ||
                 operation->length != section->data_size ||
-                operation->record_count != section->record_count ||
-                operation->first_record != 0) {
+                operation->first_record > section->record_count ||
+                operation->record_count >
+                    section->record_count - operation->first_record) {
                 return false;
             }
 
             if (operation->kind == ReportReadOperationKind::FallbackSeries) {
                 if (section->kind != ReportFallbackSectionKind::Series ||
+                    operation->record_count == 0 ||
                     !mappings || mapping_count != 1 ||
                     !mappings[0].output_window.valid() ||
                     mappings[0].series.signal != section->signal ||
@@ -192,7 +196,9 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
                     operation->event_mask != 0) {
                     return false;
                 }
-            } else if (section->kind != ReportFallbackSectionKind::Events ||
+            } else if (operation->first_record != 0 ||
+                       operation->record_count != section->record_count ||
+                       section->kind != ReportFallbackSectionKind::Events ||
                        mapping_count != 0 ||
                        !operation->event_filter.valid() ||
                        operation->event_mask == 0 ||
@@ -298,6 +304,30 @@ bool ReportExecutor::submit_read() {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
         return true;
+    }
+
+    if (fallback_kind(operation->kind)) {
+        const NightCatalogFallbackFile *file =
+            plan_->fallback_file(*operation);
+        const NightCatalogFallbackSection *section =
+            plan_->fallback_section(*operation);
+        if (!file || !section) {
+            finish(ReportExecutorState::Failed,
+                   ReportExecutorError::InvalidPlan);
+            return true;
+        }
+
+        active_fallback_ = find_cached_fallback(*file, *section);
+        if (active_fallback_) {
+            if (!prepare_operation()) {
+                finish(ReportExecutorState::Failed,
+                       ReportExecutorError::InvalidPlan);
+                return true;
+            }
+
+            state_ = ReportExecutorState::DecodeRecords;
+            return true;
+        }
     }
 
     StorageReadCommand command;
@@ -516,19 +546,30 @@ bool ReportExecutor::decode_fallback_operation() {
         return false;
     }
 
-    const PreparedByteRead read = read_port_->read_prepared(
-        prepared_, 0, record_buffer_, operation->length);
-    if (read.state == PreparedByteReadState::Retry) return false;
-    if (read.state != PreparedByteReadState::Data ||
-        read.bytes != operation->length) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::StorageShortRead);
-        return false;
-    }
-    if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::DecodeFailed);
-        return false;
+    const uint8_t *data = nullptr;
+    size_t data_size = 0;
+    if (active_fallback_) {
+        data = active_fallback_->data();
+        data_size = active_fallback_->size();
+    } else {
+        const PreparedByteRead read = read_port_->read_prepared(
+            prepared_, 0, record_buffer_, operation->length);
+        if (read.state == PreparedByteReadState::Retry) return false;
+        if (read.state != PreparedByteReadState::Data ||
+            read.bytes != operation->length) {
+            finish(ReportExecutorState::Failed,
+                   ReportExecutorError::StorageShortRead);
+            return false;
+        }
+        if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
+            finish(ReportExecutorState::Failed,
+                   ReportExecutorError::DecodeFailed);
+            return false;
+        }
+
+        data = record_buffer_;
+        data_size = read.bytes;
+        cache_fallback(*file, *section, data);
     }
 
     sink_rejected_ = false;
@@ -544,13 +585,16 @@ bool ReportExecutor::decode_fallback_operation() {
         }
 
         callback_mapping_ = mappings;
-        if (!report_for_each_series_sample(section->payload_schema,
-                                           section->coverage.start_ms,
-                                           record_buffer_,
-                                           read.bytes,
-                                           section->record_count,
-                                           emit_series,
-                                           this)) {
+        if (!report_for_each_series_sample_range(
+                section->payload_schema,
+                section->coverage.start_ms,
+                data,
+                data_size,
+                section->record_count,
+                operation->first_record,
+                operation->record_count,
+                emit_series,
+                this)) {
             finish(ReportExecutorState::Failed,
                    sink_rejected_
                        ? ReportExecutorError::SinkRejected
@@ -560,7 +604,7 @@ bool ReportExecutor::decode_fallback_operation() {
     } else {
         for (size_t i = 0; i < section->record_count; ++i) {
             ReportEventRecord event;
-            if (!report_read_event_record(record_buffer_, read.bytes, i,
+            if (!report_read_event_record(data, data_size, i,
                                           event) ||
                 !report_adjust_event_time(event, file->time_adjust_ms)) {
                 finish(ReportExecutorState::Failed,
@@ -586,9 +630,86 @@ bool ReportExecutor::decode_fallback_operation() {
 
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
-    record_index_ = section->record_count;
+    record_index_ = operation->record_count;
     finish_operation();
     return true;
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportExecutor::find_cached_fallback(
+    const NightCatalogFallbackFile &file,
+    const NightCatalogFallbackSection &section) {
+    if (!plan_ || plan_->key().kind != ReportArtifactKind::RangeTile ||
+        section.data_size < AC_REPORT_FALLBACK_SECTION_CACHE_MIN_BYTES) {
+        return {};
+    }
+
+    for (CachedFallbackSection &entry : fallback_cache_) {
+        if (!entry.bytes || entry.file_identity != file.identity ||
+            entry.data_offset != section.data_offset ||
+            entry.data_size != section.data_size ||
+            entry.data_crc32 != section.data_crc32) {
+            continue;
+        }
+
+        fallback_cache_clock_++;
+        if (fallback_cache_clock_ == 0) fallback_cache_clock_ = 1;
+        entry.last_used = fallback_cache_clock_;
+        return entry.bytes;
+    }
+    return {};
+}
+
+void ReportExecutor::cache_fallback(
+    const NightCatalogFallbackFile &file,
+    const NightCatalogFallbackSection &section,
+    const uint8_t *data) {
+    if (!data || !plan_ ||
+        plan_->key().kind != ReportArtifactKind::RangeTile ||
+        section.data_size < AC_REPORT_FALLBACK_SECTION_CACHE_MIN_BYTES) {
+        return;
+    }
+
+#ifdef ARDUINO
+    const MemoryStatus memory = Memory::status();
+    if (!memory.psram_available ||
+        memory.psram_free <
+            section.data_size +
+                AC_REPORT_FALLBACK_SECTION_CACHE_PSRAM_RESERVE) {
+        return;
+    }
+#endif
+
+    size_t target = 0;
+    for (size_t i = 0; i < FallbackCacheCapacity; ++i) {
+        if (!fallback_cache_[i].bytes) {
+            target = i;
+            break;
+        }
+        if (fallback_cache_[i].last_used <
+            fallback_cache_[target].last_used) {
+            target = i;
+        }
+    }
+
+    std::shared_ptr<const LargeByteBuffer> bytes =
+        LargeByteBuffer::copy_and_freeze(data, section.data_size);
+    if (!bytes) return;
+
+    fallback_cache_clock_++;
+    if (fallback_cache_clock_ == 0) fallback_cache_clock_ = 1;
+    fallback_cache_[target] = {
+        file.identity,
+        section.data_offset,
+        section.data_size,
+        section.data_crc32,
+        fallback_cache_clock_,
+        std::move(bytes),
+    };
+}
+
+void ReportExecutor::clear_fallback_cache() {
+    for (CachedFallbackSection &entry : fallback_cache_) entry = {};
+    fallback_cache_clock_ = 0;
 }
 
 void ReportExecutor::finish_operation() {
@@ -598,6 +719,7 @@ void ReportExecutor::finish_operation() {
     }
 
     release_prepared();
+    active_fallback_.reset();
     ++operation_index_;
     record_index_ = 0;
     decoder_count_ = 0;
@@ -622,6 +744,7 @@ void ReportExecutor::release_run_resources() {
     }
     ticket_ = {};
     release_prepared();
+    active_fallback_.reset();
     free_scratch();
     plan_.reset();
     sink_ = nullptr;

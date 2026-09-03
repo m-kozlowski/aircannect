@@ -95,6 +95,16 @@ bool report_for_each_series_sample(uint32_t payload_schema,
                                    uint32_t record_count,
                                    ReportSeriesSampleCallback callback,
                                    void *context);
+bool report_for_each_series_sample_range(
+    uint32_t payload_schema,
+    int64_t chunk_start_ms,
+    const uint8_t *data,
+    size_t len,
+    uint32_t record_count,
+    uint32_t first_sample,
+    uint32_t sample_count,
+    ReportSeriesSampleCallback callback,
+    void *context);
 bool report_read_event_record(const uint8_t *data,
                               size_t len,
                               size_t index,

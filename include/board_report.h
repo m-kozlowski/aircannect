@@ -26,6 +26,12 @@ static constexpr size_t AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY = 16;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE =
     3 * 1024 * 1024;
+// Adjacent range tiles commonly decode the same large fallback sections.
+// Retain the current flow/pressure pair after its full read and CRC check.
+static constexpr size_t AC_REPORT_FALLBACK_SECTION_CACHE_MIN_BYTES =
+    64 * 1024;
+static constexpr size_t AC_REPORT_FALLBACK_SECTION_CACHE_PSRAM_RESERVE =
+    3 * 1024 * 1024;
 // Idle work builds missing artifacts for the complete catalog. Keep only the
 // newest result/overview pairs warm because the PSRAM LRU is an accelerator,
 // not the durable backfill boundary.

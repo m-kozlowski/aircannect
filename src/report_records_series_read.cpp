@@ -51,6 +51,27 @@ bool report_for_each_series_sample(uint32_t payload_schema,
                                    uint32_t record_count,
                                    ReportSeriesSampleCallback callback,
                                    void *context) {
+    return report_for_each_series_sample_range(payload_schema,
+                                               chunk_start_ms,
+                                               data,
+                                               len,
+                                               record_count,
+                                               0,
+                                               record_count,
+                                               callback,
+                                               context);
+}
+
+bool report_for_each_series_sample_range(
+    uint32_t payload_schema,
+    int64_t chunk_start_ms,
+    const uint8_t *data,
+    size_t len,
+    uint32_t record_count,
+    uint32_t first_sample,
+    uint32_t sample_count,
+    ReportSeriesSampleCallback callback,
+    void *context) {
     if (!callback || record_count == 0 ||
         payload_schema != REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 ||
         !valid_timestamp(chunk_start_ms)) {
@@ -64,7 +85,9 @@ bool report_for_each_series_sample(uint32_t payload_schema,
 
     if (header.mode != SERIES_V2_MODE_UNIFORM ||
         static_cast<size_t>(header.sample_count) > SIZE_MAX / 4u ||
-        header.body_len != static_cast<size_t>(header.sample_count) * 4u) {
+        header.body_len != static_cast<size_t>(header.sample_count) * 4u ||
+        sample_count == 0 || first_sample > header.sample_count ||
+        sample_count > header.sample_count - first_sample) {
         return false;
     }
     if (static_cast<int64_t>(header.interval_ms) >
@@ -75,11 +98,13 @@ bool report_for_each_series_sample(uint32_t payload_schema,
     const int64_t max_steps =
         (INT64_MAX - chunk_start_ms) /
         static_cast<int64_t>(header.interval_ms);
-    if (static_cast<int64_t>(header.sample_count - 1) > max_steps) {
+    const uint32_t last_sample = first_sample + sample_count - 1;
+    if (static_cast<int64_t>(last_sample) > max_steps) {
         return false;
     }
 
-    for (uint32_t i = 0; i < header.sample_count; ++i) {
+    const uint32_t end_sample = first_sample + sample_count;
+    for (uint32_t i = first_sample; i < end_sample; ++i) {
         if (bitmap_missing(header.missing_bitmap,
                            header.missing_bitmap_bytes,
                            i)) {

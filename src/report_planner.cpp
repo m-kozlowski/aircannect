@@ -973,6 +973,22 @@ bool append_fallback_series_operations(
             night_catalog_intersection(selected.output_window,
                                        section.coverage);
         if (!mapping.output_window.valid()) continue;
+
+        const uint64_t start_delta = static_cast<uint64_t>(
+            mapping.output_window.start_ms - section.coverage.start_ms);
+        const uint64_t end_delta = static_cast<uint64_t>(
+            mapping.output_window.end_ms - section.coverage.start_ms);
+        const uint64_t interval = section.sample_interval_ms;
+        const uint64_t first_sample =
+            (start_delta + interval - 1u) / interval;
+        const uint64_t end_sample =
+            (end_delta + interval - 1u) / interval;
+        const uint32_t bounded_first = static_cast<uint32_t>(
+            std::min<uint64_t>(section.record_count, first_sample));
+        const uint32_t bounded_end = static_cast<uint32_t>(
+            std::min<uint64_t>(section.record_count, end_sample));
+        if (bounded_end <= bounded_first) continue;
+
         if (i > UINT16_MAX || section.data_size == 0 ||
             section.data_size > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
             return false;
@@ -983,7 +999,8 @@ bool append_fallback_series_operations(
         if (!entry) return false;
         entry->operation.offset = section.data_offset;
         entry->operation.length = section.data_size;
-        entry->operation.record_count = section.record_count;
+        entry->operation.first_record = bounded_first;
+        entry->operation.record_count = bounded_end - bounded_first;
         entry->operation.session_index = selected.session_index;
         entry->operation.catalog_file_index =
             selected.catalog_file_index;
