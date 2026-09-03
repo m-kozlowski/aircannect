@@ -374,7 +374,8 @@
       reportCurrentNightId = "";
       reportCurrentRevision = "";
       reportCurrentPlotEtag = "";
-      reportRangeCache.clear();
+      reportRangeTileCache.clear();
+      reportRangeView = null;
       reportRangeActiveKey = "";
       reportRangeToken++;
       reportDrawItems = [];
@@ -413,7 +414,7 @@
       reportCurrentNightId = String(nightId || "");
       reportCurrentRevision = String(revision || "");
       reportCurrentPlotEtag = String(etag || "");
-      reportRangeCache.clear();
+      reportRangeView = null;
       reportRangeActiveKey = "";
       reportRangeToken++;
     }
@@ -1159,8 +1160,7 @@
       const lo = Math.min(drag.t0, drag.t1);
       const hi = Math.max(drag.t0, drag.t1);
       if (hi - lo > 60000) {
-        reportZoom = {start: lo, end: hi};
-        renderReportCharts();
+        setReportZoomRange(lo, hi);
       }
     }
     document.addEventListener("mouseup", reportFinishDrag);
@@ -1205,7 +1205,7 @@
       hi = Math.min(bounds.end, hi);
       if (hi - lo < 60000) return false;
       reportZoom = {start: lo, end: hi};
-      renderReportCharts();
+      if (!updateRenderedReportRange()) renderReportCharts();
       return true;
     }
 
@@ -1233,7 +1233,7 @@
       reportRangeToken++;
       reportSeries = reportBaseSeries;
       reportEvents = reportBaseEvents;
-      renderReportCharts();
+      if (!updateRenderedReportRange()) renderReportCharts();
     }
 
     document.addEventListener("keydown", (ev) => {
@@ -1333,6 +1333,120 @@
       }
     }
 
+    function reportChartSeriesList(definition) {
+      return (definition.series || [definition]).map((series) => ({
+        label: series.label || definition.title,
+        color: series.color || definition.color,
+        points: (reportSeries[series.key] || []).slice()
+          .sort((a, b) => a.t - b.t),
+      })).filter((series) => series.points.length > 0);
+    }
+
+    function reportChartExtent(definition, ranges) {
+      const series = (definition.series || [definition]).map((item) => {
+        const base = reportBaseSeries[item.key] || [];
+        const source = base.length ? base : reportSeries[item.key] || [];
+        return source.filter((point) =>
+          point && !point.gap && reportPointOverlapsAnyRange(point, ranges));
+      }).filter((points) => points.length > 0);
+      return reportSeriesExtent(series);
+    }
+
+    function setReportItemLoading(item, loading) {
+      if (!item || !item.name) return;
+      if (loading && !item.loadingBadge) {
+        const badge = document.createElement("span");
+        badge.className = "report-res-badge";
+        badge.textContent = "loading";
+        item.name.appendChild(badge);
+        item.loadingBadge = badge;
+      } else if (!loading && item.loadingBadge) {
+        item.loadingBadge.remove();
+        item.loadingBadge = null;
+      }
+    }
+
+    function updateRenderedReportRange() {
+      const range = reportZoom || reportRange();
+      if (!validReportRange(range) || !reportDrawItems.length) return false;
+
+      if (reportZoom) {
+        ensureReportRangeLoaded(reportZoom.start, reportZoom.end);
+      }
+      const ranges = reportVisibleSessionRanges();
+      reportDrawItems.forEach((item) => {
+        item.events = reportEvents.slice();
+        item.start = range.start;
+        item.end = range.end;
+        item.ranges = ranges;
+
+        const pending = !reportBaseLoadedCharts.has(item.key) ||
+          (!!reportZoom && !currentReportRangeChartReady(item.key));
+        if (item.type === "series") {
+          const definition = reportChartDefinition(item.key);
+          if (definition) {
+            const extent = reportChartExtent(definition, ranges);
+            item.seriesList = reportChartSeriesList(definition);
+            item.minY = extent.min;
+            item.maxY = extent.max;
+          }
+          item.rangePending = pending;
+        }
+        setReportItemLoading(item, pending);
+      });
+
+      scheduleReportDraw();
+      updateReportZoomControls();
+      return true;
+    }
+
+    function updateRenderedReportChart(key) {
+      const range = reportZoom || reportRange();
+      if (!validReportRange(range)) return false;
+
+      const ranges = reportVisibleSessionRanges();
+      const pending = !!reportZoom && !currentReportRangeChartReady(key);
+      if (key === "events") {
+        reportDrawItems.forEach((item) => {
+          item.events = reportEvents.slice();
+          if (item.type === "events") {
+            item.start = range.start;
+            item.end = range.end;
+            item.ranges = ranges;
+            setReportItemLoading(item, pending);
+          }
+        });
+        scheduleReportDraw();
+        updateReportZoomControls();
+        return reportDrawItems.length > 0;
+      }
+
+      const item = reportDrawItems.find((candidate) => candidate.key === key);
+      const definition = reportChartDefinition(key);
+      if (!definition) return false;
+      if (!item || item.type !== "series") {
+        return reportChartSeriesList(definition).length === 0;
+      }
+
+      const extent = reportChartExtent(definition, ranges);
+      const seriesList = reportChartSeriesList(definition);
+      if (!seriesList.length && reportBaseLoadedCharts.has(key) && !pending) {
+        return false;
+      }
+      item.seriesList = seriesList;
+      item.events = reportEvents.slice();
+      item.minY = extent.min;
+      item.maxY = extent.max;
+      item.start = range.start;
+      item.end = range.end;
+      item.ranges = ranges;
+      item.rangePending = pending;
+      setReportItemLoading(item, pending);
+      scheduleReportDraw();
+      updateReportZoomControls();
+      return true;
+    }
+
     function renderReportEventFlags(container, range, ranges, definition) {
       // Stay visible if the night has events; do not vanish on an event-free zoom.
       if (!((reportResult && reportResult.events_available) ||
@@ -1345,13 +1459,14 @@
       title.className = "report-chart-title";
       const name = document.createElement("span");
       name.textContent = definition.title;
+      let loadingBadge = null;
       if (!reportChartPreferences.collapsed.has(definition.key) &&
           (!reportBaseLoadedCharts.has(definition.key) ||
            (reportZoom && !currentReportRangeChartReady(definition.key)))) {
-        const badge = document.createElement("span");
-        badge.className = "report-res-badge";
-        badge.textContent = "loading";
-        name.appendChild(badge);
+        loadingBadge = document.createElement("span");
+        loadingBadge.className = "report-res-badge";
+        loadingBadge.textContent = "loading";
+        name.appendChild(loadingBadge);
       }
       title.appendChild(name);
       const readout = document.createElement("span");
@@ -1383,8 +1498,11 @@
       card.appendChild(canvas);
       container.appendChild(card);
       const item = {
+        key: definition.key,
         type: "events",
         canvas,
+        name,
+        loadingBadge,
         events: reportEvents.slice(),
         start: range.start,
         end: range.end,
@@ -1444,13 +1562,10 @@
 
         const seriesDefs = def.series || [def];
         const availableParts = reportChartPartNames(def, reportBasePlotIndex);
-        const seriesList = seriesDefs.map((seriesDef) => ({
-          label: seriesDef.label || def.title,
-          color: seriesDef.color || def.color,
-          points: (reportSeries[seriesDef.key] || []).slice()
-            .sort((a, b) => a.t - b.t),
-        })).filter((series) => series.points.length > 0);
-        if (!seriesList.length) {
+        const seriesList = reportChartSeriesList(def);
+        const basePending = availableParts.length > 0 &&
+          !reportBaseLoadedCharts.has(def.key);
+        if (!seriesList.length && !basePending) {
           if (def.optional && !availableParts.length) return;
 
           // Expected signal with no data: high-res aged out on the device
@@ -1488,13 +1603,7 @@
           container.appendChild(card);
           return;
         }
-        const extentSeriesList = seriesDefs.map((seriesDef) => {
-          const base = reportBaseSeries[seriesDef.key] || [];
-          const source = base.length ? base : reportSeries[seriesDef.key] || [];
-          return source.filter((p) =>
-            p && !p.gap && reportPointOverlapsAnyRange(p, sessionRanges));
-        }).filter((points) => points.length > 0);
-        const extent = reportSeriesExtent(extentSeriesList);
+        const extent = reportChartExtent(def, sessionRanges);
 
         const card = document.createElement("div");
         card.className = "report-chart";
@@ -1504,11 +1613,12 @@
         name.textContent = def.title;
         const rangePending = !!reportZoom &&
           !currentReportRangeChartReady(def.key);
-        if (rangePending) {
-          const badge = document.createElement("span");
-          badge.className = "report-res-badge";
-          badge.textContent = "loading";
-          name.appendChild(badge);
+        let loadingBadge = null;
+        if (basePending || rangePending) {
+          loadingBadge = document.createElement("span");
+          loadingBadge.className = "report-res-badge";
+          loadingBadge.textContent = "loading";
+          name.appendChild(loadingBadge);
         }
         if (seriesDefs.some((sd) => lowResByName[sd.key])) {
           const badge = document.createElement("span");
@@ -1554,8 +1664,11 @@
         card.appendChild(canvas);
         container.appendChild(card);
         const item = {
+          key: def.key,
           type: "series",
           canvas,
+          name,
+          loadingBadge,
           seriesList,
           events: reportEvents.slice(),
           minY: extent.min,
@@ -1848,18 +1961,18 @@
     }
 
     async function pollReportPlotPart(url, active, maxAttempts, delay, signal,
-                                      decode) {
+                                      decode, cacheResponse = true) {
       return pollReportFetch({
         active,
         maxAttempts,
         delayMs: delay,
         request: () => {
-          const cached = lruGet(reportPlotClientCache, url);
+          const cached = cacheResponse ? lruGet(reportPlotClientCache, url) : null;
           return AirCANnect.http.request(url, conditionalRequestOptions(cached, signal));
         },
         handle: async (response) => {
           if (response.status === 304) {
-            const cached = lruGet(reportPlotClientCache, url);
+            const cached = cacheResponse ? lruGet(reportPlotClientCache, url) : null;
             if (!cached) throw new Error("plot cache revalidation failed");
             return {done: true, value: cached};
           }
@@ -1873,8 +1986,10 @@
               revision,
               decoded,
             };
-            lruSet(reportPlotClientCache, url, entry,
-              REPORT_PLOT_CLIENT_CACHE_MAX);
+            if (cacheResponse) {
+              lruSet(reportPlotClientCache, url, entry,
+                REPORT_PLOT_CLIENT_CACHE_MAX);
+            }
             return {done: true, value: entry};
           }
           if (response.status === 202) return {done: false};
@@ -1911,8 +2026,9 @@
     }
 
     function reportExpandedChartKeys() {
+      const visible = new Set(visibleReportChartOrder());
       return reportChartPreferences.order.filter((key) =>
-        !reportChartPreferences.collapsed.has(key));
+        visible.has(key) && !reportChartPreferences.collapsed.has(key));
     }
 
     function reportBaseLoadKeys(keys) {
@@ -1946,7 +2062,8 @@
           context.signal,
           (buffer) => part === "events"
             ? decodeReportPlotEvents(buffer, index, section)
-            : decodeReportPlotSeries(buffer, index, section));
+            : decodeReportPlotSeries(buffer, index, section),
+          context.cacheParts !== false);
         if (!fetched || !context.active()) return null;
         if (fetched.revision && fetched.revision !== context.revision) {
           throw new Error("report_revision_changed");
@@ -1971,11 +2088,13 @@
       } else {
         Object.keys(decoded.series || {}).forEach((name) => {
           reportBaseSeries[name] = decoded.series[name];
-          if (!reportZoom) reportSeries[name] = decoded.series[name];
+          if (!reportZoom || !currentReportRangeChartReady(key)) {
+            reportSeries[name] = decoded.series[name];
+          }
         });
       }
       reportBaseLoadedCharts.add(key);
-      renderReportCharts();
+      if (!updateRenderedReportChart(key)) renderReportCharts();
     }
 
     function loadReportBaseChart(key, token, signal) {
@@ -2082,8 +2201,67 @@
       return to > from ? {from, to} : null;
     }
 
-    function reportRangeCacheKey(nightId, revision, from, to) {
+    function reportRangeViewKey(nightId, revision, from, to) {
       return String(nightId) + ":" + String(revision) + ":" + from + ":" + to;
+    }
+
+    function reportRangeTileKey(nightId, revision, from) {
+      return String(nightId) + ":" + String(revision) + ":" + from;
+    }
+
+    function reportRangeDecodedSize(decoded) {
+      if (!decoded) return 0;
+      let bytes = (decoded.events || []).length * 32;
+      Object.values(decoded.series || {}).forEach((points) => {
+        bytes += points.length * REPORT_RANGE_POINT_ESTIMATE_BYTES;
+      });
+      return bytes;
+    }
+
+    function reportRangeTileSize(tile) {
+      let bytes = tile.bytes ? tile.bytes.byteLength : 0;
+      tile.charts.forEach((decoded) => {
+        bytes += reportRangeDecodedSize(decoded);
+      });
+      return bytes;
+    }
+
+    function trimReportRangeTileCache() {
+      const cacheSize = () => Array.from(reportRangeTileCache.values())
+        .reduce((total, tile) => total + reportRangeTileSize(tile), 0);
+      while (reportRangeTileCache.size > REPORT_RANGE_TILE_CACHE_MAX ||
+             cacheSize() > REPORT_RANGE_TILE_CACHE_MAX_BYTES) {
+        const oldest = reportRangeTileCache.keys().next().value;
+        if (oldest === undefined) break;
+        reportRangeTileCache.delete(oldest);
+      }
+    }
+
+    function touchReportRangeTile(tile) {
+      if (!tile || !reportRangeTileCache.has(tile.key)) return;
+      reportRangeTileCache.delete(tile.key);
+      reportRangeTileCache.set(tile.key, tile);
+    }
+
+    function reportRangeTile(nightId, revision, from) {
+      const key = reportRangeTileKey(nightId, revision, from);
+      let tile = lruGet(reportRangeTileCache, key);
+      if (tile) return tile;
+
+      tile = {
+        key,
+        from,
+        to: from + REPORT_RANGE_TILE_MS,
+        index: null,
+        bytes: null,
+        charts: new Map(),
+        indexPromise: null,
+        wholePromise: null,
+        chartPromises: new Map(),
+      };
+      reportRangeTileCache.set(key, tile);
+      trimReportRangeTileCache();
+      return tile;
     }
 
     function currentReportRangeCacheKey() {
@@ -2092,25 +2270,22 @@
       }
       const w = reportRangeWindow(reportZoom.start, reportZoom.end);
       if (!w) return "";
-      return reportRangeCacheKey(reportCurrentNightId,
+      return reportRangeViewKey(reportCurrentNightId,
         reportCurrentRevision, w.from, w.to);
     }
 
-    function reportRangeEntry(key, from, to) {
-      let entry = lruGet(reportRangeCache, key);
-      if (entry) return entry;
-      entry = {
+    function newReportRangeView(key, from, to) {
+      return {
+        key,
         from,
         to,
-        indexes: null,
+        tiles: null,
         series: {},
-        events: [],
+        events: null,
         loadedCharts: new Set(),
         requestedCharts: new Set(),
         promise: null,
       };
-      lruSet(reportRangeCache, key, entry, REPORT_RANGE_CACHE_MAX);
-      return entry;
     }
 
     function applyReportRangeChart(entry, key) {
@@ -2120,7 +2295,7 @@
       const definition = reportChartDefinition(key);
       if (!definition) return;
       if (definition.type === "events") {
-        reportEvents = entry.events;
+        if (Array.isArray(entry.events)) reportEvents = entry.events;
       } else {
         (definition.series || [definition]).forEach((series) => {
           if (Object.prototype.hasOwnProperty.call(entry.series, series.key)) {
@@ -2132,7 +2307,8 @@
 
     function currentReportRangeChartReady(key) {
       const cacheKey = currentReportRangeCacheKey();
-      const entry = cacheKey ? reportRangeCache.get(cacheKey) : null;
+      const entry = cacheKey && reportRangeView &&
+          reportRangeView.key === cacheKey ? reportRangeView : null;
       return !!(entry && entry.loadedCharts.has(key));
     }
 
@@ -2140,16 +2316,17 @@
       if (!reportCurrentNightId || !reportCurrentRevision) return;
       const w = reportRangeWindow(lo, hi);
       if (!w) return;
-      const key = reportRangeCacheKey(reportCurrentNightId,
+      const key = reportRangeViewKey(reportCurrentNightId,
         reportCurrentRevision, w.from, w.to);
       if (reportRangeActiveKey !== key) {
-        cancelReportRangeRequest();
         reportRangeActiveKey = key;
+        reportRangeView = newReportRangeView(key, w.from, w.to);
         reportSeries = {...reportBaseSeries};
         reportEvents = reportBaseEvents;
       }
 
-      const entry = reportRangeEntry(key, w.from, w.to);
+      const entry = reportRangeView;
+      if (!entry) return;
       const keys = requestedKeys || reportExpandedChartKeys();
       keys.forEach((chartKey) => {
         if (!entry.loadedCharts.has(chartKey)) {
@@ -2192,68 +2369,250 @@
       return merged;
     }
 
-    async function loadReportRangeIndexes(context, from, to) {
-      const indexes = [];
+    function reportRangeTilePartNames(index, keys) {
+      const names = new Set();
+      keys.forEach((key) => {
+        const definition = reportChartDefinition(key);
+        reportChartPartNames(definition, index).forEach((name) => names.add(name));
+      });
+      return names;
+    }
+
+    function reportRangeTileShouldLoadWhole(tile, keys) {
+      if (!tile || !tile.index) return false;
+      const names = reportRangeTilePartNames(tile.index, keys);
+      if (names.size < REPORT_RANGE_WHOLE_MIN_PARTS) return false;
+
+      let requestedBytes = 0;
+      names.forEach((name) => {
+        const section = reportPlotSection(name, tile.index);
+        if (section) requestedBytes += section.length;
+      });
+      const payloadBytes = tile.index.totalSize - REPORT_PLOT_PREFIX_BYTES;
+      return payloadBytes > 0 &&
+        requestedBytes * 100 >=
+          payloadBytes * REPORT_RANGE_WHOLE_THRESHOLD_PERCENT;
+    }
+
+    function decodeReportWholePlot(buffer) {
+      if (buffer.byteLength < REPORT_PLOT_PREFIX_BYTES) {
+        return {valid: false};
+      }
+
+      const index = decodeReportPlotIndex(
+        buffer.slice(0, REPORT_PLOT_PREFIX_BYTES));
+      if (!index.valid || index.totalSize !== buffer.byteLength) {
+        return {valid: false};
+      }
+      return {valid: true, index, bytes: buffer};
+    }
+
+    async function loadReportRangeTileIndex(tile, context) {
+      while (context.active() && !tile.index) {
+        if (tile.indexPromise) {
+          await tile.indexPromise;
+          continue;
+        }
+
+        const url = reportPlotUrl(context.nightId,
+          tile.from, tile.to, "index");
+        const promise = pollReportPlotPart(
+          url,
+          context.active,
+          REPORT_RANGE_POLL_MAX_ATTEMPTS,
+          REPORT_RANGE_POLL_DELAY_MS,
+          context.signal,
+          decodeReportPlotIndex,
+          false).then((fetched) => {
+            if (!fetched || !context.active()) return false;
+            if (fetched.revision && fetched.revision !== context.revision) {
+              throw new Error("report_revision_changed");
+            }
+
+            tile.index = fetched.decoded;
+            touchReportRangeTile(tile);
+            trimReportRangeTileCache();
+            return true;
+          }).finally(() => {
+            if (tile.indexPromise === promise) tile.indexPromise = null;
+          });
+        tile.indexPromise = promise;
+        await promise;
+      }
+      return !!tile.index;
+    }
+
+    async function loadReportRangeTileWhole(tile, context) {
+      while (context.active() && !tile.bytes) {
+        if (tile.wholePromise) {
+          await tile.wholePromise;
+          continue;
+        }
+
+        const url = reportPlotUrl(context.nightId, tile.from, tile.to);
+        const promise = pollReportPlotPart(
+          url,
+          context.active,
+          REPORT_RANGE_POLL_MAX_ATTEMPTS,
+          REPORT_RANGE_POLL_DELAY_MS,
+          context.signal,
+          decodeReportWholePlot,
+          false).then((fetched) => {
+            if (!fetched || !context.active()) return false;
+            if (fetched.revision && fetched.revision !== context.revision) {
+              throw new Error("report_revision_changed");
+            }
+            if (!tile.index ||
+                fetched.decoded.index.prefixCrc32 !== tile.index.prefixCrc32) {
+              throw new Error("report_tile_index_changed");
+            }
+
+            tile.bytes = fetched.decoded.bytes;
+            touchReportRangeTile(tile);
+            trimReportRangeTileCache();
+            return true;
+          }).finally(() => {
+            if (tile.wholePromise === promise) tile.wholePromise = null;
+          });
+        tile.wholePromise = promise;
+        await promise;
+      }
+      return !!tile.bytes;
+    }
+
+    async function loadReportRangeTiles(context, from, to) {
+      const tiles = [];
       const jobs = [];
+      const tileContext = {...context, active: context.tileActive};
       for (let tileStart = from; tileStart < to;
            tileStart += REPORT_RANGE_TILE_MS) {
-        const tileIndex = indexes.length;
-        indexes.push(null);
-        jobs.push(async () => {
-          const tileEnd = tileStart + REPORT_RANGE_TILE_MS;
-          const url = reportPlotUrl(context.nightId,
-            tileStart, tileEnd, "index");
-          const fetched = await pollReportPlotPart(
-            url,
-            context.active,
-            REPORT_RANGE_POLL_MAX_ATTEMPTS,
-            REPORT_RANGE_POLL_DELAY_MS,
-            context.signal,
-            decodeReportPlotIndex);
-          if (!fetched || !context.active()) return;
-          if (fetched.revision && fetched.revision !== context.revision) {
-            throw new Error("report_revision_changed");
-          }
-          indexes[tileIndex] = {
-            from: tileStart,
-            to: tileEnd,
-            index: fetched.decoded,
-          };
-        });
+        const tile = reportRangeTile(
+          context.nightId, context.revision, tileStart);
+        tiles.push(tile);
+        jobs.push(() => loadReportRangeTileIndex(tile, tileContext));
       }
       await runReportFetchJobs(jobs, 2);
-      return indexes.every((item) => item) ? indexes : null;
+      return tiles.every((tile) => tile.index) ? tiles : null;
+    }
+
+    function decodeReportRangeTileChart(tile, definition) {
+      if (!tile || !tile.index || !tile.bytes || !definition) return null;
+
+      const decoded = {events: [], series: {}};
+      const partNames = reportChartPartNames(definition, tile.index);
+      for (const name of partNames) {
+        const section = reportPlotSection(name, tile.index);
+        if (!section) continue;
+        const buffer = tile.bytes.slice(
+          section.offset, section.offset + section.length);
+        const part = name === "events"
+          ? decodeReportPlotEvents(buffer, tile.index, section)
+          : decodeReportPlotSeries(buffer, tile.index, section);
+        if (!part.valid) return null;
+
+        if (name === "events") {
+          decoded.events = part.events;
+        } else {
+          decoded.series[name] = part.points;
+        }
+      }
+      return decoded;
+    }
+
+    async function loadReportRangeTileChart(tile, definition, context) {
+      const cached = tile.charts.get(definition.key);
+      if (cached) {
+        touchReportRangeTile(tile);
+        return cached;
+      }
+
+      const pending = tile.chartPromises.get(definition.key);
+      if (pending) {
+        const decoded = await pending;
+        if (decoded || !context.active()) return decoded;
+        return loadReportRangeTileChart(tile, definition, context);
+      }
+
+      const tileContext = {
+        ...context,
+        from: tile.from,
+        to: tile.to,
+        cacheParts: false,
+        active: context.tileActive,
+      };
+      const promise = (async () => {
+        let decoded = tile.bytes
+          ? decodeReportRangeTileChart(tile, definition)
+          : null;
+        if (!decoded) {
+          decoded = await fetchReportChartData(
+            tile.index, definition, tileContext);
+        }
+        if (!decoded || !tileContext.active()) return null;
+
+        tile.charts.set(definition.key, decoded);
+        touchReportRangeTile(tile);
+        trimReportRangeTileCache();
+        return decoded;
+      })().finally(() => {
+        if (tile.chartPromises.get(definition.key) === promise) {
+          tile.chartPromises.delete(definition.key);
+        }
+      });
+      tile.chartPromises.set(definition.key, promise);
+      return promise;
     }
 
     async function loadReportRangeChart(entry, key, context) {
       const definition = reportChartDefinition(key);
-      if (!definition || !entry.indexes) return false;
+      if (!definition || !entry.tiles) return false;
 
       const plots = [];
-      for (const tile of entry.indexes) {
-        const tileContext = {
-          ...context,
-          from: tile.from,
-          to: tile.to,
-        };
-        const decoded = await fetchReportChartData(
-          tile.index, definition, tileContext);
+      for (const tile of entry.tiles) {
+        const decoded = await loadReportRangeTileChart(
+          tile, definition, context);
         if (!decoded || !context.active()) return false;
         plots.push(decoded);
       }
 
       const merged = mergeReportPlots(plots);
       if (definition.type === "events") {
-        entry.events = merged.events;
+        if (entry.tiles.some((tile) =>
+          reportPlotSection("events", tile.index))) {
+          entry.events = merged.events;
+        }
       } else {
         (definition.series || [definition]).forEach((series) => {
-          entry.series[series.key] = merged.series[series.key] || [];
+          if (Object.prototype.hasOwnProperty.call(
+            merged.series, series.key)) {
+            entry.series[series.key] = merged.series[series.key];
+          }
         });
       }
       entry.loadedCharts.add(key);
       applyReportRangeChart(entry, key);
-      renderReportCharts();
+      if (!updateRenderedReportChart(key)) renderReportCharts();
       return true;
+    }
+
+    async function prepareReportRangeTiles(entry, keys, context) {
+      if (!entry.tiles || !keys.length) return;
+      const tileContext = {...context, active: context.tileActive};
+      const jobs = entry.tiles
+        .filter((tile) => !tile.bytes &&
+          reportRangeTileShouldLoadWhole(tile, keys))
+        .map((tile) => async () => {
+          try {
+            return await loadReportRangeTileWhole(tile, tileContext);
+          } catch (error) {
+            if (error && (error.message === "report_revision_changed" ||
+                          error.message === "report_tile_index_changed")) {
+              throw error;
+            }
+            return false;
+          }
+        });
+      await runReportFetchJobs(jobs, 2);
     }
 
     function startReportRangeWorker(key, entry) {
@@ -2270,16 +2629,19 @@
         signal: controller.signal,
         maxAttempts: REPORT_RANGE_POLL_MAX_ATTEMPTS,
         delay: REPORT_RANGE_POLL_DELAY_MS,
+        tileActive: () => !controller.signal.aborted &&
+          nightId === reportCurrentNightId &&
+          revision === reportCurrentRevision,
         active: () => token === reportRangeToken &&
           key === reportRangeActiveKey &&
           nightId === reportCurrentNightId &&
           revision === reportCurrentRevision,
       };
       const promise = (async () => {
-        if (!entry.indexes) {
-          entry.indexes = await loadReportRangeIndexes(
+        if (!entry.tiles) {
+          entry.tiles = await loadReportRangeTiles(
             context, entry.from, entry.to);
-          if (!entry.indexes || !context.active()) return;
+          if (!entry.tiles || !context.active()) return;
         }
 
         while (context.active()) {
@@ -2287,11 +2649,14 @@
             .filter((chartKey) => !entry.loadedCharts.has(chartKey));
           entry.requestedCharts.clear();
           if (!keys.length) break;
+          await prepareReportRangeTiles(entry, keys, context);
+          if (!context.active()) return;
           await runReportFetchJobs(keys.map((chartKey) =>
             () => loadReportRangeChart(entry, chartKey, context)), 2);
         }
       })().catch((error) => {
-        if (error && error.message === "report_revision_changed" &&
+        if (error && (error.message === "report_revision_changed" ||
+                      error.message === "report_tile_index_changed") &&
             context.active()) {
           loadSelectedReportNight();
         }
@@ -2299,9 +2664,6 @@
         const restart = context.active() &&
           entry.requestedCharts.size > 0;
         if (entry.promise === promise) entry.promise = null;
-        if (reportRangeAbortController === controller) {
-          reportRangeAbortController = null;
-        }
         if (restart) startReportRangeWorker(key, entry);
       });
       entry.promise = promise;
@@ -2536,17 +2898,16 @@
     // identity consumed by WebUI; entry positions are deliberately ignored.
     function decodeReportPlotIndex(buffer) {
       const invalid = {valid: false, sections: {}};
-      const PREFIX_BYTES = 1600;
       const HEADER_BYTES = 64;
       const ENTRY_BYTES = 48;
       const NAME_BYTES = 32;
-      if (buffer.byteLength !== PREFIX_BYTES) return invalid;
+      if (buffer.byteLength !== REPORT_PLOT_PREFIX_BYTES) return invalid;
 
       const bytes = new Uint8Array(buffer);
       const dv = new DataView(buffer);
       if (dv.getUint32(0, true) !== 0x42504341 ||
           dv.getUint16(4, true) !== 6 ||
-          dv.getUint32(8, true) !== PREFIX_BYTES) {
+          dv.getUint32(8, true) !== REPORT_PLOT_PREFIX_BYTES) {
         return invalid;
       }
 
@@ -2562,7 +2923,7 @@
       const start = Number(dv.getBigInt64(24, true));
       const end = Number(dv.getBigInt64(32, true));
       const count = dv.getUint16(40, true);
-      if (totalSize < PREFIX_BYTES || !(end > start) ||
+      if (totalSize < REPORT_PLOT_PREFIX_BYTES || !(end > start) ||
           count < 1 || count > 32) {
         return invalid;
       }
@@ -2570,7 +2931,7 @@
       const decoder = new TextDecoder();
       const sections = {};
       const order = [];
-      let expectedOffset = PREFIX_BYTES;
+      let expectedOffset = REPORT_PLOT_PREFIX_BYTES;
       for (let i = 0; i < count; i++) {
         const offset = HEADER_BYTES + i * ENTRY_BYTES;
         const nameBytes = bytes.subarray(offset + 4, offset + 4 + NAME_BYTES);
@@ -2752,7 +3113,6 @@
           if (plotStatus === "revision_changed") continue;
 
           renderReportSummary();
-          renderReportCharts();
           AirCANnect.ui.message("reportMsg",
               reportResult.state === "partial"
                 ? "Report loaded (incomplete - some data missing)"
@@ -2852,7 +3212,8 @@
     let reportCurrentNightId = "";
     let reportCurrentRevision = "";
     let reportCurrentPlotEtag = "";
-    const reportRangeCache = new Map();
+    const reportRangeTileCache = new Map();
+    let reportRangeView = null;
     let reportRangeActiveKey = "";
     let reportRangeToken = 0;
     let reportRangeAbortController = null;
@@ -2864,8 +3225,13 @@
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
     const REPORT_PLOT_CLIENT_CACHE_MAX = 32;
-    const REPORT_RANGE_CACHE_MAX = 24;
+    const REPORT_PLOT_PREFIX_BYTES = 1600;
     const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
+    const REPORT_RANGE_TILE_CACHE_MAX = 8;
+    const REPORT_RANGE_TILE_CACHE_MAX_BYTES = 6 * 1024 * 1024;
+    const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;
+    const REPORT_RANGE_WHOLE_MIN_PARTS = 2;
+    const REPORT_RANGE_WHOLE_THRESHOLD_PERCENT = 60;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
     const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
     const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
