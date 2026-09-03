@@ -1462,25 +1462,8 @@
     function resmedRepositoryUploadProgress(name, committed, total,
                                              fileIndex, fileCount) {
       storageUploadProgress(name, committed, total, fileIndex, fileCount);
-
-      const safeTotal = Math.max(0, Number(total) || 0);
-      const safeCommitted = Math.min(safeTotal,
-        Math.max(0, Number(committed) || 0));
-      const nameNode = document.getElementById("resmedRepositoryUploadName");
-      const amountNode = document.getElementById("resmedRepositoryUploadAmount");
-      const bar = document.getElementById("resmedRepositoryUploadBar");
-      if (nameNode) {
-        nameNode.textContent = (fileCount > 1 ?
-          (fileIndex + 1) + "/" + fileCount + " " : "") + name;
-      }
-      if (amountNode) {
-        amountNode.textContent = fmtBytes(safeCommitted) + " / " +
-          fmtBytes(safeTotal);
-      }
-      if (bar) {
-        bar.max = Math.max(1, safeTotal);
-        bar.value = safeCommitted;
-      }
+      renderUploadProgress("resmedRepositoryUpload", name, committed, total,
+        fileIndex, fileCount);
     }
 
     function setResmedRepositoryUploadBusy(busy) {

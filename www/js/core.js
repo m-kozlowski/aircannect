@@ -26,6 +26,42 @@
       postLiveViewState(liveViewWanted(id), force);
     }
 
+    function loadTabContent(id, refresh) {
+      if (id === "dash") loadStatus();
+      if (id === "report") {
+        if (refresh) {
+          refreshReportSummary(true);
+        } else {
+          loadReportSummary(true);
+          scheduleReportDrawAfterReveal();
+        }
+      }
+      if (id === "edf") {
+        loadStatus();
+        loadEdfOverview();
+        loadSmbSyncStatus();
+        loadSleepHqSyncStatus();
+      }
+      if (id === "storage") {
+        loadStorageList(refresh);
+        loadSmbSyncStatus();
+      }
+      if (id === "oxi") {
+        loadStatus();
+        loadOximetrySensors();
+      }
+      if (id === "clinical") loadSettings(refresh);
+      if (id === "wifi") loadWifi();
+      if (id === "ota") loadOta();
+      if (id === "console") {
+        loadConsole();
+        if (!refresh) {
+          setTimeout(() => document.getElementById("consoleInput").focus(), 0);
+        }
+      }
+      if (id === "config") loadConfig();
+    }
+
     function showTab(id) {
       Object.keys(tabs).forEach((tab) => {
         document.getElementById("p-" + tab).classList.toggle("active", tab === id);
@@ -39,33 +75,7 @@
       updateLiveViewState(id);
       if (id !== "report") cancelReportRequests();
 
-      if (id === "dash") loadStatus();
-      if (id === "report") {
-        loadReportSummary(true);
-        scheduleReportDrawAfterReveal();
-      }
-      if (id === "edf") {
-        loadStatus();
-        loadEdfOverview();
-        loadSmbSyncStatus();
-        loadSleepHqSyncStatus();
-      }
-      if (id === "storage") {
-        loadStorageList(false);
-        loadSmbSyncStatus();
-      }
-      if (id === "oxi") {
-        loadStatus();
-        loadOximetrySensors();
-      }
-      if (id === "clinical") loadSettings(false);
-      if (id === "wifi") loadWifi();
-      if (id === "ota") loadOta();
-      if (id === "console") {
-        loadConsole();
-        setTimeout(() => document.getElementById("consoleInput").focus(), 0);
-      }
-      if (id === "config") loadConfig();
+      loadTabContent(id, false);
     }
 
     function clinicalTabActive() {
@@ -81,27 +91,7 @@
     function refreshActive() {
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       updateLiveViewState(pane);
-      if (pane === "dash") loadStatus();
-      if (pane === "report") refreshReportSummary(true);
-      if (pane === "edf") {
-        loadStatus();
-        loadEdfOverview();
-        loadSmbSyncStatus();
-        loadSleepHqSyncStatus();
-      }
-      if (pane === "storage") {
-        loadStorageList(true);
-        loadSmbSyncStatus();
-      }
-      if (pane === "oxi") {
-        loadStatus();
-        loadOximetrySensors();
-      }
-      if (pane === "clinical") loadSettings(true);
-      if (pane === "wifi") loadWifi();
-      if (pane === "ota") loadOta();
-      if (pane === "console") loadConsole();
-      if (pane === "config") loadConfig();
+      loadTabContent(pane, true);
     }
 
     document.addEventListener("visibilitychange", () => updateLiveViewState());

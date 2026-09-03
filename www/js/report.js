@@ -694,6 +694,18 @@
       });
     }
 
+    function attachReportCursor(svg, pad, graphH) {
+      const cursor = svgNode("line", {
+        x1: "0", x2: "0",
+        y1: String(pad.top), y2: (pad.top + graphH).toFixed(1),
+        stroke: "#7c8595", "stroke-width": "1", "stroke-dasharray": "3 3",
+        "pointer-events": "none", visibility: "hidden",
+      });
+      svg.appendChild(cursor);
+      svg._cursor = cursor;
+      svg._timeTooltip = createReportTimeTooltip(svg);
+    }
+
     function drawReportChart(svg,
                              seriesList,
                              events,
@@ -875,15 +887,7 @@
         pad, graphW, graphH);
 
       svg._geom = {pad, graphW, width, height};
-      const cursor = svgNode("line", {
-        x1: "0", x2: "0",
-        y1: String(pad.top), y2: (pad.top + graphH).toFixed(1),
-        stroke: "#7c8595", "stroke-width": "1", "stroke-dasharray": "3 3",
-        "pointer-events": "none", visibility: "hidden",
-      });
-      svg.appendChild(cursor);
-      svg._cursor = cursor;
-      svg._timeTooltip = createReportTimeTooltip(svg);
+      attachReportCursor(svg, pad, graphH);
       return true;
     }
 
@@ -942,15 +946,7 @@
         }));
       });
       svg._geom = {pad, graphW, width, height};
-      const cursor = svgNode("line", {
-        x1: "0", x2: "0",
-        y1: String(pad.top), y2: (pad.top + graphH).toFixed(1),
-        stroke: "#7c8595", "stroke-width": "1", "stroke-dasharray": "3 3",
-        "pointer-events": "none", visibility: "hidden",
-      });
-      svg.appendChild(cursor);
-      svg._cursor = cursor;
-      svg._timeTooltip = createReportTimeTooltip(svg);
+      attachReportCursor(svg, pad, graphH);
       return true;
     }
 
@@ -2503,7 +2499,7 @@
         arousal_count: dv.getUint32(eventsOffset + 16, true),
         csr_count: dv.getUint32(eventsOffset + 20, true),
       };
-      const metricFields = legacy ? [
+      const baseMetricFields = [
         "ahi",
         "oa_index",
         "ca_index",
@@ -2512,15 +2508,8 @@
         "arousal_index",
         "mask_pressure_50",
         "leak_50",
-      ] : [
-        "ahi",
-        "oa_index",
-        "ca_index",
-        "ua_index",
-        "hypopnea_index",
-        "arousal_index",
-        "mask_pressure_50",
-        "leak_50",
+      ];
+      const metricFields = legacy ? baseMetricFields : baseMetricFields.concat([
         null,
         "mask_pressure_95",
         "leak_95",
@@ -2534,7 +2523,7 @@
         "spo2_threshold_minutes",
         "csr_minutes",
         "average_leak",
-      ];
+      ]);
       metricFields.forEach((field, index) => {
         if (!field || !(metricValid & (1 << index))) return;
         result[field] = metrics[index];

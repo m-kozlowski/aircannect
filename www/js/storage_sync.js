@@ -489,13 +489,14 @@
       storageSelectionUi();
     }
 
-    function storageUploadProgress(name, committed, total, fileIndex, fileCount) {
+    function renderUploadProgress(prefix, name, committed, total,
+                                  fileIndex, fileCount) {
       const safeTotal = Math.max(0, Number(total) || 0);
       const safeCommitted = Math.min(safeTotal,
         Math.max(0, Number(committed) || 0));
-      const nameNode = document.getElementById("storageUploadName");
-      const amountNode = document.getElementById("storageUploadAmount");
-      const bar = document.getElementById("storageUploadBar");
+      const nameNode = document.getElementById(prefix + "Name");
+      const amountNode = document.getElementById(prefix + "Amount");
+      const bar = document.getElementById(prefix + "Bar");
       if (nameNode) {
         nameNode.textContent = (fileCount > 1 ?
           (fileIndex + 1) + "/" + fileCount + " " : "") + name;
@@ -508,6 +509,11 @@
         bar.max = Math.max(1, safeTotal);
         bar.value = safeCommitted;
       }
+    }
+
+    function storageUploadProgress(name, committed, total, fileIndex, fileCount) {
+      renderUploadProgress("storageUpload", name, committed, total,
+        fileIndex, fileCount);
     }
 
     function storageChooseUpload() {
@@ -776,6 +782,76 @@
       return "Retry in " + fmtDuration(Math.ceil((value - current) / 1000));
     }
 
+    function syncLastText(data, configured) {
+      if (!data || data.ok === false || !configured) return "--";
+      const seen = Number(data.last_sync_files_seen) || 0;
+      const uploaded = Number(data.last_sync_files_uploaded) || 0;
+      const failed = Number(data.last_sync_files_failed) || 0;
+      const bytes = Number(data.last_sync_bytes_uploaded) || 0;
+      const when = fmtStorageModified(data.last_sync_epoch);
+      if (!when && !seen) return "--";
+      let text = when || "Completed";
+      if (failed) {
+        text += ", " + failed + " failed";
+      } else if (uploaded) {
+        text += ", uploaded " + uploaded + " file" +
+          (uploaded === 1 ? "" : "s") + " (" + fmtBytes(bytes) + ")";
+      } else if (seen) {
+        text += ", up to date";
+      }
+      return text;
+    }
+
+    function syncStatusActive(data) {
+      if (!data || data.ok === false) return false;
+      return data.state === "working" || data.state === "pending" ||
+        !!data.pending;
+    }
+
+    function syncBadgeText(data, configured) {
+      if (!data || data.ok === false) return "--";
+      if (!configured) return "Setup";
+      const state = data.state || "unknown";
+      if (state === "working") return "Syncing";
+      if (state === "pending") return "Queued";
+      if (state === "error") return "Error";
+      if (state === "disabled") return "Off";
+      return "Ready";
+    }
+
+    function syncBadgeClass(data, configured) {
+      const state = data && data.state ? data.state : "unknown";
+      if (state === "error") return "badge bad";
+      if (!configured || state === "working" || state === "pending") {
+        return "badge warn";
+      }
+      return "badge good";
+    }
+
+    async function queueSyncAction(url, startMessage, messageId,
+                                   inProgressMessage, setBusy, loadStatus) {
+      setBusy(true);
+      msg(messageId, startMessage, true, false);
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          cache: "no-store",
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          throw new Error(storageErrorText(text, response.status));
+        }
+      } catch (error) {
+        const current = await loadStatus();
+        if (syncStatusActive(current)) {
+          msg(messageId, inProgressMessage, true, false);
+          return;
+        }
+        setBusy(false);
+        msg(messageId, error.message, false, true);
+      }
+    }
+
     function smbFriendlyError(error) {
       const text = String(error || "");
       if (!text) return "Sync failed";
@@ -880,28 +956,6 @@
       return "--";
     }
 
-    function smbSyncLastText(data) {
-      if (!data || data.ok === false || !data.enabled || !data.configured) {
-        return "--";
-      }
-      const seen = Number(data.last_sync_files_seen) || 0;
-      const uploaded = Number(data.last_sync_files_uploaded) || 0;
-      const failed = Number(data.last_sync_files_failed) || 0;
-      const bytes = Number(data.last_sync_bytes_uploaded) || 0;
-      const when = fmtStorageModified(data.last_sync_epoch);
-      if (!when && !seen) return "--";
-      let text = when || "Completed";
-      if (failed) {
-        text += ", " + failed + " failed";
-      } else if (uploaded) {
-        text += ", uploaded " + uploaded + " file" +
-          (uploaded === 1 ? "" : "s") + " (" + fmtBytes(bytes) + ")";
-      } else if (seen) {
-        text += ", up to date";
-      }
-      return text;
-    }
-
     function smbSyncCheckText(data) {
       if (!data || data.ok === false || !data.enabled || !data.configured) {
         return "--";
@@ -927,43 +981,24 @@
       return text;
     }
 
-    function smbSyncStatusActive(data) {
-      if (!data || data.ok === false) return false;
-      return data.state === "working" || data.state === "pending" || !!data.pending;
-    }
-
-    function smbSyncBadgeText(data) {
-      if (!data || data.ok === false) return "--";
-      if (!data.enabled || !data.configured) return "Setup";
-      const state = data.state || "unknown";
-      if (state === "working") return "Syncing";
-      if (state === "pending") return "Queued";
-      if (state === "error") return "Error";
-      if (state === "disabled") return "Off";
-      return "Ready";
-    }
-
     function renderSmbSyncStatus(data) {
-      const state = data && data.state ? data.state : "unknown";
+      const configured = !!(data && data.enabled && data.configured);
       up("edfSyncEndpoint", data && data.endpoint ? data.endpoint :
         (configData && configData.smb_ep ? configData.smb_ep : "--"));
       up("edfSyncResult", smbSyncResultText(data));
-      up("edfSyncLast", smbSyncLastText(data));
+      up("edfSyncLast", syncLastText(data, configured));
       up("edfSyncCheck", smbSyncCheckText(data));
       up("edfSyncCurrent", smbSyncNowText(data));
       const badge = document.getElementById("edfSyncBadge");
       if (badge) {
-        badge.textContent = smbSyncBadgeText(data);
-        badge.className = "badge" +
-          (state === "error" ? " bad" :
-           (!data || !data.enabled || !data.configured) ? " warn" :
-           (state === "working" || state === "pending") ? " warn" : " good");
+        badge.textContent = syncBadgeText(data, configured);
+        badge.className = syncBadgeClass(data, configured);
       }
     }
 
     function applySmbSyncStatus(data) {
       const wasActive = smbSyncBusy;
-      const active = smbSyncStatusActive(data);
+      const active = syncStatusActive(data);
       if (active && !wasActive) {
         smbSyncCompleteMessage = data.pending_reason === "startup_check" ||
           data.pending_reason === "verify_recent" || data.last_run_verify ?
@@ -1004,24 +1039,9 @@
 
     async function smbQueueAction(url, startMessage, completeMessage) {
       smbSyncCompleteMessage = completeMessage || "SMB sync complete";
-      smbSyncSetBusy(true);
-      msg("edfSmbMsg", startMessage, true, false);
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          cache: "no-store",
-        });
-        const text = await response.text();
-        if (!response.ok) throw new Error(storageErrorText(text, response.status));
-      } catch (error) {
-        const current = await loadSmbSyncStatus();
-        if (smbSyncStatusActive(current)) {
-          msg("edfSmbMsg", "SMB operation already in progress", true, false);
-          return;
-        }
-        smbSyncSetBusy(false);
-        msg("edfSmbMsg", error.message, false, true);
-      }
+      await queueSyncAction(url, startMessage, "edfSmbMsg",
+        "SMB operation already in progress", smbSyncSetBusy,
+        loadSmbSyncStatus);
     }
 
     async function smbStartSync() {
@@ -1093,26 +1113,6 @@
       return "Ready";
     }
 
-    function sleepHqSyncLastText(data) {
-      if (!data || data.ok === false || !data.configured) return "--";
-      const when = fmtStorageModified(data.last_sync_epoch);
-      const seen = Number(data.last_sync_files_seen) || 0;
-      const uploaded = Number(data.last_sync_files_uploaded) || 0;
-      const failed = Number(data.last_sync_files_failed) || 0;
-      const bytes = Number(data.last_sync_bytes_uploaded) || 0;
-      if (!when && !seen) return "--";
-      let text = when || "Completed";
-      if (failed) {
-        text += ", " + failed + " failed";
-      } else if (uploaded) {
-        text += ", uploaded " + uploaded + " file" +
-          (uploaded === 1 ? "" : "s") + " (" + fmtBytes(bytes) + ")";
-      } else if (seen) {
-        text += ", up to date";
-      }
-      return text;
-    }
-
     function sleepHqSyncCheckText(data) {
       if (!data || data.ok === false || !data.configured) return "--";
       const when = fmtStorageModified(data.last_check_epoch);
@@ -1135,43 +1135,23 @@
       return "--";
     }
 
-    function sleepHqSyncStatusActive(data) {
-      if (!data || data.ok === false) return false;
-      return data.state === "working" || data.state === "pending" ||
-        !!data.pending;
-    }
-
-    function sleepHqSyncBadgeText(data) {
-      if (!data || data.ok === false) return "--";
-      if (!data.configured) return "Setup";
-      const state = data.state || "unknown";
-      if (state === "working") return "Syncing";
-      if (state === "pending") return "Queued";
-      if (state === "error") return "Error";
-      if (state === "disabled") return "Off";
-      return "Ready";
-    }
-
     function renderSleepHqSyncStatus(data) {
-      const state = data && data.state ? data.state : "unknown";
+      const configured = !!(data && data.configured);
       up("edfSleepHqEndpoint", sleepHqEndpointText(data));
       up("edfSleepHqResult", sleepHqSyncResultText(data));
-      up("edfSleepHqLast", sleepHqSyncLastText(data));
+      up("edfSleepHqLast", syncLastText(data, configured));
       up("edfSleepHqCheck", sleepHqSyncCheckText(data));
       up("edfSleepHqCurrent", sleepHqSyncNowText(data));
       const badge = document.getElementById("edfSleepHqBadge");
       if (badge) {
-        badge.textContent = sleepHqSyncBadgeText(data);
-        badge.className = "badge" +
-          (state === "error" ? " bad" :
-           (!data || !data.configured) ? " warn" :
-           (state === "working" || state === "pending") ? " warn" : " good");
+        badge.textContent = syncBadgeText(data, configured);
+        badge.className = syncBadgeClass(data, configured);
       }
     }
 
     function applySleepHqSyncStatus(data) {
       const wasActive = sleepHqSyncBusy;
-      const active = sleepHqSyncStatusActive(data);
+      const active = syncStatusActive(data);
       if (active && !wasActive) {
         sleepHqSyncCompleteMessage = data.pending_reason === "startup_check" ?
           "SleepHQ account check complete" : "SleepHQ sync complete";
@@ -1210,25 +1190,9 @@
     async function sleepHqQueueAction(url, startMessage, completeMessage) {
       sleepHqSyncCompleteMessage = completeMessage ||
         "SleepHQ sync complete";
-      sleepHqSyncSetBusy(true);
-      msg("edfSleepHqMsg", startMessage, true, false);
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          cache: "no-store",
-        });
-        const text = await response.text();
-        if (!response.ok) throw new Error(storageErrorText(text, response.status));
-      } catch (error) {
-        const current = await loadSleepHqSyncStatus();
-        if (sleepHqSyncStatusActive(current)) {
-          msg("edfSleepHqMsg", "SleepHQ operation already in progress",
-            true, false);
-          return;
-        }
-        sleepHqSyncSetBusy(false);
-        msg("edfSleepHqMsg", error.message, false, true);
-      }
+      await queueSyncAction(url, startMessage, "edfSleepHqMsg",
+        "SleepHQ operation already in progress", sleepHqSyncSetBusy,
+        loadSleepHqSyncStatus);
     }
 
     async function sleepHqStartSync() {
