@@ -1,25 +1,3 @@
-    function row(label, control, small) {
-      const element = document.createElement("div");
-      element.className = "row";
-      const labelElement = document.createElement("label");
-      labelElement.textContent = label;
-      if (small) {
-        const smallElement = document.createElement("small");
-        smallElement.textContent = small;
-        labelElement.appendChild(smallElement);
-      }
-      element.appendChild(labelElement);
-      element.appendChild(control);
-      return element;
-    }
-    function valueSpan(text) {
-      const value = document.createElement("span");
-      value.className = "value";
-      value.textContent =
-        text === undefined || text === null || text === "" ? "--" : text;
-      return value;
-    }
-
     function invalidateSettingsCatalog() {
       settingsCatalog = [];
       settingsComposites = [];
@@ -44,7 +22,7 @@
           return;
         }
         if (!settingsCatalogPromise) {
-          settingsCatalogPromise = api("/api/settings-catalog")
+          settingsCatalogPromise = AirCANnect.http.requestOk("/api/settings-catalog")
             .then((response) => response.json())
             .then((data) => {
               const catalog = Array.isArray(data.settings) ?
@@ -470,7 +448,7 @@
           query.push("profile_mode=" + encodeURIComponent(settingsProfileMode));
         }
 
-        const response = await api("/api/settings" +
+        const response = await AirCANnect.http.requestOk("/api/settings" +
           (query.length ? "?" + query.join("&") : ""));
         const data = await response.json();
         await applySettingsSnapshot(data);
@@ -479,7 +457,7 @@
           await loadSettings(true);
         }
       } catch (error) {
-        msg("settingsMsg", error.message, false);
+        AirCANnect.ui.message("settingsMsg", error.message, false);
       }
     }
 
@@ -574,7 +552,7 @@
 
         if (!settingWritable(setting)) {
           const unit = setting.unit ? " " + setting.unit : "";
-          control = valueSpan((shown || "--") + (shown ? unit : ""));
+          control = AirCANnect.ui.valueSpan((shown || "--") + (shown ? unit : ""));
         } else if (setting.kind === "enum" || setting.kind === "composite") {
           control = document.createElement("select");
           let seen = false;
@@ -670,7 +648,7 @@
           if (setting.pending) control.classList.add("pending");
         }
 
-        const entry = row(
+        const entry = AirCANnect.ui.row(
           setting.label || setting.key,
           control,
           settingSmallText(setting));
@@ -717,22 +695,22 @@
       });
 
       if (!Object.keys(changes).length) {
-        msg("settingsMsg", "No changes", true);
+        AirCANnect.ui.message("settingsMsg", "No changes", true);
         return;
       }
 
       try {
-        const response = await api("/api/settings", {
+        const response = await AirCANnect.http.requestOk("/api/settings", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(changes),
         });
         const data = await response.json();
-        msg("settingsMsg",
+        AirCANnect.ui.message("settingsMsg",
           data.ok ? "Settings queued" : "Queue failed",
           data.ok);
       } catch (error) {
-        msg("settingsMsg", error.message, false);
+        AirCANnect.ui.message("settingsMsg", error.message, false);
       }
     }
 
@@ -759,19 +737,19 @@
       const active = Number.isFinite(Number(data.active)) ?
         Number(data.active) : Number(status.wifi_profile);
 
-      root.appendChild(row("State", valueSpan(state),
+      root.appendChild(AirCANnect.ui.row("State", AirCANnect.ui.valueSpan(state),
         roam ? "roaming on" : "roaming off"));
-      root.appendChild(row("SSID", valueSpan(ssid),
+      root.appendChild(AirCANnect.ui.row("SSID", AirCANnect.ui.valueSpan(ssid),
         Number.isFinite(active) && active >= 0 ? "profile " + active : ""));
-      root.appendChild(row("Signal", wifiSignalValue(rssi),
+      root.appendChild(AirCANnect.ui.row("Signal", wifiSignalValue(rssi),
         channel > 0 ? "channel " + channel : ""));
-      root.appendChild(row("IP", valueSpan(ip),
+      root.appendChild(AirCANnect.ui.row("IP", AirCANnect.ui.valueSpan(ip),
         bssid && bssid !== "00:00:00:00:00:00" ? bssid : ""));
     }
 
     async function loadWifi() {
       try {
-        const response = await api("/api/wifi");
+        const response = await AirCANnect.http.requestOk("/api/wifi");
         const data = await response.json();
         renderWifiCurrent(data);
         const root = document.getElementById("wifiProfiles");
@@ -784,18 +762,18 @@
           button.className = "btn danger";
           button.textContent = "Remove";
           button.onclick = () => wifiRemove(index);
-          root.appendChild(row(profile.ssid, button,
+          root.appendChild(AirCANnect.ui.row(profile.ssid, button,
             (index === data.active ? "active, " : "") +
             (profile.open ? "open" : "password")));
         });
       } catch (error) {
-        msg("wifiMsg", error.message, false);
+        AirCANnect.ui.message("wifiMsg", error.message, false);
       }
     }
 
     async function requestWifiAction(action, extra) {
       const body = Object.assign({action}, extra || {});
-      const response = await api("/api/wifi", {
+      const response = await AirCANnect.http.requestOk("/api/wifi", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body),
@@ -806,11 +784,11 @@
     async function wifiAction(action, extra) {
       try {
         const data = await requestWifiAction(action, extra);
-        msg("wifiMsg", data.result, data.ok);
+        AirCANnect.ui.message("wifiMsg", data.result, data.ok);
         setTimeout(loadWifi, 600);
         setTimeout(loadStatus, 900);
       } catch (error) {
-        msg("wifiMsg", error.message, false);
+        AirCANnect.ui.message("wifiMsg", error.message, false);
       }
     }
 
@@ -837,7 +815,7 @@
       const path = location.pathname || "/";
       const check = async () => {
         try {
-          const response = await fetch(path, {cache: "no-store"});
+          const response = await AirCANnect.http.request(path, {cache: "no-store"});
           if (response.ok) {
             location.reload();
             return;
@@ -854,77 +832,43 @@
       otaReloadTimer = setTimeout(check, 6000);
     }
 
-    function applyOtaSnapshot(data, fromEvent) {
+    function applyOtaSnapshot(data) {
       otaData = data;
       renderOta(data);
-      if (fromEvent) {
-        otaSnapshotSerial++;
-        window.dispatchEvent(new CustomEvent(
-          OTA_SNAPSHOT_EVENT, {detail: data}));
-      }
       return data;
-    }
-
-    function waitForSnapshot(eventName, readSnapshot, predicate, afterSerial,
-                             timeoutMs, timeoutMessage) {
-      return new Promise((resolve, reject) => {
-        let timeout = null;
-        const finish = (snapshot) => {
-          if (snapshot.serial <= afterSerial || !snapshot.data ||
-              !predicate(snapshot.data)) {
-            return false;
-          }
-
-          window.removeEventListener(eventName, onUpdate);
-          if (timeout) clearTimeout(timeout);
-          resolve(snapshot.data);
-          return true;
-        };
-        const onUpdate = () => finish(readSnapshot());
-
-        if (finish(readSnapshot())) return;
-        window.addEventListener(eventName, onUpdate);
-        timeout = setTimeout(() => {
-          window.removeEventListener(eventName, onUpdate);
-          if (timeoutMessage) {
-            reject(new Error(timeoutMessage));
-          } else {
-            resolve(null);
-          }
-        }, timeoutMs);
-      });
     }
 
     function waitForOtaSnapshot(predicate, afterSerial, timeoutMs,
                                 timeoutMessage) {
-      return waitForSnapshot(OTA_SNAPSHOT_EVENT,
-        () => ({data: otaData, serial: otaSnapshotSerial}), predicate,
-        afterSerial, timeoutMs, timeoutMessage);
+      return AirCANnect.snapshots.wait(
+        "ota", predicate, afterSerial, timeoutMs, timeoutMessage);
     }
 
     async function loadOta() {
       try {
-        const eventSerial = otaSnapshotSerial;
-        const response = await api("/api/ota");
+        const eventSerial = AirCANnect.snapshots.read("ota").serial;
+        const response = await AirCANnect.http.requestOk("/api/ota");
         const data = await response.json();
-        if (otaSnapshotSerial === eventSerial) {
-          applyOtaSnapshot(data, false);
+        if (AirCANnect.snapshots.read("ota").serial === eventSerial) {
+          AirCANnect.snapshots.publish("ota", data);
         }
 
-        const resmedEventSerial = resmedOtaSnapshotSerial;
-        const resmedResponse = await api("/api/resmed-ota");
+        const resmedEventSerial =
+          AirCANnect.snapshots.read("resmed_ota").serial;
+        const resmedResponse = await AirCANnect.http.requestOk("/api/resmed-ota");
         const resmedData = await resmedResponse.json();
-        if (resmedOtaSnapshotSerial === resmedEventSerial) {
-          applyResmedOtaSnapshot(resmedData, false);
+        if (AirCANnect.snapshots.read("resmed_ota").serial ===
+            resmedEventSerial) {
+          AirCANnect.snapshots.publish("resmed_ota", resmedData);
         }
         loadResmedRepository(true);
       } catch (error) {
-        msg("otaMsg", error.message, false);
+        AirCANnect.ui.message("otaMsg", error.message, false);
       }
     }
 
     function renderOta(data) {
-      up("otaVersion", data.version || "--");
+      AirCANnect.ui.text("otaVersion", data.version || "--");
       const active = data.http_prepare_pending || data.http_prepared ||
         data.http_active || data.http_ready || data.url_active ||
         data.update_check_active || data.reboot_pending ||
@@ -942,7 +886,7 @@
         latest = data.update_version +
           (data.update_available ? " available" : " (current)");
       }
-      up("otaLatest", latest);
+      AirCANnect.ui.text("otaLatest", latest);
 
       const check = document.getElementById("otaCheckUpdate");
       if (check) {
@@ -962,32 +906,32 @@
       if (install) install.disabled = active;
 
       if (!active && !(data.bytes || data.progress)) {
-        up("otaProgress", "--");
+        AirCANnect.ui.text("otaProgress", "--");
         return;
       }
       if (data.url_active && !data.total_size && !data.wire_total_size) {
-        up("otaProgress", "Resolving firmware URL...");
+        AirCANnect.ui.text("otaProgress", "Resolving firmware URL...");
         return;
       }
       if (data.http_prepare_pending) {
         const size = data.total_size || data.wire_total_size || 0;
-        up("otaProgress", "Preparing / " + fmtBytes(size));
+        AirCANnect.ui.text("otaProgress", "Preparing / " + AirCANnect.format.bytes(size));
         return;
       }
       if (data.http_prepared && !data.http_active) {
         const size = data.total_size || data.wire_total_size || 0;
-        up("otaProgress", "Ready / " + fmtBytes(size));
+        AirCANnect.ui.text("otaProgress", "Ready / " + AirCANnect.format.bytes(size));
         return;
       }
       let text;
       if (data.encoding === "zlib" && data.wire_total_size) {
         text = (data.progress || 0) + "% / " +
-          fmtBytes(data.wire_bytes || 0) + " wire, " +
-          fmtBytes(data.bytes || 0) + " raw";
+          AirCANnect.format.bytes(data.wire_bytes || 0) + " wire, " +
+          AirCANnect.format.bytes(data.bytes || 0) + " raw";
       } else {
-        text = (data.progress || 0) + "% / " + fmtBytes(data.bytes || 0);
+        text = (data.progress || 0) + "% / " + AirCANnect.format.bytes(data.bytes || 0);
       }
-      up("otaProgress", text);
+      AirCANnect.ui.text("otaProgress", text);
 
       const progress = document.getElementById("otaUploadProgress");
       const bar = document.getElementById("otaUploadBar");
@@ -1000,12 +944,12 @@
     async function otaCheckForUpdates() {
       const button = document.getElementById("otaCheckUpdate");
       if (button) button.disabled = true;
-      msg("otaUpdateMsg", "Checking for updates...", true, true);
+      AirCANnect.ui.message("otaUpdateMsg", "Checking for updates...", true, true);
 
       let data = null;
       try {
-        const eventSerial = otaSnapshotSerial;
-        const response = await fetch("/api/ota/check", {method: "POST"});
+        const eventSerial = AirCANnect.snapshots.read("ota").serial;
+        const response = await AirCANnect.http.request("/api/ota/check", {method: "POST"});
         data = await response.json();
         renderOta(data);
         if (!response.ok) {
@@ -1019,7 +963,7 @@
               !next.update_check_pending,
             eventSerial, 10000, "");
           if (!startedData) {
-            msg("otaUpdateMsg",
+            AirCANnect.ui.message("otaUpdateMsg",
               "Check queued until the device is idle and network is available.",
               true, true);
             return;
@@ -1036,13 +980,13 @@
 
         if (data.update_error) throw new Error(data.update_error);
         if (data.update_available) {
-          msg("otaUpdateMsg",
+          AirCANnect.ui.message("otaUpdateMsg",
             "Version " + data.update_version + " is available.", true);
         } else {
-          msg("otaUpdateMsg", "This device is up to date.", true);
+          AirCANnect.ui.message("otaUpdateMsg", "This device is up to date.", true);
         }
       } catch (error) {
-        msg("otaUpdateMsg", error.message, false);
+        AirCANnect.ui.message("otaUpdateMsg", error.message, false);
       } finally {
         if (button) {
           button.disabled = !data || !data.update_check_enabled ||
@@ -1052,7 +996,7 @@
     }
 
     function setOtaUploadProgress(percent, bytes) {
-      up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
+      AirCANnect.ui.text("otaProgress", percent + "% / " + AirCANnect.format.bytes(bytes || 0));
     }
 
     function otaSourceChanged(source) {
@@ -1081,8 +1025,8 @@
     }
 
     async function otaRunUrlUpdate(endpoint, messageId) {
-      const eventSerial = otaSnapshotSerial;
-      const response = await fetch(endpoint, {method: "POST"});
+      const eventSerial = AirCANnect.snapshots.read("ota").serial;
+      const response = await AirCANnect.http.request(endpoint, {method: "POST"});
       let data = await response.json();
       renderOta(data);
       if (!response.ok) {
@@ -1097,28 +1041,28 @@
         throw new Error(data.last_error);
       }
 
-      msg(messageId, "Update installed. Restarting...", true, true);
+      AirCANnect.ui.message(messageId, "Update installed. Restarting...", true, true);
       scheduleOtaReload();
       return true;
     }
 
     async function otaInstallFromUrl(url) {
       const query = otaUrlQuery(url);
-      msg("otaMsg", "Starting URL update...", true, true);
+      AirCANnect.ui.message("otaMsg", "Starting URL update...", true, true);
       return otaRunUrlUpdate("/api/ota/url?" + query, "otaMsg");
     }
 
     async function otaInstallAvailableUpdate() {
       const button = document.getElementById("otaInstallUpdate");
       if (button) button.disabled = true;
-      msg("otaUpdateMsg", "Starting release update...", true, true);
+      AirCANnect.ui.message("otaUpdateMsg", "Starting release update...", true, true);
 
       let restarting = false;
       try {
         restarting = await otaRunUrlUpdate(
           "/api/ota/install-update", "otaUpdateMsg");
       } catch (error) {
-        msg("otaUpdateMsg", "Update failed: " + error.message, false, true);
+        AirCANnect.ui.message("otaUpdateMsg", "Update failed: " + error.message, false, true);
         loadOta();
       } finally {
         if (button && !restarting) button.disabled = false;
@@ -1137,8 +1081,8 @@
     }
 
     async function prepareOtaUpload(plan) {
-      const eventSerial = otaSnapshotSerial;
-      const prepareResponse = await api("/api/ota/prepare?" +
+      const eventSerial = AirCANnect.snapshots.read("ota").serial;
+      const prepareResponse = await AirCANnect.http.requestOk("/api/ota/prepare?" +
         otaUploadQuery(plan), {method: "POST"});
       let data = await prepareResponse.json();
       renderOta(data);
@@ -1162,52 +1106,40 @@
       const plan = otaUploadPlan(file);
       const bar = document.getElementById("otaUploadBar");
 
-      msg("otaMsg", "Preparing OTA...", true, true);
+      AirCANnect.ui.message("otaMsg", "Preparing OTA...", true, true);
       await prepareOtaUpload(plan);
-      msg("otaMsg", "Uploading...", true, true);
+      AirCANnect.ui.message("otaMsg", "Uploading...", true, true);
 
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable) {
-            const percent = Math.min(100,
-              Math.floor(event.loaded / event.total * 100));
-            const bytes = Math.min(file.size, event.loaded);
-            bar.style.width = percent + "%";
-            setOtaUploadProgress(percent, bytes);
-          }
-        };
-        xhr.onload = () => {
-          try {
-            const data = JSON.parse(xhr.responseText || "{}");
-            if (xhr.status >= 300) {
-              renderOta(data);
-              reject(new Error(data.last_error || xhr.statusText));
-              return;
+      const form = new FormData();
+      form.append("firmware", file);
+
+      const result = await AirCANnect.http.upload(
+        "/api/ota/upload?" + otaUploadQuery(plan), form, {
+          onProgress: (event) => {
+            if (event.lengthComputable) {
+              const percent = Math.min(100,
+                Math.floor(event.loaded / event.total * 100));
+              const bytes = Math.min(file.size, event.loaded);
+              bar.style.width = percent + "%";
+              setOtaUploadProgress(percent, bytes);
             }
+          },
+        });
+      const data = JSON.parse(result.responseText || "{}");
+      if (result.status >= 300) {
+        renderOta(data);
+        throw new Error(data.last_error || result.statusText);
+      }
 
-            bar.style.width = "100%";
-            setOtaUploadProgress(100, data.wire_bytes || file.size);
+      bar.style.width = "100%";
+      setOtaUploadProgress(100, data.wire_bytes || file.size);
 
-            const restarting = data.reboot_pending || data.http_ready;
-            msg("otaMsg", restarting ? "Update installed. Restarting..." :
-              "Upload finished", restarting, true);
-            if (restarting) {
-              scheduleOtaReload();
-            }
-            resolve(restarting);
-          } catch (error) {
-            reject(error);
-          }
-        };
-        xhr.onerror = () => reject(new Error("Upload error"));
-        xhr.onabort = () => reject(new Error("Upload aborted"));
-        xhr.open("POST", "/api/ota/upload?" + otaUploadQuery(plan));
-
-        const form = new FormData();
-        form.append("firmware", file);
-        xhr.send(form);
-      });
+      const restarting = data.reboot_pending || data.http_ready;
+      AirCANnect.ui.message("otaMsg", restarting ?
+        "Update installed. Restarting..." : "Upload finished",
+      restarting, true);
+      if (restarting) scheduleOtaReload();
+      return restarting;
     }
 
     async function otaInstall() {
@@ -1215,11 +1147,11 @@
       const file = document.getElementById("otaFile").files[0];
 
       if (!url && !file) {
-        msg("otaMsg", "Enter a firmware URL or select an image", false);
+        AirCANnect.ui.message("otaMsg", "Enter a firmware URL or select an image", false);
         return;
       }
       if (url && file) {
-        msg("otaMsg", "Choose either a firmware URL or an image", false);
+        AirCANnect.ui.message("otaMsg", "Choose either a firmware URL or an image", false);
         return;
       }
 
@@ -1236,7 +1168,7 @@
         restarting = file ? await otaInstallFromFile(file) :
           await otaInstallFromUrl(url);
       } catch (error) {
-        msg("otaMsg", "Update failed: " + error.message, false, true);
+        AirCANnect.ui.message("otaMsg", "Update failed: " + error.message, false, true);
         loadOta();
       } finally {
         if (!restarting) button.disabled = false;
@@ -1252,14 +1184,9 @@
       return phase;
     }
 
-    function applyResmedOtaSnapshot(data, fromEvent) {
+    function applyResmedOtaSnapshot(data) {
       resmedOtaData = data;
       renderResmedOta(data);
-      if (fromEvent) {
-        resmedOtaSnapshotSerial++;
-        window.dispatchEvent(new CustomEvent(
-          RESMED_OTA_SNAPSHOT_EVENT, {detail: data}));
-      }
       return data;
     }
 
@@ -1276,9 +1203,8 @@
 
     function waitForResmedOtaSnapshot(predicate, afterSerial, timeoutMs,
                                       timeoutMessage) {
-      return waitForSnapshot(RESMED_OTA_SNAPSHOT_EVENT,
-        () => ({data: resmedOtaData, serial: resmedOtaSnapshotSerial}),
-        predicate, afterSerial, timeoutMs, timeoutMessage);
+      return AirCANnect.snapshots.wait(
+        "resmed_ota", predicate, afterSerial, timeoutMs, timeoutMessage);
     }
 
     function resmedOtaDumpSavedText(data) {
@@ -1372,7 +1298,7 @@
       if (!resmedOtaRate.bps) return "";
       const remaining = Math.max(0, total - bytes);
       const eta = fmtDuration(remaining / resmedOtaRate.bps);
-      return fmtBytes(resmedOtaRate.bps) + "/s" + (eta ? " ETA " + eta : "");
+      return AirCANnect.format.bytes(resmedOtaRate.bps) + "/s" + (eta ? " ETA " + eta : "");
     }
 
     function renderResmedOta(data) {
@@ -1394,9 +1320,9 @@
         Number(data.prepare_progress || 0) : Number(data.progress || 0);
       const progressText = progressValue + "%" +
         (rateText ? " " + rateText : "");
-      up("resmedOtaState", stateText);
-      up("resmedOtaProgress", progressText);
-      up("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
+      AirCANnect.ui.text("resmedOtaState", stateText);
+      AirCANnect.ui.text("resmedOtaProgress", progressText);
+      AirCANnect.ui.text("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
 
       const cancel = document.getElementById("resmedOtaCancelBtn");
       if (cancel) {
@@ -1442,20 +1368,20 @@
           "block" : "none";
       bar.style.width = progressValue + "%";
       if (data.confirmation_required) {
-        msg("resmedOtaMsg", "Matching patched bootloader found", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Matching patched bootloader found", false, true);
       } else if (data.prepare_error || data.last_error) {
-        msg("resmedOtaMsg", data.prepare_error || data.last_error,
+        AirCANnect.ui.message("resmedOtaMsg", data.prepare_error || data.last_error,
           false, true);
       } else if (!installAvailable) {
-        msg("resmedOtaMsg", "Patched Bootloader requires CAN",
+        AirCANnect.ui.message("resmedOtaMsg", "Patched Bootloader requires CAN",
           false, true);
       } else if (data.phase === "verified") {
-        msg("resmedOtaMsg", "Firmware verified", true, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Firmware verified", true, true);
       } else if (data.phase === "complete") {
-        msg("resmedOtaMsg", data.operation === "dump" ?
+        AirCANnect.ui.message("resmedOtaMsg", data.operation === "dump" ?
           resmedOtaDumpSavedText(data) : "Installation complete", true, true);
       } else if (data.active) {
-        msg("resmedOtaMsg", stateText, true, true);
+        AirCANnect.ui.message("resmedOtaMsg", stateText, true, true);
       }
     }
 
@@ -1475,7 +1401,7 @@
     }
 
     function renderResmedRepositoryStatus(data) {
-      up("resmedRepositoryPath", data.directory ||
+      AirCANnect.ui.text("resmedRepositoryPath", data.directory ||
         "/aircannect/resmed-firmware");
 
       const refresh = document.getElementById("resmedRepositoryRefreshBtn");
@@ -1486,7 +1412,7 @@
       }
 
       if (data.error) {
-        msg("resmedRepositoryMsg", data.error, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", data.error, false, true);
       }
     }
 
@@ -1532,7 +1458,7 @@
         };
         const meta = document.createElement("div");
         meta.className = "storage-meta";
-        meta.textContent = fmtBytes(entry.size) +
+        meta.textContent = AirCANnect.format.bytes(entry.size) +
           (fmtStorageModified(entry.modified) ?
             " / " + fmtStorageModified(entry.modified) : "");
         details.appendChild(name);
@@ -1579,7 +1505,7 @@
       for (let page = 0; page < 4; page++) {
         const url = "/api/resmed-ota/repository?offset=" + offset +
           "&limit=128" + (refresh && page === 0 ? "&refresh=1" : "");
-        const response = await fetch(url, {cache: "no-store"});
+        const response = await AirCANnect.http.request(url, {cache: "no-store"});
         const data = await response.json();
         if (!response.ok && response.status !== 202) {
           throw new Error(data.error || ("HTTP " + response.status));
@@ -1604,7 +1530,7 @@
         renderResmedRepository(data);
       } catch (error) {
         if (generation !== resmedRepositoryLoadGeneration) return;
-        msg("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
       }
     }
 
@@ -1640,14 +1566,14 @@
         }
 
         if (storageUploadCancelRequested) {
-          msg("resmedRepositoryMsg", "Upload cancelled", true, false);
+          AirCANnect.ui.message("resmedRepositoryMsg", "Upload cancelled", true, false);
         } else {
-          msg("resmedRepositoryMsg", "Added " + uploaded + " image" +
+          AirCANnect.ui.message("resmedRepositoryMsg", "Added " + uploaded + " image" +
             (uploaded === 1 ? "" : "s"), true, false);
         }
         await loadResmedRepository(true);
       } catch (error) {
-        msg("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
       } finally {
         storageUploadCurrentId = 0;
         storageUploadSetBusy(false);
@@ -1672,7 +1598,7 @@
       }
 
       try {
-        const response = await fetch("/api/resmed-ota/repository/remove", {
+        const response = await AirCANnect.http.request("/api/resmed-ota/repository/remove", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({path}),
@@ -1680,7 +1606,7 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Remove failed");
       } catch (error) {
-        msg("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
       }
     }
 
@@ -1693,11 +1619,11 @@
           base, name, "Rename firmware image");
         if (!renamed) return;
 
-        msg("resmedRepositoryMsg", "Renamed " + currentName + " to " +
+        AirCANnect.ui.message("resmedRepositoryMsg", "Renamed " + currentName + " to " +
           renamed, true, true);
         await loadResmedRepository(true);
       } catch (error) {
-        msg("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
       }
     }
 
@@ -1730,7 +1656,7 @@
 
     async function resmedRepositoryInstall(path, name) {
       if (!resmedOtaInstallAvailable()) {
-        msg("resmedRepositoryMsg",
+        AirCANnect.ui.message("resmedRepositoryMsg",
           "Patched Bootloader requires CAN", false, true);
         return;
       }
@@ -1740,7 +1666,7 @@
       if (!confirmResmedOtaTarget(target, name)) return;
 
       try {
-        msg("resmedRepositoryMsg", "Installing " + name, true, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", "Installing " + name, true, true);
         const request = await postResmedOta("/api/resmed-ota/install", {
           path,
           filename: name,
@@ -1751,18 +1677,18 @@
         await waitResmedOtaStart(request.eventSerial);
         await waitResmedOta((data) => data.phase === "complete", 4200,
           request.eventSerial);
-        msg("resmedRepositoryMsg", "Installation complete", true, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", "Installation complete", true, true);
       } catch (error) {
-        msg("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
       }
     }
 
     async function getResmedOta() {
-      const eventSerial = resmedOtaSnapshotSerial;
-      const response = await api("/api/resmed-ota");
+      const eventSerial = AirCANnect.snapshots.read("resmed_ota").serial;
+      const response = await AirCANnect.http.requestOk("/api/resmed-ota");
       const data = await response.json();
-      if (resmedOtaSnapshotSerial === eventSerial) {
-        applyResmedOtaSnapshot(data, false);
+      if (AirCANnect.snapshots.read("resmed_ota").serial === eventSerial) {
+        AirCANnect.snapshots.publish("resmed_ota", data);
       }
       return data;
     }
@@ -1787,8 +1713,8 @@
     }
 
     async function postResmedOta(url, body) {
-      const eventSerial = resmedOtaSnapshotSerial;
-      const response = await api(url, {
+      const eventSerial = AirCANnect.snapshots.read("resmed_ota").serial;
+      const response = await AirCANnect.http.requestOk(url, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body || {}),
@@ -1799,7 +1725,7 @@
           ("HTTP " + response.status));
       }
       if (!data.queued && data.result !== "queued") {
-        applyResmedOtaSnapshot(data, false);
+        AirCANnect.snapshots.publish("resmed_ota", data);
       }
       return {data, eventSerial};
     }
@@ -1815,9 +1741,9 @@
       const cancel = document.getElementById("resmedOtaCancelBtn");
       const install = document.getElementById("resmedOtaInstallBtn");
 
-      up("resmedOtaState", "Uploading " + name);
-      up("resmedOtaProgress", percent + "% " + fmtBytes(safeCommitted) +
-        " / " + fmtBytes(safeTotal));
+      AirCANnect.ui.text("resmedOtaState", "Uploading " + name);
+      AirCANnect.ui.text("resmedOtaProgress", percent + "% " + AirCANnect.format.bytes(safeCommitted) +
+        " / " + AirCANnect.format.bytes(safeTotal));
       if (progress) progress.style.display = "block";
       if (bar) bar.style.width = percent + "%";
       if (cancel) {
@@ -1830,14 +1756,14 @@
     async function resmedOtaInstall() {
       const file = document.getElementById("resmedOtaFile").files[0];
       if (!file) {
-        msg("resmedOtaMsg", "Select firmware image", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Select firmware image", false, true);
         return;
       }
 
       const target = selectedResmedOtaTarget();
       const transport = selectedResmedOtaTransport();
       if (!resmedOtaInstallAvailable()) {
-        msg("resmedOtaMsg", "Patched Bootloader requires CAN", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Patched Bootloader requires CAN", false, true);
         return;
       }
       if (!confirmResmedOtaTarget(target, file.name)) return;
@@ -1853,7 +1779,7 @@
         resmedDirectUploadBusy = true;
         const install = document.getElementById("resmedOtaInstallBtn");
         if (install) install.disabled = true;
-        msg("resmedOtaMsg", "Uploading", true, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Uploading", true, true);
         const uploaded = await storageUploadFile(
           file, "/aircannect", 0, 1, resmedDirectUploadProgress, {
             filename: "resmed-ota-input.image",
@@ -1875,9 +1801,9 @@
         await waitResmedOtaStart(request.eventSerial);
         await waitResmedOta((data) => data.phase === "complete", 4200,
           request.eventSerial);
-        msg("resmedOtaMsg", "Installation complete", true, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Installation complete", true, true);
       } catch (error) {
-        msg("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
         loadOta();
       } finally {
         storageUploadCurrentId = 0;
@@ -1895,10 +1821,10 @@
           request.eventSerial);
         if (result.confirmation_required) return;
 
-        msg("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
+        AirCANnect.ui.message("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
         loadResmedRepository(true);
       } catch (error) {
-        msg("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
       }
     }
 
@@ -1918,10 +1844,10 @@
         const result = await waitResmedOta(
           (data) => data.phase === "complete", 4200,
           request.eventSerial);
-        msg("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
+        AirCANnect.ui.message("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
         loadResmedRepository(true);
       } catch (error) {
-        msg("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
       }
     }
 
@@ -1941,15 +1867,15 @@
           } catch (_) {}
         }
         await postResmedOta("/api/resmed-ota/abort", {});
-        msg("resmedOtaMsg", "Cancelled", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", "Cancelled", false, true);
       } catch (error) {
-        msg("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
       }
     }
 
     async function loadConsole(showError) {
       try {
-        const response = await api("/api/console");
+        const response = await AirCANnect.http.requestOk("/api/console");
         const before = consoleSeq;
         renderConsole(await response.json());
         return consoleSeq !== before;
@@ -1995,7 +1921,7 @@
       input.value = "";
 
       try {
-        const response = await api("/api/console", {
+        const response = await AirCANnect.http.requestOk("/api/console", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({cmd: command}),
@@ -2012,7 +1938,7 @@
 
     async function clearConsoleLog() {
       try {
-        await api("/api/console/clear", {method: "POST"});
+        await AirCANnect.http.requestOk("/api/console/clear", {method: "POST"});
         const output = document.getElementById("consoleLog");
         output.textContent = "";
         consoleSeq = -1;
@@ -2036,7 +1962,7 @@
     }
 
     async function loadConfigSchema() {
-      const response = await api("/api/config/schema");
+      const response = await AirCANnect.http.requestOk("/api/config/schema");
       normalizeConfigSchema(await response.json());
       return configSections;
     }
@@ -2052,7 +1978,7 @@
     }
 
     async function fetchConfigSection(sectionId) {
-      const response = await api("/api/config/" + encodeURIComponent(sectionId));
+      const response = await AirCANnect.http.requestOk("/api/config/" + encodeURIComponent(sectionId));
       return await response.json();
     }
 
@@ -2139,7 +2065,7 @@
 
           select.value = overrides.get(
             button.id + ":" + gesture.gesture) || "";
-          const bindingRow = row(
+          const bindingRow = AirCANnect.ui.row(
             button.label + " / " + gesture.gesture,
             select,
             "Hardware default: " + defaultLabel);
@@ -2194,7 +2120,7 @@
         panel.appendChild(addControls);
       }
 
-      const fieldRow = row(field.label || field.key, panel, field.key);
+      const fieldRow = AirCANnect.ui.row(field.label || field.key, panel, field.key);
       fieldRow.classList.add("keybindings-field");
       root.appendChild(fieldRow);
     }
@@ -2254,7 +2180,7 @@
       let rendered = control;
       if (field.key === "tz") rendered = timezoneHelper(control);
       if (field.key === "wifi_ctry") rendered = wifiCountryHelper(control);
-      root.appendChild(row(field.label || field.key, rendered, field.key));
+      root.appendChild(AirCANnect.ui.row(field.label || field.key, rendered, field.key));
     }
 
     function as11BleStateLabel(data) {
@@ -2279,13 +2205,13 @@
       panel.dataset.snapshot = snapshot;
       panel.innerHTML = "";
 
-      const state = valueSpan(as11BleStateLabel(data));
-      panel.appendChild(row("BLE pairing", state));
+      const state = AirCANnect.ui.valueSpan(as11BleStateLabel(data));
+      panel.appendChild(AirCANnect.ui.row("BLE pairing", state));
 
       if (data.selected_name || data.selected_address) {
         const selected = [data.selected_name, data.selected_address]
           .filter(Boolean).join(" / ");
-        panel.appendChild(row("AS11", valueSpan(selected)));
+        panel.appendChild(AirCANnect.ui.row("AS11", AirCANnect.ui.valueSpan(selected)));
       }
 
       if (data.state === "select_device") {
@@ -2304,7 +2230,7 @@
             device.address + " / " + device.rssi + " dBm";
           select.appendChild(option);
         });
-        panel.appendChild(row("Device", select));
+        panel.appendChild(AirCANnect.ui.row("Device", select));
       }
 
       let passkey = null;
@@ -2315,7 +2241,7 @@
         passkey.autocomplete = "one-time-code";
         passkey.maxLength = 4;
         passkey.placeholder = "0000";
-        panel.appendChild(row("Pairing code", passkey));
+        panel.appendChild(AirCANnect.ui.row("Pairing code", passkey));
       }
 
       const buttons = document.createElement("div");
@@ -2399,7 +2325,7 @@
 
     async function loadAs11BlePairing(showError) {
       try {
-        const response = await api("/api/as11/ble");
+        const response = await AirCANnect.http.requestOk("/api/as11/ble");
         renderAs11BlePairing(await response.json());
       } catch (error) {
         if (showError) showAs11BlePairingError(error.message);
@@ -2408,7 +2334,7 @@
 
     async function as11BleAction(action, values) {
       try {
-        await api("/api/as11/ble", {
+        await AirCANnect.http.requestOk("/api/as11/ble", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(Object.assign({action}, values || {})),
@@ -2463,7 +2389,7 @@
         });
         await loadAs11BlePairing(true);
       } catch (error) {
-        msg("configMsg", error.message, false);
+        AirCANnect.ui.message("configMsg", error.message, false);
       }
     }
 
@@ -2483,35 +2409,17 @@
       return ids;
     }
 
-    function waitForConfigUpdate(revision) {
+    function waitForConfigUpdate(revision, afterSerial) {
       const expected = Number(revision || 0);
       if (!expected) {
         return Promise.reject(new Error("missing config update revision"));
       }
-
-      return new Promise((resolve, reject) => {
-        let timeout = null;
-        const finish = (data) => {
-          if (!data || Number(data.revision || 0) !== expected) return false;
-
-          window.removeEventListener(CONFIG_UPDATE_EVENT, onUpdate);
-          if (timeout) clearTimeout(timeout);
-          if (data.ok) {
-            resolve(data);
-          } else {
-            reject(new Error(data.error || "config update failed"));
-          }
-          return true;
-        };
-        const onUpdate = (event) => finish(event.detail);
-
-        if (finish(configUpdateData)) return;
-        window.addEventListener(CONFIG_UPDATE_EVENT, onUpdate);
-        timeout = setTimeout(() => {
-          window.removeEventListener(CONFIG_UPDATE_EVENT, onUpdate);
-          reject(new Error("config update timed out"));
-        }, 5000);
-      });
+      return AirCANnect.snapshots.wait(
+        "config", (data) => Number(data.revision || 0) === expected,
+        afterSerial, 5000, "config update timed out").then((data) => {
+          if (!data.ok) throw new Error(data.error || "config update failed");
+          return data;
+        });
     }
 
     function normalizeSmbEndpoint(value) {
@@ -2592,17 +2500,17 @@
     function validateConfigChanges(changes, messageId) {
       if (Object.prototype.hasOwnProperty.call(changes, "smb_ep") &&
           !validSmbEndpoint(changes.smb_ep)) {
-        msg(messageId, "smb_ep must be smb://host/share[/path]", false);
+        AirCANnect.ui.message(messageId, "smb_ep must be smb://host/share[/path]", false);
         return false;
       }
       if (Object.prototype.hasOwnProperty.call(changes, "shq_team") &&
           !validOptionalNumericId(changes.shq_team)) {
-        msg(messageId, "shq_team must be numeric", false);
+        AirCANnect.ui.message(messageId, "shq_team must be numeric", false);
         return false;
       }
       if (Object.prototype.hasOwnProperty.call(changes, "shq_device") &&
           !validOptionalNumericId(changes.shq_device)) {
-        msg(messageId, "shq_device must be numeric", false);
+        AirCANnect.ui.message(messageId, "shq_device must be numeric", false);
         return false;
       }
 
@@ -2611,24 +2519,25 @@
       const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_en") ?
         changes.syslog_en : !!(configData && configData.syslog_en);
       if (!validIpv4(syslogHost)) {
-        msg(messageId, "syslog_host must be an IPv4 address", false);
+        AirCANnect.ui.message(messageId, "syslog_host must be an IPv4 address", false);
         return false;
       }
       if (syslogEnabled && !String(syslogHost || "").trim().length) {
-        msg(messageId, "syslog_host is required when syslog_en is true", false);
+        AirCANnect.ui.message(messageId, "syslog_host is required when syslog_en is true", false);
         return false;
       }
       return true;
     }
 
     async function postConfigChanges(changes) {
-      const response = await api("/api/config", {
+      const afterSerial = AirCANnect.snapshots.read("config").serial;
+      const response = await AirCANnect.http.requestOk("/api/config", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(changes),
       });
       const data = await response.json();
-      return Number(data.revision || 0);
+      return {revision: Number(data.revision || 0), afterSerial};
     }
 
     async function saveConfigFields(root, messageId, reload) {
@@ -2637,14 +2546,14 @@
       if (!validateConfigChanges(changes, messageId)) return false;
 
       if (!Object.keys(changes).length) {
-        msg(messageId, "No changes", true);
+        AirCANnect.ui.message(messageId, "No changes", true);
         return false;
       }
 
       try {
         const sectionIds = configSectionsForChanges(changes);
-        const revision = await postConfigChanges(changes);
-        await waitForConfigUpdate(revision);
+        const update = await postConfigChanges(changes);
+        await waitForConfigUpdate(update.revision, update.afterSerial);
 
         if (reload) {
           await reload();
@@ -2652,10 +2561,10 @@
           const latest = await fetchConfigSections(sectionIds);
           configData = Object.assign({}, configData || {}, latest);
         }
-        msg(messageId, "Saved", true);
+        AirCANnect.ui.message(messageId, "Saved", true);
         return true;
       } catch (error) {
-        msg(messageId, error.message, false);
+        AirCANnect.ui.message(messageId, error.message, false);
         return false;
       }
     }
@@ -2663,17 +2572,6 @@
     async function saveConfig() {
       await saveConfigFields(document.getElementById("configFields"),
         "configMsg", loadConfig);
-    }
-
-    function clearMsg(id) {
-      const element = document.getElementById(id);
-      if (!element) return;
-      if (msgTimers[id]) {
-        clearTimeout(msgTimers[id]);
-        msgTimers[id] = null;
-      }
-      element.textContent = "";
-      element.className = "msg";
     }
 
     const endpointConfigPanels = {
@@ -2702,7 +2600,7 @@
       const section = configSectionById[panel.section];
       const root = document.getElementById(panel.fields);
       if (!section || !root) return false;
-      if (clearMessage) clearMsg(panel.msg);
+      if (clearMessage) AirCANnect.ui.clearMessage(panel.msg);
       try {
         const data = await fetchConfigSection(panel.section);
         configData = Object.assign({}, configData || {}, data);
@@ -2711,7 +2609,7 @@
           renderConfigField(root, section, field, configData));
         return true;
       } catch (error) {
-        msg(panel.msg, error.message, false, true);
+        AirCANnect.ui.message(panel.msg, error.message, false, true);
         return false;
       }
     }
@@ -2723,7 +2621,7 @@
       if (!element) return;
       if (!element.hidden) {
         element.hidden = true;
-        clearMsg(panel.msg);
+        AirCANnect.ui.clearMessage(panel.msg);
         return;
       }
       element.hidden = false;
@@ -2735,7 +2633,7 @@
       if (!panel) return;
       const element = document.getElementById(panel.panel);
       if (element) element.hidden = true;
-      clearMsg(panel.msg);
+      AirCANnect.ui.clearMessage(panel.msg);
     }
 
     async function saveEndpointConfig(id) {

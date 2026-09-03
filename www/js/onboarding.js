@@ -41,7 +41,7 @@
       input.id = id;
       input.type = type;
       if (autocomplete) input.autocomplete = autocomplete;
-      root.appendChild(row(label, input));
+      root.appendChild(AirCANnect.ui.row(label, input));
       return input;
     }
 
@@ -82,11 +82,11 @@
         "current-password");
 
       try {
-        const response = await api("/api/wifi");
+        const response = await AirCANnect.http.requestOk("/api/wifi");
         const data = await response.json();
         const current = data.ssid ? data.ssid + " / " + (data.ip || "--") :
           "Not connected";
-        root.insertBefore(row("Current Wi-Fi", valueSpan(current)), heading);
+        root.insertBefore(AirCANnect.ui.row("Current Wi-Fi", AirCANnect.ui.valueSpan(current)), heading);
       } catch (error) {
         // The current connection is informational; setup can continue offline.
       }
@@ -173,7 +173,7 @@
       document.getElementById("onboardingNext").textContent =
         onboardingStep === onboardingSteps.length - 1 ? "Finish" : "Next";
       root.innerHTML = "";
-      clearMsg("onboardingMsg");
+      AirCANnect.ui.clearMessage("onboardingMsg");
       onboardingRenderProgress();
 
       if (step.id === "network") await onboardingRenderNetwork(root);
@@ -205,7 +205,7 @@
           changes, "http_user") ? changes.http_user : null;
         onboardingPassword = Object.prototype.hasOwnProperty.call(
           changes, "http_pass") ? changes.http_pass : null;
-        msg("onboardingMsg",
+        AirCANnect.ui.message("onboardingMsg",
           onboardingUser === null && onboardingPassword === null ?
             "No changes" : "Access credentials will change after setup",
           true);
@@ -217,7 +217,7 @@
         const saved = await saveConfigFields(root, "onboardingMsg", null);
         if (!saved) return false;
       } else {
-        msg("onboardingMsg", "No changes", true);
+        AirCANnect.ui.message("onboardingMsg", "No changes", true);
       }
 
       if (onboardingSteps[onboardingStep].id !== "network") return true;
@@ -227,10 +227,10 @@
       const password = document.getElementById("onboardingWifiPass").value;
       try {
         await requestWifiAction("add", {ssid, pass: password});
-        msg("onboardingMsg", "Wi-Fi profile queued", true);
+        AirCANnect.ui.message("onboardingMsg", "Wi-Fi profile queued", true);
         return true;
       } catch (error) {
-        msg("onboardingMsg", error.message, false);
+        AirCANnect.ui.message("onboardingMsg", error.message, false);
         return false;
       }
     }
@@ -244,34 +244,20 @@
     }
 
     function waitForOnboardingCompletion() {
-      if (statusData && statusData.onboarding_complete) {
+      const current = AirCANnect.snapshots.read("status");
+      if (current.data && current.data.onboarding_complete) {
         return Promise.resolve();
       }
-
-      return new Promise((resolve, reject) => {
-        let timeout = null;
-        const finish = (error) => {
-          document.removeEventListener(STATUS_SNAPSHOT_EVENT, onStatus);
-          if (timeout !== null) clearTimeout(timeout);
-          if (error) reject(error); else resolve();
-        };
-        const onStatus = (event) => {
-          if (event.detail && event.detail.onboarding_complete) finish();
-        };
-
-        document.addEventListener(STATUS_SNAPSHOT_EVENT, onStatus);
-        timeout = setTimeout(() => finish(new Error(
-          "Onboarding completion was not persisted")), 5000);
-
-        if (statusData && statusData.onboarding_complete) finish();
-      });
+      return AirCANnect.snapshots.wait(
+        "status", (data) => !!data.onboarding_complete, current.serial,
+        5000, "Onboarding completion was not persisted");
     }
 
     async function onboardingComplete() {
       const body = {};
       if (onboardingUser !== null) body.http_user = onboardingUser;
       if (onboardingPassword !== null) body.http_password = onboardingPassword;
-      const response = await api("/api/onboarding", {
+      const response = await AirCANnect.http.requestOk("/api/onboarding", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body),
@@ -339,7 +325,7 @@
         sessionStorage.removeItem(ONBOARDING_STEP_KEY);
         onboardingRenderFinish();
       } catch (error) {
-        msg("onboardingMsg", error.message, false);
+        AirCANnect.ui.message("onboardingMsg", error.message, false);
         onboardingSetBusy(false);
       }
     }

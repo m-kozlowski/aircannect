@@ -55,10 +55,6 @@
       element.appendChild(wrapper);
     }
 
-    function pad2(value) {
-      return String(value).padStart(2, "0");
-    }
-
     function fmtIsoMinute(value, ageMs) {
       value = String(value || "");
       if (!value) return "";
@@ -80,10 +76,10 @@
       }
 
       return date.getFullYear() + "-" +
-        pad2(date.getMonth() + 1) + "-" +
-        pad2(date.getDate()) + " " +
-        pad2(date.getHours()) + ":" +
-        pad2(date.getMinutes()) +
+        AirCANnect.format.pad2(date.getMonth() + 1) + "-" +
+        AirCANnect.format.pad2(date.getDate()) + " " +
+        AirCANnect.format.pad2(date.getHours()) + ":" +
+        AirCANnect.format.pad2(date.getMinutes()) +
         timezone;
     }
 
@@ -233,7 +229,7 @@
     function formatPosixOffset(minutes) {
       const hours = Math.trunc(-minutes / 60);
       const mins = Math.abs(minutes % 60);
-      return String(hours) + (mins ? ":" + pad2(mins) : "");
+      return String(hours) + (mins ? ":" + AirCANnect.format.pad2(mins) : "");
     }
 
     function formatTimezoneTransition(timezone, reference, year) {
@@ -278,8 +274,8 @@
       if (hour !== 2 || minute || second) {
         rule += "/" + hour;
         if (minute || second) {
-          rule += ":" + pad2(minute);
-          if (second) rule += ":" + pad2(second);
+          rule += ":" + AirCANnect.format.pad2(minute);
+          if (second) rule += ":" + AirCANnect.format.pad2(second);
         }
       }
 
@@ -467,7 +463,7 @@
       const used = Number(data.storage_used || 0);
       const free = Math.max(0, total - used);
       if (data.storage_state === "mounted" && total > 0) {
-        text = fmtBytes(free) + " / " + fmtBytes(total);
+        text = AirCANnect.format.bytes(free) + " / " + AirCANnect.format.bytes(total);
         percent = Math.max(0, Math.min(100, used / total * 100));
       }
 
@@ -479,10 +475,10 @@
     function renderOximetryRuntime(data) {
       const oxi = data && data.oximetry ? data.oximetry : {};
       const sourceValid = !!(oxi.source_fresh && oxi.valid);
-      up("oxiSpo2", sourceValid ? oxi.spo2 : "--");
-      up("oxiPulse", sourceValid ? oxi.pulse_bpm : "--");
-      up("oxiTabSpo2", sourceValid ? oxi.spo2 : "--");
-      up("oxiTabPulse", sourceValid ? oxi.pulse_bpm : "--");
+      AirCANnect.ui.text("oxiSpo2", sourceValid ? oxi.spo2 : "--");
+      AirCANnect.ui.text("oxiPulse", sourceValid ? oxi.pulse_bpm : "--");
+      AirCANnect.ui.text("oxiTabSpo2", sourceValid ? oxi.spo2 : "--");
+      AirCANnect.ui.text("oxiTabPulse", sourceValid ? oxi.pulse_bpm : "--");
 
       let badgeLabel = "Off";
       let badgeStyle = "";
@@ -534,18 +530,18 @@
       } else if (oxi.source_present) {
         sourceStatus = "stale";
       }
-      up("oxiSource", sourceIdentity === "none" ?
+      AirCANnect.ui.text("oxiSource", sourceIdentity === "none" ?
         sourceStatus : sourceIdentity + " " + sourceStatus);
-      up("oxiTabSource", sourceIdentity);
-      up("oxiTabStatus", sourceStatus);
+      AirCANnect.ui.text("oxiTabSource", sourceIdentity);
+      AirCANnect.ui.text("oxiTabStatus", sourceStatus);
 
       const integrationAvailable =
         oxi.airsense_integration_available !== false;
       const as11 = !integrationAvailable ? "local SA2" :
         oxi.subscribed ? "subscribed" :
           oxi.connected ? "connected" : "not connected";
-      up("oxiAs11", as11);
-      up("oxiTabAs11", as11);
+      AirCANnect.ui.text("oxiAs11", as11);
+      AirCANnect.ui.text("oxiTabAs11", as11);
 
       let advertiseState = "idle";
       if (!integrationAvailable) {
@@ -564,13 +560,13 @@
         advertise += " / pairing " +
           Math.ceil((oxi.pairing_left_ms || 0) / 1000) + "s";
       }
-      up("oxiAdvertise", advertise);
-      up("oxiTabAdvertise", advertise);
+      AirCANnect.ui.text("oxiAdvertise", advertise);
+      AirCANnect.ui.text("oxiTabAdvertise", advertise);
 
-      up("oxiTabBleName", oxi.ble_name || "--");
-      up("oxiTabPeer", oxi.ble_peer || "--");
+      AirCANnect.ui.text("oxiTabBleName", oxi.ble_name || "--");
+      AirCANnect.ui.text("oxiTabPeer", oxi.ble_peer || "--");
 
-      setControlValue("oxiAdvertiseMode", oxi.advertise_mode || "auto");
+      AirCANnect.ui.setControlValue("oxiAdvertiseMode", oxi.advertise_mode || "auto");
 
       const pair = document.getElementById("oxiPairBtn");
       const advertiseMode = document.getElementById("oxiAdvertiseMode");
@@ -619,7 +615,7 @@
       if (!root) return;
       root.innerHTML = "";
       if (!devices || !devices.length) {
-        const empty = valueSpan(emptyText);
+        const empty = AirCANnect.ui.valueSpan(emptyText);
         empty.style.display = "block";
         empty.style.textAlign = "left";
         root.appendChild(empty);
@@ -765,8 +761,6 @@
       statusData = data;
       statusLoaded = true;
       renderStatus(statusData);
-      document.dispatchEvent(new CustomEvent(
-        STATUS_SNAPSHOT_EVENT, {detail: statusData}));
       return statusData;
     }
 
@@ -774,8 +768,10 @@
       if (statusLoadPromise) return statusLoadPromise;
 
       statusLoadPromise = (async () => {
-        const response = await api("/api/status");
-        return applyStatusSnapshot(await response.json());
+        const response = await AirCANnect.http.requestOk("/api/status");
+        const data = await response.json();
+        AirCANnect.snapshots.publish("status", data);
+        return data;
       })();
 
       try {
@@ -792,7 +788,7 @@
       if (oxiSensorsLoading) return;
       oxiSensorsLoading = true;
       try {
-        const response = await api("/api/oximetry/sensors");
+        const response = await AirCANnect.http.requestOk("/api/oximetry/sensors");
         oxiSensorData = await response.json();
         renderOximetrySensorManager(oxiSensorData);
       } catch (error) {
@@ -804,8 +800,8 @@
 
     function renderStatus(data) {
       setPageTitle(data.hostname);
-      up("ver", data.version);
-      up("built", data.built);
+      AirCANnect.ui.text("ver", data.version);
+      AirCANnect.ui.text("built", data.built);
 
       const updateNotice = document.getElementById("updateNotice");
       if (updateNotice) {
@@ -819,16 +815,16 @@
       if (data.psram_available) {
         memory += " / " + (data.psram_free / 1048576).toFixed(1) + " MB psram";
       }
-      up("heap", memory);
-      up("uptime", "Up: " + fmtUp(data.uptime || 0));
+      AirCANnect.ui.text("heap", memory);
+      AirCANnect.ui.text("uptime", "Up: " + fmtUp(data.uptime || 0));
       setWifiTop(data);
       const wifiPane = document.getElementById("p-wifi");
       if (wifiPane && wifiPane.classList.contains("active")) {
         renderWifiCurrent({});
       }
-      up("productName", data.device_name || "ResMed device");
-      up("serial", data.serial);
-      up("firmware", fmtFirmware(data.software_id || data.application));
+      AirCANnect.ui.text("productName", data.device_name || "ResMed device");
+      AirCANnect.ui.text("serial", data.serial);
+      AirCANnect.ui.text("firmware", fmtFirmware(data.software_id || data.application));
       let as11Connection = (data.as11_transport || "can").toUpperCase();
       if (data.as11_transport === "ble") {
         as11Connection += " / " + (data.as11_link_state || "unknown");
@@ -839,7 +835,7 @@
           as11Connection += " / " + data.as11_link_error;
         }
       }
-      up("as11Connection", as11Connection);
+      AirCANnect.ui.text("as11Connection", as11Connection);
 
       const pairButton = document.getElementById("as11PairButton");
       if (pairButton) {
@@ -847,14 +843,14 @@
           data.as11_link_state !== "missing_credentials";
       }
 
-      up("profile", fmtProfile(data.profile));
-      up("motorHours", data.motor_hours ?
+      AirCANnect.ui.text("profile", fmtProfile(data.profile));
+      AirCANnect.ui.text("motorHours", data.motor_hours ?
         Number(data.motor_hours).toLocaleString() + " hrs" : "--");
-      up("deviceTime", fmtIsoMinute(data.device_datetime,
+      AirCANnect.ui.text("deviceTime", fmtIsoMinute(data.device_datetime,
         data.device_datetime_age_ms));
-      up("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
+      AirCANnect.ui.text("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
-      up("timeSync", fmtSync(data));
+      AirCANnect.ui.text("timeSync", fmtSync(data));
       renderOximetryRuntime(data);
 
       const badge = document.getElementById("therapyBadge");
@@ -876,19 +872,19 @@
         data.pending_stop ? "stopping" :
         data.subscribed ? "subscribed" :
         data.desired ? "requested" : "idle";
-      up("streamState", state);
-      up("streamConsumers", data.consumers);
-      up("streamNotifications", data.notifications || 0);
-      up("streamFanout", (data.consumers || 0) + " consumers, " +
+      AirCANnect.ui.text("streamState", state);
+      AirCANnect.ui.text("streamConsumers", data.consumers);
+      AirCANnect.ui.text("streamNotifications", data.notifications || 0);
+      AirCANnect.ui.text("streamFanout", (data.consumers || 0) + " consumers, " +
         (data.fanout_drops || 0) + " drops");
-      up("streamFrames", (data.frame_pool_used || 0) + "/" +
+      AirCANnect.ui.text("streamFrames", (data.frame_pool_used || 0) + "/" +
         (data.frame_pool_capacity || 0) + " used, " +
         (data.parse_errors || 0) + " parse, " +
         (data.truncated_frames || 0) + " trunc");
-      up("streamCommands", (data.command_errors || 0) + " errors");
-      up("streamLast", data.last_age_ms === null ?
+      AirCANnect.ui.text("streamCommands", (data.command_errors || 0) + " errors");
+      AirCANnect.ui.text("streamLast", data.last_age_ms === null ?
         "--" : Math.round(data.last_age_ms / 1000) + " s ago");
-      up("streamId", data.stream_id || "--");
+      AirCANnect.ui.text("streamId", data.stream_id || "--");
     }
 
     function chartPush(name, values, limit) {
@@ -1086,101 +1082,59 @@
     }
 
     function initEvents() {
-      if (!window.EventSource) return;
-      if (evtSrc) evtSrc.close();
-
-      evtSrc = new EventSource("/api/events");
-      evtSrc.addEventListener("status", (event) => {
-        try {
-          applyStatusSnapshot(JSON.parse(event.data));
-        } catch (error) {}
+      AirCANnect.snapshots.subscribe("status", applyStatusSnapshot, false);
+      AirCANnect.events.subscribe("status", () => {});
+      AirCANnect.events.subscribe("exports", (data) => {
+        if (data.smb) applySmbSyncStatus(data.smb);
+        if (data.sleephq) applySleepHqSyncStatus(data.sleephq);
       });
-      evtSrc.addEventListener("exports", (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.smb) applySmbSyncStatus(data.smb);
-          if (data.sleephq) applySleepHqSyncStatus(data.sleephq);
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("config", (event) => {
-        try {
-          configUpdateData = JSON.parse(event.data);
-          window.dispatchEvent(new CustomEvent(
-            CONFIG_UPDATE_EVENT, {detail: configUpdateData}));
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("as11_ble", (event) => {
-        try {
-          renderAs11BlePairing(JSON.parse(event.data));
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("oximetry", (event) => {
-        try {
-          oxiSensorData = JSON.parse(event.data);
-          const pane = document.getElementById("p-oxi");
-          if (pane && pane.classList.contains("active")) {
-            renderOximetrySensorManager(oxiSensorData);
-          }
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("settings", async (event) => {
-        if (!clinicalTabActive()) return;
-        try {
-          await applySettingsSnapshot(JSON.parse(event.data));
-        } catch (error) {
-          msg("settingsMsg", error.message, false);
+      AirCANnect.events.subscribe("config", () => {});
+      AirCANnect.events.subscribe("as11_ble", renderAs11BlePairing);
+      AirCANnect.events.subscribe("oximetry", (data) => {
+        oxiSensorData = data;
+        const pane = document.getElementById("p-oxi");
+        if (pane && pane.classList.contains("active")) {
+          renderOximetrySensorManager(oxiSensorData);
         }
       });
-      evtSrc.addEventListener("ota", (event) => {
+      AirCANnect.events.subscribe("settings", async (data) => {
+        if (!clinicalTabActive()) return;
         try {
-          applyOtaSnapshot(JSON.parse(event.data), true);
-        } catch (error) {}
+          await applySettingsSnapshot(data);
+        } catch (error) {
+          AirCANnect.ui.message("settingsMsg", error.message, false);
+        }
       });
-      evtSrc.addEventListener("resmed_ota", (event) => {
-        try {
-          applyResmedOtaSnapshot(JSON.parse(event.data), true);
-        } catch (error) {}
+      AirCANnect.snapshots.subscribe("ota", applyOtaSnapshot, false);
+      AirCANnect.events.subscribe("ota", () => {});
+      AirCANnect.snapshots.subscribe(
+        "resmed_ota", applyResmedOtaSnapshot, false);
+      AirCANnect.events.subscribe("resmed_ota", () => {});
+      AirCANnect.events.subscribe("resmed_repository", (data) => {
+        renderResmedRepositoryStatus(data);
+        if (resmedRepositoryLoaded && data.state === "ready" &&
+            Number(data.revision) !== resmedRepositoryCatalogRevision) {
+          loadResmedRepository(false);
+        }
       });
-      evtSrc.addEventListener("resmed_repository", (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          renderResmedRepositoryStatus(data);
-          if (resmedRepositoryLoaded && data.state === "ready" &&
-              Number(data.revision) !== resmedRepositoryCatalogRevision) {
-            loadResmedRepository(false);
-          }
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("storage_operation", (event) => {
-        try {
-          applyStorageOperationSnapshot(JSON.parse(event.data));
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("device_boot", () => {
+      AirCANnect.events.subscribe(
+        "storage_operation", applyStorageOperationSnapshot);
+      AirCANnect.events.subscribe("device_boot", () => {
         invalidateSettingsCatalog();
+      }, {raw: true});
+      AirCANnect.events.subscribe("stream", (data) => {
+        streamData = data;
+        renderStream(streamData);
       });
-      evtSrc.addEventListener("stream", (event) => {
-        try {
-          streamData = JSON.parse(event.data);
-          renderStream(streamData);
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("console", (event) => {
-        try {
-          renderConsole(JSON.parse(event.data));
-        } catch (error) {}
-      });
-      evtSrc.addEventListener("live", (event) => {
-        try {
-          renderLive(JSON.parse(event.data));
-        } catch (error) {}
-      });
+      AirCANnect.events.subscribe("console", renderConsole);
+      AirCANnect.events.subscribe("live", renderLive);
+      AirCANnect.events.start("/api/events");
     }
 
     async function therapy(action) {
       applyTherapyPending(action);
       try {
-        const response = await api("/api/therapy", {
+        const response = await AirCANnect.http.requestOk("/api/therapy", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({action}),
@@ -1195,31 +1149,31 @@
 
     async function timeAction(action) {
       try {
-        const response = await api("/api/time", {
+        const response = await AirCANnect.http.requestOk("/api/time", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({action}),
         });
         const data = await response.json();
-        msg("timeMsg", data.result, data.ok);
+        AirCANnect.ui.message("timeMsg", data.result, data.ok);
         setTimeout(loadStatus, 900);
       } catch (error) {
-        msg("timeMsg", error.message, false);
+        AirCANnect.ui.message("timeMsg", error.message, false);
       }
     }
 
     async function oxiAction(action, extra, msgId) {
       try {
         const body = Object.assign({action}, extra || {});
-        const response = await api("/api/oximetry", {
+        const response = await AirCANnect.http.requestOk("/api/oximetry", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(body),
         });
         const data = await response.json();
-        msg(msgId || "oxiTabMsg", data.result || "Queued", data.ok);
+        AirCANnect.ui.message(msgId || "oxiTabMsg", data.result || "Queued", data.ok);
       } catch (error) {
-        msg(msgId || "oxiTabMsg", error.message, false);
+        AirCANnect.ui.message(msgId || "oxiTabMsg", error.message, false);
       }
     }
 
@@ -1273,15 +1227,15 @@
     async function saveOximetryAdvertiseConfig() {
       const advertiseMode = document.getElementById("oxiAdvertiseMode").value;
       try {
-        const response = await api("/api/config", {
+        const response = await AirCANnect.http.requestOk("/api/config", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({oxi_adv: advertiseMode}),
         });
         const data = await response.json();
-        msg("oxiTabMsg", data.queued ? "Config update queued" : "Saved", true);
+        AirCANnect.ui.message("oxiTabMsg", data.queued ? "Config update queued" : "Saved", true);
         setTimeout(loadStatus, 600);
       } catch (error) {
-        msg("oxiTabMsg", error.message, false);
+        AirCANnect.ui.message("oxiTabMsg", error.message, false);
       }
     }

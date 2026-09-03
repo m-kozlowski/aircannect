@@ -21,8 +21,8 @@
       const date = new Date(Number(ms));
       if (Number.isNaN(date.getTime())) return "--";
       return date.getFullYear() + "-" +
-        pad2(date.getMonth() + 1) + "-" +
-        pad2(date.getDate());
+        AirCANnect.format.pad2(date.getMonth() + 1) + "-" +
+        AirCANnect.format.pad2(date.getDate());
     }
 
     function reportNightsNewestFirst() {
@@ -308,7 +308,7 @@
     function fmtReportTime(ms) {
       const date = new Date(Number(ms));
       if (Number.isNaN(date.getTime())) return "--";
-      return pad2(date.getHours()) + ":" + pad2(date.getMinutes());
+      return AirCANnect.format.pad2(date.getHours()) + ":" + AirCANnect.format.pad2(date.getMinutes());
     }
 
     function renderReportSessions(sessions) {
@@ -953,8 +953,8 @@
     function fmtReportClock(ms) {
       const d = new Date(Number(ms));
       if (Number.isNaN(d.getTime())) return "--";
-      return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
-        pad2(d.getSeconds());
+      return AirCANnect.format.pad2(d.getHours()) + ":" + AirCANnect.format.pad2(d.getMinutes()) + ":" +
+        AirCANnect.format.pad2(d.getSeconds());
     }
 
     function fmtReportVal(v) {
@@ -1598,7 +1598,7 @@
     function renderOptionalReportMetric(cardId, valueId, visible, value) {
       const card = document.getElementById(cardId);
       if (card) card.hidden = !visible;
-      up(valueId, visible ? value : "--");
+      AirCANnect.ui.text(valueId, visible ? value : "--");
     }
 
     function renderReportSummary() {
@@ -1630,14 +1630,14 @@
         (reportResult.state === "ready" || reportResult.state === "partial");
       const durationMin = displayable && reportResult.duration_min ?
         reportResult.duration_min : (selected ? selected.duration_min : 0);
-      up("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
-      up("reportAhi", displayable && Number.isFinite(Number(reportResult.ahi)) ?
+      AirCANnect.ui.text("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
+      AirCANnect.ui.text("reportAhi", displayable && Number.isFinite(Number(reportResult.ahi)) ?
         Number(reportResult.ahi).toFixed(1) : "--");
-      up("reportRdi", displayable && Number.isFinite(Number(reportResult.rdi)) ?
+      AirCANnect.ui.text("reportRdi", displayable && Number.isFinite(Number(reportResult.rdi)) ?
         Number(reportResult.rdi).toFixed(1) : "--");
-      up("reportPressure", displayable ? reportMetricValues(
+      AirCANnect.ui.text("reportPressure", displayable ? reportMetricValues(
         reportResult, ["mask_pressure_50", "mask_pressure_95"], 1) : "--");
-      up("reportLeak", displayable ? reportMetricValues(
+      AirCANnect.ui.text("reportLeak", displayable ? reportMetricValues(
         reportResult, ["average_leak", "leak_50", "leak_95"], 1) : "--");
 
       const tidalVolumeVisible = displayable && (
@@ -1697,7 +1697,7 @@
       updateReportZoomControls();
 
       if (nights.length) {
-        msg("reportMsg", "Summary loaded", true);
+        AirCANnect.ui.message("reportMsg", "Summary loaded", true);
       } else {
         const element = document.getElementById("reportMsg");
         if (element) element.className = "msg";
@@ -1715,10 +1715,6 @@
       } catch (error) {
         return false;
       }
-    }
-
-    function delayMs(ms) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     function cancelReportLoadRequest() {
@@ -1752,14 +1748,14 @@
           response = await options.request();
         } catch (error) {
           if (error && error.name === "AbortError") return null;
-          await delayMs(delay);
+          await AirCANnect.time.delay(delay);
           continue;
         }
         if (!active()) return null;
         const action = await options.handle(response);
         if (!action) return null;
         if (action.done) return action.value;
-        await delayMs(action.delayMs == null ? delay : action.delayMs);
+        await AirCANnect.time.delay(action.delayMs == null ? delay : action.delayMs);
       }
       return options.timeoutValue === undefined ? null : options.timeoutValue;
     }
@@ -1784,7 +1780,7 @@
         timeoutValue: {status: 0, etag: "", result: null},
         request: () => {
           const cached = lruGet(reportResultClientCache, url);
-          return fetch(url, conditionalRequestOptions(cached, signal));
+          return AirCANnect.http.request(url, conditionalRequestOptions(cached, signal));
         },
         handle: async (resp) => {
           if (resp.status === 304) {
@@ -1814,7 +1810,7 @@
             }};
           }
           if (resp.status === 202) {
-            msg("reportMsg", "Preparing report...", true, true);
+            AirCANnect.ui.message("reportMsg", "Preparing report...", true, true);
             return {done: false};
           }
           if (resp.status === 404) {
@@ -1868,7 +1864,7 @@
         delayMs: delay,
         request: () => {
           const cached = lruGet(reportPlotClientCache, url);
-          return fetch(url, conditionalRequestOptions(cached, signal));
+          return AirCANnect.http.request(url, conditionalRequestOptions(cached, signal));
         },
         handle: async (response) => {
           if (response.status === 304) {
@@ -2735,25 +2731,25 @@
       const token = ++reportLoadToken;
       resetReportData();
       renderReportSummary();
-      msg("reportMsg", "Loading report...", true, true);
+      AirCANnect.ui.message("reportMsg", "Loading report...", true, true);
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
           const res = await pollReportResult(
             token, nightId, controller.signal);
           if (!res || token !== reportLoadToken) return;
           if (res.status === 404) {
-            msg("reportMsg", "Night not found", false, true);
+            AirCANnect.ui.message("reportMsg", "Night not found", false, true);
             return;
           }
           if ((res.status !== 200 && res.status !== 304) || !res.result) {
-            msg("reportMsg", "Report not ready", false, true);
+            AirCANnect.ui.message("reportMsg", "Report not ready", false, true);
             renderReportSummary();
             return;
           }
           reportResult = res.result;
           if (reportResult.state !== "ready" &&
               reportResult.state !== "partial") {
-            msg("reportMsg", reportResult.error || "Report incomplete",
+            AirCANnect.ui.message("reportMsg", reportResult.error || "Report incomplete",
                 false, true);
             renderReportSummary();
             return;
@@ -2766,7 +2762,7 @@
 
           renderReportSummary();
           renderReportCharts();
-          msg("reportMsg",
+          AirCANnect.ui.message("reportMsg",
               reportResult.state === "partial"
                 ? "Report loaded (incomplete - some data missing)"
                 : "Report loaded", true);
@@ -2775,7 +2771,7 @@
         throw new Error("report changed while loading");
       } catch (error) {
         if (token !== reportLoadToken) return;
-        msg("reportMsg", error.message, false, true);
+        AirCANnect.ui.message("reportMsg", error.message, false, true);
       } finally {
         if (reportLoadAbortController === controller) {
           reportLoadAbortController = null;
@@ -2794,10 +2790,10 @@
         if (reportSummaryEtag) {
           headers["If-None-Match"] = reportSummaryEtag;
         }
-        const response = await fetch("/api/report/summary",
+        const response = await AirCANnect.http.request("/api/report/summary",
           {cache: "no-cache", headers});
         if (response.status === 202) {
-          msg("reportMsg", "Preparing report index...", true, true);
+          AirCANnect.ui.message("reportMsg", "Preparing report index...", true, true);
           scheduleReportPoll(loadNight);
           return;
         }
@@ -2811,7 +2807,7 @@
         renderReportSummary();
         if (loadNight) await loadSelectedReportNight();
       } catch (error) {
-        msg("reportMsg", error.message, false, true);
+        AirCANnect.ui.message("reportMsg", error.message, false, true);
       }
     }
 

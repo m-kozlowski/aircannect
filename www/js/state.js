@@ -1,7 +1,6 @@
     let statusData = {};
     let statusLoaded = false;
     let statusLoadPromise = null;
-    const STATUS_SNAPSHOT_EVENT = "aircannect-status-snapshot";
     let streamData = {};
     let settingsData = null;
     let settingsCatalog = [];
@@ -9,11 +8,7 @@
     let settingsCatalogPromise = null;
     let settingsCatalogRevision = 0;
     let configData = null;
-    let configUpdateData = null;
-    const CONFIG_UPDATE_EVENT = "aircannect-config-update";
     let otaData = null;
-    let otaSnapshotSerial = 0;
-    const OTA_SNAPSHOT_EVENT = "aircannect-ota-snapshot";
     let configSections = [];
     let as11BlePairingData = null;
     let configSchemaPromise = null;
@@ -43,7 +38,6 @@
     }
     let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
     let oxiSensorsLoading = false;
-    let evtSrc = null;
     let consoleSeq = -1;
     let consoleEnd = 0;
     let settingsProfileMode = null;
@@ -57,8 +51,6 @@
       bps: 0,
     };
     let resmedOtaData = null;
-    let resmedOtaSnapshotSerial = 0;
-    const RESMED_OTA_SNAPSHOT_EVENT = "aircannect-resmed-ota-snapshot";
     let resmedRepositoryCatalogRevision = 0;
     let resmedRepositoryLoadGeneration = 0;
     let resmedRepositoryLoaded = false;

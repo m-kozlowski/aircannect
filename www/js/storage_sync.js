@@ -1,24 +1,13 @@
-    function fmtBytes(bytes) {
-      const value = Number(bytes);
-      if (!Number.isFinite(value) || value < 0) return "--";
-      if (value < 1024) return Math.round(value) + " B";
-      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KiB";
-      if (value < 1024 * 1024 * 1024) {
-        return (value / (1024 * 1024)).toFixed(1) + " MiB";
-      }
-      return (value / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
-    }
-
     function fmtStorageModified(value) {
       const seconds = Number(value);
       if (!Number.isFinite(seconds) || seconds <= 0) return "";
       const date = new Date(seconds * 1000);
       if (Number.isNaN(date.getTime())) return "";
       return date.getFullYear() + "-" +
-        pad2(date.getMonth() + 1) + "-" +
-        pad2(date.getDate()) + " " +
-        pad2(date.getHours()) + ":" +
-        pad2(date.getMinutes());
+        AirCANnect.format.pad2(date.getMonth() + 1) + "-" +
+        AirCANnect.format.pad2(date.getDate()) + " " +
+        AirCANnect.format.pad2(date.getHours()) + ":" +
+        AirCANnect.format.pad2(date.getMinutes());
     }
 
     function storageErrorText(text, status) {
@@ -27,10 +16,6 @@
         if (data && data.error) return data.error;
       } catch (_) {}
       return text || ("HTTP " + status);
-    }
-
-    function storageDelay(ms) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     async function fetchStorageList(path, offset, limit, refresh) {
@@ -43,7 +28,7 @@
           (forceRefresh ? "&refresh=1" : "");
         forceRefresh = false;
 
-        const response = await fetch(url, {cache: "no-store"});
+        const response = await AirCANnect.http.request(url, {cache: "no-store"});
         const text = await response.text();
         if (response.status === 202) {
           let retryMs = 750;
@@ -55,7 +40,7 @@
             }
           } catch (_) {}
           const remainingMs = Math.max(0, deadline - Date.now());
-          await storageDelay(Math.min(retryMs, remainingMs));
+          await AirCANnect.time.delay(Math.min(retryMs, remainingMs));
           continue;
         }
         if (!response.ok) {
@@ -111,8 +96,8 @@
     async function loadEdfOverview() {
       if (edfOverviewLoading) return;
       edfOverviewLoading = true;
-      up("edfLastSession", "Loading");
-      up("edfLastFiles", "--");
+      AirCANnect.ui.text("edfLastSession", "Loading");
+      AirCANnect.ui.text("edfLastFiles", "--");
       try {
         let datalogEntries = [];
         try {
@@ -148,19 +133,19 @@
         }
 
         if (!bestPrefix || !bestFiles) {
-          up("edfLastSession", "No EDF sessions");
-          up("edfLastFiles", "--");
+          AirCANnect.ui.text("edfLastSession", "No EDF sessions");
+          AirCANnect.ui.text("edfLastFiles", "--");
           return;
         }
 
         const totalBytes = bestFiles.reduce((sum, entry) =>
           sum + (Number(entry.size) || 0), 0);
-        up("edfLastSession", edfSessionLabel(bestPrefix));
-        up("edfLastFiles", bestFiles.length + " file" +
-          (bestFiles.length === 1 ? "" : "s") + ", " + fmtBytes(totalBytes));
+        AirCANnect.ui.text("edfLastSession", edfSessionLabel(bestPrefix));
+        AirCANnect.ui.text("edfLastFiles", bestFiles.length + " file" +
+          (bestFiles.length === 1 ? "" : "s") + ", " + AirCANnect.format.bytes(totalBytes));
       } catch (error) {
-        up("edfLastSession", "Unavailable");
-        up("edfLastFiles", error.message || "Storage error");
+        AirCANnect.ui.text("edfLastSession", "Unavailable");
+        AirCANnect.ui.text("edfLastFiles", error.message || "Storage error");
       } finally {
         edfOverviewLoading = false;
       }
@@ -273,7 +258,7 @@
       storageSelectedNames.forEach((name) => {
         if (!visibleNames.has(name)) storageSelectedNames.delete(name);
       });
-      up("storagePath", storagePath);
+      AirCANnect.ui.text("storagePath", storagePath);
       const upBtn = document.getElementById("storageUpBtn");
       const prevBtn = document.getElementById("storagePrevBtn");
       const nextBtn = document.getElementById("storageNextBtn");
@@ -323,7 +308,7 @@
         const meta = document.createElement("div");
         meta.className = "storage-meta";
         const metaParts = [entry.type === "dir" ?
-          (entry.path || "") : fmtBytes(entry.size)];
+          (entry.path || "") : AirCANnect.format.bytes(entry.size)];
         const modified = fmtStorageModified(entry.modified);
         if (modified) metaParts.push(modified);
         meta.textContent = metaParts.filter(Boolean).join(" | ");
@@ -370,7 +355,7 @@
       } catch (error) {
         if (requestSeq !== storageListRequestSeq) return;
         storageSetBadge("Unavailable", "bad");
-        msg("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", error.message, false, true);
       }
     }
 
@@ -397,14 +382,14 @@
 
     async function storageDownload(path, messageId) {
       const target = messageId || "storageMsg";
-      msg(target, "Preparing download", true, false);
+      AirCANnect.ui.message(target, "Preparing download", true, false);
       try {
         for (let attempt = 0; attempt < 400; attempt++) {
-          const response = await fetch("/api/storage/download?path=" +
+          const response = await AirCANnect.http.request("/api/storage/download?path=" +
             encodeURIComponent(path), {cache: "no-store"});
           const text = await response.text();
           if (response.status === 202) {
-            await storageDelay(100);
+            await AirCANnect.time.delay(100);
             continue;
           }
           if (!response.ok) {
@@ -422,12 +407,12 @@
           document.body.appendChild(link);
           link.click();
           link.remove();
-          msg(target, "Download started", true, false);
+          AirCANnect.ui.message(target, "Download started", true, false);
           return;
         }
         throw new Error("download_prepare_timeout");
       } catch (error) {
-        msg(target, error.message, false, true);
+        AirCANnect.ui.message(target, error.message, false, true);
       }
     }
 
@@ -437,7 +422,7 @@
       const newName = requested.trim();
       if (!newName || newName === currentName) return;
 
-      const response = await fetch("/api/storage/rename", {
+      const response = await AirCANnect.http.request("/api/storage/rename", {
         method: "POST",
         cache: "no-store",
         headers: {"Content-Type": "application/json"},
@@ -455,17 +440,17 @@
 
       storageRenameBusy = true;
       storageSelectionUi();
-      msg("storageMsg", "Renaming " + entry.name, true, false);
+      AirCANnect.ui.message("storageMsg", "Renaming " + entry.name, true, false);
       try {
         const renamed = await storageRenamePath(storagePath, entry.name);
         if (!renamed) return;
 
-        msg("storageMsg", "Renamed " + entry.name + " to " + renamed,
+        AirCANnect.ui.message("storageMsg", "Renamed " + entry.name + " to " + renamed,
           true, false);
         storageClearSelection();
         await loadStorageList(true);
       } catch (error) {
-        msg("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", error.message, false, true);
       } finally {
         storageRenameBusy = false;
         storageSelectionUi();
@@ -502,8 +487,8 @@
           (fileIndex + 1) + "/" + fileCount + " " : "") + name;
       }
       if (amountNode) {
-        amountNode.textContent = fmtBytes(safeCommitted) + " / " +
-          fmtBytes(safeTotal);
+        amountNode.textContent = AirCANnect.format.bytes(safeCommitted) + " / " +
+          AirCANnect.format.bytes(safeTotal);
       }
       if (bar) {
         bar.max = Math.max(1, safeTotal);
@@ -533,7 +518,7 @@
     }
 
     async function storageUploadRequest(path, options) {
-      const response = await fetch(path, options || {cache: "no-store"});
+      const response = await AirCANnect.http.request(path, options || {cache: "no-store"});
       const text = await response.text();
       let data = {};
       try {
@@ -579,7 +564,7 @@
             throw new Error(status.error || status.state);
           }
           if (predicate(status)) return status;
-          await storageDelay(storageUploadRetryMs(status));
+          await AirCANnect.time.delay(storageUploadRetryMs(status));
         }
 
         try {
@@ -587,11 +572,11 @@
         } catch (error) {
           status = null;
           if (error.status === 503 && error.message === "status_busy") {
-            await storageDelay(250);
+            await AirCANnect.time.delay(250);
             continue;
           }
           if (Number(error.status) > 0) throw error;
-          await storageDelay(1000);
+          await AirCANnect.time.delay(1000);
           continue;
         }
       }
@@ -725,16 +710,16 @@
           }
         }
         if (storageUploadCancelRequested) {
-          msg("storageMsg", "Upload cancelled", true, false);
+          AirCANnect.ui.message("storageMsg", "Upload cancelled", true, false);
         } else {
-          msg("storageMsg", "Uploaded " + uploaded + " file" +
+          AirCANnect.ui.message("storageMsg", "Uploaded " + uploaded + " file" +
             (uploaded === 1 ? "" : "s"), true, false);
         }
       } catch (error) {
         if (error.message === "upload_cancelled") {
-          msg("storageMsg", "Upload cancelled", true, false);
+          AirCANnect.ui.message("storageMsg", "Upload cancelled", true, false);
         } else {
-          msg("storageMsg", error.message, false, true);
+          AirCANnect.ui.message("storageMsg", error.message, false, true);
         }
       } finally {
         storageUploadCurrentId = 0;
@@ -795,7 +780,7 @@
         text += ", " + failed + " failed";
       } else if (uploaded) {
         text += ", uploaded " + uploaded + " file" +
-          (uploaded === 1 ? "" : "s") + " (" + fmtBytes(bytes) + ")";
+          (uploaded === 1 ? "" : "s") + " (" + AirCANnect.format.bytes(bytes) + ")";
       } else if (seen) {
         text += ", up to date";
       }
@@ -831,9 +816,9 @@
     async function queueSyncAction(url, startMessage, messageId,
                                    inProgressMessage, setBusy, loadStatus) {
       setBusy(true);
-      msg(messageId, startMessage, true, false);
+      AirCANnect.ui.message(messageId, startMessage, true, false);
       try {
-        const response = await fetch(url, {
+        const response = await AirCANnect.http.request(url, {
           method: "POST",
           cache: "no-store",
         });
@@ -844,11 +829,11 @@
       } catch (error) {
         const current = await loadStatus();
         if (syncStatusActive(current)) {
-          msg(messageId, inProgressMessage, true, false);
+          AirCANnect.ui.message(messageId, inProgressMessage, true, false);
           return;
         }
         setBusy(false);
-        msg(messageId, error.message, false, true);
+        AirCANnect.ui.message(messageId, error.message, false, true);
       }
     }
 
@@ -922,7 +907,7 @@
       if (uploaded) {
         return "Synced" + when + ": uploaded " + uploaded + " file" +
           (uploaded === 1 ? "" : "s") + " (" +
-          fmtBytes(Number(data.bytes_uploaded) || 0) + ")";
+          AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0) + ")";
       }
       if (seen && skipped === seen) {
         return "Up to date" + when + " (" + seen + " files checked)";
@@ -983,12 +968,12 @@
 
     function renderSmbSyncStatus(data) {
       const configured = !!(data && data.enabled && data.configured);
-      up("edfSyncEndpoint", data && data.endpoint ? data.endpoint :
+      AirCANnect.ui.text("edfSyncEndpoint", data && data.endpoint ? data.endpoint :
         (configData && configData.smb_ep ? configData.smb_ep : "--"));
-      up("edfSyncResult", smbSyncResultText(data));
-      up("edfSyncLast", syncLastText(data, configured));
-      up("edfSyncCheck", smbSyncCheckText(data));
-      up("edfSyncCurrent", smbSyncNowText(data));
+      AirCANnect.ui.text("edfSyncResult", smbSyncResultText(data));
+      AirCANnect.ui.text("edfSyncLast", syncLastText(data, configured));
+      AirCANnect.ui.text("edfSyncCheck", smbSyncCheckText(data));
+      AirCANnect.ui.text("edfSyncCurrent", smbSyncNowText(data));
       const badge = document.getElementById("edfSyncBadge");
       if (badge) {
         badge.textContent = syncBadgeText(data, configured);
@@ -1011,15 +996,15 @@
       smbSyncSetBusy(active);
 
       if (data && data.state === "error") {
-        msg("edfSmbMsg", data.error || "SMB sync failed", false, true);
+        AirCANnect.ui.message("edfSmbMsg", data.error || "SMB sync failed", false, true);
       } else if (data && wasActive && !active && data.state === "idle") {
-        msg("edfSmbMsg", smbSyncCompleteMessage, true, false);
+        AirCANnect.ui.message("edfSmbMsg", smbSyncCompleteMessage, true, false);
       }
     }
 
     async function loadSmbSyncStatus() {
       try {
-        const response = await fetch("/api/storage/sync/status", {cache: "no-store"});
+        const response = await AirCANnect.http.request("/api/storage/sync/status", {cache: "no-store"});
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
@@ -1028,10 +1013,10 @@
       } catch (error) {
         smbSyncEnabled = false;
         smbSyncConfigured = false;
-        up("edfSyncResult", error.message);
-        up("edfSyncLast", "--");
-        up("edfSyncCheck", "--");
-        up("edfSyncCurrent", "--");
+        AirCANnect.ui.text("edfSyncResult", error.message);
+        AirCANnect.ui.text("edfSyncLast", "--");
+        AirCANnect.ui.text("edfSyncCheck", "--");
+        AirCANnect.ui.text("edfSyncCurrent", "--");
         smbSyncSetBusy(false);
         return null;
       }
@@ -1105,7 +1090,7 @@
       if (uploaded) {
         return "Synced: uploaded " + uploaded + " file" +
           (uploaded === 1 ? "" : "s") + " (" +
-          fmtBytes(Number(data.bytes_uploaded) || 0) + ")";
+          AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0) + ")";
       }
       if (seen && Number(data.files_skipped) === seen) {
         return "Up to date (" + seen + " files checked)";
@@ -1137,11 +1122,11 @@
 
     function renderSleepHqSyncStatus(data) {
       const configured = !!(data && data.configured);
-      up("edfSleepHqEndpoint", sleepHqEndpointText(data));
-      up("edfSleepHqResult", sleepHqSyncResultText(data));
-      up("edfSleepHqLast", syncLastText(data, configured));
-      up("edfSleepHqCheck", sleepHqSyncCheckText(data));
-      up("edfSleepHqCurrent", sleepHqSyncNowText(data));
+      AirCANnect.ui.text("edfSleepHqEndpoint", sleepHqEndpointText(data));
+      AirCANnect.ui.text("edfSleepHqResult", sleepHqSyncResultText(data));
+      AirCANnect.ui.text("edfSleepHqLast", syncLastText(data, configured));
+      AirCANnect.ui.text("edfSleepHqCheck", sleepHqSyncCheckText(data));
+      AirCANnect.ui.text("edfSleepHqCurrent", sleepHqSyncNowText(data));
       const badge = document.getElementById("edfSleepHqBadge");
       if (badge) {
         badge.textContent = syncBadgeText(data, configured);
@@ -1162,15 +1147,15 @@
       sleepHqSyncSetBusy(active);
 
       if (data && data.state === "error") {
-        msg("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
+        AirCANnect.ui.message("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
       } else if (data && wasActive && !active && data.state === "idle") {
-        msg("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
+        AirCANnect.ui.message("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
       }
     }
 
     async function loadSleepHqSyncStatus() {
       try {
-        const response = await fetch("/api/sleephq/sync/status", {cache: "no-store"});
+        const response = await AirCANnect.http.request("/api/sleephq/sync/status", {cache: "no-store"});
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
@@ -1178,10 +1163,10 @@
         return data;
       } catch (error) {
         sleepHqSyncConfigured = false;
-        up("edfSleepHqResult", error.message);
-        up("edfSleepHqLast", "--");
-        up("edfSleepHqCheck", "--");
-        up("edfSleepHqCurrent", "--");
+        AirCANnect.ui.text("edfSleepHqResult", error.message);
+        AirCANnect.ui.text("edfSleepHqLast", "--");
+        AirCANnect.ui.text("edfSleepHqCheck", "--");
+        AirCANnect.ui.text("edfSleepHqCurrent", "--");
         sleepHqSyncSetBusy(false);
         return null;
       }
@@ -1250,12 +1235,12 @@
         storageArchiveJobId = 0;
         storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
-        msg("storageMsg", "Archive download complete", true, false);
+        AirCANnect.ui.message("storageMsg", "Archive download complete", true, false);
         return;
       }
       if (Number(data.id) !== id) return;
 
-      msg("storageMsg", storageArchiveStatusText(data),
+      AirCANnect.ui.message("storageMsg", storageArchiveStatusText(data),
         state !== "error", state === "error");
       if (state === "ready") {
         if (Number(storageArchiveDownloadStartedId) !== id) {
@@ -1274,7 +1259,7 @@
       if (!storageDeleteBusy || !id || !data || Number(data.id) !== id) return;
 
       const state = data.state || "unknown";
-      msg("storageMsg", storageDeleteStatusText(data),
+      AirCANnect.ui.message("storageMsg", storageDeleteStatusText(data),
         state !== "error", state === "error");
       if (state === "done") {
         storageDeleteJobId = 0;
@@ -1297,9 +1282,9 @@
       storageArchiveJobId = 0;
       storageArchiveDownloadStartedId = 0;
       storageArchiveSetBusy(true);
-      msg("storageMsg", "Starting archive", true, false);
+      AirCANnect.ui.message("storageMsg", "Starting archive", true, false);
       try {
-        const response = await fetch(url, Object.assign({
+        const response = await AirCANnect.http.request(url, Object.assign({
           method: "POST",
           cache: "no-store",
         }, options || {}));
@@ -1314,7 +1299,7 @@
         storageArchiveJobId = 0;
         storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
-        msg("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", error.message, false, true);
       }
     }
 
@@ -1329,7 +1314,7 @@
         .filter((entry) => entry && storageSelectedNames.has(entry.name))
         .map((entry) => entry.name);
       if (!selected.length) {
-        msg("storageMsg", "Select files or folders first", false, true);
+        AirCANnect.ui.message("storageMsg", "Select files or folders first", false, true);
         return;
       }
       await storageStartArchive("/api/storage/archive/start", {
@@ -1358,15 +1343,15 @@
         .filter((entry) => entry && storageSelectedNames.has(entry.name))
         .map((entry) => entry.name);
       if (!selected.length) {
-        msg("storageMsg", "Select files or folders first", false, true);
+        AirCANnect.ui.message("storageMsg", "Select files or folders first", false, true);
         return;
       }
       if (!confirm("Delete selected files and folders recursively?")) return;
       storageDeleteJobId = 0;
       storageDeleteSetBusy(true);
-      msg("storageMsg", "Starting delete", true, false);
+      AirCANnect.ui.message("storageMsg", "Starting delete", true, false);
       try {
-        const response = await fetch("/api/storage/delete/start", {
+        const response = await AirCANnect.http.request("/api/storage/delete/start", {
           method: "POST",
           cache: "no-store",
           headers: {"Content-Type": "application/json"},
@@ -1382,6 +1367,6 @@
       } catch (error) {
         storageDeleteJobId = 0;
         storageDeleteSetBusy(false);
-        msg("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", error.message, false, true);
       }
     }

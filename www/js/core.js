@@ -9,7 +9,7 @@
       }
       liveViewActiveSent = active;
       liveViewLastPostMs = now;
-      fetch("/api/live/view?id=" + encodeURIComponent(liveViewClientId) +
+      AirCANnect.http.request("/api/live/view?id=" + encodeURIComponent(liveViewClientId) +
         "&active=" + (active ? "1" : "0"), {
         method: "POST",
         cache: "no-store",
@@ -102,48 +102,13 @@
       }
     });
 
-    async function api(url, opt) {
-      const response = await fetch(url, opt);
-      if (!response.ok) throw new Error(await response.text());
-      return response;
-    }
-
-    const msgTimers = {};
-
-    function msg(id, text, ok, sticky) {
-      const element = document.getElementById(id);
-      if (!element) return;
-      if (msgTimers[id]) {
-        clearTimeout(msgTimers[id]);
-        msgTimers[id] = null;
-      }
-      element.textContent = text;
-      element.className = "msg " + (ok ? "ok" : "err");
-      if (!sticky) {
-        msgTimers[id] = setTimeout(() => element.className = "msg", 5000);
-      }
-    }
-
-    function setControlValue(id, value) {
-      const element = document.getElementById(id);
-      if (!element || document.activeElement === element) return;
-      element.value = value === undefined || value === null ? "" : String(value);
-    }
-
-    function up(id, text) {
-      const element = document.getElementById(id);
-      if (element) {
-        element.textContent =
-          text === undefined || text === null || text === "" ? "--" : text;
-      }
-    }
-
     function apiError(error) {
-      up("title", "API unavailable");
+      AirCANnect.ui.text("title", "API unavailable");
       if (location.protocol === "file:") {
-        up("wifiTop", "Open device HTTP UI, not file preview");
+        AirCANnect.ui.text("wifiTop", "Open device HTTP UI, not file preview");
       } else {
-        up("wifiTop", error && error.message ? error.message : "API error");
+        AirCANnect.ui.text(
+          "wifiTop", error && error.message ? error.message : "API error");
       }
     }
 
@@ -152,18 +117,4 @@
       const hours = ((seconds % 86400) / 3600) | 0;
       const minutes = ((seconds % 3600) / 60) | 0;
       return (days ? days + "d " : "") + hours + "h " + minutes + "m";
-    }
-
-    function fmtBytes(bytes) {
-      if (!bytes) return "0 B";
-
-      const units = ["B", "KB", "MB", "GB"];
-      let index = 0;
-      let value = Number(bytes);
-      while (value >= 1024 && index < units.length - 1) {
-        value /= 1024;
-        index++;
-      }
-      return (value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)) +
-        " " + units[index];
     }
