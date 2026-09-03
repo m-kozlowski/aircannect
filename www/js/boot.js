@@ -1,15 +1,22 @@
-    AirCANnect.events.start("/api/events");
-    AirCANnect.actions.start();
-    if (location.hash && tabs[location.hash.slice(1)]) {
-      showTab(location.hash.slice(1));
-    } else {
-      updateLiveViewState("dash");
-      AirCANnect.pages.load("dash", false);
-    }
-    initOnboarding();
+(() => {
+    const pages = {
+      dash: "Dashboard",
+      report: "Report",
+      edf: "EDF",
+      storage: "Storage",
+      clinical: "Clinical",
+      oxi: "Oximetry",
+      wifi: "WiFi",
+      ota: "Update",
+      console: "Console",
+      config: "Config",
+    };
 
-    setInterval(() => {
-      if (document.getElementById("p-dash").classList.contains("active")) {
-        updateLiveViewState("dash");
-      }
-    }, 5000);
+    AirCANnect.pages.define(pages);
+    AirCANnect.actions.start();
+    AirCANnect.events.start("/api/events");
+
+    const requested = location.hash.slice(1);
+    AirCANnect.pages.show(pages[requested] ? requested : "dash");
+    AirCANnect.startup.run();
+})();

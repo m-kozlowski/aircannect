@@ -75,27 +75,3 @@
       leak: {min: 0, max: 20, step: 5},
       therapyPressure: {min: 0, max: 15, step: 5},
     };
-    const tabs = {
-      dash: "Dashboard",
-      report: "Report",
-      edf: "EDF",
-      storage: "Storage",
-      clinical: "Clinical",
-      oxi: "Oximetry",
-      wifi: "WiFi",
-      ota: "Update",
-      console: "Console",
-      config: "Config",
-    };
-
-    document.querySelectorAll(".nav").forEach((nav) => {
-      nav.onclick = () => showTab(nav.dataset.tab);
-    });
-
-    const liveViewClientId = (() => {
-      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-      return Date.now().toString(36) + Math.random().toString(36).slice(2);
-    })();
-    let liveViewActiveSent = null;
-    let liveViewLastPostMs = 0;
-    const liveViewHeartbeatMs = 5000;

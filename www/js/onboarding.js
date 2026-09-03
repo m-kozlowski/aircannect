@@ -131,13 +131,7 @@
       if (!timezone) return;
 
       if (onboardingTimezoneValue === null) {
-        try {
-          const zone = Intl.DateTimeFormat().resolvedOptions().timeZone ||
-            "UTC";
-          setTimezoneFromZone(timezone, zone);
-        } catch (error) {
-          timezone.value = "UTC0";
-        }
+        AirCANnect.forms.setDefault("tz", timezone);
         onboardingTimezoneValue = timezone.value;
       } else {
         timezone.value = onboardingTimezoneValue;
@@ -346,7 +340,7 @@
         location.assign("/#" + tab);
         return;
       }
-      showTab(tab);
+      AirCANnect.pages.show(tab);
     }
 
     async function initOnboarding() {
@@ -374,3 +368,5 @@
         console.warn("Onboarding unavailable", error);
       }
     }
+
+    AirCANnect.startup.register(initOnboarding);

@@ -5,7 +5,7 @@
       settingsCatalogRevision = 0;
       settingsProfileMode = null;
       settingsModeDirty = false;
-      if (clinicalTabActive()) loadSettings(true);
+      if (AirCANnect.pages.isActive("clinical")) loadSettings(true);
     }
 
     function modeBit(mode) {
@@ -741,7 +741,8 @@
         roam ? "roaming on" : "roaming off"));
       root.appendChild(AirCANnect.ui.row("SSID", AirCANnect.ui.valueSpan(ssid),
         Number.isFinite(active) && active >= 0 ? "profile " + active : ""));
-      root.appendChild(AirCANnect.ui.row("Signal", wifiSignalValue(rssi),
+      root.appendChild(AirCANnect.ui.row(
+        "Signal", AirCANnect.ui.wifiSignal(rssi),
         channel > 0 ? "channel " + channel : ""));
       root.appendChild(AirCANnect.ui.row("IP", AirCANnect.ui.valueSpan(ip),
         bssid && bssid !== "00:00:00:00:00:00" ? bssid : ""));
@@ -844,7 +845,7 @@
         "ota", predicate, afterSerial, timeoutMs, timeoutMessage);
     }
 
-    async function loadOta() {
+    async function loadEspOta() {
       try {
         const eventSerial = AirCANnect.snapshots.read("ota").serial;
         const response = await AirCANnect.http.requestOk("/api/ota");
@@ -852,7 +853,13 @@
         if (AirCANnect.snapshots.read("ota").serial === eventSerial) {
           AirCANnect.snapshots.publish("ota", data);
         }
+      } catch (error) {
+        AirCANnect.ui.message("otaMsg", error.message, false);
+      }
+    }
 
+    async function loadResmedOta(refreshRepository) {
+      try {
         const resmedEventSerial =
           AirCANnect.snapshots.read("resmed_ota").serial;
         const resmedResponse = await AirCANnect.http.requestOk("/api/resmed-ota");
@@ -861,10 +868,15 @@
             resmedEventSerial) {
           AirCANnect.snapshots.publish("resmed_ota", resmedData);
         }
-        loadResmedRepository(true);
+        loadResmedRepository(!!refreshRepository);
       } catch (error) {
-        AirCANnect.ui.message("otaMsg", error.message, false);
+        AirCANnect.ui.message("resmedOtaMsg", error.message, false);
       }
+    }
+
+    function loadOta() {
+      loadEspOta();
+      loadResmedOta(true);
     }
 
     function renderOta(data) {
@@ -1063,7 +1075,7 @@
           "/api/ota/install-update", "otaUpdateMsg");
       } catch (error) {
         AirCANnect.ui.message("otaUpdateMsg", "Update failed: " + error.message, false, true);
-        loadOta();
+        loadEspOta();
       } finally {
         if (button && !restarting) button.disabled = false;
       }
@@ -1169,7 +1181,7 @@
           await otaInstallFromUrl(url);
       } catch (error) {
         AirCANnect.ui.message("otaMsg", "Update failed: " + error.message, false, true);
-        loadOta();
+        loadEspOta();
       } finally {
         if (!restarting) button.disabled = false;
       }
@@ -1827,7 +1839,7 @@
         AirCANnect.ui.message("resmedOtaMsg", "Installation complete", true, true);
       } catch (error) {
         AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
-        loadOta();
+        loadResmedOta(false);
       } finally {
         if (resmedUploadOperation) {
           resmedUploadOperation.close();
@@ -2194,9 +2206,7 @@
       control.dataset.section = section.id;
       control.dataset.type = field.type;
       control.dataset.orig = String(control.value || "");
-      let rendered = control;
-      if (field.key === "tz") rendered = timezoneHelper(control);
-      if (field.key === "wifi_ctry") rendered = wifiCountryHelper(control);
+      const rendered = AirCANnect.forms.decorate(field.key, control);
       root.appendChild(AirCANnect.ui.row(field.label || field.key, rendered, field.key));
     }
 
@@ -2364,7 +2374,7 @@
     }
 
     function startAs11PairingFromDashboard() {
-      showTab("config");
+      AirCANnect.pages.show("config");
       as11BleAction("pair");
     }
 
@@ -2680,7 +2690,8 @@
     AirCANnect.actions.register("ota.source", (_event, element) =>
       otaSourceChanged(element.dataset.value));
     AirCANnect.actions.register("ota.install", () => otaInstall());
-    AirCANnect.actions.register("resmed.transport", () => loadOta());
+    AirCANnect.actions.register("resmed.transport", () =>
+      loadResmedOta(false));
     AirCANnect.actions.register("resmed.repository-choose", () =>
       resmedRepositoryChooseFiles());
     AirCANnect.actions.register("resmed.dump", () => resmedOtaDump());
@@ -2720,7 +2731,7 @@
     AirCANnect.events.subscribe("config", () => {});
     AirCANnect.events.subscribe("as11_ble", renderAs11BlePairing);
     AirCANnect.events.subscribe("settings", async (data) => {
-      if (!clinicalTabActive()) return;
+      if (!AirCANnect.pages.isActive("clinical")) return;
       try {
         await applySettingsSnapshot(data);
       } catch (error) {

@@ -4,12 +4,17 @@
       const snapshotChannels = new Map();
       const eventHandlers = new Map();
       const eventBindings = new Set();
+      const fieldWidgets = new Map();
       const pageLoaders = new Map();
       const pageLeavers = new Map();
+      const pageListeners = new Set();
+      const pageTitles = new Map();
+      const startupHandlers = new Set();
       const actions = new Map();
       const messageTimers = new Map();
       let eventSource = null;
       let actionsStarted = false;
+      let activePage = "";
       let activeStorageUpload = null;
 
       function snapshotChannel(name) {
@@ -455,9 +460,77 @@
         (pageLeavers.get(page) || []).forEach((leaver) => leaver());
       }
 
+      function definePages(pages) {
+        Object.entries(pages).forEach(([id, title]) =>
+          pageTitles.set(id, title));
+      }
+
+      function showPage(page) {
+        if (!pageTitles.has(page)) return false;
+        const previous = activePage;
+        if (previous && previous !== page) leavePage(previous);
+
+        document.querySelectorAll(".pane").forEach((pane) => {
+          pane.classList.toggle("active", pane.id === "p-" + page);
+        });
+        document.querySelectorAll(".nav").forEach((nav) => {
+          nav.classList.toggle("active", nav.dataset.tab === page);
+        });
+
+        activePage = page;
+        const title = document.getElementById("title");
+        if (title) title.textContent = pageTitles.get(page);
+        location.hash = page;
+        pageListeners.forEach((listener) => listener(page, previous));
+        loadPage(page, false);
+        return true;
+      }
+
+      function activePageId() {
+        return activePage;
+      }
+
+      function pageIsActive(page) {
+        return activePage === page;
+      }
+
+      function onPageChange(listener) {
+        pageListeners.add(listener);
+        return () => pageListeners.delete(listener);
+      }
+
+      function refreshPage() {
+        if (activePage) loadPage(activePage, true);
+      }
+
+      function registerStartup(handler) {
+        startupHandlers.add(handler);
+      }
+
+      function runStartup() {
+        startupHandlers.forEach((handler) => handler());
+      }
+
       function registerAction(name, handler) {
         if (actions.has(name)) throw new Error("duplicate UI action " + name);
         actions.set(name, handler);
+      }
+
+      function registerFieldWidget(key, widget) {
+        if (fieldWidgets.has(key)) {
+          throw new Error("duplicate config field widget " + key);
+        }
+        fieldWidgets.set(key, Object.freeze(widget));
+      }
+
+      function decorateField(key, control) {
+        const widget = fieldWidgets.get(key);
+        return widget && widget.decorate ? widget.decorate(control) : control;
+      }
+
+      function defaultFieldValue(key, control) {
+        const widget = fieldWidgets.get(key);
+        if (widget && widget.setDefault) widget.setDefault(control);
       }
 
       function invokeAction(name, event, element) {
@@ -561,6 +634,42 @@
         return element;
       }
 
+      function wifiSignalLevel(rssi) {
+        const value = Number(rssi);
+        if (!Number.isFinite(value) || value >= 0) return 0;
+        if (value >= -55) return 4;
+        if (value >= -65) return 3;
+        if (value >= -75) return 2;
+        return 1;
+      }
+
+      function formatRssi(rssi) {
+        const value = Number(rssi);
+        return Number.isFinite(value) && value < 0 ?
+          Math.round(value) + " dBm" : "--";
+      }
+
+      function wifiSignal(rssi, prefix) {
+        const value = document.createElement("span");
+        value.className = "value wifi-signal";
+
+        const bars = document.createElement("span");
+        bars.className = "wifi-bars";
+        bars.title = formatRssi(rssi);
+        const level = wifiSignalLevel(rssi);
+        for (let index = 1; index <= 4; index++) {
+          const bar = document.createElement("span");
+          if (index <= level) bar.className = "on";
+          bars.appendChild(bar);
+        }
+        value.appendChild(bars);
+
+        const text = document.createElement("span");
+        text.textContent = (prefix ? prefix + " " : "") + formatRssi(rssi);
+        value.appendChild(text);
+        return value;
+      }
+
       function uploadProgress(prefix, name, committed, total,
                               fileIndex, fileCount) {
         const safeTotal = Math.max(0, Number(total) || 0);
@@ -634,18 +743,30 @@
           download: downloadStoragePath,
           rename: renameStoragePath,
         }),
+        forms: Object.freeze({
+          decorate: decorateField,
+          register: registerFieldWidget,
+          setDefault: defaultFieldValue,
+        }),
         format: Object.freeze({
           bytes: formatBytes,
           duration: formatDuration,
           modified: formatModified,
           pad2,
+          rssi: formatRssi,
         }),
         http: Object.freeze({request, requestOk, upload}),
         pages: Object.freeze({
+          active: activePageId,
+          define: definePages,
+          isActive: pageIsActive,
           load: loadPage,
           leave: leavePage,
+          onChange: onPageChange,
           onLoad: registerPageLoader,
           onLeave: registerPageLeaver,
+          refresh: refreshPage,
+          show: showPage,
         }),
         snapshots: Object.freeze({
           publish: publishSnapshot,
@@ -654,6 +775,7 @@
           wait: waitForSnapshot,
         }),
         time: Object.freeze({delay}),
+        startup: Object.freeze({register: registerStartup, run: runStartup}),
         ui: Object.freeze({
           clearMessage,
           message,
@@ -662,6 +784,7 @@
           text,
           uploadProgress,
           valueSpan,
+          wifiSignal,
         }),
         uploads: Object.freeze({begin: beginStorageUpload}),
       });

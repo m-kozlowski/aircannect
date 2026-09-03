@@ -569,7 +569,9 @@
       // preserveAspectRatio="none", so a logical fallback width is stretched to
       // the real CSS width and renders correctly; a later resize/redraw refines
       // the coordinate resolution. Only force a width while the tab is visible.
-      if (measuredWidth <= 0 && reportTabActive()) measuredWidth = 800;
+      if (measuredWidth <= 0 && AirCANnect.pages.isActive("report")) {
+        measuredWidth = 800;
+      }
       if (measuredWidth <= 0) return null;
       const width = Math.max(320, Math.floor(measuredWidth || 0));
       const height = Math.max(80,
@@ -1237,7 +1239,7 @@
     }
 
     document.addEventListener("keydown", (ev) => {
-      if (!reportTabActive() || !reportZoom) return;
+      if (!AirCANnect.pages.isActive("report") || !reportZoom) return;
       const tag = ev.target && ev.target.tagName ?
         ev.target.tagName.toLowerCase() : "";
       if (tag === "input" || tag === "textarea" || tag === "select" ||
@@ -1307,7 +1309,7 @@
       });
       updateReportHover();
       updateReportSelectionRects();
-      if (retry && reportTabActive()) {
+      if (retry && AirCANnect.pages.isActive("report")) {
         reportDrawRetryCount++;
         setTimeout(() => scheduleReportDraw(), 50);
       } else if (!retry) {
