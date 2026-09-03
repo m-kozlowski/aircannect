@@ -5,13 +5,11 @@
 #include <stdint.h>
 #include <string>
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
-
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
 #include "ota_status.h"
+#include "published_json_snapshot.h"
 #include "resmed_firmware_image.h"
 
 class AsyncWebServerRequest;
@@ -38,10 +36,10 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
-    uint32_t snapshot_revision() const { return snapshot_revision_; }
+    uint32_t snapshot_revision() const { return snapshot_.revision(); }
     bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
     uint32_t resmed_snapshot_revision() const {
-        return resmed_snapshot_revision_;
+        return resmed_snapshot_.revision();
     }
     bool copy_resmed_snapshot(LargeTextBuffer &out,
                               uint32_t &revision) const;
@@ -100,20 +98,16 @@ private:
 
     MainLoopInbox<Command, CommandQueueDepth> commands_;
 
-    LargeTextBuffer snapshot_json_;
+    PublishedJsonSnapshot snapshot_;
     LargeTextBuffer snapshot_build_json_;
     OtaStatusSnapshot published_status_;
-    StaticSemaphore_t snapshot_mutex_storage_ = {};
-    SemaphoreHandle_t snapshot_mutex_ = nullptr;
     std::atomic<bool> snapshot_requested_{false};
-    uint32_t snapshot_revision_ = 0;
     uint32_t next_snapshot_ms_ = 0;
     bool snapshot_initialized_ = false;
 
-    LargeTextBuffer resmed_snapshot_json_;
+    PublishedJsonSnapshot resmed_snapshot_;
     LargeTextBuffer resmed_snapshot_build_json_;
     std::atomic<bool> resmed_snapshot_requested_{false};
-    uint32_t resmed_snapshot_revision_ = 0;
     uint32_t next_resmed_snapshot_ms_ = 0;
     bool resmed_snapshot_initialized_ = false;
 };

@@ -372,12 +372,8 @@ bool StorageHttpController::begin(StorageReadPort &read_port,
     if (!job_mutex_) {
         job_mutex_ = xSemaphoreCreateMutexStatic(&job_mutex_storage_);
     }
-    if (!operation_snapshot_mutex_) {
-        operation_snapshot_mutex_ = xSemaphoreCreateMutexStatic(
-            &operation_snapshot_mutex_storage_);
-    }
-    if (!job_mutex_ || !operation_snapshot_mutex_ ||
-        !operation_snapshot_json_.reserve(
+    if (!job_mutex_ ||
+        !operation_snapshot_.begin(
             AC_WEB_STORAGE_OPERATION_JSON_RESERVE) ||
         !operation_snapshot_build_json_.reserve(
             AC_WEB_STORAGE_OPERATION_JSON_RESERVE)) {
@@ -434,47 +430,24 @@ bool StorageHttpController::publish_operation_snapshot_if_needed(bool force) {
                   "operation status snapshot allocation failed\n");
         return false;
     }
-    if (xSemaphoreTake(operation_snapshot_mutex_, 0) != pdTRUE) {
+    if (!operation_snapshot_.publish_if_changed(
+            operation_snapshot_build_json_,
+            force || requested || !operation_snapshot_initialized_)) {
         request_operation_snapshot();
         return false;
     }
 
-    const bool changed =
-        operation_snapshot_json_.length() !=
-            operation_snapshot_build_json_.length() ||
-        memcmp(operation_snapshot_json_.c_str(),
-               operation_snapshot_build_json_.c_str(),
-               operation_snapshot_json_.length()) != 0;
-    if (force || requested || !operation_snapshot_initialized_ || changed) {
-        operation_snapshot_json_.swap(operation_snapshot_build_json_);
-        operation_snapshot_revision_++;
-        if (operation_snapshot_revision_ == 0) {
-            operation_snapshot_revision_++;
-        }
-    }
     operation_snapshot_active_ = active;
     operation_snapshot_initialized_ = true;
     next_operation_snapshot_ms_ = now +
         (active ? OperationSnapshotActiveIntervalMs
                 : OperationSnapshotIdleIntervalMs);
-    xSemaphoreGive(operation_snapshot_mutex_);
     return true;
 }
 
 bool StorageHttpController::copy_operation_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!operation_snapshot_mutex_ ||
-        xSemaphoreTake(operation_snapshot_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = operation_snapshot_json_.length() &&
-        out.append(operation_snapshot_json_.c_str(),
-                   operation_snapshot_json_.length());
-    if (copied) revision = operation_snapshot_revision_;
-    xSemaphoreGive(operation_snapshot_mutex_);
-    return copied;
+    return operation_snapshot_.copy(out, revision);
 }
 
 void StorageHttpController::poll_storage_rename() {

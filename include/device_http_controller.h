@@ -1,8 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
@@ -10,6 +8,7 @@
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
+#include "published_json_snapshot.h"
 
 class AsyncWebServerRequest;
 
@@ -30,7 +29,7 @@ public:
     void poll();
 
     uint32_t ble_pairing_revision() const {
-        return published_ble_pairing_revision_;
+        return ble_pairing_snapshot_.revision();
     }
     bool copy_ble_pairing_snapshot(LargeTextBuffer &out,
                                    uint32_t &revision) const;
@@ -74,11 +73,9 @@ private:
     MainLoopInbox<Command, CommandQueueDepth> commands_;
     std::atomic<bool> as11_unavailable_{false};
 
-    StaticSemaphore_t cache_mutex_storage_ = {};
-    SemaphoreHandle_t cache_mutex_ = nullptr;
-    LargeTextBuffer ble_pairing_json_;
+    PublishedJsonSnapshot ble_pairing_snapshot_;
     LargeTextBuffer ble_pairing_build_json_;
-    uint32_t published_ble_pairing_revision_ = 0;
+    uint32_t observed_ble_pairing_revision_ = 0;
 };
 
 }  // namespace aircannect

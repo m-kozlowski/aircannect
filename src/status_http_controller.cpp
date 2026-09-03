@@ -148,14 +148,8 @@ bool build_status_json(LargeTextBuffer &json,
 }  // namespace
 
 bool StatusHttpController::begin() {
-    if (!cache_mutex_) {
-        cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
-    }
-    if (!cache_mutex_) return false;
-
-    snapshot_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
-    build_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
-    return true;
+    return snapshot_.begin(AC_WEB_STATUS_JSON_RESERVE) &&
+           build_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
 }
 
 void StatusHttpController::register_routes(AsyncWebServer &server) {
@@ -168,7 +162,7 @@ void StatusHttpController::register_routes(AsyncWebServer &server) {
 bool StatusHttpController::refresh_due(uint32_t device_revision,
                                        uint32_t config_revision,
                                        uint32_t now_ms) const {
-    if (!cache_mutex_ || !snapshot_ready_) return cache_mutex_ != nullptr;
+    if (snapshot_.revision() == 0) return true;
     if (observed_device_revision_ != device_revision ||
         observed_config_revision_ != config_revision) {
         return true;
@@ -182,16 +176,7 @@ bool StatusHttpController::refresh_due(uint32_t device_revision,
 
 bool StatusHttpController::copy_snapshot(LargeTextBuffer &out,
                                          uint32_t &revision) const {
-    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = out.append(snapshot_json_.c_str(),
-                                   snapshot_json_.length());
-    if (copied) revision = revision_;
-    xSemaphoreGive(cache_mutex_);
-    return copied;
+    return snapshot_.copy(out, revision);
 }
 
 bool StatusHttpController::publish_snapshot(
@@ -204,36 +189,25 @@ bool StatusHttpController::publish_snapshot(
         return false;
     }
 
-    if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
-    snapshot_json_.swap(build_json_);
+    if (!snapshot_.replace(build_json_)) return false;
+
     observed_device_revision_ = device_revision;
     observed_config_revision_ = config_revision;
     last_snapshot_ms_ = snapshot.now_ms;
-    snapshot_ready_ = true;
-    revision_++;
-    if (revision_ == 0) revision_ = 1;
-    xSemaphoreGive(cache_mutex_);
     return true;
 }
 
 void StatusHttpController::send_snapshot(
     AsyncWebServerRequest *request) const {
-    if (xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+    AsyncResponseStream *response = nullptr;
+    const JsonSnapshotResponse result =
+        snapshot_.prepare_response(request, response);
+    if (result == JsonSnapshotResponse::Busy) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"cache_busy\"}");
         return;
     }
-
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (response) {
-        response->write(
-            reinterpret_cast<const uint8_t *>(snapshot_json_.c_str()),
-            snapshot_json_.length());
-    }
-    xSemaphoreGive(cache_mutex_);
-
-    if (!response) {
+    if (result != JsonSnapshotResponse::Ready) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;

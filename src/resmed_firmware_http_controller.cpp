@@ -73,12 +73,8 @@ bool send_json(AsyncWebServerRequest *request,
 bool ResmedFirmwareHttpController::begin(
     ResmedFirmwareRepository &repository) {
     repository_ = &repository;
-    if (!status_mutex_) {
-        status_mutex_ =
-            xSemaphoreCreateMutexStatic(&status_mutex_storage_);
-    }
-    if (!status_mutex_ ||
-        !status_json_.reserve(AC_WEB_RESMED_REPOSITORY_JSON_RESERVE) ||
+    if (!status_snapshot_.begin(
+            AC_WEB_RESMED_REPOSITORY_JSON_RESERVE) ||
         !status_build_json_.reserve(
             AC_WEB_RESMED_REPOSITORY_JSON_RESERVE)) {
         return false;
@@ -203,29 +199,15 @@ bool ResmedFirmwareHttpController::publish_status_snapshot(bool force) {
                   "[RESMED] repository status snapshot allocation failed\n");
         return false;
     }
-    if (xSemaphoreTake(status_mutex_, 0) != pdTRUE) return false;
+    if (!status_snapshot_.replace(status_build_json_)) return false;
 
-    status_json_.swap(status_build_json_);
     observed_repository_generation_ = status.generation;
-    status_snapshot_revision_++;
-    if (status_snapshot_revision_ == 0) status_snapshot_revision_++;
-    xSemaphoreGive(status_mutex_);
     return true;
 }
 
 bool ResmedFirmwareHttpController::copy_status_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!status_mutex_ ||
-        xSemaphoreTake(status_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = status_json_.length() &&
-        out.append(status_json_.c_str(), status_json_.length());
-    if (copied) revision = status_snapshot_revision_;
-    xSemaphoreGive(status_mutex_);
-    return copied;
+    return status_snapshot_.copy(out, revision);
 }
 
 void ResmedFirmwareHttpController::request_refresh(

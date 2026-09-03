@@ -446,7 +446,7 @@ bool ConfigHttpController::begin(ConfigService &config) {
     schema_json_.reserve(CONFIG_SCHEMA_JSON_RESERVE);
     build_schema_json(schema_json_);
     if (schema_json_.overflowed()) return false;
-    if (!update_json_.reserve(CONFIG_UPDATE_JSON_RESERVE)) return false;
+    if (!update_snapshot_.begin(CONFIG_UPDATE_JSON_RESERVE)) return false;
 
     return publish_snapshots();
 }
@@ -630,8 +630,7 @@ void ConfigHttpController::publish_update_result(
     next += '}';
     if (next.overflowed()) return;
 
-    update_json_.swap(next);
-    completed_update_revision_ = update_revision;
+    (void)update_snapshot_.replace(next);
 }
 
 bool ConfigHttpController::publish_snapshots() {
@@ -664,12 +663,7 @@ bool ConfigHttpController::publish_snapshots() {
 
 bool ConfigHttpController::copy_update_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    const uint32_t available = update_revision();
-    if (available == 0 || available == revision) return false;
-    out = update_json_.c_str();
-    const bool copied = !out.overflowed();
-    if (copied) revision = available;
-    return copied;
+    return update_snapshot_.copy(out, revision);
 }
 
 void ConfigHttpController::send_config(AsyncWebServerRequest *request,

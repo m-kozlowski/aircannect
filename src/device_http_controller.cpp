@@ -13,7 +13,6 @@
 #include "board_net.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
-#include "http_response_utils.h"
 #include "json_util.h"
 #include "large_text_buffer.h"
 #include "rpc_request_port.h"
@@ -62,13 +61,12 @@ bool DeviceHttpController::begin(RpcRequestPort &rpc,
     ble_link_ = &ble_link;
     if (!commands_.begin()) return false;
 
-    if (!cache_mutex_) {
-        cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
+    if (!ble_pairing_snapshot_.begin(
+            AC_WEB_AS11_BLE_STATUS_JSON_RESERVE) ||
+        !ble_pairing_build_json_.reserve(
+            AC_WEB_AS11_BLE_STATUS_JSON_RESERVE)) {
+        return false;
     }
-    if (!cache_mutex_) return false;
-
-    ble_pairing_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
-    ble_pairing_build_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
     return publish_ble_pairing_snapshot();
 }
 
@@ -108,7 +106,7 @@ void DeviceHttpController::poll() {
         execute(command);
     }
 
-    if (ble_link_->pairing_revision() != published_ble_pairing_revision_) {
+    if (ble_link_->pairing_revision() != observed_ble_pairing_revision_) {
         (void)publish_ble_pairing_snapshot();
     }
 }
@@ -242,22 +240,21 @@ void DeviceHttpController::send_therapy_action(
 
 void DeviceHttpController::send_ble_status(
     AsyncWebServerRequest *request) const {
-    if (!ble_link_ || !cache_mutex_) {
+    if (!ble_link_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"ble_unavailable\"}");
         return;
     }
 
     AsyncResponseStream *response = nullptr;
-    if (xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+    const JsonSnapshotResponse result =
+        ble_pairing_snapshot_.prepare_response(request, response);
+    if (result == JsonSnapshotResponse::Busy) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"cache_busy\"}");
         return;
     }
-    const bool prepared = http_prepare_json_response(
-        request, ble_pairing_json_, response);
-    xSemaphoreGive(cache_mutex_);
-    if (!prepared) {
+    if (result != JsonSnapshotResponse::Ready) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
@@ -266,10 +263,10 @@ void DeviceHttpController::send_ble_status(
 }
 
 bool DeviceHttpController::publish_ble_pairing_snapshot() {
-    if (!ble_link_ || !cache_mutex_) return false;
+    if (!ble_link_) return false;
 
     const As11BlePairingStatus pairing = ble_link_->pairing_status();
-    if (pairing.revision == published_ble_pairing_revision_) return true;
+    if (pairing.revision == observed_ble_pairing_revision_) return true;
 
     const As11BleLinkStatus link = ble_link_->ble_status();
     ble_pairing_build_json_.clear();
@@ -277,25 +274,17 @@ bool DeviceHttpController::publish_ble_pairing_snapshot() {
         return false;
     }
 
-    if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
-    ble_pairing_json_.swap(ble_pairing_build_json_);
-    published_ble_pairing_revision_ = pairing.revision;
-    xSemaphoreGive(cache_mutex_);
+    if (!ble_pairing_snapshot_.replace(ble_pairing_build_json_)) {
+        return false;
+    }
+
+    observed_ble_pairing_revision_ = pairing.revision;
     return true;
 }
 
 bool DeviceHttpController::copy_ble_pairing_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = out.append(ble_pairing_json_.c_str(),
-                                   ble_pairing_json_.length());
-    if (copied) revision = published_ble_pairing_revision_;
-    xSemaphoreGive(cache_mutex_);
-    return copied;
+    return ble_pairing_snapshot_.copy(out, revision);
 }
 
 void DeviceHttpController::send_ble_action(

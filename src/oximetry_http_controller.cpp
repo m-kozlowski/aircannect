@@ -12,7 +12,6 @@
 #include "config_service.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
-#include "http_response_utils.h"
 #include "json_util.h"
 #include "oximetry_hub.h"
 #include "plx_peripheral.h"
@@ -117,13 +116,11 @@ bool OximetryHttpController::begin(OximetryHub &hub,
     config_ = &config;
     if (!commands_.begin()) return false;
 
-    if (!cache_mutex_) {
-        cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
+    if (!snapshot_.begin(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE) ||
+        !snapshot_build_json_.reserve(
+            AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE)) {
+        return false;
     }
-    if (!cache_mutex_) return false;
-
-    snapshot_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
-    snapshot_build_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
     return publish_snapshot();
 }
 
@@ -230,48 +227,31 @@ bool OximetryHttpController::publish_snapshot() {
         return false;
     }
 
-    if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
-    const bool changed =
-        snapshot_json_.length() != snapshot_build_json_.length() ||
-        memcmp(snapshot_json_.c_str(), snapshot_build_json_.c_str(),
-               snapshot_json_.length()) != 0;
-    if (changed) {
-        snapshot_json_.swap(snapshot_build_json_);
-        snapshot_revision_++;
+    if (!snapshot_.publish_if_changed(snapshot_build_json_)) {
+        return false;
     }
+
     last_snapshot_ms_ = millis();
     snapshot_dirty_ = false;
-    xSemaphoreGive(cache_mutex_);
     return true;
 }
 
 bool OximetryHttpController::copy_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = out.append(snapshot_json_.c_str(),
-                                   snapshot_json_.length());
-    if (copied) revision = snapshot_revision_;
-    xSemaphoreGive(cache_mutex_);
-    return copied;
+    return snapshot_.copy(out, revision);
 }
 
 void OximetryHttpController::send_snapshot(
     AsyncWebServerRequest *request) const {
-    if (xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+    AsyncResponseStream *response = nullptr;
+    const JsonSnapshotResponse result =
+        snapshot_.prepare_response(request, response);
+    if (result == JsonSnapshotResponse::Busy) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"cache_busy\"}");
         return;
     }
-
-    AsyncResponseStream *response = nullptr;
-    const bool prepared =
-        http_prepare_json_response(request, snapshot_json_, response);
-    xSemaphoreGive(cache_mutex_);
-    if (!prepared) {
+    if (result != JsonSnapshotResponse::Ready) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;

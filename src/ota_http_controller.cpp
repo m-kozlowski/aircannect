@@ -264,14 +264,10 @@ bool OtaHttpController::begin(FirmwareInstaller &installer,
     resmed_preparer_ = &resmed_preparer;
     resmed_ota_ = &resmed_ota;
 
-    if (!snapshot_mutex_) {
-        snapshot_mutex_ =
-            xSemaphoreCreateMutexStatic(&snapshot_mutex_storage_);
-    }
-    if (!commands_.begin() || !snapshot_mutex_ ||
-        !snapshot_json_.reserve(AC_WEB_OTA_JSON_RESERVE) ||
+    if (!commands_.begin() ||
+        !snapshot_.begin(AC_WEB_OTA_JSON_RESERVE) ||
         !snapshot_build_json_.reserve(AC_WEB_OTA_JSON_RESERVE) ||
-        !resmed_snapshot_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE) ||
+        !resmed_snapshot_.begin(AC_WEB_RESMED_OTA_JSON_RESERVE) ||
         !resmed_snapshot_build_json_.reserve(
             AC_WEB_RESMED_OTA_JSON_RESERVE)) {
         return false;
@@ -684,35 +680,12 @@ void OtaHttpController::poll() {
 
 bool OtaHttpController::copy_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!snapshot_mutex_ ||
-        xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = snapshot_json_.length() &&
-        out.append(snapshot_json_.c_str(), snapshot_json_.length());
-    if (copied) {
-        revision = snapshot_revision_;
-    }
-    xSemaphoreGive(snapshot_mutex_);
-    return copied;
+    return snapshot_.copy(out, revision);
 }
 
 bool OtaHttpController::copy_resmed_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!snapshot_mutex_ ||
-        xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = resmed_snapshot_json_.length() &&
-        out.append(resmed_snapshot_json_.c_str(),
-                   resmed_snapshot_json_.length());
-    if (copied) revision = resmed_snapshot_revision_;
-    xSemaphoreGive(snapshot_mutex_);
-    return copied;
+    return resmed_snapshot_.copy(out, revision);
 }
 
 void OtaHttpController::request_snapshot() {
@@ -753,17 +726,13 @@ void OtaHttpController::publish_snapshot_if_needed(bool force) {
                   "ESP OTA status snapshot allocation failed\n");
         return;
     }
-    if (xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
+    if (!snapshot_.replace(snapshot_build_json_)) {
         snapshot_requested_.store(true, std::memory_order_release);
         return;
     }
 
-    snapshot_json_.swap(snapshot_build_json_);
     published_status_ = std::move(status);
     snapshot_initialized_ = true;
-    snapshot_revision_++;
-    if (snapshot_revision_ == 0) snapshot_revision_++;
-    xSemaphoreGive(snapshot_mutex_);
 }
 
 void OtaHttpController::publish_resmed_snapshot_if_needed(bool force) {
@@ -789,24 +758,14 @@ void OtaHttpController::publish_resmed_snapshot_if_needed(bool force) {
                   "ResMed OTA status snapshot allocation failed\n");
         return;
     }
-    if (xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
+    if (!resmed_snapshot_.publish_if_changed(
+            resmed_snapshot_build_json_,
+            force || requested || !resmed_snapshot_initialized_)) {
         request_resmed_snapshot();
         return;
     }
 
-    const bool changed =
-        resmed_snapshot_json_.length() !=
-            resmed_snapshot_build_json_.length() ||
-        memcmp(resmed_snapshot_json_.c_str(),
-               resmed_snapshot_build_json_.c_str(),
-               resmed_snapshot_json_.length()) != 0;
-    if (force || requested || !resmed_snapshot_initialized_ || changed) {
-        resmed_snapshot_json_.swap(resmed_snapshot_build_json_);
-        resmed_snapshot_initialized_ = true;
-        resmed_snapshot_revision_++;
-        if (resmed_snapshot_revision_ == 0) resmed_snapshot_revision_++;
-    }
-    xSemaphoreGive(snapshot_mutex_);
+    resmed_snapshot_initialized_ = true;
 }
 
 bool OtaHttpController::enqueue(Command &&command) {

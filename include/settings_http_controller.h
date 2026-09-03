@@ -10,6 +10,7 @@
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
+#include "published_json_snapshot.h"
 
 class AsyncWebServerRequest;
 
@@ -30,7 +31,7 @@ public:
     void poll();
 
     uint32_t snapshot_revision() const {
-        return published_snapshot_revision_;
+        return settings_snapshot_.revision();
     }
     bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
 
@@ -67,12 +68,11 @@ private:
     MainLoopInbox<Command, CommandQueueDepth> commands_;
 
     LargeTextBuffer catalog_json_;
-    LargeTextBuffer settings_json_;
+    PublishedJsonSnapshot settings_snapshot_;
     int requested_mode_ = -1;
     int cached_request_mode_ = -1;
     uint32_t cached_catalog_revision_ = 0;
     uint32_t request_generation_ = 1;
-    uint32_t published_snapshot_revision_ = 0;
     int published_active_mode_ = -1;
     As11Availability published_availability_ = As11Availability::Unknown;
     uint32_t observed_settings_revision_ = UINT32_MAX;

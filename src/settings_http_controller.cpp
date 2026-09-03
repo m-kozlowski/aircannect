@@ -259,7 +259,10 @@ bool SettingsHttpController::begin(RpcRequestPort &rpc,
     if (!cache_mutex_) {
         cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
     }
-    if (!commands_.begin() || !cache_mutex_) return false;
+    if (!commands_.begin() || !cache_mutex_ ||
+        !settings_snapshot_.begin(AC_WEB_SETTINGS_JSON_RESERVE)) {
+        return false;
+    }
 
     catalog_json_.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
     build_catalog_json(catalog_json_, settings_->state().catalog());
@@ -428,22 +431,18 @@ void SettingsHttpController::publish_snapshot_if_needed() {
 
     if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
     if (request_generation_ == request_generation) {
-        settings_json_.swap(next);
-        if (catalog_changed) {
-            catalog_json_.swap(next_catalog);
-            cached_catalog_revision_ = catalog.revision();
-        }
-        cached_request_mode_ = requested_mode;
-        cached_device_availability_ = availability;
-        cached_refresh_pending_ = refresh_pending;
-        snapshot_pending_ = false;
-        published_availability_ = availability;
-        published_active_mode_ = active_mode;
-        if (publish_change) {
-            published_snapshot_revision_++;
-            if (published_snapshot_revision_ == 0) {
-                published_snapshot_revision_++;
+        if (settings_snapshot_.replace(next, publish_change)) {
+            if (catalog_changed) {
+                catalog_json_.swap(next_catalog);
+                cached_catalog_revision_ = catalog.revision();
             }
+
+            cached_request_mode_ = requested_mode;
+            cached_device_availability_ = availability;
+            cached_refresh_pending_ = refresh_pending;
+            snapshot_pending_ = false;
+            published_availability_ = availability;
+            published_active_mode_ = active_mode;
         }
     }
     xSemaphoreGive(cache_mutex_);
@@ -455,18 +454,7 @@ void SettingsHttpController::publish_snapshot_if_needed() {
 
 bool SettingsHttpController::copy_snapshot(
     LargeTextBuffer &out, uint32_t &revision) const {
-    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    out.clear();
-    const bool copied = settings_json_.length() &&
-        out.append(settings_json_.c_str(), settings_json_.length());
-    if (copied) {
-        revision = published_snapshot_revision_;
-    }
-    xSemaphoreGive(cache_mutex_);
-    return copied;
+    return settings_snapshot_.copy(out, revision);
 }
 
 void SettingsHttpController::send_catalog(
@@ -518,10 +506,12 @@ void SettingsHttpController::send_settings(
     const bool refresh_queued =
         !unavailable && (refresh_requested || cached_refresh_pending_);
     const uint32_t catalog_revision = cached_catalog_revision_;
-    if (!snapshot_pending && !refresh_queued && settings_json_.length()) {
-        AsyncResponseStream *response =
-            request->beginResponseStream("application/json");
-        if (!response) {
+    if (!snapshot_pending && !refresh_queued &&
+        settings_snapshot_.revision() != 0) {
+        AsyncResponseStream *response = nullptr;
+        const JsonSnapshotResponse result =
+            settings_snapshot_.prepare_response(request, response);
+        if (result != JsonSnapshotResponse::Ready) {
             xSemaphoreGive(cache_mutex_);
             request->send(
                 503, "application/json",
@@ -529,9 +519,6 @@ void SettingsHttpController::send_settings(
             return;
         }
 
-        response->write(
-            reinterpret_cast<const uint8_t *>(settings_json_.c_str()),
-            settings_json_.length());
         xSemaphoreGive(cache_mutex_);
         request->send(response);
         return;

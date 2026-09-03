@@ -9,6 +9,7 @@
 
 #include "http_route_module.h"
 #include "large_text_buffer.h"
+#include "published_json_snapshot.h"
 #include "runtime_snapshots.h"
 
 class AsyncWebServerRequest;
@@ -40,7 +41,7 @@ public:
     void publish_activity(const ActivitySnapshot &activity);
 
     uint32_t operation_snapshot_revision() const {
-        return operation_snapshot_revision_;
+        return operation_snapshot_.revision();
     }
     bool copy_operation_snapshot(LargeTextBuffer &out,
                                  uint32_t &revision) const;
@@ -81,12 +82,9 @@ private:
     // Archive and delete status publication
     static constexpr uint32_t OperationSnapshotActiveIntervalMs = 500;
     static constexpr uint32_t OperationSnapshotIdleIntervalMs = 3000;
-    LargeTextBuffer operation_snapshot_json_;
+    PublishedJsonSnapshot operation_snapshot_;
     LargeTextBuffer operation_snapshot_build_json_;
-    mutable StaticSemaphore_t operation_snapshot_mutex_storage_ = {};
-    mutable SemaphoreHandle_t operation_snapshot_mutex_ = nullptr;
     std::atomic<bool> operation_snapshot_requested_{false};
-    uint32_t operation_snapshot_revision_ = 0;
     uint32_t next_operation_snapshot_ms_ = 0;
     bool operation_snapshot_active_ = false;
     bool operation_snapshot_initialized_ = false;

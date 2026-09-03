@@ -11,6 +11,7 @@
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
+#include "published_json_snapshot.h"
 
 class AsyncWebServerRequest;
 
@@ -27,7 +28,7 @@ public:
     void poll();
 
     uint32_t update_revision() const {
-        return completed_update_revision_;
+        return update_snapshot_.revision();
     }
     bool copy_update_snapshot(LargeTextBuffer &out,
                               uint32_t &revision) const;
@@ -77,10 +78,9 @@ private:
     LargeTextBuffer all_json_;
     LargeTextBuffer section_json_[SectionCount];
     LargeTextBuffer schema_json_;
-    LargeTextBuffer update_json_;
+    PublishedJsonSnapshot update_snapshot_;
     uint32_t published_revision_ = 0;
     std::atomic<uint32_t> next_update_revision_{1};
-    uint32_t completed_update_revision_ = 0;
 };
 
 }  // namespace aircannect
