@@ -53,8 +53,17 @@
       element.textContent = "";
 
       const state = data && data.wifi_state ? String(data.wifi_state) : "--";
+      const ssid = data && data.wifi_ssid ? String(data.wifi_ssid) : "";
+      const softap = !!(data && data.wifi_softap);
       const rssi = data && data.wifi_rssi;
-      const wrapper = AirCANnect.ui.wifiSignal(rssi, "WiFi: " + state);
+      const staConnected = state === "sta" || state === "sta_ap";
+      let connection = staConnected && ssid ? ssid : state;
+      if (state === "softap") connection = "SoftAP";
+      if (softap && state !== "softap") connection += " +AP";
+
+      const wrapper = AirCANnect.ui.wifiSignal(
+        rssi, "WiFi: " + connection);
+      wrapper.classList.remove("value");
       element.appendChild(wrapper);
     }
 

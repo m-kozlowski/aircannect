@@ -649,7 +649,7 @@
           Math.round(value) + " dBm" : "--";
       }
 
-      function wifiSignal(rssi, prefix) {
+      function wifiSignal(rssi, label) {
         const value = document.createElement("span");
         value.className = "value wifi-signal";
 
@@ -665,7 +665,7 @@
         value.appendChild(bars);
 
         const text = document.createElement("span");
-        text.textContent = (prefix ? prefix + " " : "") + formatRssi(rssi);
+        text.textContent = label || formatRssi(rssi);
         value.appendChild(text);
         return value;
       }
