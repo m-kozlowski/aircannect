@@ -183,8 +183,6 @@
       title.appendChild(actions);
     }
 
-    loadReportChartPreferences();
-
     function toggleReportCalendar() {
       const pop = document.getElementById("reportCalPop");
       if (!pop) return;
@@ -2944,6 +2942,8 @@
       order: reportChartDefs.map((definition) => definition.key),
       collapsed: new Set(),
     };
+    loadReportChartPreferences();
+
     const reportEventDefs = [
       {code: 7, key: "CSR", label: "CSR", color: "#2563eb"},
       {code: 3, key: "CA", label: "Central Apnea", color: "#d946ef"},
