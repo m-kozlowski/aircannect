@@ -43,6 +43,7 @@ private:
         size_t offset = 0;
         uint64_t source_size = 0;
         uint64_t free_reserve_bytes = 0;
+        uint64_t published_modified = 0;
         bool staged_source = false;
         bool replace_existing = true;
         char path[AC_STORAGE_PATH_MAX] = {};

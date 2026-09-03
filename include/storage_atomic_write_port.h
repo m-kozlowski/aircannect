@@ -42,6 +42,7 @@ struct StorageAtomicWriteCompletion {
     OperationTicket ticket;
     OperationOutcome outcome;
     uint64_t bytes_written = 0;
+    uint64_t modified = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 

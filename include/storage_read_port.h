@@ -54,6 +54,7 @@ struct StorageReadCompletion {
     OperationTicket ticket;
     OperationOutcome outcome;
     StoragePreparedRead prepared;
+    uint64_t modified = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 

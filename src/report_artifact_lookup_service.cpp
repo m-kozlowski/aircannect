@@ -45,6 +45,7 @@ OperationAdmission ReportArtifactLookupService::start(
     status_.request = request;
     status_.generation = generation;
     lane_ = lane;
+    manifest_modified_ = 0;
     availability_ = {};
     return OperationAdmission::Accepted;
 }
@@ -118,6 +119,7 @@ bool ReportArtifactLookupService::finish_manifest() {
         }
 
         prepared_ = completion.prepared;
+        manifest_modified_ = completion.modified;
     }
 
     std::unique_ptr<LargeByteBuffer> bytes =
@@ -153,7 +155,8 @@ bool ReportArtifactLookupService::finish_manifest() {
                "report_artifact_manifest_stale");
         return true;
     }
-    if (!availability_.load(manifest, status_.request)) {
+    if (!availability_.load(
+            manifest, status_.request, manifest_modified_)) {
         finish(ReportArtifactLookupState::MissingManifest,
                "report_artifact_manifest_invalid");
         return true;
@@ -218,6 +221,7 @@ void ReportArtifactLookupService::reset() {
     if (status_.active()) cancel();
     ticket_ = {};
     release_prepared();
+    manifest_modified_ = 0;
     lane_ = StorageReadLane::Report;
     status_ = {};
     availability_ = {};

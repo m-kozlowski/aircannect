@@ -27,6 +27,7 @@ class LiveHttpController;
 class OximetryHttpController;
 class OtaHttpController;
 class PublishedJsonSnapshot;
+class ReportHttpController;
 class ResmedFirmwareHttpController;
 class SettingsHttpController;
 class StatusHttpController;
@@ -59,6 +60,7 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus resmed_ota;
     WebUiBufferMemoryStatus resmed_repository;
     WebUiBufferMemoryStatus storage_operation;
+    WebUiBufferMemoryStatus report;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -82,6 +84,7 @@ public:
                OtaHttpController &ota_http,
                ResmedFirmwareHttpController &resmed_firmware_http,
                StorageHttpController &storage_http,
+               ReportHttpController &report_http,
                LiveHttpController &live,
                ConsoleCommandRouter &console_router,
                const AppConfigData &config,
@@ -110,7 +113,8 @@ private:
         SettingsHttpController &settings_http,
         OtaHttpController &ota_http,
         ResmedFirmwareHttpController &resmed_firmware_http,
-        StorageHttpController &storage_http);
+        StorageHttpController &storage_http,
+        ReportHttpController &report_http);
     void reserve_cached_json();
     void reserve_console_log();
     void append_console_log(const String &text);
@@ -169,10 +173,12 @@ private:
     static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
     static constexpr uint16_t SNAPSHOT_RESMED_REPOSITORY = 1u << 8;
     static constexpr uint16_t SNAPSHOT_STORAGE_OPERATION = 1u << 9;
+    static constexpr uint16_t SNAPSHOT_REPORT = 1u << 10;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS | SNAPSHOT_AS11_BLE |
         SNAPSHOT_OXIMETRY | SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA |
-        SNAPSHOT_RESMED_REPOSITORY | SNAPSHOT_STORAGE_OPERATION;
+        SNAPSHOT_RESMED_REPOSITORY | SNAPSHOT_STORAGE_OPERATION |
+        SNAPSHOT_REPORT;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
 
@@ -185,6 +191,7 @@ private:
         ResmedOta,
         ResmedRepository,
         StorageOperation,
+        Report,
         Count,
     };
 

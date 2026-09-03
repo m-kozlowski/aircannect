@@ -30,6 +30,7 @@ struct ReportEngineCompletion {
     ReportPlanStatus plan_status = ReportPlanStatus::InvalidRequest;
     ReportExecutorError executor_error = ReportExecutorError::None;
     ReportSourceId fallback_source = ReportSourceId::Summary;
+    uint64_t manifest_modified = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }

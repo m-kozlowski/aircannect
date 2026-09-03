@@ -30,6 +30,9 @@ static constexpr size_t REPORT_HTTP_PENDING_CAPACITY = 4;
 static constexpr uint32_t REPORT_HTTP_PENDING_TIMEOUT_MS = 30000;
 static constexpr const char *REPORT_SOURCE_REVISION_HEADER =
     "X-Report-Source-Revision";
+static constexpr const char *REPORT_MANIFEST_MODIFIED_HEADER =
+    "X-Report-Manifest-Modified";
+static constexpr size_t REPORT_COMPLETION_JSON_RESERVE = 384;
 
 bool request_accepts_deflate(AsyncWebServerRequest *request) {
     if (!request || !request->hasHeader("Accept-Encoding")) return false;
@@ -279,7 +282,8 @@ bool request_etag_matches(AsyncWebServerRequest *request,
 
 void add_artifact_headers(AsyncWebServerResponse *response,
                           const char *etag,
-                          SourceRevision source_revision = {}) {
+                          SourceRevision source_revision = {},
+                          uint64_t manifest_modified = 0) {
     if (!response) return;
 
     response->addHeader("Cache-Control", "no-cache");
@@ -295,18 +299,29 @@ void add_artifact_headers(AsyncWebServerResponse *response,
                  static_cast<unsigned long long>(source_revision.value()));
         response->addHeader(REPORT_SOURCE_REVISION_HEADER, revision);
     }
+
+    if (manifest_modified) {
+        char modified[24] = {};
+        snprintf(modified,
+                 sizeof(modified),
+                 "%llu",
+                 static_cast<unsigned long long>(manifest_modified));
+        response->addHeader(REPORT_MANIFEST_MODIFIED_HEADER, modified);
+    }
 }
 
 void send_not_modified(AsyncWebServerRequest *request,
                        const char *etag,
-                       SourceRevision source_revision = {}) {
+                       SourceRevision source_revision = {},
+                       uint64_t manifest_modified = 0) {
     AsyncWebServerResponse *response = request->beginResponse(304);
     if (!response) {
         request->send(304);
         return;
     }
 
-    add_artifact_headers(response, etag, source_revision);
+    add_artifact_headers(
+        response, etag, source_revision, manifest_modified);
     request->send(response);
 }
 
@@ -347,7 +362,10 @@ bool send_artifact_payload(
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
     (void)format_payload_etag(descriptor, etag, sizeof(etag));
     add_artifact_headers(
-        response, etag, descriptor.artifact.key.source_revision);
+        response,
+        etag,
+        descriptor.artifact.key.source_revision,
+        descriptor.artifact.manifest_modified);
     if (deflated) response->addHeader("Content-Encoding", "deflate");
     request->send(response);
     return true;
@@ -472,6 +490,14 @@ void ReportHttpController::register_routes(AsyncWebServer &server) {
 
 void ReportHttpController::begin(ReportTask &report_task) {
     report_task_ = &report_task;
+    observed_completion_ = {};
+    completion_serial_ = 0;
+
+    if (completion_snapshot_.begin(REPORT_COMPLETION_JSON_RESERVE) &&
+        completion_json_.reserve(REPORT_COMPLETION_JSON_RESERVE)) {
+        completion_json_ = "{\"serial\":0}";
+        (void)completion_snapshot_.replace(completion_json_);
+    }
 
     if (!pending_) {
         pending_.reset(new (std::nothrow) PendingResponses());
@@ -483,6 +509,8 @@ void ReportHttpController::begin(ReportTask &report_task) {
 }
 
 void ReportHttpController::poll() {
+    publish_completion();
+
     if (!report_task_ || !pending_ || !pending_->mutex ||
         xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
         return;
@@ -601,6 +629,71 @@ void ReportHttpController::poll() {
     }
 
     xSemaphoreGive(pending_->mutex);
+}
+
+void ReportHttpController::publish_completion() {
+    if (!report_task_) return;
+
+    const ReportEngineCompletion completion =
+        report_task_->last_artifact_completion();
+    if (!completion.valid() ||
+        completion.request.ticket == observed_completion_) {
+        return;
+    }
+
+    observed_completion_ = completion.request.ticket;
+    completion_serial_++;
+    if (completion_serial_ == 0) completion_serial_ = 1;
+
+    char day[9] = {};
+    if (!completion.request.artifact.sleep_day.format_yyyymmdd(
+            day, sizeof(day))) {
+        return;
+    }
+
+    const ReportArtifactKey &artifact = completion.request.artifact;
+    const bool range = artifact.kind == ReportArtifactKind::RangeTile;
+    const bool success = completion.outcome.disposition ==
+        OperationDisposition::Succeeded;
+    const char *error = completion.error;
+    if (!success && !error[0] &&
+        completion.outcome.disposition == OperationDisposition::Cancelled) {
+        error = "cancelled";
+    }
+
+    completion_json_.clear();
+    completion_json_ = "{";
+    json_add_uint64(completion_json_, "serial", completion_serial_, false);
+    json_add_string(completion_json_, "night", day);
+    json_add_string(completion_json_, "kind", range ? "range" : "night");
+    if (range) {
+        char number[32] = {};
+        snprintf(number,
+                 sizeof(number),
+                 "%lld",
+                 static_cast<long long>(artifact.range_start_ms));
+        completion_json_ += ",\"from\":";
+        completion_json_ += number;
+        snprintf(number,
+                 sizeof(number),
+                 "%lld",
+                 static_cast<long long>(artifact.range_end_ms));
+        completion_json_ += ",\"to\":";
+        completion_json_ += number;
+    }
+    json_add_bool(completion_json_, "success", success);
+    json_add_bool(completion_json_,
+                  "forced",
+                  completion.request.force_rebuild);
+    json_add_uint64(completion_json_,
+                    "manifest_modified",
+                    completion.manifest_modified);
+    json_add_string(completion_json_, "error", error);
+    completion_json_ += '}';
+
+    if (!completion_json_.overflowed()) {
+        (void)completion_snapshot_.replace(completion_json_);
+    }
 }
 
 void ReportHttpController::queue_payload_response(
@@ -922,7 +1015,8 @@ void ReportHttpController::send_plot(
             send_not_modified(
                 request,
                 etag,
-                query.payload.artifact.key.source_revision);
+                query.payload.artifact.key.source_revision,
+                query.payload.artifact.manifest_modified);
             return;
         }
     }
@@ -1010,7 +1104,10 @@ void ReportHttpController::send_artifact(
     if (format_artifact_etag(query.descriptor, etag, sizeof(etag)) &&
         request_etag_matches(request, etag)) {
         send_not_modified(
-            request, etag, query.artifact.source_revision);
+            request,
+            etag,
+            query.artifact.source_revision,
+            query.descriptor.manifest_modified);
         return;
     }
 

@@ -26,6 +26,7 @@ struct ReportArtifactStoreStatus {
     ReportArtifactStoreState state = ReportArtifactStoreState::Idle;
     ReportArtifactKey key;
     uint64_t bytes_written = 0;
+    uint64_t manifest_modified = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool active() const;

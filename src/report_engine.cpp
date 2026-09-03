@@ -737,7 +737,8 @@ bool ReportEngine::finish_publication(uint32_t now_ms) {
         std::shared_ptr<const ReportArtifactBundle> bundle =
             artifact_store_.published();
         if (!bundle || !bundle->valid() ||
-            !active_availability_.merge(*bundle)) {
+            !active_availability_.merge(
+                *bundle, store_status.manifest_modified)) {
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::None,
@@ -826,6 +827,8 @@ void ReportEngine::complete_active(OperationOutcome outcome,
     last_completion_.plan_status = plan_status;
     last_completion_.executor_error = executor_error;
     last_completion_.fallback_source = fallback_source;
+    last_completion_.manifest_modified =
+        active_availability_.result.manifest_modified;
     copy_cstr(last_completion_.error,
               sizeof(last_completion_.error),
               completion_error(outcome,

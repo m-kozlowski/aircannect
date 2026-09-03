@@ -117,6 +117,7 @@ struct ReportArtifactDescriptor {
     uint64_t size = 0;
     uint32_t crc32 = 0;
     uint32_t prefix_crc32 = 0;
+    uint64_t manifest_modified = 0;
 
     bool valid() const;
     bool path(char *out, size_t out_size) const;
@@ -148,8 +149,10 @@ struct ReportArtifactAvailability {
     bool descriptor(const ReportArtifactKey &key,
                     ReportArtifactDescriptor &out) const;
     bool load(const ReportArtifactManifestView &manifest,
-              const ReportArtifactKey &requested);
-    bool merge(const ReportArtifactBundle &bundle);
+              const ReportArtifactKey &requested,
+              uint64_t manifest_modified);
+    bool merge(const ReportArtifactBundle &bundle,
+               uint64_t manifest_modified);
 };
 
 class ReportResultArtifactCodec {

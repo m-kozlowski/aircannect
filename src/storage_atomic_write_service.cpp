@@ -452,7 +452,6 @@ bool StorageAtomicWriteService::record_locked(const char *&error) {
 }
 
 bool StorageAtomicWriteService::publish_locked(const char *&error) {
-
     const bool had_previous = Storage::exists(job_->path);
     if (had_previous && !job_->replace_existing) {
         error = "destination_exists";
@@ -469,6 +468,15 @@ bool StorageAtomicWriteService::publish_locked(const char *&error) {
         error = "publish_failed";
         return false;
     }
+
+    File published = Storage::open(job_->path, "r");
+    if (published && !published.isDirectory()) {
+        const time_t modified = published.getLastWrite();
+        if (modified > 0) {
+            job_->published_modified = static_cast<uint64_t>(modified);
+        }
+    }
+    if (published) published.close();
 
     if (!Storage::remove(PREVIOUS_FILE_PATH) ||
         !Storage::remove(RECORD_PATH)) {
@@ -498,12 +506,14 @@ void StorageAtomicWriteService::finish_locked(OperationOutcome outcome,
     const bool abandoned = job_->abandoned;
     const OperationTicket ticket = job_->ticket;
     const uint64_t bytes_written = job_->offset;
+    const uint64_t modified = job_->published_modified;
 
     if (!abandoned) {
         completion_ = {};
         completion_.ticket = ticket;
         completion_.outcome = outcome;
         completion_.bytes_written = bytes_written;
+        completion_.modified = modified;
         copy_cstr(completion_.error, sizeof(completion_.error),
                   error ? error : "");
         completion_ready_ = true;

@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #include "http_route_module.h"
+#include "large_text_buffer.h"
+#include "operation_outcome.h"
+#include "published_json_snapshot.h"
 
 class AsyncWebServer;
 class AsyncWebServerRequest;
@@ -29,6 +32,10 @@ public:
     void poll();
     void register_routes(AsyncWebServer &server) override;
 
+    const PublishedJsonSnapshot &completion_snapshot() const {
+        return completion_snapshot_;
+    }
+
     void send_summary(AsyncWebServerRequest *request) const;
     void send_result(AsyncWebServerRequest *request);
     void send_plot(AsyncWebServerRequest *request);
@@ -45,12 +52,17 @@ private:
         ReportPayloadKind requested_kind,
         const char *series_name,
         bool prefer_deflate);
+    void publish_completion();
     uint32_t next_generation() const;
 
     struct PendingResponses;
 
     ReportTask *report_task_ = nullptr;
     std::unique_ptr<PendingResponses> pending_;
+    PublishedJsonSnapshot completion_snapshot_;
+    LargeTextBuffer completion_json_;
+    OperationTicket observed_completion_;
+    uint32_t completion_serial_ = 0;
     mutable std::atomic<uint32_t> next_generation_{1};
 };
 

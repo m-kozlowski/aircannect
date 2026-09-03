@@ -135,6 +135,7 @@ struct ReadJob {
     size_t requested_length = 0;
     size_t target_length = 0;
     size_t bytes_read = 0;
+    uint64_t modified = 0;
     size_t tail_lines = 0;
     bool tail_scan_initialized = false;
     bool tail_suffix_initialized = false;
@@ -1717,6 +1718,7 @@ void finish_read_job(size_t index,
     StorageReadCompletion completion;
     completion.ticket = job.ticket;
     completion.outcome = outcome;
+    completion.modified = job.modified;
     copy_cstr(completion.error, sizeof(completion.error), error ? error : "");
     const bool abandoned = job.abandon_requested;
     PreparedReadSlot *prepared_slot = nullptr;
@@ -1802,6 +1804,10 @@ bool open_read_job(size_t index, const char *&error) {
             error = "read_open_failed";
             return false;
         }
+        const time_t modified = active_read_file.getLastWrite();
+        job.modified = modified > 0
+            ? static_cast<uint64_t>(modified)
+            : 0;
         active_read_index = index;
     }
 

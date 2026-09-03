@@ -369,10 +369,12 @@
       reportBaseSeries = {};
       reportBaseEvents = [];
       reportBasePlotIndex = null;
+      reportBasePlotBytes = null;
       reportBaseLoadedCharts.clear();
       reportBaseChartPromises.clear();
       reportCurrentNightId = "";
       reportCurrentRevision = "";
+      reportCurrentManifestModified = "";
       reportCurrentPlotEtag = "";
       reportRangeTileCache.clear();
       reportRangeView = null;
@@ -402,17 +404,20 @@
       }
     }
 
-    function activateReportBasePlot(nightId, revision, etag, index) {
+    function activateReportBasePlot(nightId, revision, manifestModified,
+                                    etag, index, bytes) {
       cancelReportRangeRequest();
       reportSeries = {};
       reportEvents = [];
       reportBaseSeries = {};
       reportBaseEvents = [];
       reportBasePlotIndex = index || null;
+      reportBasePlotBytes = bytes || null;
       reportBaseLoadedCharts.clear();
       reportBaseChartPromises.clear();
       reportCurrentNightId = String(nightId || "");
       reportCurrentRevision = String(revision || "");
+      reportCurrentManifestModified = String(manifestModified || "");
       reportCurrentPlotEtag = String(etag || "");
       reportRangeView = null;
       reportRangeActiveKey = "";
@@ -1841,12 +1846,39 @@
       reportRangeActiveKey = "";
     }
 
+    function reportCompletionMatches(data, url) {
+      if (!data || !url) return false;
+
+      const request = new URL(url, window.location.href);
+      const night = request.searchParams.get("night") || "";
+      const from = Number(request.searchParams.get("from"));
+      const to = Number(request.searchParams.get("to"));
+      const range = Number.isFinite(from) && from > 0 &&
+        Number.isFinite(to) && to > from;
+      if (String(data.night || "") !== night) return false;
+      if (range) {
+        return data.kind === "range" && Number(data.from) === from &&
+          Number(data.to) === to;
+      }
+      return data.kind === "night";
+    }
+
+    async function waitForReportCompletion(url, afterSerial, timeoutMs) {
+      await AirCANnect.snapshots.wait(
+        "report",
+        (data) => reportCompletionMatches(data, url),
+        afterSerial,
+        timeoutMs);
+    }
+
     async function pollReportFetch(options) {
       const active = options.active || (() => true);
       const delay = options.delayMs || REPORT_POLL_DELAY_MS;
       const maxAttempts = options.maxAttempts || 1;
+      const deadline = Date.now() + maxAttempts * delay;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (!active()) return null;
+        const reportSnapshot = AirCANnect.snapshots.read("report");
         let response;
         try {
           response = await options.request();
@@ -1859,7 +1891,20 @@
         const action = await options.handle(response);
         if (!action) return null;
         if (action.done) return action.value;
-        await AirCANnect.time.delay(action.delayMs == null ? delay : action.delayMs);
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+
+        if (action.waitForReport && options.waitUrl) {
+          await waitForReportCompletion(
+            options.waitUrl,
+            reportSnapshot.serial,
+            Math.min(REPORT_SSE_FALLBACK_MS, remainingMs));
+        } else {
+          await AirCANnect.time.delay(
+            Math.min(
+              action.delayMs == null ? delay : action.delayMs,
+              remainingMs));
+        }
       }
       return options.timeoutValue === undefined ? null : options.timeoutValue;
     }
@@ -1875,10 +1920,16 @@
         response.headers.get("X-Report-Source-Revision") || "").toLowerCase();
     }
 
+    function reportManifestModified(response) {
+      return String(
+        response.headers.get("X-Report-Manifest-Modified") || "");
+    }
+
     async function pollReportResult(token, nightId, signal) {
       const url = "/api/report/result?night=" + encodeURIComponent(nightId);
       return pollReportFetch({
         active: () => token === reportLoadToken,
+        waitUrl: url,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         timeoutValue: {status: 0, etag: "", result: null},
@@ -1890,9 +1941,13 @@
           if (resp.status === 304) {
             const cached = lruGet(reportResultClientCache, url);
             if (!cached) throw new Error("result cache revalidation failed");
+            const manifestModified = reportManifestModified(resp) ||
+              cached.manifestModified || "";
+            cached.manifestModified = manifestModified;
             return {done: true, value: {
               status: 304,
               etag: cached.etag,
+              manifestModified,
               result: cached.decoded,
             }};
           }
@@ -1902,20 +1957,23 @@
 
             const etag = resp.headers.get("ETag") || "";
             const revision = reportArtifactRevision(resp);
+            const manifestModified = reportManifestModified(resp);
             if (revision && revision !== decoded.source_revision) {
               throw new Error("report result revision mismatch");
             }
-            lruSet(reportResultClientCache, url, {etag, decoded, revision},
+            lruSet(reportResultClientCache, url,
+              {etag, decoded, revision, manifestModified},
               REPORT_RESULT_CLIENT_CACHE_MAX);
             return {done: true, value: {
               status: 200,
               etag,
+              manifestModified,
               result: decoded,
             }};
           }
           if (resp.status === 202) {
             AirCANnect.ui.message("reportMsg", "Preparing report...", true, true);
-            return {done: false};
+            return {done: false, waitForReport: true};
           }
           if (resp.status === 404) {
             return {done: true, value: {
@@ -1960,10 +2018,22 @@
       await Promise.all(workers);
     }
 
+    function reportCacheIdentityMatches(entry, identity) {
+      return !!entry && !!identity && !!identity.manifestModified &&
+        entry.revision === identity.revision &&
+        entry.manifestModified === identity.manifestModified;
+    }
+
     async function pollReportPlotPart(url, active, maxAttempts, delay, signal,
-                                      decode, cacheResponse = true) {
+                                      decode, cacheResponse = true,
+                                      cacheIdentity = null) {
+      const trusted = cacheResponse ?
+        lruGet(reportPlotClientCache, url) : null;
+      if (reportCacheIdentityMatches(trusted, cacheIdentity)) return trusted;
+
       return pollReportFetch({
         active,
+        waitUrl: url,
         maxAttempts,
         delayMs: delay,
         request: () => {
@@ -1974,16 +2044,20 @@
           if (response.status === 304) {
             const cached = cacheResponse ? lruGet(reportPlotClientCache, url) : null;
             if (!cached) throw new Error("plot cache revalidation failed");
+            cached.manifestModified = reportManifestModified(response) ||
+              cached.manifestModified || "";
             return {done: true, value: cached};
           }
           if (response.status === 200) {
             const revision = reportArtifactRevision(response);
+            const manifestModified = reportManifestModified(response);
             const decoded = decode(await response.arrayBuffer());
             if (!decoded.valid) throw new Error("invalid plot response");
 
             const entry = {
               etag: response.headers.get("ETag") || "",
               revision,
+              manifestModified,
               decoded,
             };
             if (cacheResponse) {
@@ -1992,7 +2066,9 @@
             }
             return {done: true, value: entry};
           }
-          if (response.status === 202) return {done: false};
+          if (response.status === 202) {
+            return {done: false, waitForReport: true};
+          }
           if (response.status === 404) throw new Error("plot not found");
 
           const text = await response.text();
@@ -2031,7 +2107,7 @@
         visible.has(key) && !reportChartPreferences.collapsed.has(key));
     }
 
-    function reportBaseLoadKeys(keys) {
+    function reportBaseLoadKeys(keys, index = reportBasePlotIndex) {
       const result = Array.from(keys || []);
       const needsMarkers = result.some((key) => {
         const definition = reportChartDefinition(key);
@@ -2039,7 +2115,7 @@
       });
       const events = reportChartDefinition("events");
       if (needsMarkers && !result.includes("events") &&
-          reportChartPartNames(events, reportBasePlotIndex).length) {
+          reportChartPartNames(events, index).length) {
         result.unshift("events");
       }
       return result;
@@ -2063,7 +2139,8 @@
           (buffer) => part === "events"
             ? decodeReportPlotEvents(buffer, index, section)
             : decodeReportPlotSeries(buffer, index, section),
-          context.cacheParts !== false);
+          context.cacheParts !== false,
+          context.cacheIdentity || null);
         if (!fetched || !context.active()) return null;
         if (fetched.revision && fetched.revision !== context.revision) {
           throw new Error("report_revision_changed");
@@ -2077,7 +2154,7 @@
       return decoded;
     }
 
-    function publishReportBaseChart(key, decoded) {
+    function publishReportBaseChart(key, decoded, render = true) {
       const definition = reportChartDefinition(key);
       if (!definition || !decoded) return;
       if (definition.type === "events") {
@@ -2094,7 +2171,7 @@
         });
       }
       reportBaseLoadedCharts.add(key);
-      if (!updateRenderedReportChart(key)) renderReportCharts();
+      if (render && !updateRenderedReportChart(key)) renderReportCharts();
     }
 
     function loadReportBaseChart(key, token, signal) {
@@ -2105,6 +2182,14 @@
       const definition = reportChartDefinition(key);
       const index = reportBasePlotIndex;
       if (!definition || !index) return Promise.resolve(false);
+      if (reportBasePlotBytes) {
+        const decoded = decodeReportWholeChart(
+          index, reportBasePlotBytes, definition);
+        if (!decoded) return Promise.resolve(false);
+
+        publishReportBaseChart(key, decoded);
+        return Promise.resolve(true);
+      }
       const context = {
         nightId: reportCurrentNightId,
         revision: reportCurrentRevision,
@@ -2113,6 +2198,10 @@
         signal,
         maxAttempts: REPORT_PLOT_POLL_MAX_ATTEMPTS,
         delay: REPORT_POLL_DELAY_MS,
+        cacheIdentity: {
+          revision: reportCurrentRevision,
+          manifestModified: reportCurrentManifestModified,
+        },
         active: () => token === reportLoadToken &&
           index === reportBasePlotIndex,
       };
@@ -2131,26 +2220,76 @@
       return promise;
     }
 
-    async function fetchReportPlot(token, nightId, revision, signal) {
+    async function fetchReportPlot(token, nightId, revision,
+                                   manifestModified, signal) {
       const indexUrl = reportPlotUrl(nightId, null, null, "index");
+      const identity = {revision, manifestModified};
       const fetched = await pollReportPlotPart(
         indexUrl,
         () => token === reportLoadToken,
         REPORT_PLOT_POLL_MAX_ATTEMPTS,
         REPORT_POLL_DELAY_MS,
         signal,
-        decodeReportPlotIndex);
+        decodeReportPlotIndex,
+        true,
+        identity);
       if (!fetched || token !== reportLoadToken) return false;
       if (fetched.revision && fetched.revision !== revision) {
         return "revision_changed";
       }
 
-      activateReportBasePlot(nightId, revision, fetched.etag,
-        fetched.decoded);
+      const activeModified = fetched.manifestModified || manifestModified;
+      const keys = reportBaseLoadKeys(
+        reportExpandedChartKeys(), fetched.decoded);
+      if (reportPlotShouldLoadWhole(fetched.decoded, keys)) {
+        const wholeUrl = reportPlotUrl(nightId);
+        const whole = await pollReportPlotPart(
+          wholeUrl,
+          () => token === reportLoadToken,
+          REPORT_PLOT_POLL_MAX_ATTEMPTS,
+          REPORT_POLL_DELAY_MS,
+          signal,
+          decodeReportWholePlot,
+          true,
+          {revision, manifestModified: activeModified});
+        if (!whole || token !== reportLoadToken) return false;
+        if (whole.revision && whole.revision !== revision) {
+          return "revision_changed";
+        }
+        if (whole.decoded.index.prefixCrc32 !==
+            fetched.decoded.prefixCrc32) {
+          return "revision_changed";
+        }
+
+        activateReportBasePlot(
+          nightId,
+          revision,
+          whole.manifestModified || activeModified,
+          whole.etag,
+          whole.decoded.index,
+          whole.decoded.bytes);
+        keys.forEach((key) => {
+          const definition = reportChartDefinition(key);
+          const decoded = decodeReportWholeChart(
+            reportBasePlotIndex, reportBasePlotBytes, definition);
+          if (decoded) publishReportBaseChart(key, decoded, false);
+        });
+        renderReportSummary();
+        renderReportCharts();
+        return true;
+      }
+
+      activateReportBasePlot(
+        nightId,
+        revision,
+        activeModified,
+        fetched.etag,
+        fetched.decoded,
+        null);
       renderReportSummary();
       renderReportCharts();
 
-      const jobs = reportBaseLoadKeys(reportExpandedChartKeys()).map((key) =>
+      const jobs = keys.map((key) =>
         () => loadReportBaseChart(key, token, signal));
       try {
         await runReportFetchJobs(jobs, 2);
@@ -2369,7 +2508,7 @@
       return merged;
     }
 
-    function reportRangeTilePartNames(index, keys) {
+    function reportPlotPartNames(index, keys) {
       const names = new Set();
       keys.forEach((key) => {
         const definition = reportChartDefinition(key);
@@ -2378,20 +2517,20 @@
       return names;
     }
 
-    function reportRangeTileShouldLoadWhole(tile, keys) {
-      if (!tile || !tile.index) return false;
-      const names = reportRangeTilePartNames(tile.index, keys);
-      if (names.size < REPORT_RANGE_WHOLE_MIN_PARTS) return false;
+    function reportPlotShouldLoadWhole(index, keys) {
+      if (!index) return false;
+      const names = reportPlotPartNames(index, keys);
+      if (names.size < REPORT_PLOT_WHOLE_MIN_PARTS) return false;
 
       let requestedBytes = 0;
       names.forEach((name) => {
-        const section = reportPlotSection(name, tile.index);
+        const section = reportPlotSection(name, index);
         if (section) requestedBytes += section.length;
       });
-      const payloadBytes = tile.index.totalSize - REPORT_PLOT_PREFIX_BYTES;
+      const payloadBytes = index.totalSize - REPORT_PLOT_PREFIX_BYTES;
       return payloadBytes > 0 &&
         requestedBytes * 100 >=
-          payloadBytes * REPORT_RANGE_WHOLE_THRESHOLD_PERCENT;
+          payloadBytes * REPORT_PLOT_WHOLE_THRESHOLD_PERCENT;
     }
 
     function decodeReportWholePlot(buffer) {
@@ -2500,19 +2639,19 @@
       return tiles.every((tile) => tile.index) ? tiles : null;
     }
 
-    function decodeReportRangeTileChart(tile, definition) {
-      if (!tile || !tile.index || !tile.bytes || !definition) return null;
+    function decodeReportWholeChart(index, bytes, definition) {
+      if (!index || !bytes || !definition) return null;
 
       const decoded = {events: [], series: {}};
-      const partNames = reportChartPartNames(definition, tile.index);
+      const partNames = reportChartPartNames(definition, index);
       for (const name of partNames) {
-        const section = reportPlotSection(name, tile.index);
+        const section = reportPlotSection(name, index);
         if (!section) continue;
-        const buffer = tile.bytes.slice(
+        const buffer = bytes.slice(
           section.offset, section.offset + section.length);
         const part = name === "events"
-          ? decodeReportPlotEvents(buffer, tile.index, section)
-          : decodeReportPlotSeries(buffer, tile.index, section);
+          ? decodeReportPlotEvents(buffer, index, section)
+          : decodeReportPlotSeries(buffer, index, section);
         if (!part.valid) return null;
 
         if (name === "events") {
@@ -2522,6 +2661,11 @@
         }
       }
       return decoded;
+    }
+
+    function decodeReportRangeTileChart(tile, definition) {
+      if (!tile) return null;
+      return decodeReportWholeChart(tile.index, tile.bytes, definition);
     }
 
     async function loadReportRangeTileChart(tile, definition, context) {
@@ -2605,7 +2749,7 @@
       const tileContext = {...context, active: context.tileActive};
       const jobs = entry.tiles
         .filter((tile) => !tile.bytes &&
-          reportRangeTileShouldLoadWhole(tile, keys))
+          reportPlotShouldLoadWhole(tile.index, keys))
         .map((tile) => async () => {
           try {
             return await loadReportRangeTileWhole(tile, tileContext);
@@ -3114,7 +3258,11 @@
           }
 
           const plotStatus = await fetchReportPlot(
-            token, nightId, reportResult.source_revision, controller.signal);
+            token,
+            nightId,
+            reportResult.source_revision,
+            res.manifestModified,
+            controller.signal);
           if (!plotStatus || token !== reportLoadToken) return;
           if (plotStatus === "revision_changed") continue;
 
@@ -3172,6 +3320,57 @@
       await loadReportSummary(loadNight !== false);
     }
 
+    function reportCacheUrlNight(url) {
+      try {
+        return new URL(url, window.location.href).searchParams.get("night") || "";
+      } catch (error) {
+        return "";
+      }
+    }
+
+    function invalidateReportNightCache(nightId) {
+      for (const key of reportResultClientCache.keys()) {
+        if (reportCacheUrlNight(key) === nightId) {
+          reportResultClientCache.delete(key);
+        }
+      }
+      for (const key of reportPlotClientCache.keys()) {
+        if (reportCacheUrlNight(key) === nightId) {
+          reportPlotClientCache.delete(key);
+        }
+      }
+      for (const key of reportRangeTileCache.keys()) {
+        if (key.startsWith(nightId + ":")) reportRangeTileCache.delete(key);
+      }
+    }
+
+    function handleReportCompletion(data) {
+      const serial = Number(data && data.serial) || 0;
+      if (!serial) return;
+
+      const completionKey = [
+        serial,
+        data.night || "",
+        data.kind || "",
+        data.from || "",
+        data.to || "",
+        data.success ? 1 : 0,
+        data.forced ? 1 : 0,
+        data.manifest_modified || "",
+        data.error || "",
+      ].join(":");
+      if (completionKey === reportHandledCompletionKey) return;
+      reportHandledCompletionKey = completionKey;
+      if (!data.success || !data.forced || !data.night) return;
+
+      const nightId = String(data.night);
+      const reload = nightId === reportCurrentNightId &&
+        AirCANnect.pages.isActive("report");
+      invalidateReportNightCache(nightId);
+      if (reload) loadSelectedReportNight();
+    }
+
+    AirCANnect.events.subscribe("report", handleReportCompletion);
     AirCANnect.actions.register("report.step-night", (_event, element) =>
       stepReportNight(Number(element.dataset.value)));
     AirCANnect.actions.register("report.toggle-calendar", () =>
@@ -3213,11 +3412,14 @@
     let reportBaseSeries = {};
     let reportBaseEvents = [];
     let reportBasePlotIndex = null;
+    let reportBasePlotBytes = null;
     const reportBaseLoadedCharts = new Set();
     const reportBaseChartPromises = new Map();
     let reportCurrentNightId = "";
     let reportCurrentRevision = "";
+    let reportCurrentManifestModified = "";
     let reportCurrentPlotEtag = "";
+    let reportHandledCompletionKey = "";
     const reportRangeTileCache = new Map();
     let reportRangeView = null;
     let reportRangeActiveKey = "";
@@ -3237,13 +3439,14 @@
     const REPORT_RANGE_TILE_CACHE_MAX_BYTES = 6 * 1024 * 1024;
     const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;
     const REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS = 2;
-    const REPORT_RANGE_WHOLE_MIN_PARTS = 2;
-    const REPORT_RANGE_WHOLE_THRESHOLD_PERCENT = 60;
+    const REPORT_PLOT_WHOLE_MIN_PARTS = 2;
+    const REPORT_PLOT_WHOLE_THRESHOLD_PERCENT = 60;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
     const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
     const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
     const REPORT_POLL_DELAY_MS = 300;
     const REPORT_RANGE_POLL_DELAY_MS = 250;
+    const REPORT_SSE_FALLBACK_MS = 1000;
     const REPORT_CHART_PREFERENCES_KEY = "aircannect.reportCharts.v1";
     const reportChartDefs = [
       {key: "events", title: "Event Flags", type: "events"},

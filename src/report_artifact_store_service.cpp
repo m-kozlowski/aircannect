@@ -307,6 +307,7 @@ bool ReportArtifactStoreService::finish_current() {
             status_.state = ReportArtifactStoreState::PublishingManifest;
             break;
         case Phase::WaitManifest:
+            status_.manifest_modified = completion.modified;
             phase_ = Phase::Ready;
             status_.state = ReportArtifactStoreState::Ready;
             break;

@@ -62,6 +62,7 @@ private:
     StorageReadPort *read_port_ = nullptr;
     OperationTicket ticket_;
     StoragePreparedRead prepared_;
+    uint64_t manifest_modified_ = 0;
     StorageReadLane lane_ = StorageReadLane::Report;
     ReportArtifactLookupStatus status_;
     ReportArtifactAvailability availability_;

@@ -18,6 +18,7 @@
 #include "memory_manager.h"
 #include "oximetry_http_controller.h"
 #include "ota_http_controller.h"
+#include "report_http_controller.h"
 #include "resmed_firmware_http_controller.h"
 #include "rpc_transport_ports.h"
 #include "settings_http_controller.h"
@@ -64,6 +65,7 @@ bool WebUI::begin(StatusHttpController &status,
                   OtaHttpController &ota_http,
                   ResmedFirmwareHttpController &resmed_firmware_http,
                   StorageHttpController &storage_http,
+                  ReportHttpController &report_http,
                   LiveHttpController &live,
                   ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
@@ -78,7 +80,8 @@ bool WebUI::begin(StatusHttpController &status,
     console_router_ = &console_router;
     bind_snapshot_channels(config_http, device_http, oximetry_http,
                            settings_http, ota_http,
-                           resmed_firmware_http, storage_http);
+                           resmed_firmware_http, storage_http,
+                           report_http);
 
     if (!command_mutex_) {
         command_mutex_ = xSemaphoreCreateMutexStatic(&command_mutex_storage_);
@@ -135,7 +138,8 @@ void WebUI::bind_snapshot_channels(
     SettingsHttpController &settings_http,
     OtaHttpController &ota_http,
     ResmedFirmwareHttpController &resmed_firmware_http,
-    StorageHttpController &storage_http) {
+    StorageHttpController &storage_http,
+    ReportHttpController &report_http) {
     auto bind = [this](SnapshotChannelId id,
                        const PublishedJsonSnapshot &source,
                        const char *event,
@@ -177,6 +181,10 @@ void WebUI::bind_snapshot_channels(
          "storage_operation", "web_ui.snapshots.storage_operation_copy",
          SNAPSHOT_STORAGE_OPERATION,
          AC_WEB_STORAGE_OPERATION_JSON_RESERVE);
+    bind(SnapshotChannelId::Report,
+         report_http.completion_snapshot(),
+         "report", "web_ui.snapshots.report_copy",
+         SNAPSHOT_REPORT, 384);
 }
 
 void WebUI::reserve_cached_json() {
@@ -249,6 +257,8 @@ WebUiMemoryStatus WebUI::memory_status() {
         snapshot_channel(SnapshotChannelId::ResmedRepository).cached);
     out.storage_operation = capture(
         snapshot_channel(SnapshotChannelId::StorageOperation).cached);
+    out.report = capture(
+        snapshot_channel(SnapshotChannelId::Report).cached);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -878,7 +888,7 @@ void WebUI::mark_snapshots_dirty(uint16_t mask) {
     if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE |
                 SNAPSHOT_OXIMETRY | SNAPSHOT_SETTINGS | SNAPSHOT_OTA |
                 SNAPSHOT_RESMED_OTA | SNAPSHOT_RESMED_REPOSITORY |
-                SNAPSHOT_STORAGE_OPERATION)) {
+                SNAPSHOT_STORAGE_OPERATION | SNAPSHOT_REPORT)) {
         request_sse_push();
     }
 }

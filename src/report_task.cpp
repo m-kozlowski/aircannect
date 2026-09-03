@@ -545,6 +545,15 @@ struct ReportTask::Runtime {
             }
             unlock();
             if (cached) {
+                if (published->artifact_index) {
+                    const ReportArtifactIndexRecord *record =
+                        published->artifact_index->find(sleep_day);
+                    if (record && record->source_revision ==
+                            out.artifact.source_revision) {
+                        out.descriptor.manifest_modified =
+                            record->manifest_modified;
+                    }
+                }
                 out.state = ReportArtifactQueryState::Ready;
                 return out;
             }
@@ -557,6 +566,8 @@ struct ReportTask::Runtime {
             ReportArtifactAvailability pair;
             if (published->artifact_index->availability(result, pair) &&
                 pair.pair_ready()) {
+                out.descriptor.manifest_modified =
+                    pair.result.manifest_modified;
                 out.state = ReportArtifactQueryState::Ready;
                 return out;
             }

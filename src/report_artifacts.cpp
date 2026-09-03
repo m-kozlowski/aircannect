@@ -375,7 +375,8 @@ bool ReportArtifactAvailability::descriptor(
 
 bool ReportArtifactAvailability::load(
     const ReportArtifactManifestView &manifest,
-    const ReportArtifactKey &requested) {
+    const ReportArtifactKey &requested,
+    uint64_t manifest_modified) {
     *this = {};
     if (!requested.valid() || !key_is_result(manifest.key) ||
         manifest.key.sleep_day != requested.sleep_day ||
@@ -387,11 +388,13 @@ bool ReportArtifactAvailability::load(
     result.key = manifest.key;
     result.size = manifest.result_size;
     result.crc32 = manifest.result_crc32;
+    result.manifest_modified = manifest_modified;
     overview.key = ReportArtifactKey::overview(
         manifest.key.sleep_day, manifest.key.source_revision);
     overview.size = manifest.overview_size;
     overview.crc32 = manifest.overview_crc32;
     overview.prefix_crc32 = manifest.overview_prefix_crc32;
+    overview.manifest_modified = manifest_modified;
     if (!pair_ready()) {
         *this = {};
         return false;
@@ -413,13 +416,15 @@ bool ReportArtifactAvailability::load(
         range_tile.size = tile.size;
         range_tile.crc32 = tile.crc32;
         range_tile.prefix_crc32 = tile.prefix_crc32;
+        range_tile.manifest_modified = manifest_modified;
         break;
     }
     return true;
 }
 
 bool ReportArtifactAvailability::merge(
-    const ReportArtifactBundle &bundle) {
+    const ReportArtifactBundle &bundle,
+    uint64_t manifest_modified) {
     if (!request.valid() || !bundle.valid() ||
         bundle.key.sleep_day != request.sleep_day ||
         bundle.key.source_revision != request.source_revision) {
@@ -430,11 +435,13 @@ bool ReportArtifactAvailability::merge(
         result.key = bundle.key;
         result.size = bundle.result->size();
         result.crc32 = bundle.result_crc32;
+        result.manifest_modified = manifest_modified;
         overview.key = ReportArtifactKey::overview(
             bundle.key.sleep_day, bundle.key.source_revision);
         overview.size = bundle.overview->size();
         overview.crc32 = bundle.overview_crc32;
         overview.prefix_crc32 = bundle.overview_prefix_crc32;
+        overview.manifest_modified = manifest_modified;
         return pair_ready();
     }
     if (bundle.key.kind != ReportArtifactKind::RangeTile ||
@@ -446,6 +453,9 @@ bool ReportArtifactAvailability::merge(
     range_tile.size = bundle.range_tile->size();
     range_tile.crc32 = bundle.range_tile_crc32;
     range_tile.prefix_crc32 = bundle.range_tile_prefix_crc32;
+    result.manifest_modified = manifest_modified;
+    overview.manifest_modified = manifest_modified;
+    range_tile.manifest_modified = manifest_modified;
     return range_tile.valid();
 }
 

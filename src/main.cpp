@@ -1606,6 +1606,7 @@ void setup() {
                  ota_http_controller,
                  resmed_firmware_http_controller,
                  storage_http_controller,
+                 report_http_controller,
                  live_http_controller, console_router, config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
