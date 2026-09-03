@@ -661,11 +661,6 @@ bool ConfigHttpController::publish_snapshots() {
     return true;
 }
 
-bool ConfigHttpController::copy_update_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return update_snapshot_.copy(out, revision);
-}
-
 void ConfigHttpController::send_config(AsyncWebServerRequest *request,
                                        const char *section) const {
     const size_t index = section_index(section);

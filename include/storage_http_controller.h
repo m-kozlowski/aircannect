@@ -40,11 +40,9 @@ public:
 
     void publish_activity(const ActivitySnapshot &activity);
 
-    uint32_t operation_snapshot_revision() const {
-        return operation_snapshot_.revision();
+    const PublishedJsonSnapshot &operation_snapshot() const {
+        return operation_snapshot_;
     }
-    bool copy_operation_snapshot(LargeTextBuffer &out,
-                                 uint32_t &revision) const;
 
 private:
     void poll_file_log_tail();

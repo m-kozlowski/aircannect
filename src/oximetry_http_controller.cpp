@@ -236,11 +236,6 @@ bool OximetryHttpController::publish_snapshot() {
     return true;
 }
 
-bool OximetryHttpController::copy_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return snapshot_.copy(out, revision);
-}
-
 void OximetryHttpController::send_snapshot(
     AsyncWebServerRequest *request) const {
     AsyncResponseStream *response = nullptr;

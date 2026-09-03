@@ -445,11 +445,6 @@ bool StorageHttpController::publish_operation_snapshot_if_needed(bool force) {
     return true;
 }
 
-bool StorageHttpController::copy_operation_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return operation_snapshot_.copy(out, revision);
-}
-
 void StorageHttpController::poll_storage_rename() {
     if (!job_mutex_ || !storage_path_ ||
         xSemaphoreTake(job_mutex_, 0) != pdTRUE) {

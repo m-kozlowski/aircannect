@@ -678,16 +678,6 @@ void OtaHttpController::poll() {
     publish_resmed_snapshot_if_needed();
 }
 
-bool OtaHttpController::copy_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return snapshot_.copy(out, revision);
-}
-
-bool OtaHttpController::copy_resmed_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return resmed_snapshot_.copy(out, revision);
-}
-
 void OtaHttpController::request_snapshot() {
     snapshot_requested_.store(true, std::memory_order_release);
 }

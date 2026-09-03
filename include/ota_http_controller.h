@@ -36,13 +36,10 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
-    uint32_t snapshot_revision() const { return snapshot_.revision(); }
-    bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
-    uint32_t resmed_snapshot_revision() const {
-        return resmed_snapshot_.revision();
+    const PublishedJsonSnapshot &snapshot() const { return snapshot_; }
+    const PublishedJsonSnapshot &resmed_snapshot() const {
+        return resmed_snapshot_;
     }
-    bool copy_resmed_snapshot(LargeTextBuffer &out,
-                              uint32_t &revision) const;
 
 private:
     enum class CommandKind : uint8_t {

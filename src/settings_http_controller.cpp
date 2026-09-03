@@ -452,11 +452,6 @@ void SettingsHttpController::publish_snapshot_if_needed() {
     observed_device_revision_ = device_revision;
 }
 
-bool SettingsHttpController::copy_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return settings_snapshot_.copy(out, revision);
-}
-
 void SettingsHttpController::send_catalog(
     AsyncWebServerRequest *request) {
     if (!cache_mutex_ ||

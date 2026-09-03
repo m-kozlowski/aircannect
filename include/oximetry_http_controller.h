@@ -28,8 +28,7 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
-    uint32_t revision() const { return snapshot_.revision(); }
-    bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
+    const PublishedJsonSnapshot &snapshot() const { return snapshot_; }
 
 private:
     enum class CommandKind : uint8_t {

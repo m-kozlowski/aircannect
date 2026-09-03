@@ -28,11 +28,9 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
-    uint32_t ble_pairing_revision() const {
-        return ble_pairing_snapshot_.revision();
+    const PublishedJsonSnapshot &ble_pairing_snapshot() const {
+        return ble_pairing_snapshot_;
     }
-    bool copy_ble_pairing_snapshot(LargeTextBuffer &out,
-                                   uint32_t &revision) const;
 
 private:
     enum class CommandKind : uint8_t {

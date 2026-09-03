@@ -205,11 +205,6 @@ bool ResmedFirmwareHttpController::publish_status_snapshot(bool force) {
     return true;
 }
 
-bool ResmedFirmwareHttpController::copy_status_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return status_snapshot_.copy(out, revision);
-}
-
 void ResmedFirmwareHttpController::request_refresh(
     AsyncWebServerRequest *request) const {
     if (!repository_ || !repository_->request_refresh(true)) {

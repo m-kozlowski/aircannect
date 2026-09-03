@@ -18,11 +18,9 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
-    uint32_t status_snapshot_revision() const {
-        return status_snapshot_.revision();
+    const PublishedJsonSnapshot &status_snapshot() const {
+        return status_snapshot_;
     }
-    bool copy_status_snapshot(LargeTextBuffer &out,
-                              uint32_t &revision) const;
 
 private:
     bool publish_status_snapshot(bool force = false);

@@ -74,15 +74,11 @@ bool WebUI::begin(StatusHttpController &status,
     stop();
     status_ = &status;
     exports_ = &exports;
-    config_ = &config_http;
-    device_ = &device_http;
-    oximetry_ = &oximetry_http;
-    settings_ = &settings_http;
-    ota_ = &ota_http;
-    resmed_firmware_ = &resmed_firmware_http;
-    storage_ = &storage_http;
     live_ = &live;
     console_router_ = &console_router;
+    bind_snapshot_channels(config_http, device_http, oximetry_http,
+                           settings_http, ota_http,
+                           resmed_firmware_http, storage_http);
 
     if (!command_mutex_) {
         command_mutex_ = xSemaphoreCreateMutexStatic(&command_mutex_storage_);
@@ -132,31 +128,67 @@ bool WebUI::begin(StatusHttpController &status,
     return true;
 }
 
+void WebUI::bind_snapshot_channels(
+    ConfigHttpController &config_http,
+    DeviceHttpController &device_http,
+    OximetryHttpController &oximetry_http,
+    SettingsHttpController &settings_http,
+    OtaHttpController &ota_http,
+    ResmedFirmwareHttpController &resmed_firmware_http,
+    StorageHttpController &storage_http) {
+    auto bind = [this](SnapshotChannelId id,
+                       const PublishedJsonSnapshot &source,
+                       const char *event,
+                       const char *checkpoint,
+                       uint16_t mask,
+                       size_t reserve) {
+        SnapshotChannel &channel = snapshot_channel(id);
+        channel.source = &source;
+        channel.event = event;
+        channel.checkpoint = checkpoint;
+        channel.mask = mask;
+        channel.reserve = reserve;
+    };
+
+    bind(SnapshotChannelId::Config, config_http.update_snapshot(),
+         "config", "web_ui.snapshots.config_copy", SNAPSHOT_CONFIG, 256);
+    bind(SnapshotChannelId::As11Ble, device_http.ble_pairing_snapshot(),
+         "as11_ble", "web_ui.snapshots.as11_ble_copy",
+         SNAPSHOT_AS11_BLE, AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
+    bind(SnapshotChannelId::Oximetry, oximetry_http.snapshot(),
+         "oximetry", "web_ui.snapshots.oximetry_copy",
+         SNAPSHOT_OXIMETRY, AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
+    bind(SnapshotChannelId::Settings, settings_http.snapshot(),
+         "settings", "web_ui.snapshots.settings_copy",
+         SNAPSHOT_SETTINGS, AC_WEB_SETTINGS_JSON_RESERVE);
+    bind(SnapshotChannelId::Ota, ota_http.snapshot(),
+         "ota", "web_ui.snapshots.ota_copy",
+         SNAPSHOT_OTA, AC_WEB_OTA_JSON_RESERVE);
+    bind(SnapshotChannelId::ResmedOta, ota_http.resmed_snapshot(),
+         "resmed_ota", "web_ui.snapshots.resmed_ota_copy",
+         SNAPSHOT_RESMED_OTA, AC_WEB_RESMED_OTA_JSON_RESERVE);
+    bind(SnapshotChannelId::ResmedRepository,
+         resmed_firmware_http.status_snapshot(),
+         "resmed_repository", "web_ui.snapshots.resmed_repository_copy",
+         SNAPSHOT_RESMED_REPOSITORY,
+         AC_WEB_RESMED_REPOSITORY_JSON_RESERVE);
+    bind(SnapshotChannelId::StorageOperation,
+         storage_http.operation_snapshot(),
+         "storage_operation", "web_ui.snapshots.storage_operation_copy",
+         SNAPSHOT_STORAGE_OPERATION,
+         AC_WEB_STORAGE_OPERATION_JSON_RESERVE);
+}
+
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     next_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     cached_exports_json_.reserve(WEB_EXPORT_STATUS_JSON_RESERVE);
     next_exports_json_.reserve(WEB_EXPORT_STATUS_JSON_RESERVE);
-    cached_config_json_.reserve(256);
-    next_config_json_.reserve(256);
-    cached_as11_ble_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
-    next_as11_ble_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
-    cached_oximetry_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
-    next_oximetry_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
-    cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
-    next_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
-    cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
-    next_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
-    cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
-    next_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
-    cached_resmed_repository_json_.reserve(
-        AC_WEB_RESMED_REPOSITORY_JSON_RESERVE);
-    next_resmed_repository_json_.reserve(
-        AC_WEB_RESMED_REPOSITORY_JSON_RESERVE);
-    cached_storage_operation_json_.reserve(
-        AC_WEB_STORAGE_OPERATION_JSON_RESERVE);
-    next_storage_operation_json_.reserve(
-        AC_WEB_STORAGE_OPERATION_JSON_RESERVE);
+
+    for (SnapshotChannel &channel : snapshot_channels_) {
+        channel.cached.reserve(channel.reserve);
+        channel.next.reserve(channel.reserve);
+    }
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -203,14 +235,21 @@ WebUiMemoryStatus WebUI::memory_status() {
     }
     out.status = capture(cached_status_json_);
     out.exports = capture(cached_exports_json_);
-    out.config = capture(cached_config_json_);
-    out.as11_ble = capture(cached_as11_ble_json_);
-    out.oximetry = capture(cached_oximetry_json_);
-    out.settings = capture(cached_settings_json_);
-    out.ota = capture(cached_ota_json_);
-    out.resmed_ota = capture(cached_resmed_ota_json_);
-    out.resmed_repository = capture(cached_resmed_repository_json_);
-    out.storage_operation = capture(cached_storage_operation_json_);
+    out.config = capture(
+        snapshot_channel(SnapshotChannelId::Config).cached);
+    out.as11_ble = capture(
+        snapshot_channel(SnapshotChannelId::As11Ble).cached);
+    out.oximetry = capture(
+        snapshot_channel(SnapshotChannelId::Oximetry).cached);
+    out.settings = capture(
+        snapshot_channel(SnapshotChannelId::Settings).cached);
+    out.ota = capture(snapshot_channel(SnapshotChannelId::Ota).cached);
+    out.resmed_ota = capture(
+        snapshot_channel(SnapshotChannelId::ResmedOta).cached);
+    out.resmed_repository = capture(
+        snapshot_channel(SnapshotChannelId::ResmedRepository).cached);
+    out.storage_operation = capture(
+        snapshot_channel(SnapshotChannelId::StorageOperation).cached);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -264,35 +303,17 @@ void WebUI::stop() {
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_status_revision_ = 0;
-    observed_config_revision_ = 0;
-    sent_config_revision_ = 0;
-    observed_as11_ble_revision_ = 0;
-    sent_as11_ble_revision_ = 0;
-    observed_oximetry_revision_ = 0;
-    sent_oximetry_revision_ = 0;
-    observed_settings_revision_ = 0;
-    sent_settings_revision_ = 0;
-    observed_ota_revision_ = 0;
-    sent_ota_revision_ = 0;
-    observed_resmed_ota_revision_ = 0;
-    sent_resmed_ota_revision_ = 0;
-    observed_resmed_repository_revision_ = 0;
-    sent_resmed_repository_revision_ = 0;
-    observed_storage_operation_revision_ = 0;
-    sent_storage_operation_revision_ = 0;
+    for (SnapshotChannel &channel : snapshot_channels_) {
+        channel.source = nullptr;
+        channel.observed_revision = 0;
+        channel.sent_revision = 0;
+    }
     observed_live_generation_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
     status_ = nullptr;
     exports_ = nullptr;
-    config_ = nullptr;
-    device_ = nullptr;
-    oximetry_ = nullptr;
-    settings_ = nullptr;
-    ota_ = nullptr;
-    resmed_firmware_ = nullptr;
-    storage_ = nullptr;
     live_ = nullptr;
     console_router_ = nullptr;
     started_ = false;
@@ -305,38 +326,11 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (status_ && observed_status_revision_ != status_->revision()) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
-    if (config_ &&
-        observed_config_revision_ != config_->update_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_CONFIG);
-    }
-    if (device_ &&
-        observed_as11_ble_revision_ != device_->ble_pairing_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_AS11_BLE);
-    }
-    if (oximetry_ &&
-        observed_oximetry_revision_ != oximetry_->revision()) {
-        mark_snapshots_dirty(SNAPSHOT_OXIMETRY);
-    }
-    if (settings_ &&
-        observed_settings_revision_ != settings_->snapshot_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-    }
-    if (ota_ && observed_ota_revision_ != ota_->snapshot_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_OTA);
-    }
-    if (ota_ && observed_resmed_ota_revision_ !=
-                    ota_->resmed_snapshot_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
-    }
-    if (resmed_firmware_ &&
-        observed_resmed_repository_revision_ !=
-            resmed_firmware_->status_snapshot_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_RESMED_REPOSITORY);
-    }
-    if (storage_ &&
-        observed_storage_operation_revision_ !=
-            storage_->operation_snapshot_revision()) {
-        mark_snapshots_dirty(SNAPSHOT_STORAGE_OPERATION);
+    for (const SnapshotChannel &channel : snapshot_channels_) {
+        if (channel.source &&
+            channel.observed_revision != channel.source->revision()) {
+            mark_snapshots_dirty(channel.mask);
+        }
     }
 
     if (console_router_ && web_console_.pending_output(*console_router_)) {
@@ -392,98 +386,18 @@ void WebUI::poll(PollCheckpoint checkpoint) {
             sse_backpressure = true;
         }
 
-        if (cached_config_json_.length() &&
-            sent_config_revision_ != observed_config_revision_) {
-            const SseSendResult config_result = send_sse_to_clients(
-                cached_config_json_.c_str(), "config", event_id, false);
-            if (config_result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (config_result == SseSendResult::Sent) {
-                sent_config_revision_ = observed_config_revision_;
+        for (SnapshotChannel &channel : snapshot_channels_) {
+            if (!channel.cached.length() ||
+                channel.sent_revision == channel.observed_revision) {
+                continue;
             }
-        }
 
-        if (cached_as11_ble_json_.length() &&
-            sent_as11_ble_revision_ != observed_as11_ble_revision_) {
-            const SseSendResult pairing_result = send_sse_to_clients(
-                cached_as11_ble_json_.c_str(), "as11_ble", event_id, false);
-            if (pairing_result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (pairing_result == SseSendResult::Sent) {
-                sent_as11_ble_revision_ = observed_as11_ble_revision_;
-            }
-        }
-
-        if (cached_oximetry_json_.length() &&
-            sent_oximetry_revision_ != observed_oximetry_revision_) {
-            const SseSendResult oximetry_result = send_sse_to_clients(
-                cached_oximetry_json_.c_str(), "oximetry", event_id, false);
-            if (oximetry_result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (oximetry_result == SseSendResult::Sent) {
-                sent_oximetry_revision_ = observed_oximetry_revision_;
-            }
-        }
-
-        if (cached_settings_json_.length() &&
-            sent_settings_revision_ != observed_settings_revision_) {
-            const SseSendResult settings_result = send_sse_to_clients(
-                cached_settings_json_.c_str(), "settings", event_id, false);
-            if (settings_result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (settings_result == SseSendResult::Sent) {
-                sent_settings_revision_ = observed_settings_revision_;
-            }
-        }
-
-        if (cached_ota_json_.length() &&
-            sent_ota_revision_ != observed_ota_revision_) {
-            const SseSendResult ota_result = send_sse_to_clients(
-                cached_ota_json_.c_str(), "ota", event_id, false);
-            if (ota_result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (ota_result == SseSendResult::Sent) {
-                sent_ota_revision_ = observed_ota_revision_;
-            }
-        }
-
-        if (cached_resmed_ota_json_.length() &&
-            sent_resmed_ota_revision_ != observed_resmed_ota_revision_) {
             const SseSendResult result = send_sse_to_clients(
-                cached_resmed_ota_json_.c_str(), "resmed_ota", event_id,
-                false);
+                channel.cached.c_str(), channel.event, event_id, false);
             if (result == SseSendResult::Failed) {
                 sse_backpressure = true;
             } else if (result == SseSendResult::Sent) {
-                sent_resmed_ota_revision_ = observed_resmed_ota_revision_;
-            }
-        }
-
-        if (cached_resmed_repository_json_.length() &&
-            sent_resmed_repository_revision_ !=
-                observed_resmed_repository_revision_) {
-            const SseSendResult result = send_sse_to_clients(
-                cached_resmed_repository_json_.c_str(),
-                "resmed_repository", event_id, false);
-            if (result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (result == SseSendResult::Sent) {
-                sent_resmed_repository_revision_ =
-                    observed_resmed_repository_revision_;
-            }
-        }
-
-        if (cached_storage_operation_json_.length() &&
-            sent_storage_operation_revision_ !=
-                observed_storage_operation_revision_) {
-            const SseSendResult result = send_sse_to_clients(
-                cached_storage_operation_json_.c_str(),
-                "storage_operation", event_id, false);
-            if (result == SseSendResult::Failed) {
-                sse_backpressure = true;
-            } else if (result == SseSendResult::Sent) {
-                sent_storage_operation_revision_ =
-                    observed_storage_operation_revision_;
+                channel.sent_revision = channel.observed_revision;
             }
         }
 
@@ -1036,14 +950,9 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
 
     next_status_json_.clear();
     next_exports_json_.clear();
-    next_config_json_.clear();
-    next_as11_ble_json_.clear();
-    next_oximetry_json_.clear();
-    next_settings_json_.clear();
-    next_ota_json_.clear();
-    next_resmed_ota_json_.clear();
-    next_resmed_repository_json_.clear();
-    next_storage_operation_json_.clear();
+    for (SnapshotChannel &channel : snapshot_channels_) {
+        channel.next.clear();
+    }
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -1061,81 +970,17 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.exports_copy");
     }
-    if (rebuild_mask & SNAPSHOT_CONFIG) {
-        uint32_t revision = observed_config_revision_;
-        if (config_ &&
-            config_->copy_update_snapshot(next_config_json_, revision)) {
-            observed_config_revision_ = revision;
-            completed_mask |= SNAPSHOT_CONFIG;
+
+    for (SnapshotChannel &channel : snapshot_channels_) {
+        if (!(rebuild_mask & channel.mask)) continue;
+
+        uint32_t revision = channel.observed_revision;
+        if (channel.source &&
+            channel.source->copy(channel.next, revision)) {
+            channel.observed_revision = revision;
+            completed_mask |= channel.mask;
         }
-        if (checkpoint) checkpoint("web_ui.snapshots.config_copy");
-    }
-    if (rebuild_mask & SNAPSHOT_AS11_BLE) {
-        uint32_t revision = observed_as11_ble_revision_;
-        if (device_ && device_->copy_ble_pairing_snapshot(
-                           next_as11_ble_json_, revision)) {
-            observed_as11_ble_revision_ = revision;
-            completed_mask |= SNAPSHOT_AS11_BLE;
-        }
-        if (checkpoint) checkpoint("web_ui.snapshots.as11_ble_copy");
-    }
-    if (rebuild_mask & SNAPSHOT_OXIMETRY) {
-        uint32_t revision = observed_oximetry_revision_;
-        if (oximetry_ && oximetry_->copy_snapshot(
-                              next_oximetry_json_, revision)) {
-            observed_oximetry_revision_ = revision;
-            completed_mask |= SNAPSHOT_OXIMETRY;
-        }
-        if (checkpoint) checkpoint("web_ui.snapshots.oximetry_copy");
-    }
-    if (rebuild_mask & SNAPSHOT_SETTINGS) {
-        uint32_t revision = observed_settings_revision_;
-        if (settings_ && settings_->copy_snapshot(
-                             next_settings_json_, revision)) {
-            observed_settings_revision_ = revision;
-            completed_mask |= SNAPSHOT_SETTINGS;
-        }
-        if (checkpoint) checkpoint("web_ui.snapshots.settings_copy");
-    }
-    if (rebuild_mask & SNAPSHOT_OTA) {
-        uint32_t revision = observed_ota_revision_;
-        if (ota_ && ota_->copy_snapshot(next_ota_json_, revision)) {
-            observed_ota_revision_ = revision;
-            completed_mask |= SNAPSHOT_OTA;
-        }
-        if (checkpoint) checkpoint("web_ui.snapshots.ota_copy");
-    }
-    if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
-        uint32_t revision = observed_resmed_ota_revision_;
-        if (ota_ && ota_->copy_resmed_snapshot(next_resmed_ota_json_,
-                                               revision)) {
-            observed_resmed_ota_revision_ = revision;
-            completed_mask |= SNAPSHOT_RESMED_OTA;
-        }
-        if (checkpoint) checkpoint("web_ui.snapshots.resmed_ota_copy");
-    }
-    if (rebuild_mask & SNAPSHOT_RESMED_REPOSITORY) {
-        uint32_t revision = observed_resmed_repository_revision_;
-        if (resmed_firmware_ &&
-            resmed_firmware_->copy_status_snapshot(
-                next_resmed_repository_json_, revision)) {
-            observed_resmed_repository_revision_ = revision;
-            completed_mask |= SNAPSHOT_RESMED_REPOSITORY;
-        }
-        if (checkpoint) {
-            checkpoint("web_ui.snapshots.resmed_repository_copy");
-        }
-    }
-    if (rebuild_mask & SNAPSHOT_STORAGE_OPERATION) {
-        uint32_t revision = observed_storage_operation_revision_;
-        if (storage_ && storage_->copy_operation_snapshot(
-                            next_storage_operation_json_, revision)) {
-            observed_storage_operation_revision_ = revision;
-            completed_mask |= SNAPSHOT_STORAGE_OPERATION;
-        }
-        if (checkpoint) {
-            checkpoint("web_ui.snapshots.storage_operation_copy");
-        }
+        if (checkpoint) checkpoint(channel.checkpoint);
     }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
@@ -1148,31 +993,11 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     if (completed_mask & SNAPSHOT_EXPORTS) {
         cached_exports_json_.swap(next_exports_json_);
     }
-    if (completed_mask & SNAPSHOT_CONFIG) {
-        cached_config_json_.swap(next_config_json_);
-    }
-    if (completed_mask & SNAPSHOT_AS11_BLE) {
-        cached_as11_ble_json_.swap(next_as11_ble_json_);
-    }
-    if (completed_mask & SNAPSHOT_OXIMETRY) {
-        cached_oximetry_json_.swap(next_oximetry_json_);
-    }
-    if (completed_mask & SNAPSHOT_SETTINGS) {
-        cached_settings_json_.swap(next_settings_json_);
-    }
-    if (completed_mask & SNAPSHOT_OTA) {
-        cached_ota_json_.swap(next_ota_json_);
-    }
-    if (completed_mask & SNAPSHOT_RESMED_OTA) {
-        cached_resmed_ota_json_.swap(next_resmed_ota_json_);
-    }
-    if (completed_mask & SNAPSHOT_RESMED_REPOSITORY) {
-        cached_resmed_repository_json_.swap(
-            next_resmed_repository_json_);
-    }
-    if (completed_mask & SNAPSHOT_STORAGE_OPERATION) {
-        cached_storage_operation_json_.swap(
-            next_storage_operation_json_);
+
+    for (SnapshotChannel &channel : snapshot_channels_) {
+        if (completed_mask & channel.mask) {
+            channel.cached.swap(channel.next);
+        }
     }
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;

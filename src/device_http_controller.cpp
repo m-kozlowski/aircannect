@@ -282,11 +282,6 @@ bool DeviceHttpController::publish_ble_pairing_snapshot() {
     return true;
 }
 
-bool DeviceHttpController::copy_ble_pairing_snapshot(
-    LargeTextBuffer &out, uint32_t &revision) const {
-    return ble_pairing_snapshot_.copy(out, revision);
-}
-
 void DeviceHttpController::send_ble_action(
     AsyncWebServerRequest *request) {
     JsonDocument doc;

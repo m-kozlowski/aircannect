@@ -25,6 +25,7 @@ class ExportHttpController;
 class LiveHttpController;
 class OximetryHttpController;
 class OtaHttpController;
+class PublishedJsonSnapshot;
 class ResmedFirmwareHttpController;
 class SettingsHttpController;
 class StatusHttpController;
@@ -101,6 +102,14 @@ private:
     // Server setup and cached snapshots
     void register_routes(HttpRouteModule *const *route_modules,
                          size_t route_module_count);
+    void bind_snapshot_channels(
+        ConfigHttpController &config_http,
+        DeviceHttpController &device_http,
+        OximetryHttpController &oximetry_http,
+        SettingsHttpController &settings_http,
+        OtaHttpController &ota_http,
+        ResmedFirmwareHttpController &resmed_firmware_http,
+        StorageHttpController &storage_http);
     void reserve_cached_json();
     void reserve_console_log();
     void append_console_log(const String &text);
@@ -170,16 +179,42 @@ private:
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
 
+    enum class SnapshotChannelId : uint8_t {
+        Config,
+        As11Ble,
+        Oximetry,
+        Settings,
+        Ota,
+        ResmedOta,
+        ResmedRepository,
+        StorageOperation,
+        Count,
+    };
+
+    struct SnapshotChannel {
+        const PublishedJsonSnapshot *source = nullptr;
+        const char *event = nullptr;
+        const char *checkpoint = nullptr;
+        uint16_t mask = 0;
+        size_t reserve = 0;
+        LargeTextBuffer cached;
+        LargeTextBuffer next;
+        uint32_t observed_revision = 0;
+        uint32_t sent_revision = 0;
+    };
+
+    static constexpr size_t SnapshotChannelCount =
+        static_cast<size_t>(SnapshotChannelId::Count);
+    SnapshotChannel &snapshot_channel(SnapshotChannelId id) {
+        return snapshot_channels_[static_cast<size_t>(id)];
+    }
+    const SnapshotChannel &snapshot_channel(SnapshotChannelId id) const {
+        return snapshot_channels_[static_cast<size_t>(id)];
+    }
+
     // subsystem owners
     StatusHttpController *status_ = nullptr;
     ExportHttpController *exports_ = nullptr;
-    ConfigHttpController *config_ = nullptr;
-    DeviceHttpController *device_ = nullptr;
-    OximetryHttpController *oximetry_ = nullptr;
-    SettingsHttpController *settings_ = nullptr;
-    OtaHttpController *ota_ = nullptr;
-    ResmedFirmwareHttpController *resmed_firmware_ = nullptr;
-    StorageHttpController *storage_ = nullptr;
     LiveHttpController *live_ = nullptr;
     ConsoleCommandRouter *console_router_ = nullptr;
 
@@ -216,22 +251,7 @@ private:
     LargeTextBuffer next_status_json_;
     LargeTextBuffer cached_exports_json_;
     LargeTextBuffer next_exports_json_;
-    LargeTextBuffer cached_config_json_;
-    LargeTextBuffer next_config_json_;
-    LargeTextBuffer cached_as11_ble_json_;
-    LargeTextBuffer next_as11_ble_json_;
-    LargeTextBuffer cached_oximetry_json_;
-    LargeTextBuffer next_oximetry_json_;
-    LargeTextBuffer cached_settings_json_;
-    LargeTextBuffer next_settings_json_;
-    LargeTextBuffer cached_ota_json_;
-    LargeTextBuffer next_ota_json_;
-    LargeTextBuffer cached_resmed_ota_json_;
-    LargeTextBuffer next_resmed_ota_json_;
-    LargeTextBuffer cached_resmed_repository_json_;
-    LargeTextBuffer next_resmed_repository_json_;
-    LargeTextBuffer cached_storage_operation_json_;
-    LargeTextBuffer next_storage_operation_json_;
+    SnapshotChannel snapshot_channels_[SnapshotChannelCount];
 
     // cached auth config
     bool cached_http_auth_required_ = true;
@@ -246,22 +266,6 @@ private:
 
     // snapshot state
     uint32_t observed_status_revision_ = 0;
-    uint32_t observed_config_revision_ = 0;
-    uint32_t sent_config_revision_ = 0;
-    uint32_t observed_as11_ble_revision_ = 0;
-    uint32_t sent_as11_ble_revision_ = 0;
-    uint32_t observed_oximetry_revision_ = 0;
-    uint32_t sent_oximetry_revision_ = 0;
-    uint32_t observed_settings_revision_ = 0;
-    uint32_t sent_settings_revision_ = 0;
-    uint32_t observed_ota_revision_ = 0;
-    uint32_t sent_ota_revision_ = 0;
-    uint32_t observed_resmed_ota_revision_ = 0;
-    uint32_t sent_resmed_ota_revision_ = 0;
-    uint32_t observed_resmed_repository_revision_ = 0;
-    uint32_t sent_resmed_repository_revision_ = 0;
-    uint32_t observed_storage_operation_revision_ = 0;
-    uint32_t sent_storage_operation_revision_ = 0;
     uint32_t observed_live_generation_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
