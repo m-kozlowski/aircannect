@@ -1151,6 +1151,11 @@
           }
         } catch (error) {}
       });
+      evtSrc.addEventListener("storage_operation", (event) => {
+        try {
+          applyStorageOperationSnapshot(JSON.parse(event.data));
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });

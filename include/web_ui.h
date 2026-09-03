@@ -28,6 +28,7 @@ class OtaHttpController;
 class ResmedFirmwareHttpController;
 class SettingsHttpController;
 class StatusHttpController;
+class StorageHttpController;
 
 enum WebCommandKind : uint8_t {
     WebCommandConsoleLine,
@@ -55,6 +56,7 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus ota;
     WebUiBufferMemoryStatus resmed_ota;
     WebUiBufferMemoryStatus resmed_repository;
+    WebUiBufferMemoryStatus storage_operation;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -77,6 +79,7 @@ public:
                SettingsHttpController &settings_http,
                OtaHttpController &ota_http,
                ResmedFirmwareHttpController &resmed_firmware_http,
+               StorageHttpController &storage_http,
                LiveHttpController &live,
                ConsoleCommandRouter &console_router,
                const AppConfigData &config,
@@ -159,10 +162,11 @@ private:
     static constexpr uint16_t SNAPSHOT_OTA = 1u << 6;
     static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
     static constexpr uint16_t SNAPSHOT_RESMED_REPOSITORY = 1u << 8;
+    static constexpr uint16_t SNAPSHOT_STORAGE_OPERATION = 1u << 9;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS | SNAPSHOT_AS11_BLE |
         SNAPSHOT_OXIMETRY | SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA |
-        SNAPSHOT_RESMED_REPOSITORY;
+        SNAPSHOT_RESMED_REPOSITORY | SNAPSHOT_STORAGE_OPERATION;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
 
@@ -175,6 +179,7 @@ private:
     SettingsHttpController *settings_ = nullptr;
     OtaHttpController *ota_ = nullptr;
     ResmedFirmwareHttpController *resmed_firmware_ = nullptr;
+    StorageHttpController *storage_ = nullptr;
     LiveHttpController *live_ = nullptr;
     ConsoleCommandRouter *console_router_ = nullptr;
 
@@ -225,6 +230,8 @@ private:
     LargeTextBuffer next_resmed_ota_json_;
     LargeTextBuffer cached_resmed_repository_json_;
     LargeTextBuffer next_resmed_repository_json_;
+    LargeTextBuffer cached_storage_operation_json_;
+    LargeTextBuffer next_storage_operation_json_;
 
     // cached auth config
     bool cached_http_auth_required_ = true;
@@ -253,6 +260,8 @@ private:
     uint32_t sent_resmed_ota_revision_ = 0;
     uint32_t observed_resmed_repository_revision_ = 0;
     uint32_t sent_resmed_repository_revision_ = 0;
+    uint32_t observed_storage_operation_revision_ = 0;
+    uint32_t sent_storage_operation_revision_ = 0;
     uint32_t observed_live_generation_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;

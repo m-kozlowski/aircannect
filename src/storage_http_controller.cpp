@@ -12,8 +12,10 @@
 
 #include "async_prepared_response.h"
 #include "board.h"
+#include "board_net.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "large_byte_buffer.h"
 #include "large_text_buffer.h"
@@ -35,6 +37,57 @@ static constexpr size_t kStorageListMaxLimit = 128;
 static constexpr uint32_t kStorageListRetryMs = 750;
 static constexpr size_t kPreparedResponseCopyBytes = 4096;
 static constexpr uint32_t kArchiveResponseStartTimeoutMs = 10000;
+
+template <typename JsonOut>
+void append_storage_archive_status(JsonOut &json,
+                                   const StorageArchiveStatus &status) {
+    json += '{';
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "state",
+                    storage_archive_state_name(status.state));
+    json_add_int(json, "id", static_cast<long>(status.id));
+    json_add_bool(json, "recursive", status.recursive);
+    json_add_string(json, "path", status.source_path);
+    json_add_string(json, "filename", status.filename);
+    json_add_string(json, "error", status.error);
+    json_add_int(json, "files", static_cast<long>(status.files));
+    json_add_int(json, "dirs", static_cast<long>(status.dirs));
+    json_add_int(json, "files_done", static_cast<long>(status.files_done));
+    json_add_uint64(json, "bytes_done", status.bytes_done);
+    json_add_uint64(json, "bytes_sent", status.bytes_sent);
+    json_add_uint64(json, "estimated_archive_bytes",
+                    status.estimated_archive_bytes);
+    json += '}';
+}
+
+template <typename JsonOut>
+void append_storage_delete_status(JsonOut &json,
+                                  const StorageDeleteStatus &status) {
+    json += '{';
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "state", storage_delete_state_name(status.state));
+    json_add_int(json, "id", static_cast<long>(status.id));
+    json_add_string(json, "base", status.base_path);
+    json_add_string(json, "error", status.error);
+    json_add_int(json, "roots", static_cast<long>(status.roots));
+    json_add_int(json, "roots_done", static_cast<long>(status.roots_done));
+    json_add_int(json, "files_deleted",
+                 static_cast<long>(status.files_deleted));
+    json_add_int(json, "dirs_deleted",
+                 static_cast<long>(status.dirs_deleted));
+    json += '}';
+}
+
+template <typename JsonOut>
+void build_storage_operation_json(JsonOut &json,
+                                  const StorageArchiveStatus &archive,
+                                  const StorageDeleteStatus &remove) {
+    json = "{\"archive\":";
+    append_storage_archive_status(json, archive);
+    json += ",\"delete\":";
+    append_storage_delete_status(json, remove);
+    json += '}';
+}
 
 struct StorageSelectionRequest {
     JsonDocument doc;
@@ -319,7 +372,19 @@ bool StorageHttpController::begin(StorageReadPort &read_port,
     if (!job_mutex_) {
         job_mutex_ = xSemaphoreCreateMutexStatic(&job_mutex_storage_);
     }
-    return job_mutex_ != nullptr;
+    if (!operation_snapshot_mutex_) {
+        operation_snapshot_mutex_ = xSemaphoreCreateMutexStatic(
+            &operation_snapshot_mutex_storage_);
+    }
+    if (!job_mutex_ || !operation_snapshot_mutex_ ||
+        !operation_snapshot_json_.reserve(
+            AC_WEB_STORAGE_OPERATION_JSON_RESERVE) ||
+        !operation_snapshot_build_json_.reserve(
+            AC_WEB_STORAGE_OPERATION_JSON_RESERVE)) {
+        return false;
+    }
+
+    return publish_operation_snapshot_if_needed(true);
 }
 
 void StorageHttpController::publish_activity(const ActivitySnapshot &activity) {
@@ -331,6 +396,85 @@ void StorageHttpController::poll() {
     poll_file_log_tail();
     poll_archive_download();
     poll_storage_rename();
+    (void)publish_operation_snapshot_if_needed();
+}
+
+void StorageHttpController::request_operation_snapshot() {
+    operation_snapshot_requested_.store(true, std::memory_order_release);
+}
+
+bool StorageHttpController::publish_operation_snapshot_if_needed(bool force) {
+    if (!storage_archive_ || !storage_delete_) return false;
+
+    const uint32_t now = millis();
+    const bool active = storage_archive_->active() || storage_delete_->active();
+    const bool activity_changed =
+        operation_snapshot_initialized_ &&
+        active != operation_snapshot_active_;
+    const bool requested = operation_snapshot_requested_.exchange(
+        false, std::memory_order_acq_rel);
+    if (!force && !requested && !activity_changed &&
+        static_cast<int32_t>(now - next_operation_snapshot_ms_) < 0) {
+        return true;
+    }
+
+    StorageArchiveStatus archive;
+    StorageDeleteStatus remove;
+    if (!storage_archive_->status(archive) ||
+        !storage_delete_->status(remove)) {
+        operation_snapshot_requested_.store(true, std::memory_order_release);
+        return false;
+    }
+
+    operation_snapshot_build_json_.clear();
+    build_storage_operation_json(operation_snapshot_build_json_, archive,
+                                 remove);
+    if (operation_snapshot_build_json_.overflowed()) {
+        Log::logf(CAT_STORAGE, LOG_WARN,
+                  "operation status snapshot allocation failed\n");
+        return false;
+    }
+    if (xSemaphoreTake(operation_snapshot_mutex_, 0) != pdTRUE) {
+        request_operation_snapshot();
+        return false;
+    }
+
+    const bool changed =
+        operation_snapshot_json_.length() !=
+            operation_snapshot_build_json_.length() ||
+        memcmp(operation_snapshot_json_.c_str(),
+               operation_snapshot_build_json_.c_str(),
+               operation_snapshot_json_.length()) != 0;
+    if (force || requested || !operation_snapshot_initialized_ || changed) {
+        operation_snapshot_json_.swap(operation_snapshot_build_json_);
+        operation_snapshot_revision_++;
+        if (operation_snapshot_revision_ == 0) {
+            operation_snapshot_revision_++;
+        }
+    }
+    operation_snapshot_active_ = active;
+    operation_snapshot_initialized_ = true;
+    next_operation_snapshot_ms_ = now +
+        (active ? OperationSnapshotActiveIntervalMs
+                : OperationSnapshotIdleIntervalMs);
+    xSemaphoreGive(operation_snapshot_mutex_);
+    return true;
+}
+
+bool StorageHttpController::copy_operation_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    if (!operation_snapshot_mutex_ ||
+        xSemaphoreTake(operation_snapshot_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    out.clear();
+    const bool copied = operation_snapshot_json_.length() &&
+        out.append(operation_snapshot_json_.c_str(),
+                   operation_snapshot_json_.length());
+    if (copied) revision = operation_snapshot_revision_;
+    xSemaphoreGive(operation_snapshot_mutex_);
+    return copied;
 }
 
 void StorageHttpController::poll_storage_rename() {
@@ -1038,7 +1182,8 @@ void StorageHttpController::send_file_log_tail(AsyncWebServerRequest *request,
     pending_file_log_tail_ = std::move(pending);
 }
 
-void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *request) const {
+void StorageHttpController::send_storage_archive_start(
+    AsyncWebServerRequest *request) {
     if (!storage_archive_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
@@ -1075,6 +1220,7 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
             return;
         }
 
+        request_operation_snapshot();
         send_storage_job_queued(request, id);
         return;
     }
@@ -1118,10 +1264,12 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
         return;
     }
 
+    request_operation_snapshot();
     send_storage_job_queued(request, id);
 }
 
-void StorageHttpController::send_storage_archive_status(AsyncWebServerRequest *request) const {
+void StorageHttpController::send_storage_archive_status(
+    AsyncWebServerRequest *request) const {
     if (!storage_archive_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
@@ -1135,37 +1283,19 @@ void StorageHttpController::send_storage_archive_status(AsyncWebServerRequest *r
     }
     LargeTextBuffer json;
     json.reserve(WEB_JSON_RESERVE_SMALL);
-    json = "{";
-    json_add_bool(json, "ok", true, false);
-    json_add_string(json, "state",
-                    storage_archive_state_name(status.state));
-    json_add_int(json, "id", static_cast<long>(status.id));
-    json_add_bool(json, "recursive", status.recursive);
-    json_add_string(json, "path", status.source_path);
-    json_add_string(json, "filename", status.filename);
-    json_add_string(json, "error", status.error);
-    json_add_int(json, "files", static_cast<long>(status.files));
-    json_add_int(json, "dirs", static_cast<long>(status.dirs));
-    json_add_int(json, "files_done", static_cast<long>(status.files_done));
-    json_add_uint64(json, "bytes_done", status.bytes_done);
-    json_add_uint64(json, "bytes_sent", status.bytes_sent);
-    json_add_uint64(json, "estimated_archive_bytes",
-                    status.estimated_archive_bytes);
-    json += '}';
+    append_storage_archive_status(json, status);
     if (json.overflowed()) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"status_alloc\"}");
         return;
     }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
+
+    AsyncResponseStream *response = nullptr;
+    if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
     request->send(response);
 }
 
@@ -1227,6 +1357,8 @@ void StorageHttpController::send_storage_archive_download(
         request->send(409, "application/json", body);
         return;
     }
+    request_operation_snapshot();
+
     if (archive_size > static_cast<uint64_t>(SIZE_MAX)) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"archive_too_large\"}");
@@ -1261,7 +1393,8 @@ void StorageHttpController::send_storage_archive_download(
     pending_archive_download_ = std::move(pending);
 }
 
-void StorageHttpController::send_storage_delete_start(AsyncWebServerRequest *request) const {
+void StorageHttpController::send_storage_delete_start(
+    AsyncWebServerRequest *request) {
     if (!storage_delete_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"delete_unavailable\"}");
@@ -1296,10 +1429,12 @@ void StorageHttpController::send_storage_delete_start(AsyncWebServerRequest *req
         return;
     }
 
+    request_operation_snapshot();
     send_storage_job_queued(request, id);
 }
 
-void StorageHttpController::send_storage_delete_status(AsyncWebServerRequest *request) const {
+void StorageHttpController::send_storage_delete_status(
+    AsyncWebServerRequest *request) const {
     if (!storage_delete_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"delete_unavailable\"}");
@@ -1313,35 +1448,19 @@ void StorageHttpController::send_storage_delete_status(AsyncWebServerRequest *re
     }
     LargeTextBuffer json;
     json.reserve(WEB_JSON_RESERVE_SMALL);
-    json = "{";
-    json_add_bool(json, "ok", true, false);
-    json_add_string(json, "state", storage_delete_state_name(status.state));
-    json_add_int(json, "id", static_cast<long>(status.id));
-    json_add_string(json, "base", status.base_path);
-    json_add_string(json, "error", status.error);
-    json_add_int(json, "roots", static_cast<long>(status.roots));
-    json_add_int(json, "roots_done", static_cast<long>(status.roots_done));
-    json_add_int(json,
-                 "files_deleted",
-                 static_cast<long>(status.files_deleted));
-    json_add_int(json,
-                 "dirs_deleted",
-                 static_cast<long>(status.dirs_deleted));
-    json += '}';
+    append_storage_delete_status(json, status);
     if (json.overflowed()) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"status_alloc\"}");
         return;
     }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
+
+    AsyncResponseStream *response = nullptr;
+    if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
     request->send(response);
 }
 

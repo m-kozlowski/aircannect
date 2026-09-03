@@ -122,9 +122,10 @@
     let storageLimit = 64;
     let storageNextOffset = null;
     let storageListRequestSeq = 0;
-    let storageArchivePollTimer = null;
+    let storageOperationData = null;
+    let storageArchiveJobId = 0;
     let storageArchiveDownloadStartedId = 0;
-    let storageDeletePollTimer = null;
+    let storageDeleteJobId = 0;
     let storageEntries = [];
     let storageSelectedNames = new Set();
     let storageArchiveBusy = false;

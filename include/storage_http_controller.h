@@ -3,10 +3,12 @@
 #include <atomic>
 #include <memory>
 #include <stddef.h>
+#include <stdint.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 #include "http_route_module.h"
+#include "large_text_buffer.h"
 #include "runtime_snapshots.h"
 
 class AsyncWebServerRequest;
@@ -37,20 +39,28 @@ public:
 
     void publish_activity(const ActivitySnapshot &activity);
 
+    uint32_t operation_snapshot_revision() const {
+        return operation_snapshot_revision_;
+    }
+    bool copy_operation_snapshot(LargeTextBuffer &out,
+                                 uint32_t &revision) const;
+
 private:
     void poll_file_log_tail();
     void poll_archive_download();
     void poll_storage_rename();
+    void request_operation_snapshot();
+    bool publish_operation_snapshot_if_needed(bool force = false);
 
     // storage browser and maintenance
     void send_storage_list(AsyncWebServerRequest *request) const;
     void send_storage_download(AsyncWebServerRequest *request) const;
     void send_storage_rename(AsyncWebServerRequest *request);
     void send_file_log_tail(AsyncWebServerRequest *request, size_t lines);
-    void send_storage_archive_start(AsyncWebServerRequest *request) const;
+    void send_storage_archive_start(AsyncWebServerRequest *request);
     void send_storage_archive_status(AsyncWebServerRequest *request) const;
     void send_storage_archive_download(AsyncWebServerRequest *request);
-    void send_storage_delete_start(AsyncWebServerRequest *request) const;
+    void send_storage_delete_start(AsyncWebServerRequest *request);
     void send_storage_delete_status(AsyncWebServerRequest *request) const;
 
     StorageReadPort *storage_read_ = nullptr;
@@ -68,6 +78,20 @@ private:
     std::unique_ptr<PendingStorageRename> pending_storage_rename_;
     uint32_t storage_rename_generation_ = 0;
 
+    // Archive and delete status publication
+    static constexpr uint32_t OperationSnapshotActiveIntervalMs = 500;
+    static constexpr uint32_t OperationSnapshotIdleIntervalMs = 3000;
+    LargeTextBuffer operation_snapshot_json_;
+    LargeTextBuffer operation_snapshot_build_json_;
+    mutable StaticSemaphore_t operation_snapshot_mutex_storage_ = {};
+    mutable SemaphoreHandle_t operation_snapshot_mutex_ = nullptr;
+    std::atomic<bool> operation_snapshot_requested_{false};
+    uint32_t operation_snapshot_revision_ = 0;
+    uint32_t next_operation_snapshot_ms_ = 0;
+    bool operation_snapshot_active_ = false;
+    bool operation_snapshot_initialized_ = false;
+
+    // Request admission
     mutable StaticSemaphore_t job_mutex_storage_ = {};
     mutable SemaphoreHandle_t job_mutex_ = nullptr;
     std::atomic<bool> therapy_active_{false};

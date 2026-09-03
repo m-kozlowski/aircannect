@@ -1276,53 +1276,61 @@
       return state;
     }
 
-    async function storagePollArchive(id) {
-      try {
-        const response = await fetch("/api/storage/archive/status", {cache: "no-store"});
-        const text = await response.text();
-        if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        const data = JSON.parse(text);
-        const state = data.state || "unknown";
+    function storageApplyArchiveStatus(data) {
+      const id = Number(storageArchiveJobId);
+      if (!storageArchiveBusy || !id || !data) return;
 
-        if (state === "idle" &&
-            Number(storageArchiveDownloadStartedId) === Number(id)) {
-          clearInterval(storageArchivePollTimer);
-          storageArchivePollTimer = null;
-          storageArchiveDownloadStartedId = 0;
-          storageArchiveSetBusy(false);
-          msg("storageMsg", "Archive download complete", true, false);
-          return true;
-        }
-        if (Number(data.id) !== Number(id)) return false;
-
-        msg("storageMsg", storageArchiveStatusText(data), state !== "error", state === "error");
-        if (state === "ready") {
-          if (Number(storageArchiveDownloadStartedId) !== Number(id)) {
-            storageArchiveDownloadStartedId = Number(id);
-            storageArchiveDownload(id);
-          }
-          return false;
-        } else if (state === "error" || state === "idle") {
-          clearInterval(storageArchivePollTimer);
-          storageArchivePollTimer = null;
-          storageArchiveDownloadStartedId = 0;
-          storageArchiveSetBusy(false);
-          return true;
-        }
-        return false;
-      } catch (error) {
-        clearInterval(storageArchivePollTimer);
-        storageArchivePollTimer = null;
+      const state = data.state || "unknown";
+      if (state === "idle" &&
+          Number(storageArchiveDownloadStartedId) === id) {
+        storageArchiveJobId = 0;
         storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
-        msg("storageMsg", error.message, false, true);
-        return true;
+        msg("storageMsg", "Archive download complete", true, false);
+        return;
+      }
+      if (Number(data.id) !== id) return;
+
+      msg("storageMsg", storageArchiveStatusText(data),
+        state !== "error", state === "error");
+      if (state === "ready") {
+        if (Number(storageArchiveDownloadStartedId) !== id) {
+          storageArchiveDownloadStartedId = id;
+          storageArchiveDownload(id);
+        }
+      } else if (state === "error" || state === "idle") {
+        storageArchiveJobId = 0;
+        storageArchiveDownloadStartedId = 0;
+        storageArchiveSetBusy(false);
       }
     }
 
+    function storageApplyDeleteStatus(data) {
+      const id = Number(storageDeleteJobId);
+      if (!storageDeleteBusy || !id || !data || Number(data.id) !== id) return;
+
+      const state = data.state || "unknown";
+      msg("storageMsg", storageDeleteStatusText(data),
+        state !== "error", state === "error");
+      if (state === "done") {
+        storageDeleteJobId = 0;
+        storageDeleteSetBusy(false);
+        storageClearSelection();
+        loadStorageList(true);
+      } else if (state === "error" || state === "idle") {
+        storageDeleteJobId = 0;
+        storageDeleteSetBusy(false);
+      }
+    }
+
+    function applyStorageOperationSnapshot(data) {
+      storageOperationData = data;
+      storageApplyArchiveStatus(data && data.archive);
+      storageApplyDeleteStatus(data && data.delete);
+    }
+
     async function storageStartArchive(url, options) {
-      if (storageArchivePollTimer) clearInterval(storageArchivePollTimer);
-      storageArchivePollTimer = null;
+      storageArchiveJobId = 0;
       storageArchiveDownloadStartedId = 0;
       storageArchiveSetBusy(true);
       msg("storageMsg", "Starting archive", true, false);
@@ -1336,11 +1344,11 @@
         const data = JSON.parse(text);
         const id = Number(data.id);
         if (!id) throw new Error("bad_archive_id");
-        const done = await storagePollArchive(id);
-        if (!done) {
-          storageArchivePollTimer = setInterval(() => storagePollArchive(id), 1000);
-        }
+        storageArchiveJobId = id;
+        applyStorageOperationSnapshot(storageOperationData);
       } catch (error) {
+        storageArchiveJobId = 0;
+        storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
         msg("storageMsg", error.message, false, true);
       }
@@ -1381,38 +1389,6 @@
       return state;
     }
 
-    async function storagePollDelete(id) {
-      try {
-        const response = await fetch("/api/storage/delete/status", {cache: "no-store"});
-        const text = await response.text();
-        if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        const data = JSON.parse(text);
-        if (Number(data.id) !== Number(id)) return false;
-        const state = data.state || "unknown";
-        msg("storageMsg", storageDeleteStatusText(data), state !== "error", state === "error");
-        if (state === "done") {
-          clearInterval(storageDeletePollTimer);
-          storageDeletePollTimer = null;
-          storageDeleteSetBusy(false);
-          storageClearSelection();
-          loadStorageList(true);
-          return true;
-        } else if (state === "error" || state === "idle") {
-          clearInterval(storageDeletePollTimer);
-          storageDeletePollTimer = null;
-          storageDeleteSetBusy(false);
-          return true;
-        }
-        return false;
-      } catch (error) {
-        clearInterval(storageDeletePollTimer);
-        storageDeletePollTimer = null;
-        storageDeleteSetBusy(false);
-        msg("storageMsg", error.message, false, true);
-        return true;
-      }
-    }
-
     async function storageDeleteSelected() {
       const selected = storageEntries
         .filter((entry) => entry && storageSelectedNames.has(entry.name))
@@ -1422,8 +1398,7 @@
         return;
       }
       if (!confirm("Delete selected files and folders recursively?")) return;
-      if (storageDeletePollTimer) clearInterval(storageDeletePollTimer);
-      storageDeletePollTimer = null;
+      storageDeleteJobId = 0;
       storageDeleteSetBusy(true);
       msg("storageMsg", "Starting delete", true, false);
       try {
@@ -1438,11 +1413,10 @@
         const data = JSON.parse(text);
         const id = Number(data.id);
         if (!id) throw new Error("bad_delete_id");
-        const done = await storagePollDelete(id);
-        if (!done) {
-          storageDeletePollTimer = setInterval(() => storagePollDelete(id), 1000);
-        }
+        storageDeleteJobId = id;
+        applyStorageOperationSnapshot(storageOperationData);
       } catch (error) {
+        storageDeleteJobId = 0;
         storageDeleteSetBusy(false);
         msg("storageMsg", error.message, false, true);
       }
