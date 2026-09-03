@@ -227,6 +227,113 @@
       }
     }
 
+    function appendReleaseNotesInline(parent, value) {
+      const token = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+      let offset = 0;
+      let match;
+      while ((match = token.exec(value)) !== null) {
+        parent.append(document.createTextNode(value.slice(offset, match.index)));
+
+        const element = document.createElement(
+          match[0][0] === "`" ? "code" : "strong");
+        const trim = match[0][0] === "`" ? 1 : 2;
+        element.textContent = match[0].slice(trim, -trim);
+        parent.append(element);
+        offset = token.lastIndex;
+      }
+      parent.append(document.createTextNode(value.slice(offset)));
+    }
+
+    function renderReleaseNotesMarkdown(container, markdown) {
+      container.replaceChildren();
+      const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+      let paragraph = [];
+      let list = null;
+      let listItem = null;
+      let listParagraph = [];
+      let code = null;
+
+      const appendParagraph = (parent, values) => {
+        if (!values.length) return;
+        const element = document.createElement("p");
+        appendReleaseNotesInline(element, values.join(" "));
+        parent.append(element);
+        values.length = 0;
+      };
+      const closeList = () => {
+        if (listItem) appendParagraph(listItem, listParagraph);
+        list = null;
+        listItem = null;
+      };
+
+      const appendCode = () => {
+        const pre = document.createElement("pre");
+        const element = document.createElement("code");
+        element.textContent = code.join("\n");
+        pre.append(element);
+        container.append(pre);
+        code = null;
+      };
+
+      for (const line of lines) {
+        if (code !== null) {
+          if (line.startsWith("```")) appendCode();
+          else code.push(line);
+          continue;
+        }
+        if (line.startsWith("```")) {
+          appendParagraph(container, paragraph);
+          closeList();
+          code = [];
+          continue;
+        }
+
+        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          appendParagraph(container, paragraph);
+          closeList();
+          const element = document.createElement("h" + heading[1].length);
+          appendReleaseNotesInline(element, heading[2]);
+          container.append(element);
+          continue;
+        }
+
+        const item = line.match(/^-\s+(.+)$/);
+        if (item) {
+          appendParagraph(container, paragraph);
+          if (listItem) appendParagraph(listItem, listParagraph);
+          if (!list) {
+            list = document.createElement("ul");
+            container.append(list);
+          }
+          listItem = document.createElement("li");
+          appendReleaseNotesInline(listItem, item[1]);
+          list.append(listItem);
+          continue;
+        }
+
+        if (listItem && /^\s{2,}\S/.test(line)) {
+          listParagraph.push(line.trim());
+          continue;
+        }
+        if (!line.trim()) {
+          appendParagraph(container, paragraph);
+          if (listItem) appendParagraph(listItem, listParagraph);
+          continue;
+        }
+
+        closeList();
+        paragraph.push(line.trim());
+      }
+
+      appendParagraph(container, paragraph);
+      closeList();
+      if (code !== null) appendCode();
+      if (!container.childNodes.length) {
+        container.textContent = "No release notes were provided.";
+      }
+    }
+
     async function otaShowReleaseNotes() {
       const dialog = document.getElementById("otaReleaseNotesDialog");
       const title = document.getElementById("otaReleaseNotesTitle");
@@ -242,7 +349,7 @@
       try {
         const response = await AirCANnect.http.requestOk(
           "/api/ota/release-notes", {cache: "no-store"});
-        text.textContent = await response.text();
+        renderReleaseNotesMarkdown(text, await response.text());
       } catch (error) {
         text.textContent = "Release notes could not be loaded: " +
           error.message;
