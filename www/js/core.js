@@ -87,6 +87,7 @@
         loadStatus();
         loadEdfOverview();
         loadSmbSyncStatus();
+        loadSleepHqSyncStatus();
       }
       if (pane === "storage") {
         loadStorageList(true);

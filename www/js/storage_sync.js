@@ -967,10 +967,17 @@
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
+        const active = smbSyncStatusActive(data);
         smbSyncEnabled = !!data.enabled;
         smbSyncConfigured = !!data.configured;
         renderSmbSyncStatus(data);
-        smbSyncSetBusy(smbSyncStatusActive(data));
+        smbSyncSetBusy(active);
+        if (active && !smbSyncPollTimer) {
+          smbSyncCompleteMessage = data.pending_reason === "startup_check" ||
+            data.pending_reason === "verify_recent" ?
+            "SMB check complete" : "SMB sync complete";
+          smbSyncPollTimer = setInterval(smbPollSync, 1000);
+        }
         return data;
       } catch (error) {
         smbSyncEnabled = false;
@@ -1012,11 +1019,16 @@
         });
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        const done = await smbPollSync();
-        if (!done) smbSyncPollTimer = setInterval(smbPollSync, 1000);
+        if (!smbSyncPollTimer) {
+          smbSyncPollTimer = setInterval(smbPollSync, 1000);
+        }
       } catch (error) {
+        const current = await loadSmbSyncStatus();
+        if (smbSyncStatusActive(current)) {
+          msg("edfSmbMsg", "SMB operation already in progress", true, false);
+          return;
+        }
         smbSyncSetBusy(false);
-        await loadSmbSyncStatus();
         msg("edfSmbMsg", error.message, false, true);
       }
     }
@@ -1172,9 +1184,15 @@
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
+        const active = sleepHqSyncStatusActive(data);
         sleepHqSyncConfigured = !!data.configured;
         renderSleepHqSyncStatus(data);
-        sleepHqSyncSetBusy(sleepHqSyncStatusActive(data));
+        sleepHqSyncSetBusy(active);
+        if (active && !sleepHqSyncPollTimer) {
+          sleepHqSyncCompleteMessage = data.pending_reason === "startup_check" ?
+            "SleepHQ account check complete" : "SleepHQ sync complete";
+          sleepHqSyncPollTimer = setInterval(sleepHqPollSync, 1000);
+        }
         return data;
       } catch (error) {
         sleepHqSyncConfigured = false;
@@ -1216,13 +1234,17 @@
         });
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        const done = await sleepHqPollSync();
-        if (!done) {
+        if (!sleepHqSyncPollTimer) {
           sleepHqSyncPollTimer = setInterval(sleepHqPollSync, 1000);
         }
       } catch (error) {
+        const current = await loadSleepHqSyncStatus();
+        if (sleepHqSyncStatusActive(current)) {
+          msg("edfSleepHqMsg", "SleepHQ operation already in progress",
+            true, false);
+          return;
+        }
         sleepHqSyncSetBusy(false);
-        await loadSleepHqSyncStatus();
         msg("edfSleepHqMsg", error.message, false, true);
       }
     }
