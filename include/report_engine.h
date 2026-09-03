@@ -88,6 +88,7 @@ public:
     size_t cancel_background();
     void clear();
 
+    bool foreground_range_execution_active() const;
     bool poll(uint32_t now_ms, size_t record_budget = 1);
     ReportEngineStatus status() const;
     ReportArtifactAvailability take_available();

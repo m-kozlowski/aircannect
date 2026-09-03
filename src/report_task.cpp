@@ -2746,7 +2746,34 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.finish_built_bundle_cache() || worked;
     if (!runtime.pending_built_bundle) {
-        worked = runtime.engine.poll(now_ms, record_budget) || worked;
+        const bool batch_range_records = record_budget > 1 &&
+            runtime.engine.foreground_range_execution_active();
+
+        if (!batch_range_records) {
+            worked = runtime.engine.poll(
+                now_ms, std::min<size_t>(record_budget, 1)) || worked;
+        } else {
+#ifdef ARDUINO
+            const uint32_t slice_started_us = micros();
+#endif
+            for (size_t record = 0; record < record_budget; ++record) {
+                const bool engine_worked = runtime.engine.poll(now_ms, 1);
+                worked = engine_worked || worked;
+                if (!engine_worked ||
+                    !runtime.engine.foreground_range_execution_active()) {
+                    break;
+                }
+
+#ifdef ARDUINO
+                const uint32_t elapsed_us =
+                    static_cast<uint32_t>(micros() - slice_started_us);
+                if (elapsed_us >=
+                    AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS * 1000UL) {
+                    break;
+                }
+#endif
+            }
+        }
     }
 
     std::shared_ptr<const ReportArtifactBundle> built_bundle =
@@ -2798,7 +2825,8 @@ void ReportTask::run() {
     runtime_->task_started = true;
     runtime_->publish_status();
     for (;;) {
-        const bool worked = step(millis(), 1);
+        const bool worked = step(
+            millis(), AC_REPORT_RANGE_PLOT_POLL_CHUNK_CAP);
         const ReportTaskControlSnapshot control = control_snapshot();
         if (worked) {
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));

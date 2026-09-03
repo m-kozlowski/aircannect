@@ -278,6 +278,12 @@ void ReportEngine::clear() {
     last_completion_ = {};
 }
 
+bool ReportEngine::foreground_range_execution_active() const {
+    return phase_ == ActivePhase::Executing &&
+           active_request_.priority == ReportRequestPriority::Foreground &&
+           build_request_.artifact.kind == ReportArtifactKind::RangeTile;
+}
+
 bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
     if (!read_port_ || !assembler_) return false;
 
