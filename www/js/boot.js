@@ -15,7 +15,6 @@
     setInterval(() => {
       if (document.getElementById("p-dash").classList.contains("active")) {
         updateLiveViewState("dash");
-        loadStatus();
       }
       if (document.getElementById("p-oxi").classList.contains("active")) {
         loadOximetrySensors();
