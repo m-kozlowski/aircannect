@@ -56,8 +56,12 @@
       time: 0,
       bps: 0,
     };
-    let resmedRepositoryPollTimer = null;
-    let resmedRepositoryPollDelayMs = 500;
+    let resmedOtaData = null;
+    let resmedOtaSnapshotSerial = 0;
+    const RESMED_OTA_SNAPSHOT_EVENT = "aircannect-resmed-ota-snapshot";
+    let resmedRepositoryCatalogRevision = 0;
+    let resmedRepositoryLoadGeneration = 0;
+    let resmedRepositoryLoaded = false;
     let resmedDirectUploadBusy = false;
     let resmedCanAvailable = true;
     const LIVE_FAST_POINTS = 6000;

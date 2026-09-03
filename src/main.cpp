@@ -1396,7 +1396,11 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] ResMed firmware repository failed to start\n");
     }
-    resmed_firmware_http_controller.begin(resmed_firmware_repository);
+    if (!resmed_firmware_http_controller.begin(
+            resmed_firmware_repository)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] ResMed firmware HTTP controller failed to start\n");
+    }
     if (!resmed_firmware_preparer.begin(StorageService::stream_port(),
                                         StorageService::upload_port(),
                                         StorageService::path_port())) {
@@ -1600,6 +1604,7 @@ void setup() {
                  oximetry_http_controller,
                  settings_http_controller,
                  ota_http_controller,
+                 resmed_firmware_http_controller,
                  live_http_controller, console_router, config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
@@ -1831,6 +1836,7 @@ void loop() {
 
     poll_storage_upload_publication();
     resmed_firmware_repository.poll();
+    resmed_firmware_http_controller.poll();
     drain_can_rx_after("resmed_firmware_repository");
 
     // Web, TCP, and console frontends

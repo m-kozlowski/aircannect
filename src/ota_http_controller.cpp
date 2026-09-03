@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 
+#include <string.h>
 #include <utility>
 
 #include "arduino_ota_source.h"
@@ -178,14 +179,18 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
 template <typename JsonOut>
 void build_resmed_ota_json(JsonOut &json,
                            const ResmedFirmwarePreparer &preparer,
-                           const ResmedOtaManager &manager) {
+                           const ResmedOtaManager &manager,
+                           bool *active_out = nullptr) {
     const ResmedOtaStatus status = manager.status();
     const ResmedFirmwarePrepareStatus prepare = preparer.status();
+    const bool active = manager.active() || preparer.active();
+    if (active_out) *active_out = active;
+
     json = "{";
     json_add_string(json, "phase", resmed_ota_phase_name(status.phase), false);
     json_add_string(json, "operation",
                     resmed_ota_operation_name(status.operation));
-    json_add_bool(json, "active", manager.active() || preparer.active());
+    json_add_bool(json, "active", active);
     json_add_bool(json, "confirmation_required",
                   status.confirmation_required);
     json_add_bool(json, "recovery_available", status.recovery_available);
@@ -265,12 +270,16 @@ bool OtaHttpController::begin(FirmwareInstaller &installer,
     }
     if (!commands_.begin() || !snapshot_mutex_ ||
         !snapshot_json_.reserve(AC_WEB_OTA_JSON_RESERVE) ||
-        !snapshot_build_json_.reserve(AC_WEB_OTA_JSON_RESERVE)) {
+        !snapshot_build_json_.reserve(AC_WEB_OTA_JSON_RESERVE) ||
+        !resmed_snapshot_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE) ||
+        !resmed_snapshot_build_json_.reserve(
+            AC_WEB_RESMED_OTA_JSON_RESERVE)) {
         return false;
     }
 
     publish_snapshot_if_needed(true);
-    return snapshot_initialized_;
+    publish_resmed_snapshot_if_needed(true);
+    return snapshot_initialized_ && resmed_snapshot_initialized_;
 }
 
 void OtaHttpController::register_routes(AsyncWebServer &server) {
@@ -663,10 +672,14 @@ void OtaHttpController::poll() {
         Command command;
         if (!commands_.pop(command)) break;
 
+        const bool publish_after =
+            command.kind != CommandKind::ResmedBlock;
         execute(command);
+        if (publish_after) request_resmed_snapshot();
     }
 
     publish_snapshot_if_needed();
+    publish_resmed_snapshot_if_needed();
 }
 
 bool OtaHttpController::copy_snapshot(
@@ -686,8 +699,28 @@ bool OtaHttpController::copy_snapshot(
     return copied;
 }
 
+bool OtaHttpController::copy_resmed_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    if (!snapshot_mutex_ ||
+        xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    out.clear();
+    const bool copied = resmed_snapshot_json_.length() &&
+        out.append(resmed_snapshot_json_.c_str(),
+                   resmed_snapshot_json_.length());
+    if (copied) revision = resmed_snapshot_revision_;
+    xSemaphoreGive(snapshot_mutex_);
+    return copied;
+}
+
 void OtaHttpController::request_snapshot() {
     snapshot_requested_.store(true, std::memory_order_release);
+}
+
+void OtaHttpController::request_resmed_snapshot() {
+    resmed_snapshot_requested_.store(true, std::memory_order_release);
 }
 
 void OtaHttpController::publish_snapshot_if_needed(bool force) {
@@ -730,6 +763,49 @@ void OtaHttpController::publish_snapshot_if_needed(bool force) {
     snapshot_initialized_ = true;
     snapshot_revision_++;
     if (snapshot_revision_ == 0) snapshot_revision_++;
+    xSemaphoreGive(snapshot_mutex_);
+}
+
+void OtaHttpController::publish_resmed_snapshot_if_needed(bool force) {
+    if (!resmed_preparer_ || !resmed_ota_) return;
+
+    const uint32_t now = millis();
+    const bool requested =
+        resmed_snapshot_requested_.exchange(false, std::memory_order_acq_rel);
+    if (!force && !requested &&
+        static_cast<int32_t>(now - next_resmed_snapshot_ms_) < 0) {
+        return;
+    }
+
+    bool active = false;
+    resmed_snapshot_build_json_.clear();
+    build_resmed_ota_json(resmed_snapshot_build_json_, *resmed_preparer_,
+                          *resmed_ota_, &active);
+    next_resmed_snapshot_ms_ = now +
+        (active ? ResmedSnapshotActiveIntervalMs
+                : ResmedSnapshotIdleIntervalMs);
+    if (resmed_snapshot_build_json_.overflowed()) {
+        Log::logf(CAT_OTA, LOG_WARN,
+                  "ResMed OTA status snapshot allocation failed\n");
+        return;
+    }
+    if (xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
+        request_resmed_snapshot();
+        return;
+    }
+
+    const bool changed =
+        resmed_snapshot_json_.length() !=
+            resmed_snapshot_build_json_.length() ||
+        memcmp(resmed_snapshot_json_.c_str(),
+               resmed_snapshot_build_json_.c_str(),
+               resmed_snapshot_json_.length()) != 0;
+    if (force || requested || !resmed_snapshot_initialized_ || changed) {
+        resmed_snapshot_json_.swap(resmed_snapshot_build_json_);
+        resmed_snapshot_initialized_ = true;
+        resmed_snapshot_revision_++;
+        if (resmed_snapshot_revision_ == 0) resmed_snapshot_revision_++;
+    }
     xSemaphoreGive(snapshot_mutex_);
 }
 

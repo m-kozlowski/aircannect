@@ -49,6 +49,10 @@ void print_web_memory_detail(Print &out, WebUI &web_ui) {
     print_web_buffer_memory(out, "oximetry", web.oximetry, total_capacity);
     print_web_buffer_memory(out, "settings", web.settings, total_capacity);
     print_web_buffer_memory(out, "ota", web.ota, total_capacity);
+    print_web_buffer_memory(out, "resmed_ota", web.resmed_ota,
+                            total_capacity);
+    print_web_buffer_memory(out, "resmed_repository",
+                            web.resmed_repository, total_capacity);
     print_web_buffer_memory(out, "stream", web.stream, total_capacity);
     print_web_buffer_memory(out, "console", web.console, total_capacity);
     print_web_buffer_memory(out, "live", web.live, total_capacity);

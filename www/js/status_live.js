@@ -1136,6 +1136,21 @@
           applyOtaSnapshot(JSON.parse(event.data), true);
         } catch (error) {}
       });
+      evtSrc.addEventListener("resmed_ota", (event) => {
+        try {
+          applyResmedOtaSnapshot(JSON.parse(event.data), true);
+        } catch (error) {}
+      });
+      evtSrc.addEventListener("resmed_repository", (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          renderResmedRepositoryStatus(data);
+          if (resmedRepositoryLoaded && data.state === "ready" &&
+              Number(data.revision) !== resmedRepositoryCatalogRevision) {
+            loadResmedRepository(false);
+          }
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });

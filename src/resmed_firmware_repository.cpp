@@ -42,7 +42,11 @@ bool ResmedFirmwareRepository::begin(StorageScanPort &scan_port,
     if (!mutex_) {
         mutex_ = xSemaphoreCreateMutexStatic(&mutex_storage_);
     }
-    return mutex_ != nullptr;
+    if (!mutex_) return false;
+
+    status_.generation = 1;
+    status_generation_.store(status_.generation, std::memory_order_release);
+    return true;
 }
 
 bool ResmedFirmwareRepository::lock(uint32_t timeout_ms) const {
@@ -60,6 +64,12 @@ uint32_t ResmedFirmwareRepository::next_generation() {
     return generation_;
 }
 
+void ResmedFirmwareRepository::advance_status_generation_locked() {
+    status_.generation++;
+    if (status_.generation == 0) status_.generation++;
+    status_generation_.store(status_.generation, std::memory_order_release);
+}
+
 void ResmedFirmwareRepository::request_refresh_locked(bool foreground) {
     refresh_generation_++;
     if (refresh_generation_ == 0) refresh_generation_++;
@@ -68,6 +78,7 @@ void ResmedFirmwareRepository::request_refresh_locked(bool foreground) {
     foreground_refresh_ = foreground_refresh_ || foreground;
     retry_at_ms_ = 0;
     status_.refresh_pending = true;
+    advance_status_generation_locked();
 }
 
 bool ResmedFirmwareRepository::request_refresh(bool foreground) {
@@ -106,6 +117,7 @@ bool ResmedFirmwareRepository::consume_file_published(const char *path) {
     retry_at_ms_ = 0;
     status_.state = ResmedFirmwareRepositoryState::Inspecting;
     status_.refresh_pending = true;
+    advance_status_generation_locked();
     unlock();
     return true;
 }
@@ -122,6 +134,7 @@ bool ResmedFirmwareRepository::request_remove(const char *path) {
     remove_requested_ = true;
     retry_at_ms_ = 0;
     status_.state = ResmedFirmwareRepositoryState::Removing;
+    advance_status_generation_locked();
     unlock();
     return true;
 }
@@ -162,6 +175,7 @@ void ResmedFirmwareRepository::publish_status(
         status_.entries = snapshot_->size();
         status_.truncated = snapshot_->truncated();
     }
+    advance_status_generation_locked();
     unlock();
 }
 
@@ -182,6 +196,7 @@ void ResmedFirmwareRepository::fail_action(const char *error) {
         status_.refresh_pending =
             refresh_requested_ || publication_phase_ != PublicationPhase::None;
         copy_cstr(status_.error, sizeof(status_.error), reason);
+        advance_status_generation_locked();
         unlock();
     }
 
@@ -312,6 +327,7 @@ void ResmedFirmwareRepository::poll_completion() {
         status_.truncated = next->truncated();
         status_.refresh_pending = refresh_requested_;
         status_.error[0] = '\0';
+        advance_status_generation_locked();
         unlock();
         return;
     }

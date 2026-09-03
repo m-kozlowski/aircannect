@@ -18,6 +18,7 @@
 #include "memory_manager.h"
 #include "oximetry_http_controller.h"
 #include "ota_http_controller.h"
+#include "resmed_firmware_http_controller.h"
 #include "rpc_transport_ports.h"
 #include "settings_http_controller.h"
 #include "status_http_controller.h"
@@ -60,6 +61,7 @@ bool WebUI::begin(StatusHttpController &status,
                   OximetryHttpController &oximetry_http,
                   SettingsHttpController &settings_http,
                   OtaHttpController &ota_http,
+                  ResmedFirmwareHttpController &resmed_firmware_http,
                   LiveHttpController &live,
                   ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
@@ -75,6 +77,7 @@ bool WebUI::begin(StatusHttpController &status,
     oximetry_ = &oximetry_http;
     settings_ = &settings_http;
     ota_ = &ota_http;
+    resmed_firmware_ = &resmed_firmware_http;
     live_ = &live;
     console_router_ = &console_router;
 
@@ -141,6 +144,12 @@ void WebUI::reserve_cached_json() {
     next_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
     cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
     next_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
+    cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
+    next_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
+    cached_resmed_repository_json_.reserve(
+        AC_WEB_RESMED_REPOSITORY_JSON_RESERVE);
+    next_resmed_repository_json_.reserve(
+        AC_WEB_RESMED_REPOSITORY_JSON_RESERVE);
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -192,6 +201,8 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.oximetry = capture(cached_oximetry_json_);
     out.settings = capture(cached_settings_json_);
     out.ota = capture(cached_ota_json_);
+    out.resmed_ota = capture(cached_resmed_ota_json_);
+    out.resmed_repository = capture(cached_resmed_repository_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -255,6 +266,10 @@ void WebUI::stop() {
     sent_settings_revision_ = 0;
     observed_ota_revision_ = 0;
     sent_ota_revision_ = 0;
+    observed_resmed_ota_revision_ = 0;
+    sent_resmed_ota_revision_ = 0;
+    observed_resmed_repository_revision_ = 0;
+    sent_resmed_repository_revision_ = 0;
     observed_live_generation_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
@@ -266,6 +281,7 @@ void WebUI::stop() {
     oximetry_ = nullptr;
     settings_ = nullptr;
     ota_ = nullptr;
+    resmed_firmware_ = nullptr;
     live_ = nullptr;
     console_router_ = nullptr;
     started_ = false;
@@ -296,6 +312,15 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     }
     if (ota_ && observed_ota_revision_ != ota_->snapshot_revision()) {
         mark_snapshots_dirty(SNAPSHOT_OTA);
+    }
+    if (ota_ && observed_resmed_ota_revision_ !=
+                    ota_->resmed_snapshot_revision()) {
+        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
+    }
+    if (resmed_firmware_ &&
+        observed_resmed_repository_revision_ !=
+            resmed_firmware_->status_snapshot_revision()) {
+        mark_snapshots_dirty(SNAPSHOT_RESMED_REPOSITORY);
     }
 
     if (console_router_ && web_console_.pending_output(*console_router_)) {
@@ -403,6 +428,32 @@ void WebUI::poll(PollCheckpoint checkpoint) {
                 sse_backpressure = true;
             } else if (ota_result == SseSendResult::Sent) {
                 sent_ota_revision_ = observed_ota_revision_;
+            }
+        }
+
+        if (cached_resmed_ota_json_.length() &&
+            sent_resmed_ota_revision_ != observed_resmed_ota_revision_) {
+            const SseSendResult result = send_sse_to_clients(
+                cached_resmed_ota_json_.c_str(), "resmed_ota", event_id,
+                false);
+            if (result == SseSendResult::Failed) {
+                sse_backpressure = true;
+            } else if (result == SseSendResult::Sent) {
+                sent_resmed_ota_revision_ = observed_resmed_ota_revision_;
+            }
+        }
+
+        if (cached_resmed_repository_json_.length() &&
+            sent_resmed_repository_revision_ !=
+                observed_resmed_repository_revision_) {
+            const SseSendResult result = send_sse_to_clients(
+                cached_resmed_repository_json_.c_str(),
+                "resmed_repository", event_id, false);
+            if (result == SseSendResult::Failed) {
+                sse_backpressure = true;
+            } else if (result == SseSendResult::Sent) {
+                sent_resmed_repository_revision_ =
+                    observed_resmed_repository_revision_;
             }
         }
 
@@ -841,7 +892,8 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
     if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE |
-                SNAPSHOT_OXIMETRY | SNAPSHOT_SETTINGS | SNAPSHOT_OTA)) {
+                SNAPSHOT_OXIMETRY | SNAPSHOT_SETTINGS | SNAPSHOT_OTA |
+                SNAPSHOT_RESMED_OTA | SNAPSHOT_RESMED_REPOSITORY)) {
         request_sse_push();
     }
 }
@@ -958,6 +1010,8 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     next_oximetry_json_.clear();
     next_settings_json_.clear();
     next_ota_json_.clear();
+    next_resmed_ota_json_.clear();
+    next_resmed_repository_json_.clear();
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -1019,6 +1073,27 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.ota_copy");
     }
+    if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
+        uint32_t revision = observed_resmed_ota_revision_;
+        if (ota_ && ota_->copy_resmed_snapshot(next_resmed_ota_json_,
+                                               revision)) {
+            observed_resmed_ota_revision_ = revision;
+            completed_mask |= SNAPSHOT_RESMED_OTA;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.resmed_ota_copy");
+    }
+    if (rebuild_mask & SNAPSHOT_RESMED_REPOSITORY) {
+        uint32_t revision = observed_resmed_repository_revision_;
+        if (resmed_firmware_ &&
+            resmed_firmware_->copy_status_snapshot(
+                next_resmed_repository_json_, revision)) {
+            observed_resmed_repository_revision_ = revision;
+            completed_mask |= SNAPSHOT_RESMED_REPOSITORY;
+        }
+        if (checkpoint) {
+            checkpoint("web_ui.snapshots.resmed_repository_copy");
+        }
+    }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
@@ -1044,6 +1119,13 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     }
     if (completed_mask & SNAPSHOT_OTA) {
         cached_ota_json_.swap(next_ota_json_);
+    }
+    if (completed_mask & SNAPSHOT_RESMED_OTA) {
+        cached_resmed_ota_json_.swap(next_resmed_ota_json_);
+    }
+    if (completed_mask & SNAPSHOT_RESMED_REPOSITORY) {
+        cached_resmed_repository_json_.swap(
+            next_resmed_repository_json_);
     }
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;

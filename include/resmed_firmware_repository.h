@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <memory>
@@ -26,6 +27,7 @@ enum class ResmedFirmwareRepositoryState : uint8_t {
 
 struct ResmedFirmwareRepositoryStatus {
     ResmedFirmwareRepositoryState state = ResmedFirmwareRepositoryState::Idle;
+    uint32_t generation = 0;
     uint32_t revision = 0;
     size_t entries = 0;
     bool truncated = false;
@@ -51,6 +53,9 @@ public:
     void publish_activity(const ActivitySnapshot &activity);
 
     ResmedFirmwareRepositoryStatus status() const;
+    uint32_t status_generation() const {
+        return status_generation_.load(std::memory_order_acquire);
+    }
     std::shared_ptr<const ResmedFirmwareCatalogSnapshot> snapshot() const;
 
 private:
@@ -81,6 +86,7 @@ private:
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     uint32_t next_generation();
+    void advance_status_generation_locked();
     void request_refresh_locked(bool foreground);
 
     void poll_completion();
@@ -99,6 +105,7 @@ private:
     mutable StaticSemaphore_t mutex_storage_ = {};
     mutable SemaphoreHandle_t mutex_ = nullptr;
     ResmedFirmwareRepositoryStatus status_;
+    std::atomic<uint32_t> status_generation_{0};
     std::shared_ptr<const ResmedFirmwareCatalogSnapshot> snapshot_;
     ActivitySnapshot activity_;
     bool refresh_requested_ = true;

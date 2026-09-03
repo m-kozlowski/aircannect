@@ -865,27 +865,27 @@
       return data;
     }
 
-    function waitForOtaSnapshot(predicate, afterSerial, timeoutMs,
-                                timeoutMessage) {
+    function waitForSnapshot(eventName, readSnapshot, predicate, afterSerial,
+                             timeoutMs, timeoutMessage) {
       return new Promise((resolve, reject) => {
         let timeout = null;
-        const finish = (data) => {
-          if (otaSnapshotSerial <= afterSerial || !data ||
-              !predicate(data)) {
+        const finish = (snapshot) => {
+          if (snapshot.serial <= afterSerial || !snapshot.data ||
+              !predicate(snapshot.data)) {
             return false;
           }
 
-          window.removeEventListener(OTA_SNAPSHOT_EVENT, onUpdate);
+          window.removeEventListener(eventName, onUpdate);
           if (timeout) clearTimeout(timeout);
-          resolve(data);
+          resolve(snapshot.data);
           return true;
         };
-        const onUpdate = (event) => finish(event.detail);
+        const onUpdate = () => finish(readSnapshot());
 
-        if (finish(otaData)) return;
-        window.addEventListener(OTA_SNAPSHOT_EVENT, onUpdate);
+        if (finish(readSnapshot())) return;
+        window.addEventListener(eventName, onUpdate);
         timeout = setTimeout(() => {
-          window.removeEventListener(OTA_SNAPSHOT_EVENT, onUpdate);
+          window.removeEventListener(eventName, onUpdate);
           if (timeoutMessage) {
             reject(new Error(timeoutMessage));
           } else {
@@ -893,6 +893,13 @@
           }
         }, timeoutMs);
       });
+    }
+
+    function waitForOtaSnapshot(predicate, afterSerial, timeoutMs,
+                                timeoutMessage) {
+      return waitForSnapshot(OTA_SNAPSHOT_EVENT,
+        () => ({data: otaData, serial: otaSnapshotSerial}), predicate,
+        afterSerial, timeoutMs, timeoutMessage);
     }
 
     async function loadOta() {
@@ -904,8 +911,12 @@
           applyOtaSnapshot(data, false);
         }
 
+        const resmedEventSerial = resmedOtaSnapshotSerial;
         const resmedResponse = await api("/api/resmed-ota");
-        renderResmedOta(await resmedResponse.json());
+        const resmedData = await resmedResponse.json();
+        if (resmedOtaSnapshotSerial === resmedEventSerial) {
+          applyResmedOtaSnapshot(resmedData, false);
+        }
         loadResmedRepository(true);
       } catch (error) {
         msg("otaMsg", error.message, false);
@@ -1241,6 +1252,35 @@
       return phase;
     }
 
+    function applyResmedOtaSnapshot(data, fromEvent) {
+      resmedOtaData = data;
+      renderResmedOta(data);
+      if (fromEvent) {
+        resmedOtaSnapshotSerial++;
+        window.dispatchEvent(new CustomEvent(
+          RESMED_OTA_SNAPSHOT_EVENT, {detail: data}));
+      }
+      return data;
+    }
+
+    function resmedOtaError(data) {
+      if (data.phase === "error") {
+        return data.last_error || "ResMed OTA failed";
+      }
+      if (data.prepare_state === "error" ||
+          data.prepare_state === "cancelled") {
+        return data.prepare_error || "Image preparation failed";
+      }
+      return "";
+    }
+
+    function waitForResmedOtaSnapshot(predicate, afterSerial, timeoutMs,
+                                      timeoutMessage) {
+      return waitForSnapshot(RESMED_OTA_SNAPSHOT_EVENT,
+        () => ({data: resmedOtaData, serial: resmedOtaSnapshotSerial}),
+        predicate, afterSerial, timeoutMs, timeoutMessage);
+    }
+
     function resmedOtaDumpSavedText(data) {
       const path = String(data.output_path || "");
       const filename = String(data.filename || path.split("/").pop() || "");
@@ -1451,9 +1491,26 @@
       if (add) add.disabled = !!busy;
     }
 
-    function renderResmedRepository(data) {
+    function renderResmedRepositoryStatus(data) {
       up("resmedRepositoryPath", data.directory ||
         "/aircannect/resmed-firmware");
+
+      const refresh = document.getElementById("resmedRepositoryRefreshBtn");
+      if (refresh) {
+        refresh.disabled = !!data.refresh_pending ||
+          ["preparing", "scanning", "inspecting", "storing_bootloader",
+           "removing"].includes(data.state);
+      }
+
+      if (data.error) {
+        msg("resmedRepositoryMsg", data.error, false, true);
+      }
+    }
+
+    function renderResmedRepository(data) {
+      renderResmedRepositoryStatus(data);
+      resmedRepositoryCatalogRevision = Number(data.revision) || 0;
+      resmedRepositoryLoaded = true;
 
       const list = document.getElementById("resmedRepositoryList");
       if (!list) return;
@@ -1530,17 +1587,6 @@
         list.appendChild(row);
       });
 
-      const refresh = document.getElementById("resmedRepositoryRefreshBtn");
-      if (refresh) {
-        refresh.disabled = !!data.refresh_pending ||
-          ["preparing", "scanning", "inspecting", "storing_bootloader",
-           "removing"].includes(
-            data.state);
-      }
-
-      if (data.error) {
-        msg("resmedRepositoryMsg", data.error, false, true);
-      }
     }
 
     async function fetchResmedRepository(refresh) {
@@ -1567,27 +1613,14 @@
     }
 
     async function loadResmedRepository(refresh) {
-      if (resmedRepositoryPollTimer) {
-        clearTimeout(resmedRepositoryPollTimer);
-        resmedRepositoryPollTimer = null;
-      }
-      if (refresh) resmedRepositoryPollDelayMs = 500;
+      const generation = ++resmedRepositoryLoadGeneration;
 
       try {
         const data = await fetchResmedRepository(!!refresh);
+        if (generation !== resmedRepositoryLoadGeneration) return;
         renderResmedRepository(data);
-        if (data.refresh_pending ||
-            ["idle", "preparing", "scanning", "inspecting",
-             "storing_bootloader", "removing"].includes(
-              data.state)) {
-          const delay = resmedRepositoryPollDelayMs;
-          resmedRepositoryPollDelayMs = Math.min(5000, delay * 2);
-          resmedRepositoryPollTimer = setTimeout(
-            () => loadResmedRepository(false), delay);
-        } else {
-          resmedRepositoryPollDelayMs = 500;
-        }
       } catch (error) {
+        if (generation !== resmedRepositoryLoadGeneration) return;
         msg("resmedRepositoryMsg", error.message, false, true);
       }
     }
@@ -1663,7 +1696,6 @@
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Remove failed");
-        await loadResmedRepository(false);
       } catch (error) {
         msg("resmedRepositoryMsg", error.message, false, true);
       }
@@ -1726,58 +1758,53 @@
 
       try {
         msg("resmedRepositoryMsg", "Installing " + name, true, true);
-        await postResmedOta("/api/resmed-ota/install", {
+        const request = await postResmedOta("/api/resmed-ota/install", {
           path,
           filename: name,
           transient: false,
           target,
           transport,
         });
-        await waitResmedOtaStart();
-        await waitResmedOta((data) => data.phase === "complete", 4200);
+        await waitResmedOtaStart(request.eventSerial);
+        await waitResmedOta((data) => data.phase === "complete", 4200,
+          request.eventSerial);
         msg("resmedRepositoryMsg", "Installation complete", true, true);
       } catch (error) {
         msg("resmedRepositoryMsg", error.message, false, true);
       }
     }
 
-    function sleep(ms) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
     async function getResmedOta() {
+      const eventSerial = resmedOtaSnapshotSerial;
       const response = await api("/api/resmed-ota");
       const data = await response.json();
-      renderResmedOta(data);
+      if (resmedOtaSnapshotSerial === eventSerial) {
+        applyResmedOtaSnapshot(data, false);
+      }
       return data;
     }
 
-    async function waitResmedOta(predicate, attempts) {
-      for (let index = 0; index < (attempts || 360); index++) {
-        const data = await getResmedOta();
-        if (data.phase === "error") {
-          throw new Error(data.last_error || "ResMed OTA failed");
-        }
-        if (data.prepare_state === "error" ||
-            data.prepare_state === "cancelled") {
-          throw new Error(data.prepare_error || "Image preparation failed");
-        }
-        if (predicate(data)) return data;
-        await sleep(500);
-      }
-      throw new Error("ResMed OTA timeout");
+    async function waitResmedOta(predicate, attempts, afterSerial) {
+      const data = await waitForResmedOtaSnapshot(
+        (next) => !!resmedOtaError(next) || predicate(next),
+        afterSerial, (attempts || 360) * 500, "ResMed OTA timeout");
+      const error = resmedOtaError(data);
+      if (error) throw new Error(error);
+      return data;
     }
 
-    async function waitResmedOtaStart(attempts) {
-      for (let index = 0; index < (attempts || 20); index++) {
-        const data = await getResmedOta();
-        if (data.active) return data;
-        await sleep(500);
-      }
-      throw new Error("ResMed OTA did not start");
+    async function waitResmedOtaStart(afterSerial, attempts) {
+      const data = await waitForResmedOtaSnapshot(
+        (next) => next.active || !!resmedOtaError(next),
+        afterSerial, (attempts || 20) * 500,
+        "ResMed OTA did not start");
+      const error = resmedOtaError(data);
+      if (error) throw new Error(error);
+      return data;
     }
 
     async function postResmedOta(url, body) {
+      const eventSerial = resmedOtaSnapshotSerial;
       const response = await api(url, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -1788,12 +1815,10 @@
         throw new Error(data.error || data.last_error ||
           ("HTTP " + response.status));
       }
-      if (data.queued || data.result === "queued") {
-        setTimeout(getResmedOta, 300);
-        return data;
+      if (!data.queued && data.result !== "queued") {
+        applyResmedOtaSnapshot(data, false);
       }
-      renderResmedOta(data);
-      return data;
+      return {data, eventSerial};
     }
 
     function resmedDirectUploadProgress(name, committed, total) {
@@ -1857,15 +1882,16 @@
         storageUploadCurrentId = 0;
         storageUploadSetBusy(false);
         resmedDirectUploadBusy = false;
-        await postResmedOta("/api/resmed-ota/install", {
+        const request = await postResmedOta("/api/resmed-ota/install", {
           path: "/aircannect/resmed-ota-input.image",
           filename: file.name,
           transient: true,
           target,
           transport,
         });
-        await waitResmedOtaStart();
-        await waitResmedOta((data) => data.phase === "complete", 4200);
+        await waitResmedOtaStart(request.eventSerial);
+        await waitResmedOta((data) => data.phase === "complete", 4200,
+          request.eventSerial);
         msg("resmedOtaMsg", "Installation complete", true, true);
       } catch (error) {
         msg("resmedOtaMsg", error.message, false, true);
@@ -1874,16 +1900,16 @@
         storageUploadCurrentId = 0;
         storageUploadSetBusy(false);
         resmedDirectUploadBusy = false;
-        setTimeout(getResmedOta, 0);
       }
     }
 
     async function resmedOtaDump() {
       try {
-        await postResmedOta("/api/resmed-ota/dump", {});
-        await waitResmedOtaStart();
+        const request = await postResmedOta("/api/resmed-ota/dump", {});
+        await waitResmedOtaStart(request.eventSerial);
         const result = await waitResmedOta((data) =>
-          data.phase === "complete" || data.confirmation_required, 4200);
+          data.phase === "complete" || data.confirmation_required, 4200,
+          request.eventSerial);
         if (result.confirmation_required) return;
 
         msg("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
@@ -1902,11 +1928,13 @@
       }
 
       try {
-        await postResmedOta("/api/resmed-ota/dump/confirm", {
+        const request = await postResmedOta(
+          "/api/resmed-ota/dump/confirm", {
           confirm: "INSTALL_PATCHED_BOOTLOADER",
         });
         const result = await waitResmedOta(
-          (data) => data.phase === "complete", 4200);
+          (data) => data.phase === "complete", 4200,
+          request.eventSerial);
         msg("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
         loadResmedRepository(true);
       } catch (error) {
@@ -1931,7 +1959,6 @@
         }
         await postResmedOta("/api/resmed-ota/abort", {});
         msg("resmedOtaMsg", "Cancelled", false, true);
-        setTimeout(getResmedOta, 300);
       } catch (error) {
         msg("resmedOtaMsg", error.message, false, true);
       }

@@ -40,6 +40,11 @@ public:
 
     uint32_t snapshot_revision() const { return snapshot_revision_; }
     bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
+    uint32_t resmed_snapshot_revision() const {
+        return resmed_snapshot_revision_;
+    }
+    bool copy_resmed_snapshot(LargeTextBuffer &out,
+                              uint32_t &revision) const;
 
 private:
     enum class CommandKind : uint8_t {
@@ -78,9 +83,13 @@ private:
     void send_queue_result(AsyncWebServerRequest *request, bool queued) const;
     void request_snapshot();
     void publish_snapshot_if_needed(bool force = false);
+    void request_resmed_snapshot();
+    void publish_resmed_snapshot_if_needed(bool force = false);
 
     static constexpr uint32_t SnapshotActiveIntervalMs = 250;
     static constexpr uint32_t SnapshotIdleIntervalMs = 3000;
+    static constexpr uint32_t ResmedSnapshotActiveIntervalMs = 500;
+    static constexpr uint32_t ResmedSnapshotIdleIntervalMs = 3000;
 
     FirmwareInstaller *installer_ = nullptr;
     FirmwareUrlSource *url_source_ = nullptr;
@@ -100,6 +109,13 @@ private:
     uint32_t snapshot_revision_ = 0;
     uint32_t next_snapshot_ms_ = 0;
     bool snapshot_initialized_ = false;
+
+    LargeTextBuffer resmed_snapshot_json_;
+    LargeTextBuffer resmed_snapshot_build_json_;
+    std::atomic<bool> resmed_snapshot_requested_{false};
+    uint32_t resmed_snapshot_revision_ = 0;
+    uint32_t next_resmed_snapshot_ms_ = 0;
+    bool resmed_snapshot_initialized_ = false;
 };
 
 }  // namespace aircannect
