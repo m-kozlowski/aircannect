@@ -365,6 +365,17 @@ bool ota_parse_release_manifest(const char *json,
         return false;
     }
 
+    const char *release_notes_url =
+        root["release_notes_url"].as<const char *>();
+    if (release_notes_url && *release_notes_url &&
+        strlen(release_notes_url) < sizeof(manifest.release_notes_url) &&
+        valid_url_text(release_notes_url)) {
+        snprintf(manifest.release_notes_url,
+                 sizeof(manifest.release_notes_url),
+                 "%s",
+                 release_notes_url);
+    }
+
     JsonObjectConst targets = root["targets"].as<JsonObjectConst>();
     JsonObjectConst target_object = targets[target].as<JsonObjectConst>();
     if (target_object.isNull()) {

@@ -127,6 +127,13 @@
           : "Install update";
         installUpdate.disabled = !data.update_installable || active;
       }
+
+      const releaseNotes = document.getElementById("otaReleaseNotes");
+      if (releaseNotes) {
+        releaseNotes.hidden = !data.update_available ||
+          !data.update_release_notes_available;
+      }
+
       const install = document.getElementById("otaInstall");
       if (install) install.disabled = active;
 
@@ -217,6 +224,28 @@
           button.disabled = !data || !data.update_check_enabled ||
             data.update_check_pending || data.update_check_active;
         }
+      }
+    }
+
+    async function otaShowReleaseNotes() {
+      const dialog = document.getElementById("otaReleaseNotesDialog");
+      const title = document.getElementById("otaReleaseNotesTitle");
+      const text = document.getElementById("otaReleaseNotesText");
+      if (!dialog || !title || !text) return;
+
+      title.textContent = otaData && otaData.update_version
+        ? "Release notes " + otaData.update_version
+        : "Release notes";
+      text.textContent = "Loading...";
+      if (!dialog.open) dialog.showModal();
+
+      try {
+        const response = await AirCANnect.http.requestOk(
+          "/api/ota/release-notes", {cache: "no-store"});
+        text.textContent = await response.text();
+      } catch (error) {
+        text.textContent = "Release notes could not be loaded: " +
+          error.message;
       }
     }
 
@@ -1119,6 +1148,8 @@
     AirCANnect.actions.register("ota.check", () => otaCheckForUpdates());
     AirCANnect.actions.register("ota.install-update", () =>
       otaInstallAvailableUpdate());
+    AirCANnect.actions.register("ota.release-notes", () =>
+      otaShowReleaseNotes());
     AirCANnect.actions.register("ota.source", (_event, element) =>
       otaSourceChanged(element.dataset.value));
     AirCANnect.actions.register("ota.install", () => otaInstall());

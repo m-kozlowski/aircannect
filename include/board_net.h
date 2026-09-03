@@ -135,6 +135,7 @@ static constexpr uint32_t AC_OTA_URL_TASK_STACK_BYTES = 8192;
 static constexpr uint8_t AC_OTA_URL_TASK_PRIORITY = 1;
 static constexpr int8_t AC_OTA_URL_TASK_CORE = 0;
 static constexpr size_t AC_OTA_MANIFEST_MAX_BYTES = 16 * 1024;
+static constexpr size_t AC_OTA_RELEASE_NOTES_MAX_BYTES = 32 * 1024;
 static constexpr uint32_t AC_OTA_UPDATE_INITIAL_DELAY_MS = 60 * 1000;
 static constexpr uint32_t AC_OTA_UPDATE_CHECK_INTERVAL_MS =
     6UL * 60UL * 60UL * 1000UL;

@@ -54,7 +54,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         status_.installable = false;
         status_.version = "";
         status_.error = "";
-        clear_artifact_locked();
+        clear_release_locked();
         status_.pending = manual_requested_;
         network_online_ = false;
         network_since_ms_ = 0;
@@ -194,6 +194,17 @@ bool UpdateChecker::copy_available_artifact(
     return copied;
 }
 
+std::shared_ptr<const LargeByteBuffer> UpdateChecker::release_notes() const {
+    if (!lock()) return {};
+
+    std::shared_ptr<const LargeByteBuffer> notes;
+    if (status_.available && status_.release_notes_available) {
+        notes = release_notes_;
+    }
+    unlock();
+    return notes;
+}
+
 bool UpdateChecker::active() const {
     if (!lock()) return false;
     const bool result = status_.active || task_;
@@ -321,7 +332,7 @@ void UpdateChecker::run_task() {
         unlock();
     }
     if (!url) {
-        finish_task(nullptr, generation, nullptr, false, {},
+        finish_task(nullptr, generation, nullptr, false, {}, {},
                     "update_request_missing", true);
         return;
     }
@@ -329,7 +340,7 @@ void UpdateChecker::run_task() {
     uint8_t *manifest_buffer = static_cast<uint8_t *>(
         Memory::alloc_large(AC_OTA_MANIFEST_MAX_BYTES + 1, false));
     if (!manifest_buffer) {
-        finish_task(url, generation, nullptr, false, {},
+        finish_task(url, generation, nullptr, false, {}, {},
                     "update_manifest_alloc_failed", true);
         return;
     }
@@ -350,7 +361,7 @@ void UpdateChecker::run_task() {
             transport_error.http_status >= 500;
 
         Memory::free(manifest_buffer);
-        finish_task(url, generation, nullptr, false, {},
+        finish_task(url, generation, nullptr, false, {}, {},
                     transport_error.code, retry_soon, &transport_error);
         return;
     }
@@ -362,7 +373,7 @@ void UpdateChecker::run_task() {
             reinterpret_cast<const char *>(manifest_buffer), manifest_len,
             AC_OTA_RELEASE_TARGET, manifest, manifest_error)) {
         Memory::free(manifest_buffer);
-        finish_task(url, generation, nullptr, false, {}, manifest_error,
+        finish_task(url, generation, nullptr, false, {}, {}, manifest_error,
                     false);
         return;
     }
@@ -371,7 +382,7 @@ void UpdateChecker::run_task() {
     if (!ota_release_is_newer(aircannect_version(), manifest.version,
                               update_available)) {
         Memory::free(manifest_buffer);
-        finish_task(url, generation, nullptr, false, {},
+        finish_task(url, generation, nullptr, false, {}, {},
                     "current_version_invalid", false);
         return;
     }
@@ -385,7 +396,7 @@ void UpdateChecker::run_task() {
                 AC_OTA_URL_MAX_LENGTH + 1)) {
             if (artifact.url) Memory::free(artifact.url);
             Memory::free(manifest_buffer);
-            finish_task(url, generation, nullptr, false, {},
+            finish_task(url, generation, nullptr, false, {}, {},
                         "manifest_artifact_url_invalid", false);
             return;
         }
@@ -397,9 +408,44 @@ void UpdateChecker::run_task() {
                                 : OtaUploadEncoding::Plain;
     }
 
+    std::shared_ptr<const LargeByteBuffer> release_notes;
+    if (update_available && manifest.release_notes_url[0]) {
+        char *resolved_url = reinterpret_cast<char *>(manifest_buffer);
+        if (ota_resolve_release_artifact_url(
+                url, manifest.release_notes_url, resolved_url,
+                AC_OTA_URL_MAX_LENGTH + 1)) {
+            std::unique_ptr<LargeByteBuffer> notes =
+                LargeByteBuffer::allocate(AC_OTA_RELEASE_NOTES_MAX_BYTES);
+            size_t notes_length = 0;
+            OtaUrlError notes_error;
+            if (notes && ota_url_fetch(
+                    resolved_url, notes->data(), notes->size(), notes_length,
+                    notes_error, continue_callback, &context) &&
+                notes_length > 0 && notes->truncate(notes_length)) {
+                release_notes = LargeByteBuffer::freeze(std::move(notes));
+            } else if (!cancelled(generation)) {
+                Log::logf(CAT_OTA, LOG_DEBUG,
+                          "release notes unavailable error=%s http=%d\n",
+                          notes ? notes_error.code
+                                : "release_notes_alloc_failed",
+                          notes_error.http_status);
+            }
+        } else {
+            Log::logf(CAT_OTA, LOG_DEBUG,
+                      "release notes unavailable error=invalid_url\n");
+        }
+    }
+
+    if (cancelled(generation)) {
+        Memory::free(manifest_buffer);
+        finish_task(url, generation, nullptr, false, {}, {}, "aborted",
+                    false);
+        return;
+    }
+
     Memory::free(manifest_buffer);
     finish_task(url, generation, &manifest, update_available, artifact,
-                nullptr, false);
+                std::move(release_notes), nullptr, false);
 }
 
 void UpdateChecker::finish_task(
@@ -408,6 +454,7 @@ void UpdateChecker::finish_task(
     const OtaReleaseManifest *manifest,
     bool update_available,
     OwnedArtifact artifact,
+    std::shared_ptr<const LargeByteBuffer> release_notes,
     const char *error,
     bool retry_soon,
     const OtaUrlError *transport_error) {
@@ -434,11 +481,15 @@ void UpdateChecker::finish_task(
                 status_.version = manifest->version;
                 status_.error = "";
 
-                clear_artifact_locked();
+                clear_release_locked();
                 if (update_available && artifact.url) {
                     available_artifact_ = artifact;
                     artifact.url = nullptr;
                     status_.installable = true;
+                }
+                if (update_available && release_notes) {
+                    release_notes_ = std::move(release_notes);
+                    status_.release_notes_available = true;
                 }
             } else {
                 status_.error =
@@ -480,10 +531,12 @@ void UpdateChecker::finish_task(
     }
 }
 
-void UpdateChecker::clear_artifact_locked() {
+void UpdateChecker::clear_release_locked() {
     if (available_artifact_.url) Memory::free(available_artifact_.url);
     available_artifact_ = {};
+    release_notes_.reset();
     status_.installable = false;
+    status_.release_notes_available = false;
 }
 
 bool UpdateChecker::cancelled(uint32_t generation) const {

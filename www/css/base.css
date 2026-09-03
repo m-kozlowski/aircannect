@@ -27,6 +27,53 @@
       overflow: hidden;
     }
 
+    .release-notes-dialog {
+      width: min(720px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      max-height: calc(100dvh - 32px);
+      margin: auto;
+      padding: 18px;
+      overflow: hidden;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .release-notes-dialog::backdrop {
+      background: #000000a8;
+    }
+
+    .release-notes-dialog header small {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .release-notes-dialog h2 {
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .release-notes-dialog pre {
+      max-height: calc(100vh - 160px);
+      max-height: calc(100dvh - 160px);
+      margin-top: 16px;
+      overflow: auto;
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .release-notes-dialog .btns {
+      justify-content: flex-end;
+    }
+
     .app {
       display: grid;
       grid-template-columns: 220px 1fr;

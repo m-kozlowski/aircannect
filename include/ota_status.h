@@ -27,6 +27,7 @@ struct OtaStatusSnapshot {
     bool update_checked = false;
     bool update_available = false;
     bool update_installable = false;
+    bool update_release_notes_available = false;
     bool reboot_pending = false;
     bool auth_enabled = true;
     uint16_t arduino_port = AC_ARDUINO_OTA_PORT;

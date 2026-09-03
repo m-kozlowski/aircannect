@@ -7,6 +7,7 @@ namespace aircannect {
 static constexpr size_t AC_OTA_RELEASE_VERSION_MAX = 48;
 static constexpr size_t AC_OTA_RELEASE_ERROR_MAX = 48;
 static constexpr size_t AC_OTA_RELEASE_ARTIFACT_URL_MAX = 512;
+static constexpr size_t AC_OTA_RELEASE_NOTES_URL_MAX = 512;
 
 struct OtaReleaseArtifact {
     char url[AC_OTA_RELEASE_ARTIFACT_URL_MAX] = {};
@@ -17,6 +18,7 @@ struct OtaReleaseArtifact {
 
 struct OtaReleaseManifest {
     char version[AC_OTA_RELEASE_VERSION_MAX] = {};
+    char release_notes_url[AC_OTA_RELEASE_NOTES_URL_MAX] = {};
     bool raw_available = false;
     bool zlib_available = false;
     OtaReleaseArtifact preferred_artifact;

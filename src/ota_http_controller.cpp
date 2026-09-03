@@ -4,10 +4,13 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 
+#include <algorithm>
+#include <new>
 #include <string.h>
 #include <utility>
 
 #include "arduino_ota_source.h"
+#include "async_prepared_response.h"
 #include "board.h"
 #include "debug_log.h"
 #include "firmware_installer.h"
@@ -117,6 +120,8 @@ bool same_ota_status(const OtaStatusSnapshot &lhs,
            lhs.update_checked == rhs.update_checked &&
            lhs.update_available == rhs.update_available &&
            lhs.update_installable == rhs.update_installable &&
+           lhs.update_release_notes_available ==
+               rhs.update_release_notes_available &&
            lhs.reboot_pending == rhs.reboot_pending &&
            lhs.auth_enabled == rhs.auth_enabled &&
            lhs.arduino_port == rhs.arduino_port && lhs.bytes == rhs.bytes &&
@@ -152,6 +157,8 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
     json_add_bool(json, "update_checked", ota.update_checked);
     json_add_bool(json, "update_available", ota.update_available);
     json_add_bool(json, "update_installable", ota.update_installable);
+    json_add_bool(json, "update_release_notes_available",
+                  ota.update_release_notes_available);
     json_add_string(json, "update_version", ota.update_version.c_str());
     json_add_string(json, "update_error", ota.update_error.c_str());
     if (ota.update_check_attempted) {
@@ -296,6 +303,44 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
         const int response_status =
             ok ? 202 : (status.update_error == "ota_busy" ? 409 : 400);
         send_esp_status(request, status, response_status);
+    });
+
+    server.on(AsyncURIMatcher::exact("/api/ota/release-notes"), HTTP_GET,
+              [this](AsyncWebServerRequest *request) {
+        std::shared_ptr<const LargeByteBuffer> notes =
+            update_checker_->release_notes();
+        if (!notes) {
+            request->send(
+                404, "application/json",
+                "{\"error\":\"release_notes_unavailable\"}");
+            return;
+        }
+
+        AsyncWebServerResponse *response = new (std::nothrow)
+            AsyncPreparedResponse(
+                "text/markdown; charset=utf-8",
+                notes->size(),
+                [notes](uint8_t *buffer,
+                        size_t max_length,
+                        size_t offset) -> size_t {
+                    if (!buffer || offset >= notes->size()) return 0;
+
+                    const size_t copied = std::min(
+                        max_length, notes->size() - offset);
+                    memcpy(buffer, notes->data() + offset, copied);
+                    return copied;
+                });
+        if (!response || !response->_sourceValid()) {
+            delete response;
+            request->send(
+                503, "application/json",
+                "{\"error\":\"release_notes_response_failed\"}");
+            return;
+        }
+
+        response->addHeader("Cache-Control", "no-store");
+        response->addHeader("Content-Disposition", "inline");
+        request->send(response);
     });
 
     server.on(AsyncURIMatcher::exact("/api/ota/install-update"), HTTP_POST,

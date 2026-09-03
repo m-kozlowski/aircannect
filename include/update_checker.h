@@ -4,10 +4,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <memory>
 #include <stdint.h>
 
 #include "app_config.h"
 #include "firmware_installer.h"
+#include "large_byte_buffer.h"
 #include "ota_release_manifest.h"
 #include "runtime_snapshots.h"
 
@@ -28,6 +30,7 @@ struct UpdateCheckerStatus {
     bool checked = false;
     bool available = false;
     bool installable = false;
+    bool release_notes_available = false;
     String version;
     String error;
     uint32_t last_check_age_ms = 0;
@@ -50,6 +53,7 @@ public:
     bool request_check(bool install_active);
     void request_abort(const char *reason);
     bool copy_available_artifact(OtaUpdateArtifact &artifact) const;
+    std::shared_ptr<const LargeByteBuffer> release_notes() const;
 
     bool active() const;
     UpdateCheckerStatus status() const;
@@ -72,11 +76,12 @@ private:
                      const OtaReleaseManifest *manifest,
                      bool update_available,
                      OwnedArtifact artifact,
+                     std::shared_ptr<const LargeByteBuffer> release_notes,
                      const char *error,
                      bool retry_soon,
                      const struct OtaUrlError *transport_error = nullptr);
 
-    void clear_artifact_locked();
+    void clear_release_locked();
     bool cancelled(uint32_t generation) const;
     static bool continue_callback(void *ctx);
     bool lock(TickType_t timeout = portMAX_DELAY) const;
@@ -99,6 +104,7 @@ private:
     char *check_url_ = nullptr;
     TaskHandle_t task_ = nullptr;
     OwnedArtifact available_artifact_;
+    std::shared_ptr<const LargeByteBuffer> release_notes_;
 };
 
 }  // namespace aircannect

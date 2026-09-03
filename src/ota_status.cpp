@@ -34,6 +34,8 @@ OtaStatusSnapshot collect_ota_status(
     status.update_checked = update.checked;
     status.update_available = update.available;
     status.update_installable = update.installable;
+    status.update_release_notes_available =
+        update.release_notes_available;
     status.update_version = update.version;
     status.update_error = update.error;
     status.update_last_check_age_ms = update.last_check_age_ms;

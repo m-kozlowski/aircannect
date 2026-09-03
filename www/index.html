@@ -36,6 +36,18 @@
     </section>
   </div>
 
+  <dialog class="release-notes-dialog" id="otaReleaseNotesDialog"
+          aria-labelledby="otaReleaseNotesTitle">
+    <header>
+      <small>ESP32 firmware</small>
+      <h2 id="otaReleaseNotesTitle">Release notes</h2>
+    </header>
+    <pre id="otaReleaseNotesText">Loading...</pre>
+    <form method="dialog" class="btns">
+      <button class="btn primary">Close</button>
+    </form>
+  </dialog>
+
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -714,6 +726,8 @@
                       data-action="ota.check">Check for updates</button>
               <button class="btn primary" id="otaInstallUpdate" hidden
                       data-action="ota.install-update">Install update</button>
+              <button class="btn" id="otaReleaseNotes" hidden
+                      data-action="ota.release-notes">Release notes</button>
             </div>
             <div class="msg" id="otaUpdateMsg"></div>
             <div class="section-title">Install firmware</div>
