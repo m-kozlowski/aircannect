@@ -24,6 +24,7 @@ class HttpRouteModule;
 class ExportHttpController;
 class LiveHttpController;
 class OximetryHttpController;
+class OtaHttpController;
 class SettingsHttpController;
 class StatusHttpController;
 
@@ -50,6 +51,7 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus as11_ble;
     WebUiBufferMemoryStatus oximetry;
     WebUiBufferMemoryStatus settings;
+    WebUiBufferMemoryStatus ota;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -70,6 +72,7 @@ public:
                DeviceHttpController &device_http,
                OximetryHttpController &oximetry_http,
                SettingsHttpController &settings_http,
+               OtaHttpController &ota_http,
                LiveHttpController &live,
                ConsoleCommandRouter &console_router,
                const AppConfigData &config,
@@ -149,9 +152,10 @@ private:
     static constexpr uint16_t SNAPSHOT_AS11_BLE = 1u << 3;
     static constexpr uint16_t SNAPSHOT_OXIMETRY = 1u << 4;
     static constexpr uint16_t SNAPSHOT_SETTINGS = 1u << 5;
+    static constexpr uint16_t SNAPSHOT_OTA = 1u << 6;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS | SNAPSHOT_AS11_BLE |
-        SNAPSHOT_OXIMETRY;
+        SNAPSHOT_OXIMETRY | SNAPSHOT_OTA;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
 
@@ -162,6 +166,7 @@ private:
     DeviceHttpController *device_ = nullptr;
     OximetryHttpController *oximetry_ = nullptr;
     SettingsHttpController *settings_ = nullptr;
+    OtaHttpController *ota_ = nullptr;
     LiveHttpController *live_ = nullptr;
     ConsoleCommandRouter *console_router_ = nullptr;
 
@@ -206,6 +211,8 @@ private:
     LargeTextBuffer next_oximetry_json_;
     LargeTextBuffer cached_settings_json_;
     LargeTextBuffer next_settings_json_;
+    LargeTextBuffer cached_ota_json_;
+    LargeTextBuffer next_ota_json_;
 
     // cached auth config
     bool cached_http_auth_required_ = true;
@@ -228,6 +235,8 @@ private:
     uint32_t sent_oximetry_revision_ = 0;
     uint32_t observed_settings_revision_ = 0;
     uint32_t sent_settings_revision_ = 0;
+    uint32_t observed_ota_revision_ = 0;
+    uint32_t sent_ota_revision_ = 0;
     uint32_t observed_live_generation_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;

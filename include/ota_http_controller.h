@@ -1,11 +1,17 @@
 #pragma once
 
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include "http_route_module.h"
+#include "large_text_buffer.h"
 #include "main_loop_inbox.h"
+#include "ota_status.h"
 #include "resmed_firmware_image.h"
 
 class AsyncWebServerRequest;
@@ -31,6 +37,9 @@ public:
                ResmedOtaManager &resmed_ota);
     void register_routes(AsyncWebServer &server) override;
     void poll();
+
+    uint32_t snapshot_revision() const { return snapshot_revision_; }
+    bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
 
 private:
     enum class CommandKind : uint8_t {
@@ -67,6 +76,11 @@ private:
     bool enqueue(Command &&command);
     void execute(Command &command);
     void send_queue_result(AsyncWebServerRequest *request, bool queued) const;
+    void request_snapshot();
+    void publish_snapshot_if_needed(bool force = false);
+
+    static constexpr uint32_t SnapshotActiveIntervalMs = 250;
+    static constexpr uint32_t SnapshotIdleIntervalMs = 3000;
 
     FirmwareInstaller *installer_ = nullptr;
     FirmwareUrlSource *url_source_ = nullptr;
@@ -76,6 +90,16 @@ private:
     ResmedOtaManager *resmed_ota_ = nullptr;
 
     MainLoopInbox<Command, CommandQueueDepth> commands_;
+
+    LargeTextBuffer snapshot_json_;
+    LargeTextBuffer snapshot_build_json_;
+    OtaStatusSnapshot published_status_;
+    StaticSemaphore_t snapshot_mutex_storage_ = {};
+    SemaphoreHandle_t snapshot_mutex_ = nullptr;
+    std::atomic<bool> snapshot_requested_{false};
+    uint32_t snapshot_revision_ = 0;
+    uint32_t next_snapshot_ms_ = 0;
+    bool snapshot_initialized_ = false;
 };
 
 }  // namespace aircannect

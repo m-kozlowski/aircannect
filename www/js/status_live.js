@@ -1131,6 +1131,11 @@
           msg("settingsMsg", error.message, false);
         }
       });
+      evtSrc.addEventListener("ota", (event) => {
+        try {
+          applyOtaSnapshot(JSON.parse(event.data), true);
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });

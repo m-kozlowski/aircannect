@@ -1599,6 +1599,7 @@ void setup() {
                  config_http_controller, device_http_controller,
                  oximetry_http_controller,
                  settings_http_controller,
+                 ota_http_controller,
                  live_http_controller, console_router, config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));

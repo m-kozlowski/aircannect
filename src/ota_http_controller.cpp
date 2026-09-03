@@ -93,6 +93,43 @@ bool request_url_args(AsyncWebServerRequest *request,
     return true;
 }
 
+bool ota_status_active(const OtaStatusSnapshot &status) {
+    return status.arduino_active || status.http_prepare_pending ||
+           status.http_prepared || status.http_active || status.http_ready ||
+           status.url_active || status.update_check_pending ||
+           status.update_check_active || status.reboot_pending;
+}
+
+bool same_ota_status(const OtaStatusSnapshot &lhs,
+                     const OtaStatusSnapshot &rhs) {
+    return lhs.arduino_started == rhs.arduino_started &&
+           lhs.arduino_active == rhs.arduino_active &&
+           lhs.http_prepare_pending == rhs.http_prepare_pending &&
+           lhs.http_prepared == rhs.http_prepared &&
+           lhs.http_active == rhs.http_active &&
+           lhs.http_ready == rhs.http_ready &&
+           lhs.url_active == rhs.url_active &&
+           lhs.update_check_enabled == rhs.update_check_enabled &&
+           lhs.update_check_pending == rhs.update_check_pending &&
+           lhs.update_check_active == rhs.update_check_active &&
+           lhs.update_check_attempted == rhs.update_check_attempted &&
+           lhs.update_checked == rhs.update_checked &&
+           lhs.update_available == rhs.update_available &&
+           lhs.update_installable == rhs.update_installable &&
+           lhs.reboot_pending == rhs.reboot_pending &&
+           lhs.auth_enabled == rhs.auth_enabled &&
+           lhs.arduino_port == rhs.arduino_port && lhs.bytes == rhs.bytes &&
+           lhs.total_size == rhs.total_size &&
+           lhs.wire_bytes == rhs.wire_bytes &&
+           lhs.wire_total_size == rhs.wire_total_size &&
+           lhs.progress_percent == rhs.progress_percent &&
+           lhs.method == rhs.method && lhs.encoding == rhs.encoding &&
+           lhs.partition == rhs.partition &&
+           lhs.last_error == rhs.last_error &&
+           lhs.update_version == rhs.update_version &&
+           lhs.update_error == rhs.update_error;
+}
+
 template <typename JsonOut>
 void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
     json = "{";
@@ -222,7 +259,18 @@ bool OtaHttpController::begin(FirmwareInstaller &installer,
     resmed_preparer_ = &resmed_preparer;
     resmed_ota_ = &resmed_ota;
 
-    return commands_.begin();
+    if (!snapshot_mutex_) {
+        snapshot_mutex_ =
+            xSemaphoreCreateMutexStatic(&snapshot_mutex_storage_);
+    }
+    if (!commands_.begin() || !snapshot_mutex_ ||
+        !snapshot_json_.reserve(AC_WEB_OTA_JSON_RESERVE) ||
+        !snapshot_build_json_.reserve(AC_WEB_OTA_JSON_RESERVE)) {
+        return false;
+    }
+
+    publish_snapshot_if_needed(true);
+    return snapshot_initialized_;
 }
 
 void OtaHttpController::register_routes(AsyncWebServer &server) {
@@ -237,6 +285,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
     server.on(AsyncURIMatcher::exact("/api/ota/check"), HTTP_POST,
               [this](AsyncWebServerRequest *request) {
         const bool ok = update_checker_->request_check(installer_->active());
+        request_snapshot();
         const OtaStatusSnapshot status = collect_ota_status(
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
@@ -255,6 +304,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
         String error;
         const bool ok = request_selected_update(*update_checker_,
                                                 *url_source_, error);
+        request_snapshot();
         OtaStatusSnapshot status = collect_ota_status(
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         if (!ok && error.length()) status.last_error = error;
@@ -284,6 +334,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
 
         const bool ok = url_source_->request(url, encoding, image_size,
                                              wire_size);
+        request_snapshot();
         const OtaStatusSnapshot status = collect_ota_status(
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
@@ -311,6 +362,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
         const bool ok = installer_->request_prepare(
             image_size, encoding, wire_size,
             FirmwareInstallSource::HttpUpload);
+        request_snapshot();
         const OtaStatusSnapshot status = collect_ota_status(
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
@@ -328,6 +380,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             }
 
             const bool ok = installer_->finish();
+            request_snapshot();
             send_esp_status(
                 request,
                 collect_ota_status(*installer_, *url_source_,
@@ -612,6 +665,72 @@ void OtaHttpController::poll() {
 
         execute(command);
     }
+
+    publish_snapshot_if_needed();
+}
+
+bool OtaHttpController::copy_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    if (!snapshot_mutex_ ||
+        xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    out.clear();
+    const bool copied = snapshot_json_.length() &&
+        out.append(snapshot_json_.c_str(), snapshot_json_.length());
+    if (copied) {
+        revision = snapshot_revision_;
+    }
+    xSemaphoreGive(snapshot_mutex_);
+    return copied;
+}
+
+void OtaHttpController::request_snapshot() {
+    snapshot_requested_.store(true, std::memory_order_release);
+}
+
+void OtaHttpController::publish_snapshot_if_needed(bool force) {
+    if (!installer_ || !url_source_ || !arduino_source_ || !update_checker_) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    const bool requested =
+        snapshot_requested_.exchange(false, std::memory_order_acq_rel);
+    if (!force && !requested &&
+        static_cast<int32_t>(now - next_snapshot_ms_) < 0) {
+        return;
+    }
+
+    OtaStatusSnapshot status = collect_ota_status(
+        *installer_, *url_source_, *arduino_source_, *update_checker_);
+    next_snapshot_ms_ = now +
+        (ota_status_active(status) ? SnapshotActiveIntervalMs
+                                   : SnapshotIdleIntervalMs);
+    if (!force && !requested && snapshot_initialized_ &&
+        same_ota_status(published_status_, status)) {
+        return;
+    }
+
+    snapshot_build_json_.clear();
+    build_ota_json(snapshot_build_json_, status);
+    if (snapshot_build_json_.overflowed()) {
+        Log::logf(CAT_OTA, LOG_WARN,
+                  "ESP OTA status snapshot allocation failed\n");
+        return;
+    }
+    if (xSemaphoreTake(snapshot_mutex_, 0) != pdTRUE) {
+        snapshot_requested_.store(true, std::memory_order_release);
+        return;
+    }
+
+    snapshot_json_.swap(snapshot_build_json_);
+    published_status_ = std::move(status);
+    snapshot_initialized_ = true;
+    snapshot_revision_++;
+    if (snapshot_revision_ == 0) snapshot_revision_++;
+    xSemaphoreGive(snapshot_mutex_);
 }
 
 bool OtaHttpController::enqueue(Command &&command) {

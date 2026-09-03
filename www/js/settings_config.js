@@ -854,11 +854,55 @@
       otaReloadTimer = setTimeout(check, 6000);
     }
 
+    function applyOtaSnapshot(data, fromEvent) {
+      otaData = data;
+      renderOta(data);
+      if (fromEvent) {
+        otaSnapshotSerial++;
+        window.dispatchEvent(new CustomEvent(
+          OTA_SNAPSHOT_EVENT, {detail: data}));
+      }
+      return data;
+    }
+
+    function waitForOtaSnapshot(predicate, afterSerial, timeoutMs,
+                                timeoutMessage) {
+      return new Promise((resolve, reject) => {
+        let timeout = null;
+        const finish = (data) => {
+          if (otaSnapshotSerial <= afterSerial || !data ||
+              !predicate(data)) {
+            return false;
+          }
+
+          window.removeEventListener(OTA_SNAPSHOT_EVENT, onUpdate);
+          if (timeout) clearTimeout(timeout);
+          resolve(data);
+          return true;
+        };
+        const onUpdate = (event) => finish(event.detail);
+
+        if (finish(otaData)) return;
+        window.addEventListener(OTA_SNAPSHOT_EVENT, onUpdate);
+        timeout = setTimeout(() => {
+          window.removeEventListener(OTA_SNAPSHOT_EVENT, onUpdate);
+          if (timeoutMessage) {
+            reject(new Error(timeoutMessage));
+          } else {
+            resolve(null);
+          }
+        }, timeoutMs);
+      });
+    }
+
     async function loadOta() {
       try {
+        const eventSerial = otaSnapshotSerial;
         const response = await api("/api/ota");
         const data = await response.json();
-        renderOta(data);
+        if (otaSnapshotSerial === eventSerial) {
+          applyOtaSnapshot(data, false);
+        }
 
         const resmedResponse = await api("/api/resmed-ota");
         renderResmedOta(await resmedResponse.json());
@@ -949,7 +993,8 @@
 
       let data = null;
       try {
-        let response = await fetch("/api/ota/check", {method: "POST"});
+        const eventSerial = otaSnapshotSerial;
+        const response = await fetch("/api/ota/check", {method: "POST"});
         data = await response.json();
         renderOta(data);
         if (!response.ok) {
@@ -957,22 +1002,25 @@
         }
 
         const started = Date.now();
-        while (data.update_check_pending || data.update_check_active) {
-          if (data.update_check_pending && !data.update_check_active &&
-              Date.now() - started > 10000) {
+        if (data.update_check_pending && !data.update_check_active) {
+          const startedData = await waitForOtaSnapshot(
+            (next) => next.update_check_active ||
+              !next.update_check_pending,
+            eventSerial, 10000, "");
+          if (!startedData) {
             msg("otaUpdateMsg",
               "Check queued until the device is idle and network is available.",
               true, true);
             return;
           }
-          if (Date.now() - started > 60000) {
-            throw new Error("Update check timed out");
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          response = await api("/api/ota");
-          data = await response.json();
-          renderOta(data);
+          data = startedData;
+        }
+        if (data.update_check_pending || data.update_check_active) {
+          data = await waitForOtaSnapshot(
+            (next) => !next.update_check_pending &&
+              !next.update_check_active,
+            eventSerial, Math.max(1, 60000 - (Date.now() - started)),
+            "Update check timed out");
         }
 
         if (data.update_error) throw new Error(data.update_error);
@@ -1022,32 +1070,25 @@
     }
 
     async function otaRunUrlUpdate(endpoint, messageId) {
-      let response = await fetch(endpoint, {method: "POST"});
+      const eventSerial = otaSnapshotSerial;
+      const response = await fetch(endpoint, {method: "POST"});
       let data = await response.json();
       renderOta(data);
       if (!response.ok) {
         throw new Error(data.last_error || data.error || "URL update rejected");
       }
 
-      const started = Date.now();
-      while (true) {
-        if (data.last_error && !data.url_active && !data.reboot_pending) {
-          throw new Error(data.last_error);
-        }
-        if (data.reboot_pending || data.http_ready) {
-          msg(messageId, "Update installed. Restarting...", true, true);
-          scheduleOtaReload();
-          return true;
-        }
-        if (Date.now() - started > 15 * 60 * 1000) {
-          throw new Error("URL update timed out");
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 500));
-        response = await api("/api/ota");
-        data = await response.json();
-        renderOta(data);
+      data = await waitForOtaSnapshot(
+        (next) => next.reboot_pending || next.http_ready ||
+          (!!next.last_error && !next.url_active),
+        eventSerial, 15 * 60 * 1000, "URL update timed out");
+      if (data.last_error && !data.url_active && !data.reboot_pending) {
+        throw new Error(data.last_error);
       }
+
+      msg(messageId, "Update installed. Restarting...", true, true);
+      scheduleOtaReload();
+      return true;
     }
 
     async function otaInstallFromUrl(url) {
@@ -1085,25 +1126,24 @@
     }
 
     async function prepareOtaUpload(plan) {
+      const eventSerial = otaSnapshotSerial;
       const prepareResponse = await api("/api/ota/prepare?" +
         otaUploadQuery(plan), {method: "POST"});
       let data = await prepareResponse.json();
       renderOta(data);
-
-      const started = Date.now();
-      while (!data.http_prepared) {
-        if (data.last_error) throw new Error(data.last_error);
-        if (!data.http_prepare_pending) {
-          throw new Error("OTA prepare did not start");
-        }
-        if (Date.now() - started > 15000) {
-          throw new Error("OTA prepare timed out");
-        }
-        await new Promise(resolve => setTimeout(resolve, 250));
-        const pollResponse = await api("/api/ota");
-        data = await pollResponse.json();
-        renderOta(data);
+      if (!prepareResponse.ok) {
+        throw new Error(data.last_error || data.error ||
+          "OTA prepare rejected");
       }
+
+      if (!data.http_prepared) {
+        data = await waitForOtaSnapshot(
+          (next) => next.http_prepared || !!next.last_error ||
+            !next.http_prepare_pending,
+          eventSerial, 15000, "OTA prepare timed out");
+      }
+      if (data.last_error) throw new Error(data.last_error);
+      if (!data.http_prepared) throw new Error("OTA prepare did not start");
       return data;
     }
 

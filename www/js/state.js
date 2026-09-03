@@ -11,6 +11,9 @@
     let configData = null;
     let configUpdateData = null;
     const CONFIG_UPDATE_EVENT = "aircannect-config-update";
+    let otaData = null;
+    let otaSnapshotSerial = 0;
+    const OTA_SNAPSHOT_EVENT = "aircannect-ota-snapshot";
     let configSections = [];
     let as11BlePairingData = null;
     let configSchemaPromise = null;
