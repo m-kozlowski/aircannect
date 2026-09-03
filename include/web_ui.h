@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include <stdint.h>
 #include <string>
 #include <freertos/FreeRTOS.h>
@@ -142,6 +143,8 @@ private:
     enum class SseSendResult : uint8_t { Skipped, Sent, Failed };
     SseSendResult send_sse_to_clients(const char *payload, const char *event,
                                       uint32_t id, bool status_heartbeat);
+    SseSendResult send_snapshot_to_clients(size_t channel_index,
+                                           uint32_t id);
 
     // Dashboard live stream transport
     void poll_live_transport(size_t healthy_clients);
@@ -153,13 +156,6 @@ private:
                            const char *result = "queued") const;
     bool request_allowed_cached(AsyncWebServerRequest *request) const;
     void publish_pending_auth_config();
-
-    // client tracking
-    struct SseClientRef {
-        AsyncEventSourceClient *client = nullptr;
-        uint32_t connected_ms = 0;
-        uint32_t last_status_ms = 0;
-    };
 
     // snapshot masks
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
@@ -200,7 +196,6 @@ private:
         LargeTextBuffer cached;
         LargeTextBuffer next;
         uint32_t observed_revision = 0;
-        uint32_t sent_revision = 0;
     };
 
     static constexpr size_t SnapshotChannelCount =
@@ -211,6 +206,14 @@ private:
     const SnapshotChannel &snapshot_channel(SnapshotChannelId id) const {
         return snapshot_channels_[static_cast<size_t>(id)];
     }
+
+    // client tracking
+    struct SseClientRef {
+        AsyncEventSourceClient *client = nullptr;
+        uint32_t connected_ms = 0;
+        uint32_t last_status_ms = 0;
+        uint32_t sent_snapshot_revisions[SnapshotChannelCount] = {};
+    };
 
     // subsystem owners
     StatusHttpController *status_ = nullptr;
@@ -271,7 +274,7 @@ private:
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;
     uint32_t last_sse_push_ms_ = 0;
-    bool sse_push_requested_ = false;
+    std::atomic<bool> sse_push_requested_{false};
     bool started_ = false;
 };
 
