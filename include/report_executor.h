@@ -128,7 +128,7 @@ private:
     StoragePreparedRead prepared_;
     std::shared_ptr<const LargeByteBuffer> active_fallback_;
 
-    static constexpr size_t FallbackCacheCapacity = 2;
+    static constexpr size_t FallbackCacheCapacity = 4;
     CachedFallbackSection fallback_cache_[FallbackCacheCapacity] = {};
     uint32_t fallback_cache_clock_ = 0;
 

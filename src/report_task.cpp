@@ -249,9 +249,13 @@ struct ReportTask::Runtime {
 
         size_t selected = SIZE_MAX;
         for (size_t i = 0; i < command_count; ++i) {
-            if (commands[i].kind == ReportTaskCommandKind::Artifact &&
-                commands[i].priority ==
-                    ReportRequestPriority::Foreground) {
+            const bool foreground_artifact =
+                commands[i].kind == ReportTaskCommandKind::Artifact &&
+                commands[i].priority == ReportRequestPriority::Foreground;
+            const bool foreground_payload =
+                commands[i].kind == ReportTaskCommandKind::CacheArtifact &&
+                cache_load_available;
+            if (foreground_artifact || foreground_payload) {
                 selected = i;
                 break;
             }
@@ -2323,11 +2327,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     worked = runtime.start_pending_deflate() || worked;
 
     ReportTaskCommand command;
-    const ReportEngineStatus command_engine_status = runtime.engine.status();
+    const ReportArtifactPayloadLoadStatus command_payload_status =
+        runtime.payload_loader.status();
     const bool cache_load_available =
-        !runtime.payload_loader.status().active() &&
-        !command_engine_status.foreground_active;
-    if (runtime.pop(command, cache_load_available)) {
+        !command_payload_status.active();
+    if (!command_payload_status.active() &&
+        runtime.pop(command, cache_load_available)) {
         worked = true;
         switch (command.kind) {
             case ReportTaskCommandKind::Artifact: {

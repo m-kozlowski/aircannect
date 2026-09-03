@@ -2462,11 +2462,12 @@
             if (fetched.revision && fetched.revision !== context.revision) {
               throw new Error("report_revision_changed");
             }
-            if (!tile.index ||
+            if (tile.index &&
                 fetched.decoded.index.prefixCrc32 !== tile.index.prefixCrc32) {
               throw new Error("report_tile_index_changed");
             }
 
+            tile.index = fetched.decoded.index;
             tile.bytes = fetched.decoded.bytes;
             touchReportRangeTile(tile);
             trimReportRangeTileCache();
@@ -2480,16 +2481,20 @@
       return !!tile.bytes;
     }
 
-    async function loadReportRangeTiles(context, from, to) {
+    async function loadReportRangeTiles(context, from, to, chartKeys) {
       const tiles = [];
       const jobs = [];
       const tileContext = {...context, active: context.tileActive};
+      const loadWhole = chartKeys.length >=
+        REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS;
       for (let tileStart = from; tileStart < to;
            tileStart += REPORT_RANGE_TILE_MS) {
         const tile = reportRangeTile(
           context.nightId, context.revision, tileStart);
         tiles.push(tile);
-        jobs.push(() => loadReportRangeTileIndex(tile, tileContext));
+        jobs.push(() => loadWhole
+          ? loadReportRangeTileWhole(tile, tileContext)
+          : loadReportRangeTileIndex(tile, tileContext));
       }
       await runReportFetchJobs(jobs, 2);
       return tiles.every((tile) => tile.index) ? tiles : null;
@@ -2639,8 +2644,9 @@
       };
       const promise = (async () => {
         if (!entry.tiles) {
+          const initialKeys = Array.from(entry.requestedCharts);
           entry.tiles = await loadReportRangeTiles(
-            context, entry.from, entry.to);
+            context, entry.from, entry.to, initialKeys);
           if (!entry.tiles || !context.active()) return;
         }
 
@@ -3230,6 +3236,7 @@
     const REPORT_RANGE_TILE_CACHE_MAX = 32;
     const REPORT_RANGE_TILE_CACHE_MAX_BYTES = 6 * 1024 * 1024;
     const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;
+    const REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS = 2;
     const REPORT_RANGE_WHOLE_MIN_PARTS = 2;
     const REPORT_RANGE_WHOLE_THRESHOLD_PERCENT = 60;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;

@@ -26,8 +26,9 @@ static constexpr size_t AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY = 16;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE =
     3 * 1024 * 1024;
-// Adjacent range tiles commonly decode the same large fallback sections.
-// Retain the current flow/pressure pair after its full read and CRC check.
+// Adjacent range tiles commonly decode the same large fallback sections. A
+// tile on a spool-fragment boundary can use two chunks for both flow and
+// pressure, so retain all four after their full read and CRC check.
 static constexpr size_t AC_REPORT_FALLBACK_SECTION_CACHE_MIN_BYTES =
     64 * 1024;
 static constexpr size_t AC_REPORT_FALLBACK_SECTION_CACHE_PSRAM_RESERVE =
