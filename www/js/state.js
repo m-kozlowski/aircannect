@@ -1,7 +1,3 @@
-    let statusData = {};
-    let statusLoaded = false;
-    let statusLoadPromise = null;
-    let streamData = {};
     let settingsData = null;
     let settingsCatalog = [];
     let settingsComposites = [];
@@ -15,11 +11,6 @@
     const configSectionById = {};
     const configSectionByKey = {};
     const configFieldByKey = {};
-
-    function setPageTitle(hostname) {
-      const clean = String(hostname || "").trim();
-      document.title = clean ? "AirCANnect - " + clean : "AirCANnect";
-    }
 
     function rebuildConfigSectionMaps() {
       Object.keys(configSectionById).forEach((key) =>
@@ -36,8 +27,6 @@
         });
       });
     }
-    let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
-    let oxiSensorsLoading = false;
     let consoleSeq = -1;
     let consoleEnd = 0;
     let settingsProfileMode = null;
@@ -57,21 +46,3 @@
     let resmedDirectUploadBusy = false;
     let resmedUploadOperation = null;
     let resmedCanAvailable = true;
-    const LIVE_FAST_POINTS = 6000;
-    const LIVE_MEDIUM_POINTS = 3000;
-    const LIVE_SLOW_POINTS = 1800;
-    const liveData = {
-      pressure: [],
-      flow: [],
-      leak: [],
-      inspPressure: [],
-      expPressure: [],
-      spo2: [],
-      pulse: [],
-    };
-    const chartScales = {
-      pressure: {min: 0, max: 15, step: 5},
-      flow: {min: -40, max: 40, step: 10, symmetric: true},
-      leak: {min: 0, max: 20, step: 5},
-      therapyPressure: {min: 0, max: 15, step: 5},
-    };

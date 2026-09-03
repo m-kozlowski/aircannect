@@ -726,7 +726,7 @@
       if (!root) return;
       root.innerHTML = "";
 
-      const status = statusData || {};
+      const status = AirCANnect.snapshots.read("status").data || {};
       const state = data.state || status.wifi_state || "--";
       const ssid = data.ssid || status.wifi_ssid || "";
       const ip = data.ip || status.wifi_ip || "";
@@ -787,7 +787,6 @@
         const data = await requestWifiAction(action, extra);
         AirCANnect.ui.message("wifiMsg", data.result, data.ok);
         setTimeout(loadWifi, 600);
-        setTimeout(loadStatus, 900);
       } catch (error) {
         AirCANnect.ui.message("wifiMsg", error.message, false);
       }
@@ -2681,6 +2680,8 @@
     AirCANnect.actions.register("settings.revert", () =>
       revertSettingsDraft());
     AirCANnect.actions.register("settings.refresh", () => loadSettings(true));
+    AirCANnect.actions.register("as11.pair-dashboard", () =>
+      startAs11PairingFromDashboard());
     AirCANnect.actions.register("wifi.add", () => wifiAdd());
     AirCANnect.actions.register("wifi.command", (_event, element) =>
       wifiAction(element.dataset.value));
@@ -2739,6 +2740,9 @@
       }
     });
     AirCANnect.snapshots.subscribe("ota", applyOtaSnapshot, false);
+    AirCANnect.snapshots.subscribe("status", () => {
+      if (AirCANnect.pages.isActive("wifi")) renderWifiCurrent({});
+    }, false);
     AirCANnect.events.subscribe("ota", () => {});
     AirCANnect.snapshots.subscribe(
       "resmed_ota", applyResmedOtaSnapshot, false);

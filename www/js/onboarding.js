@@ -347,7 +347,9 @@
       try {
         const forced = location.pathname === "/wizard";
         if (!forced) {
-          const status = statusLoaded ? statusData : await loadStatus();
+          const current = AirCANnect.snapshots.read("status");
+          const status = current.data || await AirCANnect.snapshots.wait(
+            "status", () => true, current.serial, 5000);
           if (!status || status.onboarding_complete) return;
         }
 

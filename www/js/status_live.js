@@ -1,3 +1,35 @@
+(() => {
+    "use strict";
+
+    let statusData = {};
+    let statusLoadPromise = null;
+    let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
+    let oxiSensorsLoading = false;
+
+    const LIVE_FAST_POINTS = 6000;
+    const LIVE_MEDIUM_POINTS = 3000;
+    const LIVE_SLOW_POINTS = 1800;
+    const liveData = {
+      pressure: [],
+      flow: [],
+      leak: [],
+      inspPressure: [],
+      expPressure: [],
+      spo2: [],
+      pulse: [],
+    };
+    const chartScales = {
+      pressure: {min: 0, max: 15, step: 5},
+      flow: {min: -40, max: 40, step: 10, symmetric: true},
+      leak: {min: 0, max: 20, step: 5},
+      therapyPressure: {min: 0, max: 15, step: 5},
+    };
+
+    function setPageTitle(hostname) {
+      const clean = String(hostname || "").trim();
+      document.title = clean ? "AirCANnect - " + clean : "AirCANnect";
+    }
+
     function apiError(error) {
       AirCANnect.ui.text("title", "API unavailable");
       if (location.protocol === "file:") {
@@ -390,7 +422,6 @@
 
     function applyStatusSnapshot(data) {
       statusData = data;
-      statusLoaded = true;
       renderStatus(statusData);
       return statusData;
     }
@@ -449,10 +480,6 @@
       AirCANnect.ui.text("heap", memory);
       AirCANnect.ui.text("uptime", "Up: " + fmtUp(data.uptime || 0));
       setWifiTop(data);
-      const wifiPane = document.getElementById("p-wifi");
-      if (wifiPane && wifiPane.classList.contains("active")) {
-        renderWifiCurrent({});
-      }
       AirCANnect.ui.text("productName", data.device_name || "ResMed device");
       AirCANnect.ui.text("serial", data.serial);
       AirCANnect.ui.text("firmware", fmtFirmware(data.software_id || data.application));
@@ -821,8 +848,6 @@
       }
     }
 
-    AirCANnect.actions.register("as11.pair-dashboard", () =>
-      startAs11PairingFromDashboard());
     AirCANnect.actions.register("therapy.command", (_event, element) =>
       therapy(element.dataset.value));
     AirCANnect.actions.register("time.command", (_event, element) =>
@@ -851,10 +876,8 @@
         renderOximetrySensorManager(oxiSensorData);
       }
     });
-    AirCANnect.events.subscribe("stream", (data) => {
-      streamData = data;
-      renderStream(streamData);
-    });
+    AirCANnect.events.subscribe("stream", renderStream);
     AirCANnect.events.subscribe("live", renderLive);
     window.addEventListener("resize", () => updateCharts());
     updateCharts();
+})();
