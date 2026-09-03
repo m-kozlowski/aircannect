@@ -1081,56 +1081,6 @@
       updateCharts();
     }
 
-    function initEvents() {
-      AirCANnect.snapshots.subscribe("status", applyStatusSnapshot, false);
-      AirCANnect.events.subscribe("status", () => {});
-      AirCANnect.events.subscribe("exports", (data) => {
-        if (data.smb) applySmbSyncStatus(data.smb);
-        if (data.sleephq) applySleepHqSyncStatus(data.sleephq);
-      });
-      AirCANnect.events.subscribe("config", () => {});
-      AirCANnect.events.subscribe("as11_ble", renderAs11BlePairing);
-      AirCANnect.events.subscribe("oximetry", (data) => {
-        oxiSensorData = data;
-        const pane = document.getElementById("p-oxi");
-        if (pane && pane.classList.contains("active")) {
-          renderOximetrySensorManager(oxiSensorData);
-        }
-      });
-      AirCANnect.events.subscribe("settings", async (data) => {
-        if (!clinicalTabActive()) return;
-        try {
-          await applySettingsSnapshot(data);
-        } catch (error) {
-          AirCANnect.ui.message("settingsMsg", error.message, false);
-        }
-      });
-      AirCANnect.snapshots.subscribe("ota", applyOtaSnapshot, false);
-      AirCANnect.events.subscribe("ota", () => {});
-      AirCANnect.snapshots.subscribe(
-        "resmed_ota", applyResmedOtaSnapshot, false);
-      AirCANnect.events.subscribe("resmed_ota", () => {});
-      AirCANnect.events.subscribe("resmed_repository", (data) => {
-        renderResmedRepositoryStatus(data);
-        if (resmedRepositoryLoaded && data.state === "ready" &&
-            Number(data.revision) !== resmedRepositoryCatalogRevision) {
-          loadResmedRepository(false);
-        }
-      });
-      AirCANnect.events.subscribe(
-        "storage_operation", applyStorageOperationSnapshot);
-      AirCANnect.events.subscribe("device_boot", () => {
-        invalidateSettingsCatalog();
-      }, {raw: true});
-      AirCANnect.events.subscribe("stream", (data) => {
-        streamData = data;
-        renderStream(streamData);
-      });
-      AirCANnect.events.subscribe("console", renderConsole);
-      AirCANnect.events.subscribe("live", renderLive);
-      AirCANnect.events.start("/api/events");
-    }
-
     async function therapy(action) {
       applyTherapyPending(action);
       try {
@@ -1261,5 +1211,19 @@
       loadStatus();
       loadOximetrySensors();
     });
+    AirCANnect.snapshots.subscribe("status", applyStatusSnapshot, false);
+    AirCANnect.events.subscribe("status", () => {});
+    AirCANnect.events.subscribe("oximetry", (data) => {
+      oxiSensorData = data;
+      const pane = document.getElementById("p-oxi");
+      if (pane && pane.classList.contains("active")) {
+        renderOximetrySensorManager(oxiSensorData);
+      }
+    });
+    AirCANnect.events.subscribe("stream", (data) => {
+      streamData = data;
+      renderStream(streamData);
+    });
+    AirCANnect.events.subscribe("live", renderLive);
     window.addEventListener("resize", () => updateCharts());
     updateCharts();

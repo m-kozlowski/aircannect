@@ -1,4 +1,4 @@
-    initEvents();
+    AirCANnect.events.start("/api/events");
     AirCANnect.actions.start();
     if (location.hash && tabs[location.hash.slice(1)]) {
       showTab(location.hash.slice(1));

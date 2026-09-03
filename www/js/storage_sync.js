@@ -1403,3 +1403,9 @@
       loadStorageList(refresh);
       loadSmbSyncStatus();
     });
+    AirCANnect.events.subscribe("exports", (data) => {
+      if (data.smb) applySmbSyncStatus(data.smb);
+      if (data.sleephq) applySleepHqSyncStatus(data.sleephq);
+    });
+    AirCANnect.events.subscribe(
+      "storage_operation", applyStorageOperationSnapshot);

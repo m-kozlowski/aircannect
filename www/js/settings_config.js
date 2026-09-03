@@ -2702,3 +2702,29 @@
       }
     });
     AirCANnect.pages.onLoad("config", () => loadConfig());
+    AirCANnect.events.subscribe("config", () => {});
+    AirCANnect.events.subscribe("as11_ble", renderAs11BlePairing);
+    AirCANnect.events.subscribe("settings", async (data) => {
+      if (!clinicalTabActive()) return;
+      try {
+        await applySettingsSnapshot(data);
+      } catch (error) {
+        AirCANnect.ui.message("settingsMsg", error.message, false);
+      }
+    });
+    AirCANnect.snapshots.subscribe("ota", applyOtaSnapshot, false);
+    AirCANnect.events.subscribe("ota", () => {});
+    AirCANnect.snapshots.subscribe(
+      "resmed_ota", applyResmedOtaSnapshot, false);
+    AirCANnect.events.subscribe("resmed_ota", () => {});
+    AirCANnect.events.subscribe("resmed_repository", (data) => {
+      renderResmedRepositoryStatus(data);
+      if (resmedRepositoryLoaded && data.state === "ready" &&
+          Number(data.revision) !== resmedRepositoryCatalogRevision) {
+        loadResmedRepository(false);
+      }
+    });
+    AirCANnect.events.subscribe("device_boot", () => {
+      invalidateSettingsCatalog();
+    }, {raw: true});
+    AirCANnect.events.subscribe("console", renderConsole);
