@@ -10,6 +10,7 @@
       const messageTimers = new Map();
       let eventSource = null;
       let actionsStarted = false;
+      let activeStorageUpload = null;
 
       function snapshotChannel(name) {
         if (!snapshotChannels.has(name)) {
@@ -102,6 +103,290 @@
           Object.entries(settings.headers || {}).forEach(([key, value]) =>
             xhr.setRequestHeader(key, value));
           xhr.send(body);
+        });
+      }
+
+      async function storageUploadRequest(path, options) {
+        const response = await request(path, options || {cache: "no-store"});
+        const text = await response.text();
+        let data = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch (_) {
+          data = {error: text || ("HTTP " + response.status)};
+        }
+
+        if (!response.ok) {
+          const error = new Error(data.error || ("HTTP " + response.status));
+          error.status = response.status;
+          error.data = data;
+          throw error;
+        }
+        return data;
+      }
+
+      async function downloadStoragePath(path) {
+        for (let attempt = 0; attempt < 400; attempt++) {
+          const response = await request("/api/storage/download?path=" +
+            encodeURIComponent(path), {cache: "no-store"});
+          const text = await response.text();
+          if (response.status === 202) {
+            await delay(100);
+            continue;
+          }
+          if (!response.ok) {
+            throw new Error(responseError(text, response.status));
+          }
+
+          const data = JSON.parse(text);
+          if (data.state !== "ready" || !Number(data.id)) {
+            throw new Error("download_not_ready");
+          }
+
+          const link = document.createElement("a");
+          link.href = "/api/storage/download?id=" + encodeURIComponent(data.id);
+          link.download = data.filename || path.split("/").pop() || "download";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          return;
+        }
+        throw new Error("download_prepare_timeout");
+      }
+
+      async function renameStoragePath(base, currentName, title) {
+        const requested = window.prompt(
+          title || "Rename storage item", currentName);
+        if (requested === null) return "";
+        const newName = requested.trim();
+        if (!newName || newName === currentName) return "";
+
+        const response = await request("/api/storage/rename", {
+          method: "POST",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({base, name: currentName, new_name: newName}),
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          throw new Error(responseError(text, response.status));
+        }
+        return newName;
+      }
+
+      function responseError(text, status) {
+        try {
+          const data = JSON.parse(text);
+          if (data && data.error) return data.error;
+        } catch (_) {}
+        return text || ("HTTP " + status);
+      }
+
+      async function storageUploadStatus(id) {
+        return storageUploadRequest("/api/storage/upload/status?id=" +
+          encodeURIComponent(id), {cache: "no-store"});
+      }
+
+      async function cancelStorageUploadSession(id) {
+        if (!id) return;
+        try {
+          await storageUploadRequest("/api/storage/upload/cancel?id=" +
+            encodeURIComponent(id), {method: "POST"});
+        } catch (_) {}
+      }
+
+      function storageUploadRetryMs(status) {
+        const requested = Number(status && status.retry_ms);
+        if (!Number.isFinite(requested) || requested <= 0) return 500;
+        return Math.min(5000, Math.max(100, requested));
+      }
+
+      async function waitForStorageUpload(operation, id, predicate,
+                                          initialStatus) {
+        let status = initialStatus || null;
+        for (;;) {
+          if (operation.cancelRequested) throw new Error("upload_cancelled");
+
+          if (status) {
+            if (status.state === "error" || status.state === "cancelled") {
+              throw new Error(status.error || status.state);
+            }
+            if (predicate(status)) return status;
+            await delay(storageUploadRetryMs(status));
+          }
+
+          try {
+            status = await storageUploadStatus(id);
+          } catch (error) {
+            status = null;
+            if (error.status === 503 && error.message === "status_busy") {
+              await delay(250);
+              continue;
+            }
+            if (Number(error.status) > 0) throw error;
+            await delay(1000);
+          }
+        }
+      }
+
+      async function startStorageUpload(file, directory, settings) {
+        return storageUploadRequest("/api/storage/upload/start", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            directory,
+            filename: settings.filename || file.name,
+            total_size: file.size,
+            conflict: settings.conflict || "fail",
+          }),
+        });
+      }
+
+      async function sendStorageUploadChunk(session, file, offset, size) {
+        const chunk = file.slice(offset, offset + size);
+        const url = "/api/storage/upload/chunk?id=" +
+          encodeURIComponent(session.id) + "&offset=" +
+          encodeURIComponent(offset) + "&token=" +
+          encodeURIComponent(session.token);
+        try {
+          return await storageUploadRequest(url, {
+            method: "POST",
+            headers: {"Content-Type": "application/octet-stream"},
+            body: chunk,
+          });
+        } catch (error) {
+          if (error.status !== 409 ||
+              !["paused", "chunk_pending", "service_busy"].includes(
+                error.message)) {
+            throw error;
+          }
+          return null;
+        }
+      }
+
+      async function uploadStorageFile(operation, file, directory, options) {
+        if (activeStorageUpload !== operation || operation.closed) {
+          throw new Error("upload_not_active");
+        }
+
+        const settings = options || {};
+        const progress = settings.progress || (() => {});
+        const fileIndex = Number(settings.fileIndex) || 0;
+        const fileCount = Math.max(1, Number(settings.fileCount) || 1);
+        let conflict = settings.conflict || "fail";
+
+        for (;;) {
+          let session = null;
+          try {
+            session = await startStorageUpload(file, directory,
+              Object.assign({}, settings, {conflict}));
+            operation.currentId = Number(session.id) || 0;
+
+            let status = await waitForStorageUpload(
+              operation,
+              session.id,
+              (current) => current.state === "ready" ||
+                current.state === "done",
+              session);
+            let committed = Number(status.committed_bytes) || 0;
+            const chunkSize = Math.max(
+              1, Number(session.chunk_size) || 262144);
+            progress(file.name, committed, file.size, fileIndex, fileCount);
+
+            while (status.state !== "done") {
+              let accepted = null;
+              try {
+                accepted = await sendStorageUploadChunk(
+                  session,
+                  file,
+                  committed,
+                  Math.min(chunkSize, file.size - committed));
+              } catch (error) {
+                if (Number(error.status) > 0) throw error;
+                status = await waitForStorageUpload(
+                  operation,
+                  session.id,
+                  (current) => current.state === "done" ||
+                    current.state === "ready");
+                committed = Number(status.committed_bytes) || committed;
+                progress(file.name, committed, file.size,
+                  fileIndex, fileCount);
+                continue;
+              }
+
+              if (!accepted) {
+                status = await waitForStorageUpload(
+                  operation,
+                  session.id,
+                  (current) => current.state === "done" ||
+                    current.state === "ready");
+                committed = Number(status.committed_bytes) || committed;
+                continue;
+              }
+
+              status = await waitForStorageUpload(
+                operation,
+                session.id,
+                (current) => current.state === "done" ||
+                  (current.state === "ready" &&
+                   Number(current.committed_bytes) > committed),
+                accepted);
+              committed = Number(status.committed_bytes) || committed;
+              progress(file.name, committed, file.size, fileIndex, fileCount);
+            }
+
+            operation.currentId = 0;
+            return true;
+          } catch (error) {
+            await cancelStorageUploadSession(
+              session ? Number(session.id) || 0 : 0);
+            operation.currentId = 0;
+
+            if (error.message === "destination_exists" &&
+                conflict === "fail") {
+              const confirmReplace = settings.confirmReplace;
+              const replace = confirmReplace === false ? false :
+                typeof confirmReplace === "function" ?
+                  await confirmReplace(file) :
+                  window.confirm(file.name +
+                    " already exists. Replace it?");
+              if (replace) {
+                conflict = "replace";
+                continue;
+              }
+              return false;
+            }
+            throw error;
+          }
+        }
+      }
+
+      function beginStorageUpload() {
+        if (activeStorageUpload) return null;
+
+        const operation = {
+          cancelRequested: false,
+          closed: false,
+          currentId: 0,
+        };
+        activeStorageUpload = operation;
+
+        return Object.freeze({
+          get cancelled() {
+            return operation.cancelRequested;
+          },
+          cancel: async () => {
+            operation.cancelRequested = true;
+            await cancelStorageUploadSession(operation.currentId);
+          },
+          close: () => {
+            if (activeStorageUpload !== operation) return;
+            operation.closed = true;
+            operation.currentId = 0;
+            activeStorageUpload = null;
+          },
+          file: (file, directory, options) =>
+            uploadStorageFile(operation, file, directory, options),
         });
       }
 
@@ -276,6 +561,29 @@
         return element;
       }
 
+      function uploadProgress(prefix, name, committed, total,
+                              fileIndex, fileCount) {
+        const safeTotal = Math.max(0, Number(total) || 0);
+        const safeCommitted = Math.min(safeTotal,
+          Math.max(0, Number(committed) || 0));
+        const nameNode = document.getElementById(prefix + "Name");
+        const amountNode = document.getElementById(prefix + "Amount");
+        const bar = document.getElementById(prefix + "Bar");
+
+        if (nameNode) {
+          nameNode.textContent = (fileCount > 1 ?
+            (fileIndex + 1) + "/" + fileCount + " " : "") + name;
+        }
+        if (amountNode) {
+          amountNode.textContent = formatBytes(safeCommitted) + " / " +
+            formatBytes(safeTotal);
+        }
+        if (bar) {
+          bar.max = Math.max(1, safeTotal);
+          bar.value = safeCommitted;
+        }
+      }
+
       function formatBytes(bytes) {
         const value = Number(bytes);
         if (!Number.isFinite(value) || value < 0) return "--";
@@ -285,6 +593,26 @@
           return (value / (1024 * 1024)).toFixed(1) + " MiB";
         }
         return (value / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+      }
+
+      function formatDuration(seconds) {
+        const value = Number(seconds);
+        if (!Number.isFinite(value) || value < 0) return "";
+        if (value < 90) return Math.ceil(value) + "s";
+        if (value < 3600) return Math.ceil(value / 60) + "m";
+        const hours = Math.floor(value / 3600);
+        const minutes = Math.ceil((value - hours * 3600) / 60);
+        return hours + "h " + minutes + "m";
+      }
+
+      function formatModified(value) {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds <= 0) return "";
+        const date = new Date(seconds * 1000);
+        if (Number.isNaN(date.getTime())) return "";
+        return date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" +
+          pad2(date.getDate()) + " " + pad2(date.getHours()) + ":" +
+          pad2(date.getMinutes());
       }
 
       function pad2(value) {
@@ -302,7 +630,16 @@
           stop: stopEvents,
           subscribe: subscribeEvent,
         }),
-        format: Object.freeze({bytes: formatBytes, pad2}),
+        files: Object.freeze({
+          download: downloadStoragePath,
+          rename: renameStoragePath,
+        }),
+        format: Object.freeze({
+          bytes: formatBytes,
+          duration: formatDuration,
+          modified: formatModified,
+          pad2,
+        }),
         http: Object.freeze({request, requestOk, upload}),
         pages: Object.freeze({
           load: loadPage,
@@ -323,7 +660,9 @@
           row,
           setControlValue,
           text,
+          uploadProgress,
           valueSpan,
         }),
+        uploads: Object.freeze({begin: beginStorageUpload}),
       });
     })();

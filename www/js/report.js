@@ -1,14 +1,4 @@
 (() => {
-    function fmtDuration(seconds) {
-      const value = Number(seconds);
-      if (!Number.isFinite(value) || value < 0) return "";
-      if (value < 90) return Math.ceil(value) + "s";
-      if (value < 3600) return Math.ceil(value / 60) + "m";
-      const hours = Math.floor(value / 3600);
-      const minutes = Math.ceil((value - hours * 3600) / 60);
-      return hours + "h " + minutes + "m";
-    }
-
     function fmtMinutes(minutes) {
       const value = Number(minutes);
       if (!Number.isFinite(value) || value <= 0) return "--";

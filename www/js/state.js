@@ -55,6 +55,7 @@
     let resmedRepositoryLoadGeneration = 0;
     let resmedRepositoryLoaded = false;
     let resmedDirectUploadBusy = false;
+    let resmedUploadOperation = null;
     let resmedCanAvailable = true;
     const LIVE_FAST_POINTS = 6000;
     const LIVE_MEDIUM_POINTS = 3000;
@@ -74,32 +75,6 @@
       leak: {min: 0, max: 20, step: 5},
       therapyPressure: {min: 0, max: 15, step: 5},
     };
-    let storagePath = "/";
-    let storageOffset = 0;
-    let storageLimit = 64;
-    let storageNextOffset = null;
-    let storageListRequestSeq = 0;
-    let storageOperationData = null;
-    let storageArchiveJobId = 0;
-    let storageArchiveDownloadStartedId = 0;
-    let storageDeleteJobId = 0;
-    let storageEntries = [];
-    let storageSelectedNames = new Set();
-    let storageArchiveBusy = false;
-    let storageDeleteBusy = false;
-    let storageRenameBusy = false;
-    let storageUploadBusy = false;
-    let storageUploadCancelRequested = false;
-    let storageUploadCurrentId = 0;
-    let smbSyncBusy = false;
-    let smbSyncEnabled = false;
-    let smbSyncConfigured = false;
-    let smbSyncCompleteMessage = "SMB sync complete";
-    let sleepHqSyncBusy = false;
-    let sleepHqSyncConfigured = false;
-    let sleepHqSyncCompleteMessage = "SleepHQ sync complete";
-    let edfOverviewLoading = false;
-
     const tabs = {
       dash: "Dashboard",
       report: "Report",

@@ -1,14 +1,28 @@
-    function fmtStorageModified(value) {
-      const seconds = Number(value);
-      if (!Number.isFinite(seconds) || seconds <= 0) return "";
-      const date = new Date(seconds * 1000);
-      if (Number.isNaN(date.getTime())) return "";
-      return date.getFullYear() + "-" +
-        AirCANnect.format.pad2(date.getMonth() + 1) + "-" +
-        AirCANnect.format.pad2(date.getDate()) + " " +
-        AirCANnect.format.pad2(date.getHours()) + ":" +
-        AirCANnect.format.pad2(date.getMinutes());
-    }
+(() => {
+    let storagePath = "/";
+    let storageOffset = 0;
+    let storageLimit = 64;
+    let storageNextOffset = null;
+    let storageListRequestSeq = 0;
+    let storageOperationData = null;
+    let storageArchiveJobId = 0;
+    let storageArchiveDownloadStartedId = 0;
+    let storageDeleteJobId = 0;
+    let storageEntries = [];
+    let storageSelectedNames = new Set();
+    let storageArchiveBusy = false;
+    let storageDeleteBusy = false;
+    let storageRenameBusy = false;
+    let storageUploadBusy = false;
+    let storageUploadOperation = null;
+    let smbSyncBusy = false;
+    let smbSyncEnabled = false;
+    let smbSyncConfigured = false;
+    let smbSyncCompleteMessage = "SMB sync complete";
+    let sleepHqSyncBusy = false;
+    let sleepHqSyncConfigured = false;
+    let sleepHqSyncCompleteMessage = "SleepHQ sync complete";
+    let edfOverviewLoading = false;
 
     function storageErrorText(text, status) {
       try {
@@ -309,7 +323,7 @@
         meta.className = "storage-meta";
         const metaParts = [entry.type === "dir" ?
           (entry.path || "") : AirCANnect.format.bytes(entry.size)];
-        const modified = fmtStorageModified(entry.modified);
+        const modified = AirCANnect.format.modified(entry.modified);
         if (modified) metaParts.push(modified);
         meta.textContent = metaParts.filter(Boolean).join(" | ");
         info.appendChild(name);
@@ -384,55 +398,15 @@
       const target = messageId || "storageMsg";
       AirCANnect.ui.message(target, "Preparing download", true, false);
       try {
-        for (let attempt = 0; attempt < 400; attempt++) {
-          const response = await AirCANnect.http.request("/api/storage/download?path=" +
-            encodeURIComponent(path), {cache: "no-store"});
-          const text = await response.text();
-          if (response.status === 202) {
-            await AirCANnect.time.delay(100);
-            continue;
-          }
-          if (!response.ok) {
-            throw new Error(storageErrorText(text, response.status));
-          }
-
-          const data = JSON.parse(text);
-          if (data.state !== "ready" || !Number(data.id)) {
-            throw new Error("download_not_ready");
-          }
-
-          const link = document.createElement("a");
-          link.href = "/api/storage/download?id=" + encodeURIComponent(data.id);
-          link.download = data.filename || path.split("/").pop() || "download";
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-          AirCANnect.ui.message(target, "Download started", true, false);
-          return;
-        }
-        throw new Error("download_prepare_timeout");
+        await AirCANnect.files.download(path);
+        AirCANnect.ui.message(target, "Download started", true, false);
       } catch (error) {
         AirCANnect.ui.message(target, error.message, false, true);
       }
     }
 
     async function storageRenamePath(base, currentName, title) {
-      const requested = prompt(title || "Rename storage item", currentName);
-      if (requested === null) return;
-      const newName = requested.trim();
-      if (!newName || newName === currentName) return;
-
-      const response = await AirCANnect.http.request("/api/storage/rename", {
-        method: "POST",
-        cache: "no-store",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({base, name: currentName, new_name: newName}),
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        throw new Error(storageErrorText(text, response.status));
-      }
-      return newName;
+      return AirCANnect.files.rename(base, currentName, title);
     }
 
     async function storageRenameEntry(entry) {
@@ -474,30 +448,8 @@
       storageSelectionUi();
     }
 
-    function renderUploadProgress(prefix, name, committed, total,
-                                  fileIndex, fileCount) {
-      const safeTotal = Math.max(0, Number(total) || 0);
-      const safeCommitted = Math.min(safeTotal,
-        Math.max(0, Number(committed) || 0));
-      const nameNode = document.getElementById(prefix + "Name");
-      const amountNode = document.getElementById(prefix + "Amount");
-      const bar = document.getElementById(prefix + "Bar");
-      if (nameNode) {
-        nameNode.textContent = (fileCount > 1 ?
-          (fileIndex + 1) + "/" + fileCount + " " : "") + name;
-      }
-      if (amountNode) {
-        amountNode.textContent = AirCANnect.format.bytes(safeCommitted) + " / " +
-          AirCANnect.format.bytes(safeTotal);
-      }
-      if (bar) {
-        bar.max = Math.max(1, safeTotal);
-        bar.value = safeCommitted;
-      }
-    }
-
     function storageUploadProgress(name, committed, total, fileIndex, fileCount) {
-      renderUploadProgress("storageUpload", name, committed, total,
+      AirCANnect.ui.uploadProgress("storageUpload", name, committed, total,
         fileIndex, fileCount);
     }
 
@@ -517,199 +469,33 @@
       storageUploadQueue(queue);
     }
 
-    async function storageUploadRequest(path, options) {
-      const response = await AirCANnect.http.request(path, options || {cache: "no-store"});
-      const text = await response.text();
-      let data = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch (_) {
-        data = {error: text || ("HTTP " + response.status)};
-      }
-      if (!response.ok) {
-        const error = new Error(data.error || ("HTTP " + response.status));
-        error.status = response.status;
-        error.data = data;
-        throw error;
-      }
-      return data;
-    }
-
-    async function storageUploadStatus(id) {
-      return storageUploadRequest("/api/storage/upload/status?id=" +
-        encodeURIComponent(id), {cache: "no-store"});
-    }
-
-    async function storageCancelUploadSession(id) {
-      if (!id) return;
-      try {
-        await storageUploadRequest("/api/storage/upload/cancel?id=" +
-          encodeURIComponent(id), {method: "POST"});
-      } catch (_) {}
-    }
-
-    function storageUploadRetryMs(status) {
-      const requested = Number(status && status.retry_ms);
-      if (!Number.isFinite(requested) || requested <= 0) return 500;
-      return Math.min(5000, Math.max(100, requested));
-    }
-
-    async function storageWaitForUpload(id, predicate, initialStatus) {
-      let status = initialStatus || null;
-      for (;;) {
-        if (storageUploadCancelRequested) throw new Error("upload_cancelled");
-
-        if (status) {
-          if (status.state === "error" || status.state === "cancelled") {
-            throw new Error(status.error || status.state);
-          }
-          if (predicate(status)) return status;
-          await AirCANnect.time.delay(storageUploadRetryMs(status));
-        }
-
-        try {
-          status = await storageUploadStatus(id);
-        } catch (error) {
-          status = null;
-          if (error.status === 503 && error.message === "status_busy") {
-            await AirCANnect.time.delay(250);
-            continue;
-          }
-          if (Number(error.status) > 0) throw error;
-          await AirCANnect.time.delay(1000);
-          continue;
-        }
-      }
-    }
-
-    async function storageStartUpload(file, directory, conflict, filename) {
-      return storageUploadRequest("/api/storage/upload/start", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-          directory,
-          filename: filename || file.name,
-          total_size: file.size,
-          conflict: conflict || "fail"
-        })
-      });
-    }
-
-    async function storageSendUploadChunk(session, file, offset, size) {
-      const chunk = file.slice(offset, offset + size);
-      const url = "/api/storage/upload/chunk?id=" +
-        encodeURIComponent(session.id) + "&offset=" +
-        encodeURIComponent(offset) + "&token=" +
-        encodeURIComponent(session.token);
-      try {
-        return await storageUploadRequest(url, {
-          method: "POST",
-          headers: {"Content-Type": "application/octet-stream"},
-          body: chunk
-        });
-      } catch (error) {
-        if (error.status !== 409 ||
-            !["paused", "chunk_pending", "service_busy"].includes(
-              error.message)) {
-          throw error;
-        }
-        return null;
-      }
-    }
-
-    async function storageUploadFile(file, directory, fileIndex, fileCount,
-                                     progressCallback, options) {
-      const updateProgress = progressCallback || storageUploadProgress;
-      const settings = options || {};
-      const destinationName = settings.filename || file.name;
-      let conflict = settings.conflict || "fail";
-      for (;;) {
-        let session = null;
-        try {
-          session = await storageStartUpload(
-            file, directory, conflict, destinationName);
-          storageUploadCurrentId = Number(session.id) || 0;
-
-          let status = await storageWaitForUpload(
-            session.id,
-            (current) => current.state === "ready" ||
-              current.state === "done",
-            session);
-          let committed = Number(status.committed_bytes) || 0;
-          const chunkSize = Math.max(1, Number(session.chunk_size) || 262144);
-          updateProgress(file.name, committed, file.size,
-            fileIndex, fileCount);
-
-          while (status.state !== "done") {
-            let accepted = null;
-            try {
-              accepted = await storageSendUploadChunk(session, file, committed,
-                Math.min(chunkSize, file.size - committed));
-            } catch (error) {
-              if (Number(error.status) > 0) throw error;
-              status = await storageWaitForUpload(session.id, (current) =>
-                current.state === "done" || current.state === "ready");
-              if (status.state === "error" || status.state === "cancelled") {
-                throw new Error(status.error || status.state);
-              }
-              committed = Number(status.committed_bytes) || committed;
-              updateProgress(file.name, committed, file.size,
-                fileIndex, fileCount);
-              continue;
-            }
-            if (!accepted) {
-              status = await storageWaitForUpload(session.id, (current) =>
-                current.state === "done" || current.state === "ready");
-              committed = Number(status.committed_bytes) || committed;
-              continue;
-            }
-            status = await storageWaitForUpload(
-              session.id,
-              (current) => current.state === "done" ||
-                (current.state === "ready" &&
-                 Number(current.committed_bytes) > committed),
-              accepted);
-            committed = Number(status.committed_bytes) || committed;
-            updateProgress(file.name, committed, file.size,
-              fileIndex, fileCount);
-          }
-          storageUploadCurrentId = 0;
-          return true;
-        } catch (error) {
-          const failedId = session ? Number(session.id) || 0 : 0;
-          await storageCancelUploadSession(failedId);
-          storageUploadCurrentId = 0;
-
-          if (error.message === "destination_exists" && conflict === "fail") {
-            if (settings.confirmReplace !== false &&
-                window.confirm(file.name + " already exists. Replace it?")) {
-              conflict = "replace";
-              continue;
-            }
-            return false;
-          }
-          throw error;
-        }
-      }
-    }
-
     async function storageUploadQueue(queue) {
-      storageUploadCancelRequested = false;
+      const operation = AirCANnect.uploads.begin();
+      if (!operation) {
+        AirCANnect.ui.message(
+          "storageMsg", "Another upload is already active", false, true);
+        return;
+      }
+
+      storageUploadOperation = operation;
       storageUploadSetBusy(true);
       let uploaded = 0;
       try {
         for (let index = 0; index < queue.length; index++) {
-          if (storageUploadCancelRequested) break;
+          if (operation.cancelled) break;
           const item = queue[index];
           storageUploadProgress(item.file.name, 0, item.file.size,
             index, queue.length);
-          if (await storageUploadFile(item.file, item.directory,
-                                      index, queue.length)) {
+          if (await operation.file(item.file, item.directory, {
+              fileIndex: index,
+              fileCount: queue.length,
+              progress: storageUploadProgress,
+            })) {
             uploaded++;
             await loadStorageList(true);
           }
         }
-        if (storageUploadCancelRequested) {
+        if (operation.cancelled) {
           AirCANnect.ui.message("storageMsg", "Upload cancelled", true, false);
         } else {
           AirCANnect.ui.message("storageMsg", "Uploaded " + uploaded + " file" +
@@ -722,18 +508,20 @@
           AirCANnect.ui.message("storageMsg", error.message, false, true);
         }
       } finally {
-        storageUploadCurrentId = 0;
+        operation.close();
+        if (storageUploadOperation === operation) storageUploadOperation = null;
         storageUploadSetBusy(false);
       }
     }
 
     async function storageCancelUpload() {
-      storageUploadCancelRequested = true;
-      const id = storageUploadCurrentId;
+      const operation = storageUploadOperation;
+      if (!operation) return;
+
       const button = document.getElementById("storageUploadCancelBtn");
       if (button) button.disabled = true;
       try {
-        await storageCancelUploadSession(id);
+        await operation.cancel();
       } catch (_) {
       } finally {
         if (button) button.disabled = false;
@@ -751,20 +539,24 @@
     }
 
     function runtimeAgeText(ms) {
-      const current = statusData && Number(statusData.uptime) > 0 ?
-        Number(statusData.uptime) * 1000 : 0;
+      const status = AirCANnect.snapshots.read("status").data;
+      const current = status && Number(status.uptime) > 0 ?
+        Number(status.uptime) * 1000 : 0;
       const value = Number(ms) || 0;
       if (!current || !value || current < value) return "";
       const age = Math.max(0, Math.round((current - value) / 1000));
-      return age < 5 ? "just now" : fmtDuration(age) + " ago";
+      return age < 5 ? "just now" :
+        AirCANnect.format.duration(age) + " ago";
     }
 
     function retryInText(ms) {
-      const current = statusData && Number(statusData.uptime) > 0 ?
-        Number(statusData.uptime) * 1000 : 0;
+      const status = AirCANnect.snapshots.read("status").data;
+      const current = status && Number(status.uptime) > 0 ?
+        Number(status.uptime) * 1000 : 0;
       const value = Number(ms) || 0;
       if (!current || !value || value <= current) return "";
-      return "Retry in " + fmtDuration(Math.ceil((value - current) / 1000));
+      return "Retry in " + AirCANnect.format.duration(
+        Math.ceil((value - current) / 1000));
     }
 
     function syncLastText(data, configured) {
@@ -773,7 +565,7 @@
       const uploaded = Number(data.last_sync_files_uploaded) || 0;
       const failed = Number(data.last_sync_files_failed) || 0;
       const bytes = Number(data.last_sync_bytes_uploaded) || 0;
-      const when = fmtStorageModified(data.last_sync_epoch);
+      const when = AirCANnect.format.modified(data.last_sync_epoch);
       if (!when && !seen) return "--";
       let text = when || "Completed";
       if (failed) {
@@ -946,7 +738,7 @@
         return "--";
       }
       const reconcileSeen = Number(data.last_reconcile_files_seen) || 0;
-      const reconcileWhen = fmtStorageModified(data.last_reconcile_epoch);
+      const reconcileWhen = AirCANnect.format.modified(data.last_reconcile_epoch);
       if (reconcileWhen || reconcileSeen) {
         let text = reconcileWhen || "Share checked";
         if (reconcileSeen) {
@@ -956,7 +748,7 @@
         return text;
       }
       const seen = Number(data.last_verify_files_seen) || 0;
-      const when = fmtStorageModified(data.last_verify_epoch);
+      const when = AirCANnect.format.modified(data.last_verify_epoch);
       if (!when && !seen) return "--";
       let text = when || "Latest data checked";
       if (seen) {
@@ -968,8 +760,8 @@
 
     function renderSmbSyncStatus(data) {
       const configured = !!(data && data.enabled && data.configured);
-      AirCANnect.ui.text("edfSyncEndpoint", data && data.endpoint ? data.endpoint :
-        (configData && configData.smb_ep ? configData.smb_ep : "--"));
+      AirCANnect.ui.text(
+        "edfSyncEndpoint", data && data.endpoint ? data.endpoint : "--");
       AirCANnect.ui.text("edfSyncResult", smbSyncResultText(data));
       AirCANnect.ui.text("edfSyncLast", syncLastText(data, configured));
       AirCANnect.ui.text("edfSyncCheck", smbSyncCheckText(data));
@@ -1100,7 +892,7 @@
 
     function sleepHqSyncCheckText(data) {
       if (!data || data.ok === false || !data.configured) return "--";
-      const when = fmtStorageModified(data.last_check_epoch);
+      const when = AirCANnect.format.modified(data.last_check_epoch);
       return when || "--";
     }
 
@@ -1409,3 +1201,4 @@
     });
     AirCANnect.events.subscribe(
       "storage_operation", applyStorageOperationSnapshot);
+})();

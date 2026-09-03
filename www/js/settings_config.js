@@ -1297,7 +1297,7 @@
 
       if (!resmedOtaRate.bps) return "";
       const remaining = Math.max(0, total - bytes);
-      const eta = fmtDuration(remaining / resmedOtaRate.bps);
+      const eta = AirCANnect.format.duration(remaining / resmedOtaRate.bps);
       return AirCANnect.format.bytes(resmedOtaRate.bps) + "/s" + (eta ? " ETA " + eta : "");
     }
 
@@ -1387,8 +1387,8 @@
 
     function resmedRepositoryUploadProgress(name, committed, total,
                                              fileIndex, fileCount) {
-      storageUploadProgress(name, committed, total, fileIndex, fileCount);
-      renderUploadProgress("resmedRepositoryUpload", name, committed, total,
+      AirCANnect.ui.uploadProgress(
+        "resmedRepositoryUpload", name, committed, total,
         fileIndex, fileCount);
     }
 
@@ -1413,6 +1413,19 @@
 
       if (data.error) {
         AirCANnect.ui.message("resmedRepositoryMsg", data.error, false, true);
+      }
+    }
+
+    async function resmedRepositoryDownload(path) {
+      AirCANnect.ui.message(
+        "resmedRepositoryMsg", "Preparing download", true, false);
+      try {
+        await AirCANnect.files.download(path);
+        AirCANnect.ui.message(
+          "resmedRepositoryMsg", "Download started", true, false);
+      } catch (error) {
+        AirCANnect.ui.message(
+          "resmedRepositoryMsg", error.message, false, true);
       }
     }
 
@@ -1448,19 +1461,18 @@
         name.className = "storage-name";
         name.textContent = entry.name || entry.path || "--";
         name.tabIndex = 0;
-        name.onclick = () => storageDownload(entry.path,
-          "resmedRepositoryMsg");
+        name.onclick = () => resmedRepositoryDownload(entry.path);
         name.onkeydown = (event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            storageDownload(entry.path, "resmedRepositoryMsg");
+            resmedRepositoryDownload(entry.path);
           }
         };
         const meta = document.createElement("div");
         meta.className = "storage-meta";
         meta.textContent = AirCANnect.format.bytes(entry.size) +
-          (fmtStorageModified(entry.modified) ?
-            " / " + fmtStorageModified(entry.modified) : "");
+          (AirCANnect.format.modified(entry.modified) ?
+            " / " + AirCANnect.format.modified(entry.modified) : "");
         details.appendChild(name);
         details.appendChild(meta);
 
@@ -1535,7 +1547,7 @@
     }
 
     function resmedRepositoryChooseFiles() {
-      if (storageUploadBusy) return;
+      if (resmedUploadOperation) return;
       const input = document.getElementById("resmedRepositoryInput");
       if (input) input.click();
     }
@@ -1543,29 +1555,38 @@
     function resmedRepositoryFilesSelected(input) {
       const files = input && input.files ? Array.from(input.files) : [];
       if (input) input.value = "";
-      if (!files.length || storageUploadBusy) return;
+      if (!files.length || resmedUploadOperation) return;
       resmedRepositoryUploadQueue(files);
     }
 
     async function resmedRepositoryUploadQueue(files) {
-      storageUploadCancelRequested = false;
-      storageUploadSetBusy(true);
+      const operation = AirCANnect.uploads.begin();
+      if (!operation) {
+        AirCANnect.ui.message(
+          "resmedRepositoryMsg", "Another upload is already active",
+          false, true);
+        return;
+      }
+
+      resmedUploadOperation = operation;
       setResmedRepositoryUploadBusy(true);
       let uploaded = 0;
       try {
         for (let index = 0; index < files.length; index++) {
-          if (storageUploadCancelRequested) break;
+          if (operation.cancelled) break;
           const file = files[index];
           resmedRepositoryUploadProgress(file.name, 0, file.size,
             index, files.length);
-          if (await storageUploadFile(
-              file, "/aircannect/resmed-firmware", index, files.length,
-              resmedRepositoryUploadProgress)) {
+          if (await operation.file(file, "/aircannect/resmed-firmware", {
+              fileIndex: index,
+              fileCount: files.length,
+              progress: resmedRepositoryUploadProgress,
+            })) {
             uploaded++;
           }
         }
 
-        if (storageUploadCancelRequested) {
+        if (operation.cancelled) {
           AirCANnect.ui.message("resmedRepositoryMsg", "Upload cancelled", true, false);
         } else {
           AirCANnect.ui.message("resmedRepositoryMsg", "Added " + uploaded + " image" +
@@ -1575,20 +1596,18 @@
       } catch (error) {
         AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
       } finally {
-        storageUploadCurrentId = 0;
-        storageUploadSetBusy(false);
+        operation.close();
+        if (resmedUploadOperation === operation) resmedUploadOperation = null;
         setResmedRepositoryUploadBusy(false);
       }
     }
 
     async function resmedRepositoryCancelUpload() {
-      storageUploadCancelRequested = true;
-      const id = storageUploadCurrentId;
+      const operation = resmedUploadOperation;
+      if (!operation) return;
+
       try {
-        if (id) {
-          await storageUploadRequest("/api/storage/upload/cancel?id=" +
-            encodeURIComponent(id), {method: "POST"});
-        }
+        await operation.cancel();
       } catch (_) {}
     }
 
@@ -1615,7 +1634,7 @@
         const slash = path.lastIndexOf("/");
         const base = slash > 0 ? path.slice(0, slash) : "/";
         const name = slash >= 0 ? path.slice(slash + 1) : currentName;
-        const renamed = await storageRenamePath(
+        const renamed = await AirCANnect.files.rename(
           base, name, "Rename firmware image");
         if (!renamed) return;
 
@@ -1774,22 +1793,26 @@
           throw new Error("Another ResMed firmware operation is active");
         }
 
-        storageUploadCancelRequested = false;
-        storageUploadSetBusy(true);
+        const operation = AirCANnect.uploads.begin();
+        if (!operation) throw new Error("Another upload is already active");
+
+        resmedUploadOperation = operation;
         resmedDirectUploadBusy = true;
         const install = document.getElementById("resmedOtaInstallBtn");
         if (install) install.disabled = true;
         AirCANnect.ui.message("resmedOtaMsg", "Uploading", true, true);
-        const uploaded = await storageUploadFile(
-          file, "/aircannect", 0, 1, resmedDirectUploadProgress, {
+        const uploaded = await operation.file(file, "/aircannect", {
+            fileIndex: 0,
+            fileCount: 1,
+            progress: resmedDirectUploadProgress,
             filename: "resmed-ota-input.image",
             conflict: "replace",
             confirmReplace: false,
           });
         if (!uploaded) throw new Error("Upload was not completed");
 
-        storageUploadCurrentId = 0;
-        storageUploadSetBusy(false);
+        operation.close();
+        if (resmedUploadOperation === operation) resmedUploadOperation = null;
         resmedDirectUploadBusy = false;
         const request = await postResmedOta("/api/resmed-ota/install", {
           path: "/aircannect/resmed-ota-input.image",
@@ -1806,8 +1829,10 @@
         AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
         loadOta();
       } finally {
-        storageUploadCurrentId = 0;
-        storageUploadSetBusy(false);
+        if (resmedUploadOperation) {
+          resmedUploadOperation.close();
+          resmedUploadOperation = null;
+        }
         resmedDirectUploadBusy = false;
       }
     }
@@ -1857,15 +1882,7 @@
       }
 
       try {
-        storageUploadCancelRequested = true;
-        if (storageUploadCurrentId) {
-          try {
-            await storageUploadRequest(
-              "/api/storage/upload/cancel?id=" +
-                encodeURIComponent(storageUploadCurrentId),
-              {method: "POST"});
-          } catch (_) {}
-        }
+        if (resmedUploadOperation) await resmedUploadOperation.cancel();
         await postResmedOta("/api/resmed-ota/abort", {});
         AirCANnect.ui.message("resmedOtaMsg", "Cancelled", false, true);
       } catch (error) {
@@ -2581,7 +2598,6 @@
         fields: "edfSmbConfigFields",
         msg: "edfSmbConfigMsg",
         save: "edfSmbSaveBtn",
-        status: loadSmbSyncStatus,
       },
       sleephq: {
         section: "sleephq",
@@ -2589,7 +2605,6 @@
         fields: "edfSleepHqConfigFields",
         msg: "edfSleepHqConfigMsg",
         save: "edfSleepHqSaveBtn",
-        status: loadSleepHqSyncStatus,
       },
     };
 
@@ -2645,7 +2660,7 @@
       try {
         await saveConfigFields(root, panel.msg, async () => {
           await loadEndpointConfig(id, false);
-          if (panel.status) await panel.status();
+          AirCANnect.pages.load("edf", true);
         });
       } finally {
         if (save) save.disabled = false;
