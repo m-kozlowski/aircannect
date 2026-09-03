@@ -1097,6 +1097,13 @@
           renderStatus(statusData);
         } catch (error) {}
       });
+      evtSrc.addEventListener("exports", (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.smb) applySmbSyncStatus(data.smb);
+          if (data.sleephq) applySleepHqSyncStatus(data.sleephq);
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });

@@ -20,8 +20,4 @@
       if (document.getElementById("p-oxi").classList.contains("active")) {
         loadOximetrySensors();
       }
-      if (document.getElementById("p-edf").classList.contains("active")) {
-        loadSmbSyncStatus();
-        loadSleepHqSyncStatus();
-      }
     }, 5000);

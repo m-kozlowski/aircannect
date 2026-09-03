@@ -19,6 +19,7 @@ class AsyncWebServer;
 namespace aircannect {
 
 class HttpRouteModule;
+class ExportHttpController;
 class LiveHttpController;
 class StatusHttpController;
 
@@ -40,6 +41,7 @@ struct WebUiBufferMemoryStatus {
 struct WebUiMemoryStatus {
     bool started = false;
     WebUiBufferMemoryStatus status;
+    WebUiBufferMemoryStatus exports;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -55,6 +57,7 @@ public:
 
     // lifecycle
     bool begin(StatusHttpController &status,
+               ExportHttpController &exports,
                LiveHttpController &live,
                ConsoleCommandRouter &console_router,
                const AppConfigData &config,
@@ -129,11 +132,14 @@ private:
 
     // snapshot masks
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
-    static constexpr uint16_t SNAPSHOT_ALL = SNAPSHOT_STATUS;
-    static constexpr uint16_t SNAPSHOT_PERIODIC = SNAPSHOT_STATUS;
+    static constexpr uint16_t SNAPSHOT_EXPORTS = 1u << 1;
+    static constexpr uint16_t SNAPSHOT_ALL =
+        SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
+    static constexpr uint16_t SNAPSHOT_PERIODIC = SNAPSHOT_ALL;
 
     // subsystem owners
     StatusHttpController *status_ = nullptr;
+    ExportHttpController *exports_ = nullptr;
     LiveHttpController *live_ = nullptr;
     ConsoleCommandRouter *console_router_ = nullptr;
 
@@ -168,6 +174,8 @@ private:
     // cached JSON snapshots
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer next_status_json_;
+    LargeTextBuffer cached_exports_json_;
+    LargeTextBuffer next_exports_json_;
 
     // cached auth config
     bool cached_http_auth_required_ = true;

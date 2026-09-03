@@ -36,6 +36,10 @@ SleepHqSyncStatus ExportCoordinator::sleephq_status() const {
     return sleephq_snapshot().sync;
 }
 
+ExportStatusSnapshot ExportCoordinator::endpoint_status_snapshot() const {
+    return task_ ? task_->status_snapshot() : ExportStatusSnapshot();
+}
+
 ExportSmbStatusSnapshot ExportCoordinator::smb_snapshot() const {
     return task_ ? task_->smb_status() : ExportSmbStatusSnapshot();
 }

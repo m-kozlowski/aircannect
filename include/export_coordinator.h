@@ -31,6 +31,7 @@ public:
     }
     StorageSyncStatus smb_status() const;
     SleepHqSyncStatus sleephq_status() const;
+    ExportStatusSnapshot endpoint_status_snapshot() const;
     ExportSmbStatusSnapshot smb_snapshot() const;
     ExportSleepHqStatusSnapshot sleephq_snapshot() const;
 

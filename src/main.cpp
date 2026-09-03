@@ -1595,8 +1595,8 @@ void setup() {
                   "[INIT] live HTTP controller failed to start\n");
     }
 
-    web_ui.begin(status_http_controller, live_http_controller, console_router,
-                 config_service.data(),
+    web_ui.begin(status_http_controller, export_http_controller,
+                 live_http_controller, console_router, config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
     log_memory_profile_checkpoint("web");

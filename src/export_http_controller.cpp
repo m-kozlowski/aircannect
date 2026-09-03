@@ -12,6 +12,57 @@ namespace {
 static constexpr size_t SMB_STATUS_JSON_RESERVE = 1536;
 static constexpr size_t SLEEPHQ_STATUS_JSON_RESERVE = 1024;
 
+void append_smb_sync_json(LargeTextBuffer &json,
+                          const ExportSmbStatusSnapshot &snapshot) {
+    const StorageSyncStatus &status = snapshot.sync;
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "state", storage_sync_state_name(status.state));
+    json_add_bool(json, "enabled", status.enabled);
+    json_add_bool(json, "configured", status.configured);
+    json_add_string(json, "endpoint", snapshot.smb_endpoint);
+    json_add_bool(json, "network_available", status.network_available);
+    json_add_bool(json, "pending", status.pending);
+    json_add_bool(json, "last_run_verify", status.last_run_verify);
+    json_add_bool(json, "last_run_reconcile", status.last_run_reconcile);
+    json_add_string(json, "pending_reason", status.pending_reason);
+    json_add_string(json, "error", status.last_error);
+    json_add_string(json, "current_path", status.current_path);
+    json_add_int(json, "files_seen", static_cast<long>(status.files_seen));
+    json_add_int(json, "files_uploaded",
+                 static_cast<long>(status.files_uploaded));
+    json_add_int(json, "files_skipped",
+                 static_cast<long>(status.files_skipped));
+    json_add_int(json, "files_failed",
+                 static_cast<long>(status.files_failed));
+    json_add_uint64(json, "bytes_uploaded", status.bytes_uploaded);
+    json_add_uint64(json, "last_sync_epoch", status.last_sync_epoch);
+    json_add_int(json, "last_sync_files_seen",
+                 static_cast<long>(status.last_sync_files_seen));
+    json_add_int(json, "last_sync_files_uploaded",
+                 static_cast<long>(status.last_sync_files_uploaded));
+    json_add_int(json, "last_sync_files_skipped",
+                 static_cast<long>(status.last_sync_files_skipped));
+    json_add_int(json, "last_sync_files_failed",
+                 static_cast<long>(status.last_sync_files_failed));
+    json_add_uint64(json, "last_sync_bytes_uploaded",
+                    status.last_sync_bytes_uploaded);
+    json_add_uint64(json, "last_verify_epoch", status.last_verify_epoch);
+    json_add_int(json, "last_verify_files_seen",
+                 static_cast<long>(status.last_verify_files_seen));
+    json_add_uint64(json, "last_reconcile_epoch",
+                    status.last_reconcile_epoch);
+    json_add_int(json, "last_reconcile_files_seen",
+                 static_cast<long>(status.last_reconcile_files_seen));
+    json_add_uint64(json, "last_failure_epoch", status.last_failure_epoch);
+    json_add_string(json, "last_failure_error", status.last_failure_error);
+    json_add_int(json, "started_ms", static_cast<long>(status.started_ms));
+    json_add_int(json, "updated_ms", static_cast<long>(status.updated_ms));
+    json_add_int(json, "retry_due_ms",
+                 static_cast<long>(status.retry_due_ms));
+    json_add_int(json, "retry_attempt",
+                 static_cast<long>(status.retry_attempt));
+}
+
 void append_sleephq_sync_json(LargeTextBuffer &json,
                               const SleepHqSyncStatus &status,
                               const char *configured_team_id,
@@ -116,6 +167,24 @@ void ExportHttpController::register_routes(AsyncWebServer &server) {
     });
 }
 
+bool ExportHttpController::build_status_snapshot(
+    LargeTextBuffer &json) const {
+    if (!coordinator_) return false;
+
+    const ExportStatusSnapshot status =
+        coordinator_->endpoint_status_snapshot();
+
+    json.clear();
+    json = "{\"smb\":{";
+    append_smb_sync_json(json, status.smb);
+    json += "},\"sleephq\":{";
+    append_sleephq_sync_json(json, status.sleephq.sync,
+                             status.sleephq.sleephq_team_id,
+                             status.sleephq.sleephq_device_id);
+    json += "}}";
+    return !json.overflowed();
+}
+
 void ExportHttpController::send_smb_sync_start(
     AsyncWebServerRequest *request) const {
     if (!coordinator_) {
@@ -159,56 +228,10 @@ void ExportHttpController::send_smb_sync_status(
     }
 
     const ExportSmbStatusSnapshot snapshot = coordinator_->smb_snapshot();
-    const StorageSyncStatus &status = snapshot.sync;
     LargeTextBuffer json;
     json.reserve(SMB_STATUS_JSON_RESERVE);
     json = "{";
-    json_add_bool(json, "ok", true, false);
-    json_add_string(json, "state", storage_sync_state_name(status.state));
-    json_add_bool(json, "enabled", status.enabled);
-    json_add_bool(json, "configured", status.configured);
-    json_add_string(json, "endpoint", snapshot.smb_endpoint);
-    json_add_bool(json, "network_available", status.network_available);
-    json_add_bool(json, "pending", status.pending);
-    json_add_bool(json, "last_run_verify", status.last_run_verify);
-    json_add_bool(json, "last_run_reconcile", status.last_run_reconcile);
-    json_add_string(json, "pending_reason", status.pending_reason);
-    json_add_string(json, "error", status.last_error);
-    json_add_string(json, "current_path", status.current_path);
-    json_add_int(json, "files_seen", static_cast<long>(status.files_seen));
-    json_add_int(json, "files_uploaded",
-                 static_cast<long>(status.files_uploaded));
-    json_add_int(json, "files_skipped",
-                 static_cast<long>(status.files_skipped));
-    json_add_int(json, "files_failed",
-                 static_cast<long>(status.files_failed));
-    json_add_uint64(json, "bytes_uploaded", status.bytes_uploaded);
-    json_add_uint64(json, "last_sync_epoch", status.last_sync_epoch);
-    json_add_int(json, "last_sync_files_seen",
-                 static_cast<long>(status.last_sync_files_seen));
-    json_add_int(json, "last_sync_files_uploaded",
-                 static_cast<long>(status.last_sync_files_uploaded));
-    json_add_int(json, "last_sync_files_skipped",
-                 static_cast<long>(status.last_sync_files_skipped));
-    json_add_int(json, "last_sync_files_failed",
-                 static_cast<long>(status.last_sync_files_failed));
-    json_add_uint64(json, "last_sync_bytes_uploaded",
-                    status.last_sync_bytes_uploaded);
-    json_add_uint64(json, "last_verify_epoch", status.last_verify_epoch);
-    json_add_int(json, "last_verify_files_seen",
-                 static_cast<long>(status.last_verify_files_seen));
-    json_add_uint64(json, "last_reconcile_epoch",
-                    status.last_reconcile_epoch);
-    json_add_int(json, "last_reconcile_files_seen",
-                 static_cast<long>(status.last_reconcile_files_seen));
-    json_add_uint64(json, "last_failure_epoch", status.last_failure_epoch);
-    json_add_string(json, "last_failure_error", status.last_failure_error);
-    json_add_int(json, "started_ms", static_cast<long>(status.started_ms));
-    json_add_int(json, "updated_ms", static_cast<long>(status.updated_ms));
-    json_add_int(json, "retry_due_ms",
-                 static_cast<long>(status.retry_due_ms));
-    json_add_int(json, "retry_attempt",
-                 static_cast<long>(status.retry_attempt));
+    append_smb_sync_json(json, snapshot);
     json += '}';
 
     (void)send_status_json(request, json);

@@ -120,8 +120,6 @@
     let storageArchivePollTimer = null;
     let storageArchiveDownloadStartedId = 0;
     let storageDeletePollTimer = null;
-    let smbSyncPollTimer = null;
-    let sleepHqSyncPollTimer = null;
     let storageEntries = [];
     let storageSelectedNames = new Set();
     let storageArchiveBusy = false;

@@ -961,23 +961,34 @@
       }
     }
 
+    function applySmbSyncStatus(data) {
+      const wasActive = smbSyncBusy;
+      const active = smbSyncStatusActive(data);
+      if (active && !wasActive) {
+        smbSyncCompleteMessage = data.pending_reason === "startup_check" ||
+          data.pending_reason === "verify_recent" || data.last_run_verify ?
+          "SMB check complete" : "SMB sync complete";
+      }
+
+      smbSyncEnabled = !!(data && data.enabled);
+      smbSyncConfigured = !!(data && data.configured);
+      renderSmbSyncStatus(data);
+      smbSyncSetBusy(active);
+
+      if (data && data.state === "error") {
+        msg("edfSmbMsg", data.error || "SMB sync failed", false, true);
+      } else if (data && wasActive && !active && data.state === "idle") {
+        msg("edfSmbMsg", smbSyncCompleteMessage, true, false);
+      }
+    }
+
     async function loadSmbSyncStatus() {
       try {
         const response = await fetch("/api/storage/sync/status", {cache: "no-store"});
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
-        const active = smbSyncStatusActive(data);
-        smbSyncEnabled = !!data.enabled;
-        smbSyncConfigured = !!data.configured;
-        renderSmbSyncStatus(data);
-        smbSyncSetBusy(active);
-        if (active && !smbSyncPollTimer) {
-          smbSyncCompleteMessage = data.pending_reason === "startup_check" ||
-            data.pending_reason === "verify_recent" ?
-            "SMB check complete" : "SMB sync complete";
-          smbSyncPollTimer = setInterval(smbPollSync, 1000);
-        }
+        applySmbSyncStatus(data);
         return data;
       } catch (error) {
         smbSyncEnabled = false;
@@ -991,24 +1002,7 @@
       }
     }
 
-    async function smbPollSync() {
-      const data = await loadSmbSyncStatus();
-      const active = smbSyncStatusActive(data);
-      if (!active && smbSyncPollTimer) {
-        clearInterval(smbSyncPollTimer);
-        smbSyncPollTimer = null;
-      }
-      if (data && data.state === "error") {
-        msg("edfSmbMsg", data.error || "SMB sync failed", false, true);
-      } else if (data && !active && data.state === "idle") {
-        msg("edfSmbMsg", smbSyncCompleteMessage, true, false);
-      }
-      return !active;
-    }
-
     async function smbQueueAction(url, startMessage, completeMessage) {
-      if (smbSyncPollTimer) clearInterval(smbSyncPollTimer);
-      smbSyncPollTimer = null;
       smbSyncCompleteMessage = completeMessage || "SMB sync complete";
       smbSyncSetBusy(true);
       msg("edfSmbMsg", startMessage, true, false);
@@ -1019,9 +1013,6 @@
         });
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        if (!smbSyncPollTimer) {
-          smbSyncPollTimer = setInterval(smbPollSync, 1000);
-        }
       } catch (error) {
         const current = await loadSmbSyncStatus();
         if (smbSyncStatusActive(current)) {
@@ -1178,21 +1169,32 @@
       }
     }
 
+    function applySleepHqSyncStatus(data) {
+      const wasActive = sleepHqSyncBusy;
+      const active = sleepHqSyncStatusActive(data);
+      if (active && !wasActive) {
+        sleepHqSyncCompleteMessage = data.pending_reason === "startup_check" ?
+          "SleepHQ account check complete" : "SleepHQ sync complete";
+      }
+
+      sleepHqSyncConfigured = !!(data && data.configured);
+      renderSleepHqSyncStatus(data);
+      sleepHqSyncSetBusy(active);
+
+      if (data && data.state === "error") {
+        msg("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
+      } else if (data && wasActive && !active && data.state === "idle") {
+        msg("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
+      }
+    }
+
     async function loadSleepHqSyncStatus() {
       try {
         const response = await fetch("/api/sleephq/sync/status", {cache: "no-store"});
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
-        const active = sleepHqSyncStatusActive(data);
-        sleepHqSyncConfigured = !!data.configured;
-        renderSleepHqSyncStatus(data);
-        sleepHqSyncSetBusy(active);
-        if (active && !sleepHqSyncPollTimer) {
-          sleepHqSyncCompleteMessage = data.pending_reason === "startup_check" ?
-            "SleepHQ account check complete" : "SleepHQ sync complete";
-          sleepHqSyncPollTimer = setInterval(sleepHqPollSync, 1000);
-        }
+        applySleepHqSyncStatus(data);
         return data;
       } catch (error) {
         sleepHqSyncConfigured = false;
@@ -1205,24 +1207,7 @@
       }
     }
 
-    async function sleepHqPollSync() {
-      const data = await loadSleepHqSyncStatus();
-      const active = sleepHqSyncStatusActive(data);
-      if (!active && sleepHqSyncPollTimer) {
-        clearInterval(sleepHqSyncPollTimer);
-        sleepHqSyncPollTimer = null;
-      }
-      if (data && data.state === "error") {
-        msg("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
-      } else if (data && !active && data.state === "idle") {
-        msg("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
-      }
-      return !active;
-    }
-
     async function sleepHqQueueAction(url, startMessage, completeMessage) {
-      if (sleepHqSyncPollTimer) clearInterval(sleepHqSyncPollTimer);
-      sleepHqSyncPollTimer = null;
       sleepHqSyncCompleteMessage = completeMessage ||
         "SleepHQ sync complete";
       sleepHqSyncSetBusy(true);
@@ -1234,9 +1219,6 @@
         });
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        if (!sleepHqSyncPollTimer) {
-          sleepHqSyncPollTimer = setInterval(sleepHqPollSync, 1000);
-        }
       } catch (error) {
         const current = await loadSleepHqSyncStatus();
         if (sleepHqSyncStatusActive(current)) {

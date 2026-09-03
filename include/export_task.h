@@ -49,6 +49,11 @@ struct ExportSleepHqStatusSnapshot {
     SleepHqSyncStatus sync;
 };
 
+struct ExportStatusSnapshot {
+    ExportSmbStatusSnapshot smb;
+    ExportSleepHqStatusSnapshot sleephq;
+};
+
 // Sole task owner for the SMB and SleepHQ protocol engines. Public methods
 // only publish immutable inputs, enqueue one typed command, or copy status.
 class ExportTask {
@@ -91,6 +96,7 @@ public:
     // copied status
     bool endpoint_work_claimed() const;
     ExportTaskControlSnapshot control_snapshot() const;
+    ExportStatusSnapshot status_snapshot() const;
     ExportSmbStatusSnapshot smb_status() const;
     ExportSleepHqStatusSnapshot sleephq_status() const;
 #if AC_STACK_PROFILE_ENABLED

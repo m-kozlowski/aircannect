@@ -562,6 +562,17 @@ ExportTaskControlSnapshot ExportTask::control_snapshot() const {
     return out;
 }
 
+ExportStatusSnapshot ExportTask::status_snapshot() const {
+    ExportStatusSnapshot out;
+    if (runtime_ && status_lock_ &&
+        xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        out.smb = runtime_->smb_status;
+        out.sleephq = runtime_->sleephq_status;
+        xSemaphoreGive(status_lock_);
+    }
+    return out;
+}
+
 ExportSmbStatusSnapshot ExportTask::smb_status() const {
     ExportSmbStatusSnapshot out;
     if (runtime_ && status_lock_ &&

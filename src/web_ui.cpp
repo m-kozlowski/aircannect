@@ -8,6 +8,7 @@
 #include "auth_utils.h"
 #include "board.h"
 #include "debug_log.h"
+#include "export_http_controller.h"
 #include "http_route_module.h"
 #include "http_request_utils.h"
 #include "json_util.h"
@@ -22,6 +23,8 @@
 namespace aircannect {
 
 namespace {
+
+static constexpr size_t WEB_EXPORT_STATUS_JSON_RESERVE = 3072;
 
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
@@ -46,6 +49,7 @@ void send_web_ui(AsyncWebServerRequest *request) {
 }  // namespace
 
 bool WebUI::begin(StatusHttpController &status,
+                  ExportHttpController &exports,
                   LiveHttpController &live,
                   ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
@@ -55,6 +59,7 @@ bool WebUI::begin(StatusHttpController &status,
     if (started_) return true;
     stop();
     status_ = &status;
+    exports_ = &exports;
     live_ = &live;
     console_router_ = &console_router;
 
@@ -109,6 +114,8 @@ bool WebUI::begin(StatusHttpController &status,
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     next_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
+    cached_exports_json_.reserve(WEB_EXPORT_STATUS_JSON_RESERVE);
+    next_exports_json_.reserve(WEB_EXPORT_STATUS_JSON_RESERVE);
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -154,6 +161,7 @@ WebUiMemoryStatus WebUI::memory_status() {
         return out;
     }
     out.status = capture(cached_status_json_);
+    out.exports = capture(cached_exports_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -212,6 +220,7 @@ void WebUI::stop() {
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
     status_ = nullptr;
+    exports_ = nullptr;
     live_ = nullptr;
     console_router_ = nullptr;
     started_ = false;
@@ -269,6 +278,12 @@ void WebUI::poll(PollCheckpoint checkpoint) {
 
         if (send_sse_to_clients(cached_status_json_.c_str(), "status",
                                 event_id, true) == SseSendResult::Failed) {
+            sse_backpressure = true;
+        }
+
+        if (cached_exports_json_.length() &&
+            send_sse_to_clients(cached_exports_json_.c_str(), "exports",
+                                event_id, false) == SseSendResult::Failed) {
             sse_backpressure = true;
         }
 
@@ -815,6 +830,7 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     if (!rebuild_mask) return;
 
     next_status_json_.clear();
+    next_exports_json_.clear();
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -825,6 +841,13 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.status_copy");
     }
+
+    if (rebuild_mask & SNAPSHOT_EXPORTS) {
+        if (exports_ && exports_->build_status_snapshot(next_exports_json_)) {
+            completed_mask |= SNAPSHOT_EXPORTS;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.exports_copy");
+    }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
@@ -832,6 +855,9 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
 
     if (completed_mask & SNAPSHOT_STATUS) {
         cached_status_json_.swap(next_status_json_);
+    }
+    if (completed_mask & SNAPSHOT_EXPORTS) {
+        cached_exports_json_.swap(next_exports_json_);
     }
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;
