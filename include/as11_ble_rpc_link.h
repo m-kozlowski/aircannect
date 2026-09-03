@@ -71,6 +71,7 @@ struct As11BlePairingDevice {
 };
 
 struct As11BlePairingStatus {
+    uint32_t revision = 1;
     As11BlePairingState state = As11BlePairingState::Idle;
     bool paired = false;
     bool active = false;
@@ -113,6 +114,7 @@ public:
                    const char *master_key_hex);
     void set_credential_store(CredentialStore store, void *context);
     As11BleLinkStatus ble_status() const;
+    uint32_t pairing_revision() const;
     As11BlePairingStatus pairing_status() const;
     bool request_reconnect();
 
@@ -183,6 +185,7 @@ private:
     bool finish_pairing(const char *passkey);
     void fail_pairing(const char *error);
     void clear_pairing_context();
+    void bump_pairing_revision_locked();
     void set_pairing_state(As11BlePairingState state,
                            const char *error = nullptr);
     void set_pairing_selected(const As11BlePairingDevice &device);

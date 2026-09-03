@@ -99,8 +99,6 @@
       const saved = await saveConfigFields(root, "onboardingMsg", null);
       onboardingSetBusy(false);
       if (!saved) return;
-
-      setTimeout(() => loadAs11BlePairing(true), 300);
     }
 
     async function onboardingRenderAs11(root) {

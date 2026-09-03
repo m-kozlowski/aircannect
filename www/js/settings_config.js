@@ -2247,24 +2247,6 @@
       return labels[data.state] || data.state || "Unknown";
     }
 
-    function scheduleAs11BlePairingPoll(data, afterError) {
-      if (as11BlePairTimer) {
-        clearTimeout(as11BlePairTimer);
-        as11BlePairTimer = null;
-      }
-
-      if (data && data.active) as11BlePairStartDeadline = 0;
-      const waitingForStart = Date.now() < as11BlePairStartDeadline;
-      if (!data || (!data.active && !waitingForStart)) {
-        as11BlePairStartDeadline = 0;
-        return;
-      }
-
-      as11BlePairTimer = setTimeout(
-        () => loadAs11BlePairing(false),
-        afterError ? 1500 : (data.active ? 700 : 500));
-    }
-
     function renderAs11BlePairingPanel(panel, data) {
       const snapshot = JSON.stringify(data || {});
       if (panel.dataset.snapshot === snapshot) return;
@@ -2388,7 +2370,6 @@
       as11BlePairingData = data;
       as11BlePairingPanels().forEach((panel) =>
         renderAs11BlePairingPanel(panel, data));
-      scheduleAs11BlePairingPoll(data);
     }
 
     async function loadAs11BlePairing(showError) {
@@ -2397,7 +2378,6 @@
         renderAs11BlePairing(await response.json());
       } catch (error) {
         if (showError) showAs11BlePairingError(error.message);
-        scheduleAs11BlePairingPoll(as11BlePairingData, true);
       }
     }
 
@@ -2408,10 +2388,6 @@
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(Object.assign({action}, values || {})),
         });
-        if (action === "pair") {
-          as11BlePairStartDeadline = Date.now() + 10000;
-        }
-        setTimeout(() => loadAs11BlePairing(true), 150);
         return true;
       } catch (error) {
         showAs11BlePairingError(error.message);

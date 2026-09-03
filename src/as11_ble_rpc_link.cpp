@@ -269,16 +269,20 @@ void As11BleRpcLink::configure(bool enabled,
         next.enabled = enabled;
     }
 
+    const bool paired = next.address[0] && next.client_id[0] &&
+                        strlen(next.master_key_hex) ==
+                            AS11_BLE_KEY_HEX_BYTES;
 #if AC_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
+    const bool pairing_changed =
+        status_.enabled != enabled || pairing_status_.paired != paired;
     next.generation = config_.generation + 1;
     if (next.generation == 0) next.generation = 1;
     config_ = next;
     status_.enabled = enabled;
-    pairing_status_.paired = next.address[0] && next.client_id[0] &&
-                             strlen(next.master_key_hex) ==
-                                 AS11_BLE_KEY_HEX_BYTES;
+    pairing_status_.paired = paired;
+    if (pairing_changed) bump_pairing_revision_locked();
 #if AC_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -299,6 +303,17 @@ As11BleLinkStatus As11BleRpcLink::ble_status() const {
     portEXIT_CRITICAL(&mux_);
 #endif
     return out;
+}
+
+uint32_t As11BleRpcLink::pairing_revision() const {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    const uint32_t revision = pairing_status_.revision;
+#if AC_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
+    return revision;
 }
 
 As11BlePairingStatus As11BleRpcLink::pairing_status() const {
@@ -706,6 +721,7 @@ bool As11BleRpcLink::scan_for_pairing_devices(
            sizeof(pairing_status_.devices));
     pairing_status_.selected_address[0] = 0;
     pairing_status_.selected_name[0] = 0;
+    bump_pairing_revision_locked();
     portEXIT_CRITICAL(&mux_);
 
     As11BleScanCallbacks callbacks(this);
@@ -855,6 +871,11 @@ void As11BleRpcLink::clear_pairing_context() {
     memset(pairing_salt_, 0, sizeof(pairing_salt_));
 }
 
+void As11BleRpcLink::bump_pairing_revision_locked() {
+    pairing_status_.revision++;
+    if (pairing_status_.revision == 0) pairing_status_.revision = 1;
+}
+
 void As11BleRpcLink::set_pairing_state(As11BlePairingState state,
                                        const char *error) {
     As11BlePairingState previous = As11BlePairingState::Idle;
@@ -878,6 +899,7 @@ void As11BleRpcLink::set_pairing_state(As11BlePairingState state,
     } else if (state != As11BlePairingState::Failed) {
         pairing_status_.error[0] = 0;
     }
+    if (previous != state || error) bump_pairing_revision_locked();
 #if AC_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -907,6 +929,7 @@ void As11BleRpcLink::set_pairing_selected(
               sizeof(pairing_status_.selected_address), device.address);
     copy_text(pairing_status_.selected_name,
               sizeof(pairing_status_.selected_name), device.name);
+    bump_pairing_revision_locked();
 #if AC_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -1007,6 +1030,7 @@ void As11BleRpcLink::note_scan_result(const NimBLEAdvertisedDevice *device) {
         copy_text(candidate.name, sizeof(candidate.name), name.c_str());
         candidate.address_type = device->getAddress().getType();
         candidate.rssi = device->getRSSI();
+        bump_pairing_revision_locked();
         portEXIT_CRITICAL(&mux_);
         return;
     }

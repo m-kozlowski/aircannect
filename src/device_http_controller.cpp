@@ -10,6 +10,7 @@
 
 #include "as11_device_service.h"
 #include "as11_ble_rpc_link.h"
+#include "board_net.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
 #include "http_response_utils.h"
@@ -19,6 +20,37 @@
 #include "time_sync_service.h"
 
 namespace aircannect {
+namespace {
+
+bool build_ble_pairing_json(LargeTextBuffer &json,
+                            const As11BlePairingStatus &pairing,
+                            const As11BleLinkStatus &link) {
+    json = "{";
+    json_add_bool(json, "ok", true, false);
+    json_add_uint64(json, "revision", pairing.revision);
+    json_add_bool(json, "enabled", link.enabled);
+    json_add_bool(json, "paired", pairing.paired);
+    json_add_string(json, "state",
+                    as11_ble_pairing_state_name(pairing.state));
+    json_add_bool(json, "active", pairing.active);
+    json_add_bool(json, "passkey_required", pairing.passkey_required);
+    json_add_string(json, "selected_address", pairing.selected_address);
+    json_add_string(json, "selected_name", pairing.selected_name);
+    json_add_string(json, "error", pairing.error);
+    json += ",\"devices\":[";
+    for (size_t i = 0; i < pairing.device_count; ++i) {
+        if (i) json += ',';
+        json += '{';
+        json_add_string(json, "address", pairing.devices[i].address, false);
+        json_add_string(json, "name", pairing.devices[i].name);
+        json_add_int(json, "rssi", pairing.devices[i].rssi);
+        json += '}';
+    }
+    json += "]}";
+    return !json.overflowed();
+}
+
+}  // namespace
 
 bool DeviceHttpController::begin(RpcRequestPort &rpc,
                                  As11DeviceService &device,
@@ -28,7 +60,16 @@ bool DeviceHttpController::begin(RpcRequestPort &rpc,
     device_ = &device;
     time_sync_ = &time_sync;
     ble_link_ = &ble_link;
-    return commands_.begin();
+    if (!commands_.begin()) return false;
+
+    if (!cache_mutex_) {
+        cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
+    }
+    if (!cache_mutex_) return false;
+
+    ble_pairing_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
+    ble_pairing_build_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
+    return publish_ble_pairing_snapshot();
 }
 
 void DeviceHttpController::register_routes(AsyncWebServer &server) {
@@ -65,6 +106,10 @@ void DeviceHttpController::poll() {
         Command command;
         if (!commands_.pop(command)) break;
         execute(command);
+    }
+
+    if (ble_link_->pairing_revision() != published_ble_pairing_revision_) {
+        (void)publish_ble_pairing_snapshot();
     }
 }
 
@@ -197,46 +242,60 @@ void DeviceHttpController::send_therapy_action(
 
 void DeviceHttpController::send_ble_status(
     AsyncWebServerRequest *request) const {
-    if (!ble_link_) {
+    if (!ble_link_ || !cache_mutex_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"ble_unavailable\"}");
         return;
     }
 
-    const As11BlePairingStatus pairing = ble_link_->pairing_status();
-    const As11BleLinkStatus link = ble_link_->ble_status();
-    LargeTextBuffer json;
-    json.reserve(1024);
-    json = "{";
-    json_add_bool(json, "ok", true, false);
-    json_add_bool(json, "enabled", link.enabled);
-    json_add_bool(json, "paired", pairing.paired);
-    json_add_string(json, "state",
-                    as11_ble_pairing_state_name(pairing.state));
-    json_add_bool(json, "active", pairing.active);
-    json_add_bool(json, "passkey_required", pairing.passkey_required);
-    json_add_string(json, "selected_address", pairing.selected_address);
-    json_add_string(json, "selected_name", pairing.selected_name);
-    json_add_string(json, "error", pairing.error);
-    json += ",\"devices\":[";
-    for (size_t i = 0; i < pairing.device_count; ++i) {
-        if (i) json += ',';
-        json += '{';
-        json_add_string(json, "address", pairing.devices[i].address, false);
-        json_add_string(json, "name", pairing.devices[i].name);
-        json_add_int(json, "rssi", pairing.devices[i].rssi);
-        json += '}';
-    }
-    json += "]}";
-
     AsyncResponseStream *response = nullptr;
-    if (json.overflowed() ||
-        !http_prepare_json_response(request, json, response)) {
+    if (xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"cache_busy\"}");
+        return;
+    }
+    const bool prepared = http_prepare_json_response(
+        request, ble_pairing_json_, response);
+    xSemaphoreGive(cache_mutex_);
+    if (!prepared) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
     request->send(response);
+}
+
+bool DeviceHttpController::publish_ble_pairing_snapshot() {
+    if (!ble_link_ || !cache_mutex_) return false;
+
+    const As11BlePairingStatus pairing = ble_link_->pairing_status();
+    if (pairing.revision == published_ble_pairing_revision_) return true;
+
+    const As11BleLinkStatus link = ble_link_->ble_status();
+    ble_pairing_build_json_.clear();
+    if (!build_ble_pairing_json(ble_pairing_build_json_, pairing, link)) {
+        return false;
+    }
+
+    if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
+    ble_pairing_json_.swap(ble_pairing_build_json_);
+    published_ble_pairing_revision_ = pairing.revision;
+    xSemaphoreGive(cache_mutex_);
+    return true;
+}
+
+bool DeviceHttpController::copy_ble_pairing_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    out.clear();
+    const bool copied = out.append(ble_pairing_json_.c_str(),
+                                   ble_pairing_json_.length());
+    if (copied) revision = published_ble_pairing_revision_;
+    xSemaphoreGive(cache_mutex_);
+    return copied;
 }
 
 void DeviceHttpController::send_ble_action(

@@ -12,8 +12,6 @@
     let configUpdateData = null;
     const CONFIG_UPDATE_EVENT = "aircannect-config-update";
     let configSections = [];
-    let as11BlePairTimer = null;
-    let as11BlePairStartDeadline = 0;
     let as11BlePairingData = null;
     let configSchemaPromise = null;
     const configSectionById = {};

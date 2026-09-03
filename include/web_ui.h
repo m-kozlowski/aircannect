@@ -19,6 +19,7 @@ class AsyncWebServer;
 namespace aircannect {
 
 class ConfigHttpController;
+class DeviceHttpController;
 class HttpRouteModule;
 class ExportHttpController;
 class LiveHttpController;
@@ -44,6 +45,7 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus status;
     WebUiBufferMemoryStatus exports;
     WebUiBufferMemoryStatus config;
+    WebUiBufferMemoryStatus as11_ble;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -61,6 +63,7 @@ public:
     bool begin(StatusHttpController &status,
                ExportHttpController &exports,
                ConfigHttpController &config_http,
+               DeviceHttpController &device_http,
                LiveHttpController &live,
                ConsoleCommandRouter &console_router,
                const AppConfigData &config,
@@ -137,14 +140,17 @@ private:
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
     static constexpr uint16_t SNAPSHOT_EXPORTS = 1u << 1;
     static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 2;
+    static constexpr uint16_t SNAPSHOT_AS11_BLE = 1u << 3;
     static constexpr uint16_t SNAPSHOT_ALL =
+        SNAPSHOT_STATUS | SNAPSHOT_EXPORTS | SNAPSHOT_AS11_BLE;
+    static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
-    static constexpr uint16_t SNAPSHOT_PERIODIC = SNAPSHOT_ALL;
 
     // subsystem owners
     StatusHttpController *status_ = nullptr;
     ExportHttpController *exports_ = nullptr;
     ConfigHttpController *config_ = nullptr;
+    DeviceHttpController *device_ = nullptr;
     LiveHttpController *live_ = nullptr;
     ConsoleCommandRouter *console_router_ = nullptr;
 
@@ -183,6 +189,8 @@ private:
     LargeTextBuffer next_exports_json_;
     LargeTextBuffer cached_config_json_;
     LargeTextBuffer next_config_json_;
+    LargeTextBuffer cached_as11_ble_json_;
+    LargeTextBuffer next_as11_ble_json_;
 
     // cached auth config
     bool cached_http_auth_required_ = true;
@@ -199,6 +207,8 @@ private:
     uint32_t observed_status_revision_ = 0;
     uint32_t observed_config_revision_ = 0;
     uint32_t sent_config_revision_ = 0;
+    uint32_t observed_as11_ble_revision_ = 0;
+    uint32_t sent_as11_ble_revision_ = 0;
     uint32_t observed_live_generation_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;

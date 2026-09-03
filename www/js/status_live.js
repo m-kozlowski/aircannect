@@ -1116,6 +1116,11 @@
             CONFIG_UPDATE_EVENT, {detail: configUpdateData}));
         } catch (error) {}
       });
+      evtSrc.addEventListener("as11_ble", (event) => {
+        try {
+          renderAs11BlePairing(JSON.parse(event.data));
+        } catch (error) {}
+      });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();
       });
