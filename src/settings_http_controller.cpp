@@ -386,12 +386,21 @@ void SettingsHttpController::publish_snapshot_if_needed() {
         settings_->refresh_pending();
     const uint32_t settings_revision = settings_->revision();
     const uint32_t device_revision = device_->revision();
+    const int active_mode = active_settings_mode(device_->state(),
+                                                  settings_->state());
     if (!requested_snapshot &&
         observed_refresh_pending_ == refresh_pending &&
         observed_settings_revision_ == settings_revision &&
         observed_device_revision_ == device_revision) {
         return;
     }
+
+    const bool publish_change =
+        requested_snapshot ||
+        observed_refresh_pending_ != refresh_pending ||
+        observed_settings_revision_ != settings_revision ||
+        published_availability_ != availability ||
+        published_active_mode_ != active_mode;
 
     LargeTextBuffer next;
     next.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
@@ -428,12 +437,36 @@ void SettingsHttpController::publish_snapshot_if_needed() {
         cached_device_availability_ = availability;
         cached_refresh_pending_ = refresh_pending;
         snapshot_pending_ = false;
+        published_availability_ = availability;
+        published_active_mode_ = active_mode;
+        if (publish_change) {
+            published_snapshot_revision_++;
+            if (published_snapshot_revision_ == 0) {
+                published_snapshot_revision_++;
+            }
+        }
     }
     xSemaphoreGive(cache_mutex_);
 
     observed_refresh_pending_ = refresh_pending;
     observed_settings_revision_ = settings_revision;
     observed_device_revision_ = device_revision;
+}
+
+bool SettingsHttpController::copy_snapshot(
+    LargeTextBuffer &out, uint32_t &revision) const {
+    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
+        return false;
+    }
+
+    out.clear();
+    const bool copied = settings_json_.length() &&
+        out.append(settings_json_.c_str(), settings_json_.length());
+    if (copied) {
+        revision = published_snapshot_revision_;
+    }
+    xSemaphoreGive(cache_mutex_);
+    return copied;
 }
 
 void SettingsHttpController::send_catalog(

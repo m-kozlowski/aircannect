@@ -29,6 +29,11 @@ public:
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
+    uint32_t snapshot_revision() const {
+        return published_snapshot_revision_;
+    }
+    bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
+
 private:
     enum class CommandKind : uint8_t {
         Refresh,
@@ -67,6 +72,9 @@ private:
     int cached_request_mode_ = -1;
     uint32_t cached_catalog_revision_ = 0;
     uint32_t request_generation_ = 1;
+    uint32_t published_snapshot_revision_ = 0;
+    int published_active_mode_ = -1;
+    As11Availability published_availability_ = As11Availability::Unknown;
     uint32_t observed_settings_revision_ = UINT32_MAX;
     uint32_t observed_device_revision_ = UINT32_MAX;
     As11Availability cached_device_availability_ = As11Availability::Unknown;

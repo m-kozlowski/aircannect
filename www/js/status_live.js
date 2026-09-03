@@ -803,13 +803,6 @@
     }
 
     function renderStatus(data) {
-      const previousAs11State = settingsAs11State;
-      settingsAs11State = data.as11_state || "unknown";
-      if (previousAs11State === "unavailable" &&
-          settingsAs11State !== "unavailable" && clinicalTabActive()) {
-        loadSettings(false);
-      }
-
       setPageTitle(data.hostname);
       up("ver", data.version);
       up("built", data.built);
@@ -1129,6 +1122,14 @@
             renderOximetrySensorManager(oxiSensorData);
           }
         } catch (error) {}
+      });
+      evtSrc.addEventListener("settings", async (event) => {
+        if (!clinicalTabActive()) return;
+        try {
+          await applySettingsSnapshot(JSON.parse(event.data));
+        } catch (error) {
+          msg("settingsMsg", error.message, false);
+        }
       });
       evtSrc.addEventListener("device_boot", () => {
         invalidateSettingsCatalog();

@@ -43,9 +43,6 @@
     let evtSrc = null;
     let consoleSeq = -1;
     let consoleEnd = 0;
-    let settingsPollTimer = null;
-    let settingsRefreshUntil = 0;
-    let settingsAs11State = null;
     let settingsProfileMode = null;
     let settingsModeDirty = false;
     let settingsActiveMode = null;

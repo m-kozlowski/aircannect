@@ -18,6 +18,7 @@
 #include "memory_manager.h"
 #include "oximetry_http_controller.h"
 #include "rpc_transport_ports.h"
+#include "settings_http_controller.h"
 #include "status_http_controller.h"
 #include "string_util.h"
 #include "string_print.h"
@@ -56,6 +57,7 @@ bool WebUI::begin(StatusHttpController &status,
                   ConfigHttpController &config_http,
                   DeviceHttpController &device_http,
                   OximetryHttpController &oximetry_http,
+                  SettingsHttpController &settings_http,
                   LiveHttpController &live,
                   ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
@@ -69,6 +71,7 @@ bool WebUI::begin(StatusHttpController &status,
     config_ = &config_http;
     device_ = &device_http;
     oximetry_ = &oximetry_http;
+    settings_ = &settings_http;
     live_ = &live;
     console_router_ = &console_router;
 
@@ -131,6 +134,8 @@ void WebUI::reserve_cached_json() {
     next_as11_ble_json_.reserve(AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
     cached_oximetry_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
     next_oximetry_json_.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
+    cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
+    next_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -180,6 +185,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.config = capture(cached_config_json_);
     out.as11_ble = capture(cached_as11_ble_json_);
     out.oximetry = capture(cached_oximetry_json_);
+    out.settings = capture(cached_settings_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -239,6 +245,8 @@ void WebUI::stop() {
     sent_as11_ble_revision_ = 0;
     observed_oximetry_revision_ = 0;
     sent_oximetry_revision_ = 0;
+    observed_settings_revision_ = 0;
+    sent_settings_revision_ = 0;
     observed_live_generation_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
@@ -248,6 +256,7 @@ void WebUI::stop() {
     config_ = nullptr;
     device_ = nullptr;
     oximetry_ = nullptr;
+    settings_ = nullptr;
     live_ = nullptr;
     console_router_ = nullptr;
     started_ = false;
@@ -271,6 +280,10 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (oximetry_ &&
         observed_oximetry_revision_ != oximetry_->revision()) {
         mark_snapshots_dirty(SNAPSHOT_OXIMETRY);
+    }
+    if (settings_ &&
+        observed_settings_revision_ != settings_->snapshot_revision()) {
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
 
     if (console_router_ && web_console_.pending_output(*console_router_)) {
@@ -356,6 +369,17 @@ void WebUI::poll(PollCheckpoint checkpoint) {
                 sse_backpressure = true;
             } else if (oximetry_result == SseSendResult::Sent) {
                 sent_oximetry_revision_ = observed_oximetry_revision_;
+            }
+        }
+
+        if (cached_settings_json_.length() &&
+            sent_settings_revision_ != observed_settings_revision_) {
+            const SseSendResult settings_result = send_sse_to_clients(
+                cached_settings_json_.c_str(), "settings", event_id, false);
+            if (settings_result == SseSendResult::Failed) {
+                sse_backpressure = true;
+            } else if (settings_result == SseSendResult::Sent) {
+                sent_settings_revision_ = observed_settings_revision_;
             }
         }
 
@@ -794,7 +818,7 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
     if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE |
-                SNAPSHOT_OXIMETRY)) {
+                SNAPSHOT_OXIMETRY | SNAPSHOT_SETTINGS)) {
         request_sse_push();
     }
 }
@@ -909,6 +933,7 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     next_config_json_.clear();
     next_as11_ble_json_.clear();
     next_oximetry_json_.clear();
+    next_settings_json_.clear();
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -953,6 +978,15 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.oximetry_copy");
     }
+    if (rebuild_mask & SNAPSHOT_SETTINGS) {
+        uint32_t revision = observed_settings_revision_;
+        if (settings_ && settings_->copy_snapshot(
+                             next_settings_json_, revision)) {
+            observed_settings_revision_ = revision;
+            completed_mask |= SNAPSHOT_SETTINGS;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.settings_copy");
+    }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
@@ -972,6 +1006,9 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     }
     if (completed_mask & SNAPSHOT_OXIMETRY) {
         cached_oximetry_json_.swap(next_oximetry_json_);
+    }
+    if (completed_mask & SNAPSHOT_SETTINGS) {
+        cached_settings_json_.swap(next_settings_json_);
     }
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;

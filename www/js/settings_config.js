@@ -20,27 +20,6 @@
       return value;
     }
 
-    function scheduleSettingsPoll(data) {
-      if (settingsPollTimer) {
-        clearTimeout(settingsPollTimer);
-        settingsPollTimer = null;
-      }
-
-      const active = clinicalTabActive();
-      if (data.as11_state === "unavailable") return;
-
-      const refreshing = Date.now() < settingsRefreshUntil;
-      const snapshotPending = !!data.snapshot_pending;
-      const needsRefresh = !data.valid && !data.refresh_queued &&
-        !snapshotPending && !refreshing;
-      if (active && (data.refresh_queued || snapshotPending || refreshing ||
-          !data.valid || data.pending_count)) {
-        settingsPollTimer = setTimeout(
-          () => loadSettings(needsRefresh, !needsRefresh),
-          needsRefresh ? 0 : 1200);
-      }
-    }
-
     function invalidateSettingsCatalog() {
       settingsCatalog = [];
       settingsComposites = [];
@@ -477,13 +456,16 @@
       return [];
     }
 
-    async function loadSettings(refresh, poll) {
-      try {
-        if (refresh) settingsRefreshUntil = Date.now() + 7000;
+    async function applySettingsSnapshot(data) {
+      await ensureSettingsCatalog(data.catalog_revision);
+      settingsData = mergeSettingsCatalog(data);
+      renderSettings(settingsData);
+    }
 
+    async function loadSettings(refresh) {
+      try {
         const query = [];
         if (refresh) query.push("refresh=1");
-        if (poll) query.push("poll=1");
         if (settingsModeDirty && settingsProfileMode !== null) {
           query.push("profile_mode=" + encodeURIComponent(settingsProfileMode));
         }
@@ -491,15 +473,17 @@
         const response = await api("/api/settings" +
           (query.length ? "?" + query.join("&") : ""));
         const data = await response.json();
-        await ensureSettingsCatalog(data.catalog_revision);
-        settingsData = mergeSettingsCatalog(data);
-        renderSettings(settingsData, !!refresh);
+        await applySettingsSnapshot(data);
+        if (!refresh && data.as11_state !== "unavailable" && !data.valid &&
+            !data.refresh_queued && !data.snapshot_pending) {
+          await loadSettings(true);
+        }
       } catch (error) {
         msg("settingsMsg", error.message, false);
       }
     }
 
-    function renderSettings(data, requestedRefresh) {
+    function renderSettings(data) {
       const parts = [];
       const activeMode = settingsTherapyMode(data);
       if (activeMode !== null) settingsActiveMode = activeMode;
@@ -511,16 +495,10 @@
           settingsProfileMode === settingsActiveMode && !data.pending_count) {
         settingsModeDirty = false;
       }
-      if (!requestedRefresh && data.valid && !data.refresh_queued &&
-          (data.age_ms || 0) < 2500) {
-        settingsRefreshUntil = 0;
-      }
-
       const unavailable = data.as11_state === "unavailable";
       if (unavailable) {
-        settingsRefreshUntil = 0;
         parts.push("Device unavailable");
-      } else if (data.refresh_queued || Date.now() < settingsRefreshUntil) {
+      } else if (data.refresh_queued) {
         parts.push("Refreshing settings");
       } else if (!data.valid) {
         parts.push("Waiting for device");
@@ -541,7 +519,6 @@
       const save = document.getElementById("settingsSave");
       const revert = document.getElementById("settingsRevert");
       root.innerHTML = "";
-      scheduleSettingsPoll(data);
       if (revert) {
         revert.style.display =
           settingsModeDirty && settingsProfileMode !== null &&
@@ -754,8 +731,6 @@
         msg("settingsMsg",
           data.ok ? "Settings queued" : "Queue failed",
           data.ok);
-        settingsRefreshUntil = Date.now() + 7000;
-        setTimeout(() => loadSettings(true), 1200);
       } catch (error) {
         msg("settingsMsg", error.message, false);
       }

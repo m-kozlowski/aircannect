@@ -47,6 +47,7 @@ void print_web_memory_detail(Print &out, WebUI &web_ui) {
     print_web_buffer_memory(out, "config", web.config, total_capacity);
     print_web_buffer_memory(out, "as11_ble", web.as11_ble, total_capacity);
     print_web_buffer_memory(out, "oximetry", web.oximetry, total_capacity);
+    print_web_buffer_memory(out, "settings", web.settings, total_capacity);
     print_web_buffer_memory(out, "stream", web.stream, total_capacity);
     print_web_buffer_memory(out, "console", web.console, total_capacity);
     print_web_buffer_memory(out, "live", web.live, total_capacity);
