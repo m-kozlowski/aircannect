@@ -1187,9 +1187,6 @@
         });
         const data = await response.json();
         if (!data.ok) throw new Error("therapy command queue failed");
-        [300, 900, 1800, 3200, 5200].forEach((delay) => {
-          setTimeout(loadStatus, delay);
-        });
       } catch (error) {
         alert(error.message);
         loadStatus();
