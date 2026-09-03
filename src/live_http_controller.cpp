@@ -12,6 +12,7 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
+static constexpr uint32_t WEB_LIVE_BACKPRESSURE_GRACE_MS = 2000;
 
 uint32_t fnv1a32_string(const String &text) {
     uint32_t hash = 2166136261u;
@@ -153,6 +154,8 @@ void LiveHttpController::stop() {
     }
 
     last_live_send_ms_ = 0;
+    live_backpressure_since_ms_ = 0;
+    live_backpressure_active_ = false;
     live_json_.clear();
 }
 
@@ -168,12 +171,27 @@ void LiveHttpController::register_routes(AsyncWebServer &server) {
     });
 }
 
-void LiveHttpController::poll(size_t healthy_sse_clients,
+void LiveHttpController::poll(size_t connected_sse_clients,
+                              size_t healthy_sse_clients,
                               uint32_t now_ms) {
     if (!stream_ || !live_) return;
 
-    const bool live_needed =
-        healthy_sse_clients > 0 && live_view_requested(now_ms);
+    const bool live_requested =
+        connected_sse_clients > 0 && live_view_requested(now_ms);
+    bool live_needed = live_requested;
+    if (!live_requested || healthy_sse_clients > 0) {
+        live_backpressure_since_ms_ = 0;
+        live_backpressure_active_ = false;
+    } else {
+        if (!live_backpressure_active_) {
+            live_backpressure_since_ms_ = now_ms;
+            live_backpressure_active_ = true;
+        }
+        live_needed =
+            static_cast<int32_t>(now_ms - live_backpressure_since_ms_) <
+            static_cast<int32_t>(WEB_LIVE_BACKPRESSURE_GRACE_MS);
+    }
+
     live_->set_enabled(live_needed);
     if (!live_needed) {
         live_->clear_batch();

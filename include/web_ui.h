@@ -139,7 +139,7 @@ private:
     void handle_sse_connect(AsyncEventSourceClient *client);
     void handle_sse_disconnect(AsyncEventSourceClient *client);
     void enforce_sse_limits();
-    size_t healthy_sse_client_count();
+    void count_sse_clients(size_t &connected, size_t &healthy);
     enum class SseSendResult : uint8_t { Skipped, Sent, Failed };
     SseSendResult send_sse_to_clients(const char *payload, const char *event,
                                       uint32_t id, bool status_heartbeat);
@@ -147,7 +147,8 @@ private:
                                            uint32_t id);
 
     // Dashboard live stream transport
-    void poll_live_transport(size_t healthy_clients);
+    void poll_live_transport(size_t connected_clients,
+                             size_t healthy_clients);
 
     // Response helpers
     String queued_json(const char *result = "queued") const;

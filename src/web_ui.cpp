@@ -341,8 +341,13 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (checkpoint) checkpoint("web_ui.commands");
     enforce_sse_limits();
     if (checkpoint) checkpoint("web_ui.sse_limits");
-    poll_live_transport(healthy_sse_client_count());
+
+    size_t connected_sse_clients = 0;
+    size_t healthy_sse_clients = 0;
+    count_sse_clients(connected_sse_clients, healthy_sse_clients);
+    poll_live_transport(connected_sse_clients, healthy_sse_clients);
     if (checkpoint) checkpoint("web_ui.live");
+
     publish_snapshots(false, checkpoint);
     if (checkpoint) checkpoint("web_ui.snapshots");
 
@@ -560,11 +565,15 @@ void WebUI::enforce_sse_limits() {
     }
 }
 
-size_t WebUI::healthy_sse_client_count() {
-    if (!sse_mutex_) return 0;
-    size_t count = 0;
+void WebUI::count_sse_clients(size_t &connected, size_t &healthy) {
+    connected = 0;
+    healthy = 0;
+    if (!sse_mutex_) return;
+
     if (xSemaphoreTake(sse_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
-        return 0;
+        connected = events_ ? events_->count() : 0;
+        healthy = connected;
+        return;
     }
     for (SseClientRef &ref : sse_clients_) {
         AsyncEventSourceClient *client = ref.client;
@@ -573,12 +582,12 @@ size_t WebUI::healthy_sse_client_count() {
             ref = {};
             continue;
         }
+        connected++;
         if (client->packetsWaiting() <= AC_WEB_SSE_CLIENT_PENDING_MAX) {
-            count++;
+            healthy++;
         }
     }
     xSemaphoreGive(sse_mutex_);
-    return count;
 }
 
 WebUI::SseSendResult WebUI::send_sse_to_clients(const char *payload,
@@ -668,11 +677,12 @@ WebUI::SseSendResult WebUI::send_snapshot_to_clients(
     return result;
 }
 
-void WebUI::poll_live_transport(size_t healthy_clients) {
+void WebUI::poll_live_transport(size_t connected_clients,
+                                size_t healthy_clients) {
     if (!live_) return;
 
     const uint32_t now_ms = millis();
-    live_->poll(healthy_clients, now_ms);
+    live_->poll(connected_clients, healthy_clients, now_ms);
 
     const char *payload = nullptr;
     size_t length = 0;

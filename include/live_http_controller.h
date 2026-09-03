@@ -28,7 +28,9 @@ public:
     bool begin(StreamBroker &stream, LiveChartService &live);
     void stop();
     void register_routes(AsyncWebServer &server) override;
-    void poll(size_t healthy_sse_clients, uint32_t now_ms);
+    void poll(size_t connected_sse_clients,
+              size_t healthy_sse_clients,
+              uint32_t now_ms);
 
     bool stream_payload(const char *&data, size_t &length) const;
     bool live_payload(const char *&data,
@@ -65,6 +67,8 @@ private:
     uint32_t live_generation_ = 0;
     uint32_t last_stream_snapshot_ms_ = 0;
     uint32_t last_live_send_ms_ = 0;
+    uint32_t live_backpressure_since_ms_ = 0;
+    bool live_backpressure_active_ = false;
 };
 
 }  // namespace aircannect
