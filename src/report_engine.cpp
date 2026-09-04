@@ -11,7 +11,7 @@ namespace {
 constexpr uint32_t PLAN_RETRY_DELAY_MS = 50;
 constexpr uint8_t PLAN_RETRY_LIMIT = 2;
 
-StorageReadLane lookup_lane(ReportRequestPriority priority) {
+StorageReadLane read_lane(ReportRequestPriority priority) {
     return priority == ReportRequestPriority::Foreground
         ? StorageReadLane::Foreground
         : StorageReadLane::Report;
@@ -93,6 +93,11 @@ const char *completion_error(OperationOutcome outcome,
     return plan ? plan : "report_engine_failed";
 }
 
+uint32_t increment_generation(uint32_t generation) {
+    ++generation;
+    return generation == 0 ? 1 : generation;
+}
+
 }  // namespace
 
 ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
@@ -101,55 +106,29 @@ ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
 
 void ReportEngine::begin(StorageReadPort &read_port,
                          StorageAtomicWritePort &write_port,
-                         ReportSpoolPort &spool_port,
-                         ReportArtifactAssembler &assembler) {
-    read_port_ = &read_port;
-    assembler_ = &assembler;
-    lookup_.begin(read_port);
+                         ReportSpoolPort &spool_port) {
     fallback_acquisition_.begin(read_port, write_port, spool_port);
     executor_.begin(read_port);
-    artifact_store_.begin(read_port, write_port);
+    store_.begin(write_port);
 }
 
-void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) {
+void ReportEngine::publish_catalog(
+    std::shared_ptr<const NightCatalog> catalog) {
     catalog_ = std::move(catalog);
-
-    if (available_.request.valid()) {
-        const NightCatalogRecord *available_night =
-            catalog_ ? catalog_->find(available_.request.sleep_day) : nullptr;
-        if (!available_night ||
-            available_night->source_revision !=
-                available_.request.source_revision) {
-            available_ = {};
-        }
-    }
-
-    if (built_bundle_) {
-        const NightCatalogRecord *built_night = catalog_
-            ? catalog_->find(built_bundle_->key.sleep_day)
-            : nullptr;
-        if (!built_night ||
-            built_night->source_revision !=
-                built_bundle_->key.source_revision) {
-            built_bundle_.reset();
-        }
-    }
-
     if (phase_ == ActivePhase::Idle || !catalog_) return;
 
     const NightCatalogRecord *night =
         catalog_->find(active_request_.artifact.sleep_day);
-
     if (phase_ == ActivePhase::WaitingForCatalog) {
         if (!night ||
-            !catalog_contains_fallback(*catalog_,
-                                       *night,
-                                       awaited_fallback_identity_)) {
+            !catalog_contains_fallback(
+                *catalog_, *night, awaited_fallback_identity_)) {
             return;
         }
 
         ReportArtifactRequest resumed = active_request_;
-        resumed.artifact.source_revision = night->source_revision;
+        resumed.artifact = ReportArtifactKey::result(
+            night->sleep_day, night->source_revision);
         resumed.force_rebuild = false;
         fallback_acquisition_.reset();
         active_plan_.reset();
@@ -163,6 +142,11 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
         night->source_revision != active_request_.artifact.source_revision) {
         cancel_active_work();
     }
+}
+
+void ReportEngine::publish_store_catalog(
+    std::shared_ptr<const ReportSignalStoreCatalog> catalog) {
+    store_catalog_ = std::move(catalog);
 }
 
 void ReportEngine::publish_spool_availability(
@@ -199,57 +183,43 @@ ReportRequestEnqueueResult ReportEngine::request(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild,
-    uint8_t range_tile_count) {
-    const ReportArtifactKey canonical = build_key(artifact);
-    if (!canonical.valid() || generation == 0 ||
-        !report_artifact_batch_count_valid(
-            canonical.kind, range_tile_count)) {
+    bool force_rebuild) {
+    if (!artifact.valid() || generation == 0) {
         return {};
     }
-    if (catalog_ && !artifact_current(canonical)) return {};
+    if (catalog_ && !source_current(artifact)) return {};
 
     if (phase_ != ActivePhase::Idle &&
-        same_build(active_request_.artifact, canonical)) {
-        const bool rebuild_upgrade = active_request_.artifact == canonical &&
-            force_rebuild && !active_request_.force_rebuild;
-        const bool batch_upgrade = active_request_.artifact == canonical &&
-            range_tile_count > active_request_.range_tile_count;
-        if (!rebuild_upgrade && !batch_upgrade &&
-            active_request_.artifact == canonical &&
-            report_request_priority_higher(
-                priority, active_request_.priority)) {
-            active_request_.priority = priority;
-        }
-        if (!rebuild_upgrade && !batch_upgrade &&
-            active_request_.artifact == canonical) {
+        active_request_.artifact.sleep_day == artifact.sleep_day) {
+        const bool same_source = active_request_.artifact == artifact;
+        const bool rebuild_upgrade = same_source && force_rebuild &&
+            !active_request_.force_rebuild;
+        if (!rebuild_upgrade && same_source) {
+            if (report_request_priority_higher(
+                    priority, active_request_.priority)) {
+                active_request_.priority = priority;
+            }
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     active_request_.ticket};
         }
         cancel_active_work();
     }
 
-    const ReportRequestEnqueueResult queued =
-        queue_.enqueue(canonical,
-                       priority,
-                       generation,
-                       force_rebuild,
-                       range_tile_count);
+    const ReportRequestEnqueueResult queued = queue_.enqueue(
+        artifact, priority, generation, force_rebuild);
     const bool accepted =
         queued.status != ReportRequestEnqueueStatus::Full &&
         queued.status != ReportRequestEnqueueStatus::Invalid;
-    const bool can_preempt =
-        accepted && phase_ != ActivePhase::Idle &&
+    const bool can_preempt = accepted && phase_ != ActivePhase::Idle &&
         report_request_priority_higher(priority, active_request_.priority) &&
-        artifact_current(active_request_.artifact);
+        source_current(active_request_.artifact);
     if (!can_preempt) return queued;
 
     const ReportRequestEnqueueResult restored = queue_.enqueue(
         active_request_.artifact,
         active_request_.priority,
         active_request_.ticket.generation,
-        active_request_.force_rebuild,
-        active_request_.range_tile_count);
+        active_request_.force_rebuild);
     if (restored.status != ReportRequestEnqueueStatus::Full &&
         restored.status != ReportRequestEnqueueStatus::Invalid) {
         cancel_active_work();
@@ -269,54 +239,31 @@ size_t ReportEngine::cancel_background() {
 
 void ReportEngine::clear() {
     queue_.clear();
+    published_ = {};
 
     if (phase_ == ActivePhase::AcquiringFallback) {
         fallback_acquisition_.cancel();
         clear_after_fallback_cancel_ = true;
-        available_ = {};
         last_completion_ = {};
         return;
     }
 
-    if (phase_ != ActivePhase::Idle) {
-        const bool discard_assembly = phase_ == ActivePhase::Executing;
-        cancel_active_work();
-        if (assembler_ && discard_assembly) {
-            assembler_->discard_build();
-        }
-    }
+    if (phase_ == ActivePhase::Executing) builder_.discard_build();
+    if (phase_ != ActivePhase::Idle) cancel_active_work();
 
     reset_active();
-    available_ = {};
-    built_bundle_.reset();
     last_completion_ = {};
 }
 
-bool ReportEngine::foreground_range_execution_active() const {
-    return phase_ == ActivePhase::Executing &&
-           active_request_.priority == ReportRequestPriority::Foreground &&
-           build_request_.artifact.kind == ReportArtifactKind::RangeTile;
-}
-
 bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
-    if (!read_port_ || !assembler_) return false;
-
     bool worked = false;
     if (phase_ == ActivePhase::Idle) {
-        if (queue_.size() == 0) return false;
-        if (!catalog_) return false;
+        if (queue_.size() == 0 || !catalog_) return false;
         worked = start_next(now_ms);
     }
     if (phase_ == ActivePhase::Idle) return worked;
 
     switch (phase_) {
-        case ActivePhase::LookingUp:
-            worked = lookup_.poll() || worked;
-            if (lookup_.status().terminal()) {
-                worked = finish_lookup(now_ms) || worked;
-            }
-            break;
-
         case ActivePhase::AcquiringFallback:
             worked = fallback_acquisition_.poll() || worked;
             if (fallback_acquisition_.status().terminal()) {
@@ -335,9 +282,9 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             break;
 
         case ActivePhase::Publishing:
-            worked = artifact_store_.poll() || worked;
-            if (artifact_store_.status().terminal()) {
-                worked = finish_publication(now_ms) || worked;
+            worked = store_.poll() || worked;
+            if (store_.status().terminal()) {
+                worked = finish_publication() || worked;
             }
             break;
 
@@ -355,17 +302,13 @@ ReportEngineStatus ReportEngine::status() const {
         queue_.contains(ReportRequestPriority::Foreground) ||
         (phase_ != ActivePhase::Idle &&
          active_request_.priority == ReportRequestPriority::Foreground);
-    out.lookup = lookup_.status();
     out.fallback = fallback_acquisition_.status();
     out.executor = executor_.status();
-    out.store = artifact_store_.status();
+    out.store = store_.status();
     out.awaited_fallback_identity = awaited_fallback_identity_;
     out.last_completion = last_completion_;
 
     switch (phase_) {
-        case ActivePhase::LookingUp:
-            out.state = ReportEngineState::LookingUp;
-            break;
         case ActivePhase::AcquiringFallback:
             out.state = ReportEngineState::AcquiringFallback;
             break;
@@ -389,47 +332,37 @@ ReportEngineStatus ReportEngine::status() const {
     return out;
 }
 
-ReportArtifactAvailability ReportEngine::take_available() {
-    ReportArtifactAvailability out = available_;
-    available_ = {};
+ReportSignalStoreCatalogInput ReportEngine::take_published() {
+    ReportSignalStoreCatalogInput out = std::move(published_);
+    published_ = {};
     return out;
 }
 
-std::shared_ptr<const ReportArtifactBundle>
-ReportEngine::take_built_bundle() {
-    return std::move(built_bundle_);
-}
-
-ReportArtifactKey ReportEngine::build_key(
-    const ReportArtifactKey &artifact) {
-    if (artifact.kind != ReportArtifactKind::Overview) return artifact;
-    return ReportArtifactKey::result(artifact.sleep_day,
-                                     artifact.source_revision);
-}
-
-bool ReportEngine::same_build(const ReportArtifactKey &lhs,
-                              const ReportArtifactKey &rhs) {
-    return build_key(lhs) == build_key(rhs);
-}
-
-bool ReportEngine::artifact_current(
-    const ReportArtifactKey &artifact) const {
-    if (!catalog_ || !artifact.valid()) return false;
+bool ReportEngine::source_current(const ReportArtifactKey &artifact) const {
+    if (!catalog_ || !artifact.valid()) {
+        return false;
+    }
 
     const NightCatalogRecord *night = catalog_->find(artifact.sleep_day);
     return night && night->source_revision == artifact.source_revision;
+}
+
+uint32_t ReportEngine::next_store_generation(SleepDayId sleep_day) const {
+    const ReportSignalStoreCatalogRecord *record =
+        store_catalog_ ? store_catalog_->find(sleep_day) : nullptr;
+    return record ? increment_generation(record->generation) : 1;
 }
 
 bool ReportEngine::start_next(uint32_t now_ms) {
     ReportArtifactRequest request;
     const ReportRequestSelection selected = queue_.take_next(now_ms, request);
     if (selected != ReportRequestSelection::Ready) return false;
-    if (!artifact_current(request.artifact)) {
+    if (!source_current(request.artifact)) {
         active_request_ = request;
         complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::StaleRevision,
                         ReportExecutorError::None,
-                        "report_artifact_revision_stale");
+                        "report_source_revision_stale");
         return true;
     }
     return start_request(request, now_ms);
@@ -438,145 +371,27 @@ bool ReportEngine::start_next(uint32_t now_ms) {
 bool ReportEngine::start_request(ReportArtifactRequest request,
                                  uint32_t now_ms) {
     active_request_ = request;
-    active_availability_ = {};
-    active_availability_.request = request.artifact;
-    active_availability_.requested_range_tile_count =
-        request.range_tile_count;
 
-    if (request.force_rebuild) {
-        return start_build(request.artifact, now_ms);
-    }
-
-    const OperationAdmission admitted = lookup_.start(
-        request.artifact,
-        request.ticket.generation,
-        lookup_lane(request.priority),
-        request.range_tile_count);
-    if (admitted != OperationAdmission::Accepted) {
-        complete_active(OperationOutcome::failed(),
+    const ReportSignalStoreCatalogRecord *stored =
+        store_catalog_ ? store_catalog_->find(request.artifact.sleep_day)
+                       : nullptr;
+    if (!request.force_rebuild && stored &&
+        stored->source_revision == request.artifact.source_revision) {
+        complete_active(OperationOutcome::succeeded(),
                         ReportPlanStatus::Ready,
-                        ReportExecutorError::None,
-                        "report_artifact_lookup_rejected");
+                        ReportExecutorError::None);
+        last_completion_.store_generation = stored->generation;
         return true;
     }
 
-    phase_ = ActivePhase::LookingUp;
-    return true;
+    active_store_generation_ = next_store_generation(
+        request.artifact.sleep_day);
+    return start_build(now_ms);
 }
 
-bool ReportEngine::finish_lookup(uint32_t now_ms) {
-    const ReportArtifactLookupStatus lookup_status = lookup_.status();
-    switch (lookup_status.state) {
-        case ReportArtifactLookupState::Ready:
-            active_availability_ = lookup_.availability();
-            if (!active_availability_.requested_ready()) {
-                complete_active(OperationOutcome::failed(),
-                                ReportPlanStatus::Ready,
-                                ReportExecutorError::None,
-                                "report_artifact_lookup_missing");
-                return true;
-            }
-
-            available_ = active_availability_;
-            complete_active(OperationOutcome::succeeded(),
-                            ReportPlanStatus::Ready,
-                            ReportExecutorError::None);
-            return true;
-
-        case ReportArtifactLookupState::MissingManifest: {
-            lookup_.reset();
-            active_availability_ = {};
-            active_availability_.request = active_request_.artifact;
-            active_availability_.requested_range_tile_count =
-                active_request_.range_tile_count;
-            build_tile_after_pair_ =
-                active_request_.artifact.kind ==
-                ReportArtifactKind::RangeTile;
-            const ReportArtifactKey artifact = build_tile_after_pair_
-                ? ReportArtifactKey::result(
-                      active_request_.artifact.sleep_day,
-                      active_request_.artifact.source_revision)
-                : active_request_.artifact;
-            return start_build(artifact, now_ms);
-        }
-
-        case ReportArtifactLookupState::MissingArtifact:
-            active_availability_ = lookup_.availability();
-            lookup_.reset();
-            if (!active_availability_.pair_ready() ||
-                active_request_.artifact.kind !=
-                    ReportArtifactKind::RangeTile) {
-                complete_active(OperationOutcome::failed(),
-                                ReportPlanStatus::Ready,
-                                ReportExecutorError::None,
-                                "report_artifact_manifest_invalid");
-                return true;
-            }
-            return start_build(active_request_.artifact, now_ms);
-
-        case ReportArtifactLookupState::Cancelled:
-            complete_active(OperationOutcome::cancelled(),
-                            ReportPlanStatus::Ready,
-                            ReportExecutorError::None);
-            return true;
-
-        case ReportArtifactLookupState::Failed:
-            if (retry_active(now_ms, PLAN_RETRY_DELAY_MS)) return true;
-            complete_active(OperationOutcome::failed(),
-                            ReportPlanStatus::Ready,
-                            ReportExecutorError::None,
-                            lookup_status.error[0]
-                                ? lookup_status.error
-                                : "report_artifact_lookup_failed");
-            return true;
-
-        case ReportArtifactLookupState::Idle:
-        case ReportArtifactLookupState::SubmitManifest:
-        case ReportArtifactLookupState::WaitManifest:
-            return false;
-    }
-    return false;
-}
-
-bool ReportEngine::start_build(const ReportArtifactKey &artifact,
-                               uint32_t now_ms) {
-    if (!artifact.valid() ||
-        artifact.sleep_day != active_request_.artifact.sleep_day ||
-        artifact.source_revision !=
-            active_request_.artifact.source_revision) {
-        complete_active(OperationOutcome::failed(),
-                        ReportPlanStatus::InvalidRequest,
-                        ReportExecutorError::None,
-                        "report_artifact_build_key_invalid");
-        return true;
-    }
-
-    const NightCatalogRecord *night = catalog_
-        ? catalog_->find(artifact.sleep_day)
-        : nullptr;
-    if (night && night->source_revision == artifact.source_revision &&
-        (night->source_flags &
-         NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0) {
-        complete_active(OperationOutcome::failed(),
-                        ReportPlanStatus::Ready,
-                        ReportExecutorError::None,
-                        "report_source_expired");
-        return true;
-    }
-
-    build_request_ = active_request_;
-    build_request_.artifact = artifact;
-    build_request_.range_tile_count = artifact.kind ==
-            ReportArtifactKind::RangeTile
-        ? active_request_.range_tile_count
-        : 1;
-
+bool ReportEngine::start_build(uint32_t now_ms) {
     ReportPlanRequest plan_request;
-    plan_request.artifact = artifact;
-    plan_request.range_tile_count = artifact.kind ==
-            ReportArtifactKind::RangeTile
-        ? active_request_.range_tile_count
-        : 1;
+    plan_request.artifact = active_request_.artifact;
     plan_request.signal_mask = report_signal_mask_all();
     plan_request.event_mask = REPORT_EVENT_ALL;
 
@@ -597,16 +412,6 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     if (active_plan_->fallback_acquisition_allowed() &&
         (active_plan_->acquirable_signal_mask() != 0 ||
          active_plan_->missing_event_mask() != 0)) {
-        if (active_request_.priority !=
-                ReportRequestPriority::Foreground &&
-            active_request_.range_tile_count > 1) {
-            complete_active(OperationOutcome::cancelled(),
-                            ReportPlanStatus::Ready,
-                            ReportExecutorError::None,
-                            "report_range_source_incomplete");
-            return true;
-        }
-
         if (active_request_.priority != ReportRequestPriority::Foreground &&
             !spool_availability_complete_) {
             complete_active(OperationOutcome::cancelled(),
@@ -619,17 +424,17 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
         const OperationAdmission admitted = fallback_acquisition_.start(
             active_plan_,
             active_request_.ticket.generation,
-            lookup_lane(active_request_.priority),
+            read_lane(active_request_.priority),
             write_lane(active_request_.priority),
             spool_availability_);
         if (admitted != OperationAdmission::Accepted) {
-            const ReportFallbackAcquisitionStatus fallback_status =
+            const ReportFallbackAcquisitionStatus status =
                 fallback_acquisition_.status();
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::None,
-                            fallback_status.error[0]
-                                ? fallback_status.error
+                            status.error[0]
+                                ? status.error
                                 : "fallback_acquisition_rejected");
             return true;
         }
@@ -638,22 +443,22 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
         return true;
     }
 
-    if (!assembler_->begin_build(build_request_, *active_plan_)) {
-        const char *reason = assembler_->failure_reason();
-        assembler_->discard_build();
-
+    if (!builder_.begin_build(
+            active_request_, *active_plan_, active_store_generation_)) {
+        const char *reason = builder_.failure_reason();
+        builder_.discard_build();
         complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::SinkRejected,
-                        reason ? reason : "report_artifact_begin_failed");
+                        reason ? reason : "report_signal_store_begin_failed");
         return true;
     }
 
     const OperationAdmission admitted = executor_.start(
-        active_plan_, *assembler_, active_request_.ticket.generation);
+        active_plan_, builder_, active_request_.ticket.generation);
     if (admitted != OperationAdmission::Accepted) {
         const ReportExecutorError error = executor_.status().error;
-        assembler_->discard_build();
+        builder_.discard_build();
         if (error == ReportExecutorError::AllocationFailed &&
             retry_active(now_ms, PLAN_RETRY_DELAY_MS)) {
             return true;
@@ -671,7 +476,7 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
 }
 
 bool ReportEngine::finish_fallback_acquisition() {
-    const ReportFallbackAcquisitionStatus fallback_status =
+    const ReportFallbackAcquisitionStatus status =
         fallback_acquisition_.status();
     if (clear_after_fallback_cancel_) {
         clear_after_fallback_cancel_ = false;
@@ -680,16 +485,15 @@ bool ReportEngine::finish_fallback_acquisition() {
         return true;
     }
 
-    if (fallback_status.state == ReportFallbackAcquisitionState::Ready &&
-        fallback_status.replacement_identity != 0) {
-        awaited_fallback_identity_ = fallback_status.replacement_identity;
+    if (status.state == ReportFallbackAcquisitionState::Ready &&
+        status.replacement_identity != 0) {
+        awaited_fallback_identity_ = status.replacement_identity;
         active_plan_.reset();
         phase_ = ActivePhase::WaitingForCatalog;
         return true;
     }
 
-    if (fallback_status.state ==
-        ReportFallbackAcquisitionState::Cancelled) {
+    if (status.state == ReportFallbackAcquisitionState::Cancelled) {
         complete_active(OperationOutcome::cancelled(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::None);
@@ -699,44 +503,42 @@ bool ReportEngine::finish_fallback_acquisition() {
     complete_active(OperationOutcome::failed(),
                     ReportPlanStatus::Ready,
                     ReportExecutorError::None,
-                    fallback_status.error[0]
-                        ? fallback_status.error
+                    status.error[0]
+                        ? status.error
                         : "fallback_acquisition_failed",
-                    fallback_status.source);
+                    status.source);
     return true;
 }
 
 bool ReportEngine::finish_execution(uint32_t now_ms) {
-    const ReportExecutorStatus executor_status = executor_.status();
-    if (executor_status.state == ReportExecutorState::Complete) {
-        const bool finished = assembler_->finish_build();
-        std::shared_ptr<const ReportArtifactBundle> bundle =
-            finished ? assembler_->take_completed() : nullptr;
+    const ReportExecutorStatus status = executor_.status();
+    if (status.state == ReportExecutorState::Complete) {
+        const bool finished = builder_.finish_build();
+        std::shared_ptr<ReportSignalStoreBundle> bundle =
+            finished ? builder_.take_completed() : nullptr;
         if (!finished || !bundle || !bundle->valid()) {
-            const char *reason = assembler_->failure_reason();
-            assembler_->discard_build();
-
+            const char *reason = builder_.failure_reason();
+            builder_.discard_build();
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::SinkRejected,
                             reason ? reason
-                                   : "report_artifact_assembly_failed");
+                                   : "report_signal_store_assembly_failed");
             return true;
         }
 
-        const OperationAdmission admitted = artifact_store_.start(
-            bundle,
+        const OperationAdmission admitted = store_.start(
+            std::move(bundle),
             active_request_.ticket.generation,
             write_lane(active_request_.priority));
         if (admitted != OperationAdmission::Accepted) {
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::None,
-                            "report_artifact_publish_rejected");
+                            "report_signal_store_publish_rejected");
             return true;
         }
 
-        built_bundle_ = std::move(bundle);
         executor_.reset();
         active_plan_.reset();
         phase_ = ActivePhase::Publishing;
@@ -744,68 +546,58 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     }
 
     const char *sink_reason =
-        executor_status.error == ReportExecutorError::SinkRejected
-            ? assembler_->failure_reason()
+        status.error == ReportExecutorError::SinkRejected
+            ? builder_.failure_reason()
             : nullptr;
-    assembler_->discard_build();
+    builder_.discard_build();
 
-    if (executor_status.state == ReportExecutorState::Cancelled) {
+    if (status.state == ReportExecutorState::Cancelled) {
         complete_active(OperationOutcome::cancelled(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::None);
         return true;
     }
 
-    if (executor_status.error == ReportExecutorError::StorageRejected &&
+    if (status.error == ReportExecutorError::StorageRejected &&
         retry_active(now_ms, PLAN_RETRY_DELAY_MS)) {
         return true;
     }
 
     complete_active(OperationOutcome::failed(),
                     ReportPlanStatus::Ready,
-                    executor_status.error,
+                    status.error,
                     sink_reason);
     return true;
 }
 
-bool ReportEngine::finish_publication(uint32_t now_ms) {
-    const ReportArtifactStoreStatus store_status = artifact_store_.status();
-    if (store_status.state == ReportArtifactStoreState::Ready) {
-        std::shared_ptr<const ReportArtifactBundle> bundle =
-            artifact_store_.published();
-        if (!bundle || !bundle->valid() ||
-            !active_availability_.merge(
-                *bundle, store_status.manifest_modified)) {
+bool ReportEngine::finish_publication() {
+    const ReportSignalStoreStatus status = store_.status();
+    if (status.state == ReportSignalStoreState::Ready) {
+        std::shared_ptr<const LargeByteBuffer> metadata =
+            store_.take_published_metadata();
+        ReportSignalStoreNightView view;
+        if (!metadata ||
+            !ReportSignalStoreNightCodec::decode(
+                metadata->data(), metadata->size(), view) ||
+            view.night.sleep_day != active_request_.artifact.sleep_day ||
+            view.night.source_revision !=
+                active_request_.artifact.source_revision) {
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::None,
-                            "report_artifact_publish_missing");
+                            "report_signal_store_publish_missing");
             return true;
         }
 
-        if (build_tile_after_pair_ &&
-            bundle->key.kind == ReportArtifactKind::Result) {
-            artifact_store_.reset();
-            build_tile_after_pair_ = false;
-            return start_build(active_request_.artifact, now_ms);
-        }
-
-        if (!active_availability_.requested_ready()) {
-            complete_active(OperationOutcome::failed(),
-                            ReportPlanStatus::Ready,
-                            ReportExecutorError::None,
-                            "report_artifact_publish_incomplete");
-            return true;
-        }
-
-        available_ = active_availability_;
+        published_.metadata = std::move(metadata);
         complete_active(OperationOutcome::succeeded(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::None);
+        last_completion_.store_generation = view.night.generation;
         return true;
     }
 
-    if (store_status.state == ReportArtifactStoreState::Cancelled) {
+    if (status.state == ReportSignalStoreState::Cancelled) {
         complete_active(OperationOutcome::cancelled(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::None);
@@ -815,9 +607,9 @@ bool ReportEngine::finish_publication(uint32_t now_ms) {
     complete_active(OperationOutcome::failed(),
                     ReportPlanStatus::Ready,
                     ReportExecutorError::None,
-                    store_status.error[0]
-                        ? store_status.error
-                        : "report_artifact_publish_failed");
+                    status.error[0]
+                        ? status.error
+                        : "report_signal_store_publish_failed");
     return true;
 }
 
@@ -832,9 +624,6 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
 
 void ReportEngine::cancel_active_work() {
     switch (phase_) {
-        case ActivePhase::LookingUp:
-            lookup_.cancel();
-            break;
         case ActivePhase::AcquiringFallback:
             fallback_acquisition_.cancel();
             break;
@@ -845,9 +634,10 @@ void ReportEngine::cancel_active_work() {
             break;
         case ActivePhase::Executing:
             executor_.cancel();
+            builder_.discard_build();
             break;
         case ActivePhase::Publishing:
-            artifact_store_.cancel();
+            store_.cancel();
             break;
         case ActivePhase::Idle:
             break;
@@ -864,8 +654,6 @@ void ReportEngine::complete_active(OperationOutcome outcome,
     last_completion_.plan_status = plan_status;
     last_completion_.executor_error = executor_error;
     last_completion_.fallback_source = fallback_source;
-    last_completion_.manifest_modified =
-        active_availability_.result.manifest_modified;
     copy_cstr(last_completion_.error,
               sizeof(last_completion_.error),
               completion_error(outcome,
@@ -876,17 +664,15 @@ void ReportEngine::complete_active(OperationOutcome outcome,
 }
 
 void ReportEngine::reset_active() {
-    lookup_.reset();
     executor_.reset();
-    artifact_store_.reset();
+    builder_.discard_build();
+    store_.reset();
     fallback_acquisition_.reset();
     active_plan_.reset();
     active_request_ = {};
-    build_request_ = {};
-    active_availability_ = {};
-    phase_ = ActivePhase::Idle;
-    build_tile_after_pair_ = false;
     awaited_fallback_identity_ = 0;
+    active_store_generation_ = 0;
+    phase_ = ActivePhase::Idle;
     clear_after_fallback_cancel_ = false;
 }
 

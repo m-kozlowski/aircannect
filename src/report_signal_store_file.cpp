@@ -58,28 +58,32 @@ size_t count_bits(const uint8_t *bitmap, size_t count) {
     return total;
 }
 
-bool layout(const ReportSignalStoreTrack &track,
-            uint32_t &samples_per_block,
-            uint32_t &raw_bytes,
-            uint32_t &one_second_offset,
-            uint32_t &one_second_bytes,
-            uint32_t &one_second_cells,
-            uint32_t &ten_second_offset,
-            uint32_t &ten_second_bytes,
-            uint32_t &ten_second_cells,
-            size_t &total_bytes) {
+struct SignalFileLayout {
+    uint32_t samples_per_block = 0;
+    uint32_t raw_bytes = 0;
+    uint32_t one_second_offset = 0;
+    uint32_t one_second_bytes = 0;
+    uint32_t one_second_cells = 0;
+    uint32_t ten_second_offset = 0;
+    uint32_t ten_second_bytes = 0;
+    uint32_t ten_second_cells = 0;
+    size_t total_bytes = 0;
+};
+
+bool layout(const ReportSignalStoreTrack &track, SignalFileLayout &result) {
     if (!report_signal_store_track_valid(track)) return false;
 
-    samples_per_block = static_cast<uint32_t>(
+    result = {};
+    result.samples_per_block = static_cast<uint32_t>(
         REPORT_SIGNAL_STORE_BLOCK_MS / track.sample_interval_ms);
     size_t raw_size = 0;
-    if (!CheckedSize::multiply(samples_per_block,
+    if (!CheckedSize::multiply(result.samples_per_block,
                                sizeof(int16_t),
                                raw_size) ||
         raw_size > UINT32_MAX) {
         return false;
     }
-    raw_bytes = static_cast<uint32_t>(raw_size);
+    result.raw_bytes = static_cast<uint32_t>(raw_size);
 
     size_t offset = ReportSignalStoreFileCodec::HeaderBytes;
     if (!CheckedSize::add_array(offset,
@@ -88,46 +92,42 @@ bool layout(const ReportSignalStoreTrack &track,
         return false;
     }
 
-    one_second_offset = 0;
-    one_second_bytes = 0;
-    one_second_cells = 0;
     if ((track.lod_mask & REPORT_SIGNAL_STORE_LOD_1S) != 0) {
         if (offset > UINT32_MAX) return false;
-        one_second_offset = static_cast<uint32_t>(offset);
-        one_second_cells = static_cast<uint32_t>(
+        result.one_second_offset = static_cast<uint32_t>(offset);
+        result.one_second_cells = static_cast<uint32_t>(
             REPORT_SIGNAL_STORE_BLOCK_MS / 1000);
         const size_t block_bytes =
-            static_cast<size_t>(one_second_cells) * sizeof(int16_t) * 2;
+            static_cast<size_t>(result.one_second_cells) *
+            sizeof(int16_t) * 2;
         if (block_bytes > UINT32_MAX ||
             !CheckedSize::add_array(offset,
                                     track.present_block_count,
                                     block_bytes)) {
             return false;
         }
-        one_second_bytes = static_cast<uint32_t>(block_bytes);
+        result.one_second_bytes = static_cast<uint32_t>(block_bytes);
     }
 
-    ten_second_offset = 0;
-    ten_second_bytes = 0;
-    ten_second_cells = 0;
     if ((track.lod_mask & REPORT_SIGNAL_STORE_LOD_10S) != 0) {
         if (offset > UINT32_MAX) return false;
-        ten_second_offset = static_cast<uint32_t>(offset);
-        ten_second_cells = static_cast<uint32_t>(
+        result.ten_second_offset = static_cast<uint32_t>(offset);
+        result.ten_second_cells = static_cast<uint32_t>(
             REPORT_SIGNAL_STORE_BLOCK_MS / 10000);
         const size_t block_bytes =
-            static_cast<size_t>(ten_second_cells) * sizeof(int16_t) * 2;
+            static_cast<size_t>(result.ten_second_cells) *
+            sizeof(int16_t) * 2;
         if (block_bytes > UINT32_MAX ||
             !CheckedSize::add_array(offset,
                                     track.present_block_count,
                                     block_bytes)) {
             return false;
         }
-        ten_second_bytes = static_cast<uint32_t>(block_bytes);
+        result.ten_second_bytes = static_cast<uint32_t>(block_bytes);
     }
 
-    total_bytes = offset;
-    return total_bytes <= UINT32_MAX;
+    result.total_bytes = offset;
+    return result.total_bytes <= UINT32_MAX;
 }
 
 int64_t first_sample_in_block(const ReportSignalStoreTrack &track,
@@ -209,27 +209,8 @@ bool slot_for_block(const ReportSignalStoreTrack &track,
 
 std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode(
     const ReportSignalStoreFileData &data) {
-    uint32_t samples_per_block = 0;
-    uint32_t raw_bytes = 0;
-    uint32_t one_second_offset = 0;
-    uint32_t one_second_bytes = 0;
-    uint32_t one_second_cells = 0;
-    uint32_t ten_second_offset = 0;
-    uint32_t ten_second_bytes = 0;
-    uint32_t ten_second_cells = 0;
-    size_t total_bytes = 0;
-    if (!layout(data.track,
-                samples_per_block,
-                raw_bytes,
-                one_second_offset,
-                one_second_bytes,
-                one_second_cells,
-                ten_second_offset,
-                ten_second_bytes,
-                ten_second_cells,
-                total_bytes)) {
-        return {};
-    }
+    SignalFileLayout file_layout;
+    if (!layout(data.track, file_layout)) return {};
 
     if (!data.raw_block_slots ||
         data.raw_block_slot_count != data.track.block_slot_count) {
@@ -237,15 +218,15 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode(
     }
 
     std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(total_bytes);
+        LargeByteBuffer::allocate(file_layout.total_bytes);
     if (!output) return {};
 
     uint8_t *bytes = output->data();
-    memset(bytes, 0, total_bytes);
+    memset(bytes, 0, file_layout.total_bytes);
     memcpy(bytes, FILE_MAGIC, sizeof(FILE_MAGIC));
     put_le16(bytes + 8, Version);
     put_le16(bytes + 10, HeaderBytes);
-    put_le32(bytes + 12, static_cast<uint32_t>(total_bytes));
+    put_le32(bytes + 12, static_cast<uint32_t>(file_layout.total_bytes));
     put_i32(bytes + 16, data.track.sleep_day.epoch_days());
     put_le32(bytes + 20, data.track.generation);
     put_le64(bytes + 24, data.track.source_revision.value());
@@ -259,18 +240,18 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode(
     put_le32(bytes + 44, data.track.value_scale_milli);
     put_le32(bytes + 48,
              static_cast<uint32_t>(REPORT_SIGNAL_STORE_BLOCK_MS));
-    put_le32(bytes + 52, samples_per_block);
+    put_le32(bytes + 52, file_layout.samples_per_block);
     put_i64(bytes + 56, data.track.first_block_start_ms);
     put_le32(bytes + 64, data.track.grid_phase_ms);
     put_le16(bytes + 68, data.track.present_block_count);
     put_le32(bytes + 72, HeaderBytes);
-    put_le32(bytes + 76, raw_bytes);
-    put_le32(bytes + 80, one_second_offset);
-    put_le32(bytes + 84, one_second_bytes);
-    put_le32(bytes + 88, one_second_cells ? 1000 : 0);
-    put_le32(bytes + 92, ten_second_offset);
-    put_le32(bytes + 96, ten_second_bytes);
-    put_le32(bytes + 100, ten_second_cells ? 10000 : 0);
+    put_le32(bytes + 76, file_layout.raw_bytes);
+    put_le32(bytes + 80, file_layout.one_second_offset);
+    put_le32(bytes + 84, file_layout.one_second_bytes);
+    put_le32(bytes + 88, file_layout.one_second_cells ? 1000 : 0);
+    put_le32(bytes + 92, file_layout.ten_second_offset);
+    put_le32(bytes + 96, file_layout.ten_second_bytes);
+    put_le32(bytes + 100, file_layout.ten_second_cells ? 10000 : 0);
     put_i64(bytes + 112, data.track.first_valid_sample_ms);
     put_i64(bytes + 120, data.track.last_valid_sample_ms);
     put_le64(bytes + 128, data.track.valid_sample_count);
@@ -288,32 +269,33 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode(
         }
         if (!raw) return {};
 
-        uint8_t *raw_block = bytes + HeaderBytes + packed * raw_bytes;
-        for (uint32_t i = 0; i < samples_per_block; ++i) {
+        uint8_t *raw_block =
+            bytes + HeaderBytes + packed * file_layout.raw_bytes;
+        for (uint32_t i = 0; i < file_layout.samples_per_block; ++i) {
             put_i16(raw_block + static_cast<size_t>(i) * 2, raw[i]);
         }
 
         const int64_t block_start = data.track.first_block_start_ms +
             static_cast<int64_t>(slot) * REPORT_SIGNAL_STORE_BLOCK_MS;
-        if (one_second_cells != 0) {
+        if (file_layout.one_second_cells != 0) {
             build_envelopes(data.track,
                             block_start,
                             raw,
-                            samples_per_block,
-                            bytes + one_second_offset +
-                                packed * one_second_bytes,
+                            file_layout.samples_per_block,
+                            bytes + file_layout.one_second_offset +
+                                packed * file_layout.one_second_bytes,
                             1000,
-                            one_second_cells);
+                            file_layout.one_second_cells);
         }
-        if (ten_second_cells != 0) {
+        if (file_layout.ten_second_cells != 0) {
             build_envelopes(data.track,
                             block_start,
                             raw,
-                            samples_per_block,
-                            bytes + ten_second_offset +
-                                packed * ten_second_bytes,
+                            file_layout.samples_per_block,
+                            bytes + file_layout.ten_second_offset +
+                                packed * file_layout.ten_second_bytes,
                             10000,
-                            ten_second_cells);
+                            file_layout.ten_second_cells);
         }
         ++packed;
     }
@@ -362,34 +344,19 @@ bool ReportSignalStoreFileCodec::inspect(
            REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES);
     if (!report_signal_store_track_valid(track)) return false;
 
-    uint32_t samples_per_block = 0;
-    uint32_t raw_bytes = 0;
-    uint32_t one_second_offset = 0;
-    uint32_t one_second_bytes = 0;
-    uint32_t one_second_cells = 0;
-    uint32_t ten_second_offset = 0;
-    uint32_t ten_second_bytes = 0;
-    uint32_t ten_second_cells = 0;
-    size_t expected_length = 0;
-    if (!layout(track,
-                samples_per_block,
-                raw_bytes,
-                one_second_offset,
-                one_second_bytes,
-                one_second_cells,
-                ten_second_offset,
-                ten_second_bytes,
-                ten_second_cells,
-                expected_length) ||
-        expected_length != length ||
-        get_le32(bytes + 52) != samples_per_block ||
-        get_le32(bytes + 76) != raw_bytes ||
-        get_le32(bytes + 80) != one_second_offset ||
-        get_le32(bytes + 84) != one_second_bytes ||
-        get_le32(bytes + 88) != (one_second_cells ? 1000u : 0u) ||
-        get_le32(bytes + 92) != ten_second_offset ||
-        get_le32(bytes + 96) != ten_second_bytes ||
-        get_le32(bytes + 100) != (ten_second_cells ? 10000u : 0u)) {
+    SignalFileLayout file_layout;
+    if (!layout(track, file_layout) ||
+        file_layout.total_bytes != length ||
+        get_le32(bytes + 52) != file_layout.samples_per_block ||
+        get_le32(bytes + 76) != file_layout.raw_bytes ||
+        get_le32(bytes + 80) != file_layout.one_second_offset ||
+        get_le32(bytes + 84) != file_layout.one_second_bytes ||
+        get_le32(bytes + 88) !=
+            (file_layout.one_second_cells ? 1000u : 0u) ||
+        get_le32(bytes + 92) != file_layout.ten_second_offset ||
+        get_le32(bytes + 96) != file_layout.ten_second_bytes ||
+        get_le32(bytes + 100) !=
+            (file_layout.ten_second_cells ? 10000u : 0u)) {
         return false;
     }
 
@@ -397,14 +364,27 @@ bool ReportSignalStoreFileCodec::inspect(
     view.bytes = bytes;
     view.length = length;
     view.raw_plane_offset = HeaderBytes;
-    view.raw_plane_bytes = raw_bytes;
-    view.one_second_plane_offset = one_second_offset;
-    view.one_second_plane_bytes = one_second_bytes;
-    view.one_second_cell_count = one_second_cells;
-    view.ten_second_plane_offset = ten_second_offset;
-    view.ten_second_plane_bytes = ten_second_bytes;
-    view.ten_second_cell_count = ten_second_cells;
-    view.samples_per_block = samples_per_block;
+    view.raw_plane_bytes = file_layout.raw_bytes;
+    view.one_second_plane_offset = file_layout.one_second_offset;
+    view.one_second_plane_bytes = file_layout.one_second_bytes;
+    view.one_second_cell_count = file_layout.one_second_cells;
+    view.ten_second_plane_offset = file_layout.ten_second_offset;
+    view.ten_second_plane_bytes = file_layout.ten_second_bytes;
+    view.ten_second_cell_count = file_layout.ten_second_cells;
+    view.samples_per_block = file_layout.samples_per_block;
+    return true;
+}
+
+bool ReportSignalStoreFileCodec::file_size(
+    const ReportSignalStoreTrack &track,
+    size_t &size) {
+    SignalFileLayout file_layout;
+    if (!layout(track, file_layout)) {
+        size = 0;
+        return false;
+    }
+
+    size = file_layout.total_bytes;
     return true;
 }
 
@@ -440,27 +420,8 @@ bool ReportSignalStoreFileCodec::plane_range(
         return false;
     }
 
-    uint32_t samples_per_block = 0;
-    uint32_t raw_bytes = 0;
-    uint32_t one_second_offset = 0;
-    uint32_t one_second_bytes = 0;
-    uint32_t one_second_cells = 0;
-    uint32_t ten_second_offset = 0;
-    uint32_t ten_second_bytes = 0;
-    uint32_t ten_second_cells = 0;
-    size_t total_bytes = 0;
-    if (!layout(track,
-                samples_per_block,
-                raw_bytes,
-                one_second_offset,
-                one_second_bytes,
-                one_second_cells,
-                ten_second_offset,
-                ten_second_bytes,
-                ten_second_cells,
-                total_bytes)) {
-        return false;
-    }
+    SignalFileLayout file_layout;
+    if (!layout(track, file_layout)) return false;
 
     size_t plane_offset = 0;
     size_t plane_block_bytes = 0;
@@ -468,24 +429,24 @@ bool ReportSignalStoreFileCodec::plane_range(
     switch (level) {
         case ReportSignalStoreLevel::Raw:
             plane_offset = HeaderBytes;
-            plane_block_bytes = raw_bytes;
+            plane_block_bytes = file_layout.raw_bytes;
             range.interval_ms = track.sample_interval_ms;
-            cells_per_block = samples_per_block;
+            cells_per_block = file_layout.samples_per_block;
             break;
         case ReportSignalStoreLevel::OneSecond:
-            if (one_second_cells == 0) return false;
-            plane_offset = one_second_offset;
-            plane_block_bytes = one_second_bytes;
+            if (file_layout.one_second_cells == 0) return false;
+            plane_offset = file_layout.one_second_offset;
+            plane_block_bytes = file_layout.one_second_bytes;
             range.interval_ms = 1000;
-            cells_per_block = one_second_cells;
+            cells_per_block = file_layout.one_second_cells;
             range.envelope = true;
             break;
         case ReportSignalStoreLevel::TenSeconds:
-            if (ten_second_cells == 0) return false;
-            plane_offset = ten_second_offset;
-            plane_block_bytes = ten_second_bytes;
+            if (file_layout.ten_second_cells == 0) return false;
+            plane_offset = file_layout.ten_second_offset;
+            plane_block_bytes = file_layout.ten_second_bytes;
             range.interval_ms = 10000;
-            cells_per_block = ten_second_cells;
+            cells_per_block = file_layout.ten_second_cells;
             range.envelope = true;
             break;
     }
@@ -506,8 +467,8 @@ bool ReportSignalStoreFileCodec::plane_range(
         !CheckedSize::multiply(present_in_range,
                                plane_block_bytes,
                                range.length) ||
-        block_offset > total_bytes ||
-        range.length > total_bytes - block_offset ||
+        block_offset > file_layout.total_bytes ||
+        range.length > file_layout.total_bytes - block_offset ||
         present_in_range > UINT32_MAX / cells_per_block) {
         range = {};
         return false;

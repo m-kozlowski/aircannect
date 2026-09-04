@@ -49,37 +49,10 @@ bool add_count(size_t &total, size_t amount) {
     return CheckedSize::add_to(total, amount);
 }
 
-bool requested_range(const ReportPlanRequest &request,
-                     NightCatalogTimeRange &range) {
-    range = {};
-    if (!request.artifact.valid() ||
-        !report_artifact_batch_count_valid(
-            request.artifact.kind, request.range_tile_count)) {
-        return false;
-    }
-
-    if (request.artifact.kind != ReportArtifactKind::RangeTile) {
-        return true;
-    }
-
-    const int64_t extra_tiles = request.range_tile_count - 1;
-    if (extra_tiles >
-        (INT64_MAX - request.artifact.range_end_ms) /
-            REPORT_RANGE_TILE_MS) {
-        return false;
-    }
-
-    range.start_ms = request.artifact.range_start_ms;
-    range.end_ms = request.artifact.range_end_ms +
-        extra_tiles * REPORT_RANGE_TILE_MS;
-    return range.valid();
-}
-
 NightCatalogTimeRange requested_window(const ReportPlanRequest &request,
                                        const NightCatalogTimeRange &session) {
-    NightCatalogTimeRange range;
-    if (!requested_range(request, range) || !range.valid()) return session;
-    return night_catalog_intersection(session, range);
+    (void)request;
+    return session;
 }
 
 size_t requested_session_count(const NightCatalog &catalog,
@@ -975,7 +948,6 @@ bool append_fallback_series_operations(
     const NightCatalog &catalog,
     const NightCatalogRecord &night,
     const SelectedSource &selected,
-    bool direct_range_slice,
     LargeScratchArray<PendingOperation> &pending) {
     size_t file_count = 0;
     const NightCatalogFallbackFile *files =
@@ -1033,30 +1005,9 @@ bool append_fallback_series_operations(
         entry->operation.fallback_section_index =
             static_cast<uint16_t>(i);
 
-        uint32_t slice_offset = 0;
-        uint32_t slice_size = 0;
-        const bool direct_slice =
-            direct_range_slice &&
-            section.payload_schema ==
-                REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 &&
-            report_series_v2_uniform_unmasked_slice(
-                section.record_count,
-                section.data_size,
-                entry->operation.first_record,
-                entry->operation.record_count,
-                slice_offset,
-                slice_size) &&
-            section.data_offset <= UINT64_MAX - slice_offset;
-        if (direct_slice) {
-            entry->operation.offset = section.data_offset + slice_offset;
-            entry->operation.length = slice_size;
-            entry->operation.kind =
-                ReportReadOperationKind::FallbackSeriesSlice;
-        } else {
-            entry->operation.offset = section.data_offset;
-            entry->operation.length = section.data_size;
-            entry->operation.kind = ReportReadOperationKind::FallbackSeries;
-        }
+        entry->operation.offset = section.data_offset;
+        entry->operation.length = section.data_size;
+        entry->operation.kind = ReportReadOperationKind::FallbackSeries;
         entry->mapping = mapping;
         entry->has_mapping = true;
     }
@@ -1066,7 +1017,6 @@ bool append_fallback_series_operations(
 bool append_numeric_operations(const NightCatalog &catalog,
                                const NightCatalogRecord &night,
                                const SelectedSource &selected,
-                               bool direct_range_slice,
                                LargeScratchArray<PendingOperation> &pending) {
     return selected.storage == SelectedStorage::Edf
         ? append_edf_numeric_operations(catalog,
@@ -1076,7 +1026,6 @@ bool append_numeric_operations(const NightCatalog &catalog,
         : append_fallback_series_operations(catalog,
                                             night,
                                             selected,
-                                            direct_range_slice,
                                             pending);
 }
 
@@ -1445,8 +1394,7 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
 }  // namespace
 
 bool ReportPlanRequest::valid() const {
-    NightCatalogTimeRange ignored;
-    return artifact.valid() && requested_range(*this, ignored) &&
+    return artifact.valid() &&
            (signal_mask & ~report_signal_mask_all()) == 0 &&
            (event_mask & ~REPORT_EVENT_ALL) == 0;
 }
@@ -1519,8 +1467,6 @@ ReportPlanResult ReportPlanner::build(
         if (!append_numeric_operations(*catalog,
                                        *night,
                                        selected.data()[i],
-                                       request.artifact.kind ==
-                                           ReportArtifactKind::RangeTile,
                                        pending)) {
             result.status = ReportPlanStatus::InvalidCatalog;
             return result;

@@ -77,15 +77,6 @@ public:
     ReportExecutorStatus status() const;
 
 private:
-    struct CachedFallbackSection {
-        uint64_t file_identity = 0;
-        uint64_t data_offset = 0;
-        uint32_t data_size = 0;
-        uint32_t data_crc32 = 0;
-        uint32_t last_used = 0;
-        std::shared_ptr<const LargeByteBuffer> bytes;
-    };
-
     bool validate_plan(size_t &record_capacity,
                        size_t &decoder_capacity) const;
     bool allocate_scratch(size_t record_capacity,
@@ -95,13 +86,6 @@ private:
     bool prepare_operation();
     bool decode_record();
     bool decode_fallback_operation();
-    std::shared_ptr<const LargeByteBuffer> find_cached_fallback(
-        const NightCatalogFallbackFile &file,
-        const NightCatalogFallbackSection &section);
-    void cache_fallback(const NightCatalogFallbackFile &file,
-                        const NightCatalogFallbackSection &section,
-                        const uint8_t *data);
-    void clear_fallback_cache();
     void finish_operation();
     void finish(ReportExecutorState state, ReportExecutorError error);
     void release_run_resources();
@@ -126,11 +110,6 @@ private:
 
     OperationTicket ticket_;
     StoragePreparedRead prepared_;
-    std::shared_ptr<const LargeByteBuffer> active_fallback_;
-
-    static constexpr size_t FallbackCacheCapacity = 4;
-    CachedFallbackSection fallback_cache_[FallbackCacheCapacity] = {};
-    uint32_t fallback_cache_clock_ = 0;
 
     uint8_t *record_buffer_ = nullptr;
     size_t record_capacity_ = 0;

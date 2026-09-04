@@ -23,16 +23,13 @@ const char *report_condition_name(ReportTaskCondition condition) {
 const char *report_operation_name(ReportTaskOperation operation) {
     switch (operation) {
         case ReportTaskOperation::LoadingCatalog: return "loading_catalog";
+        case ReportTaskOperation::LoadingStoreCatalog:
+            return "loading_report_index";
         case ReportTaskOperation::RefreshingCatalog:
             return "refreshing_catalog";
         case ReportTaskOperation::CheckingSpools: return "checking_spools";
-        case ReportTaskOperation::Reconciling: return "reconciling";
-        case ReportTaskOperation::LookingUp: return "looking_up";
         case ReportTaskOperation::Building: return "building";
         case ReportTaskOperation::Publishing: return "publishing";
-        case ReportTaskOperation::LoadingPayload: return "loading_payload";
-        case ReportTaskOperation::CompressingPayload:
-            return "compressing_payload";
         case ReportTaskOperation::SavingCatalog: return "saving_catalog";
         case ReportTaskOperation::None:
         default: return "--";
@@ -108,22 +105,10 @@ void print_report_stats(Print &out, const ReportTask &task) {
     out.print(" failed=");
     out.println(static_cast<unsigned long>(status.command_failures));
 
-    out.print("[REPORT cache] entries=");
-    out.print(static_cast<unsigned long>(status.payload_cache_entries));
-    out.print('/');
-    out.print(static_cast<unsigned long>(
-        AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY));
-    out.print(" bytes=");
-    out.print(static_cast<unsigned long>(status.payload_cache_bytes));
-    out.print(" hits=");
-    out.print(static_cast<unsigned long>(status.payload_cache_hits));
-    out.print(" misses=");
-    out.print(static_cast<unsigned long>(status.payload_cache_misses));
-    out.print(" evictions=");
-    out.println(static_cast<unsigned long>(status.payload_cache_evictions));
-
     out.print("[REPORT catalog] nights=");
     out.print(static_cast<unsigned long>(status.catalog_nights));
+    out.print(" materialized=");
+    out.print(static_cast<unsigned long>(status.materialized_nights));
     out.print(" files=");
     out.print(static_cast<unsigned long>(status.catalog_files_indexed));
     out.print('/');

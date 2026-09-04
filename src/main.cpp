@@ -1499,12 +1499,12 @@ void setup() {
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
-                           report_spool_service,
-                           StorageService::delete_port())) {
+                           report_spool_service)) {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
-    report_http_controller.begin(report_task);
+    report_http_controller.begin(
+        report_task, StorageService::stream_port());
     log_memory_profile_checkpoint("therapy_reports");
 
     if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,

@@ -6,6 +6,7 @@
 
 #include "large_byte_buffer.h"
 #include "night_catalog.h"
+#include "report_night_summary.h"
 #include "report_records.h"
 #include "report_sources.h"
 
@@ -150,6 +151,8 @@ public:
     static bool inspect(const uint8_t *bytes,
                         size_t length,
                         ReportSignalStoreFileView &view);
+    static bool file_size(const ReportSignalStoreTrack &track,
+                          size_t &size);
     static bool plane_range(const ReportSignalStoreFileView &view,
                             int64_t block_start_ms,
                             ReportSignalStoreLevel level,
@@ -182,6 +185,13 @@ struct ReportSignalStoreNight {
     uint8_t available_event_mask = 0;
     uint8_t source_flags = 0;
     uint32_t event_count = 0;
+    uint32_t requested_signal_mask = 0;
+    uint32_t missing_required_signal_mask = 0;
+    uint32_t missing_optional_signal_mask = 0;
+    uint8_t requested_event_mask = 0;
+    uint8_t missing_event_mask = 0;
+    ReportNightMetrics metrics;
+    ReportEventCounts events;
     const NightCatalogTimeRange *sessions = nullptr;
     size_t session_count = 0;
     const ReportSignalStoreTrack *tracks = nullptr;
@@ -200,7 +210,7 @@ struct ReportSignalStoreNightView {
 class ReportSignalStoreNightCodec {
 public:
     static constexpr uint16_t Version = 1;
-    static constexpr size_t HeaderBytes = 96;
+    static constexpr size_t HeaderBytes = 224;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t TrackBytes = 80;
 
@@ -247,6 +257,9 @@ public:
     static bool inspect(const uint8_t *bytes,
                         size_t length,
                         ReportSignalStoreEventFileView &view);
+    static bool file_size(uint16_t block_slot_count,
+                          uint32_t event_count,
+                          size_t &size);
     static bool block(const ReportSignalStoreEventFileView &view,
                       int64_t block_start_ms,
                       uint32_t &first_event,

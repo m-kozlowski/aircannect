@@ -24,7 +24,6 @@ struct ReportSignalStoreStatus {
     size_t signal_index = 0;
     size_t signal_count = 0;
     uint64_t bytes_written = 0;
-    uint64_t metadata_modified = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool active() const;
@@ -50,6 +49,8 @@ public:
     void reset();
 
     const ReportSignalStoreStatus &status() const { return status_; }
+    std::shared_ptr<const LargeByteBuffer> take_published_metadata();
+
 private:
     enum class Phase : uint8_t {
         Idle,
@@ -73,6 +74,7 @@ private:
 
     StorageAtomicWritePort *write_port_ = nullptr;
     std::shared_ptr<ReportSignalStoreBundle> bundle_;
+    std::shared_ptr<const LargeByteBuffer> published_metadata_;
     OperationTicket write_ticket_;
     uint32_t operation_generation_ = 0;
     StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;

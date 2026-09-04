@@ -116,7 +116,7 @@
         return series.some((item) =>
           (reportSeries[item.key] || []).length > 0 ||
           (reportBaseSeries[item.key] || []).length > 0 ||
-          reportPlotSection(item.key));
+          reportSignalTracks(item.key).length > 0);
       });
     }
 
@@ -138,7 +138,7 @@
     function toggleReportChartCollapsed(key) {
       if (reportChartPreferences.collapsed.has(key)) {
         reportChartPreferences.collapsed.delete(key);
-        ensureReportChartLoaded(key);
+        ensureSignalStoreChartLoaded(key);
       } else {
         reportChartPreferences.collapsed.add(key);
       }
@@ -368,14 +368,12 @@
       reportEvents = [];
       reportBaseSeries = {};
       reportBaseEvents = [];
-      reportBasePlotIndex = null;
-      reportBasePlotBytes = null;
+      reportSignalStore = null;
       reportBaseLoadedCharts.clear();
       reportBaseChartPromises.clear();
       reportCurrentNightId = "";
       reportCurrentRevision = "";
-      reportCurrentManifestModified = "";
-      reportCurrentPlotEtag = "";
+      reportCurrentGeneration = 0;
       reportRangeView = null;
       reportRangeActiveKey = "";
       reportRangeToken++;
@@ -403,21 +401,18 @@
       }
     }
 
-    function activateReportBasePlot(nightId, revision, manifestModified,
-                                    etag, index, bytes) {
+    function activateSignalStoreNight(nightId, revision, generation, store) {
       cancelReportRangeRequest();
       reportSeries = {};
       reportEvents = [];
       reportBaseSeries = {};
       reportBaseEvents = [];
-      reportBasePlotIndex = index || null;
-      reportBasePlotBytes = bytes || null;
+      reportSignalStore = store || null;
       reportBaseLoadedCharts.clear();
       reportBaseChartPromises.clear();
       reportCurrentNightId = String(nightId || "");
       reportCurrentRevision = String(revision || "");
-      reportCurrentManifestModified = String(manifestModified || "");
-      reportCurrentPlotEtag = String(etag || "");
+      reportCurrentGeneration = Number(generation) || 0;
       reportRangeView = null;
       reportRangeActiveKey = "";
       reportRangeToken++;
@@ -1375,7 +1370,7 @@
       if (!validReportRange(range) || !reportDrawItems.length) return false;
 
       if (reportZoom) {
-        ensureReportRangeLoaded(reportZoom.start, reportZoom.end);
+        ensureSignalStoreRangeLoaded(reportZoom.start, reportZoom.end);
       }
       const ranges = reportVisibleSessionRanges();
       reportDrawItems.forEach((item) => {
@@ -1385,7 +1380,7 @@
         item.ranges = ranges;
 
         const pending = !reportBaseLoadedCharts.has(item.key) ||
-          (!!reportZoom && !currentReportRangeChartReady(item.key));
+          (!!reportZoom && !signalStoreRangeChartReady(item.key));
         if (item.type === "series") {
           const definition = reportChartDefinition(item.key);
           if (definition) {
@@ -1409,7 +1404,7 @@
       if (!validReportRange(range)) return false;
 
       const ranges = reportVisibleSessionRanges();
-      const pending = !!reportZoom && !currentReportRangeChartReady(key);
+      const pending = !!reportZoom && !signalStoreRangeChartReady(key);
       if (key === "events") {
         reportDrawItems.forEach((item) => {
           item.events = reportEvents.slice();
@@ -1466,7 +1461,7 @@
       let loadingBadge = null;
       if (!reportChartPreferences.collapsed.has(definition.key) &&
           (!reportBaseLoadedCharts.has(definition.key) ||
-           (reportZoom && !currentReportRangeChartReady(definition.key)))) {
+           (reportZoom && !signalStoreRangeChartReady(definition.key)))) {
         loadingBadge = document.createElement("span");
         loadingBadge.className = "report-res-badge";
         loadingBadge.textContent = "loading";
@@ -1544,7 +1539,9 @@
         updateReportZoomControls();
         return;
       }
-      if (reportZoom) ensureReportRangeLoaded(reportZoom.start, reportZoom.end);
+      if (reportZoom) {
+        ensureSignalStoreRangeLoaded(reportZoom.start, reportZoom.end);
+      }
       const sessionRanges = reportVisibleSessionRanges();
 
       // Map each signal name -> whether it fell back to the low-res 1-min trend
@@ -1565,7 +1562,7 @@
         }
 
         const seriesDefs = def.series || [def];
-        const availableParts = reportChartPartNames(def, reportBasePlotIndex);
+        const availableParts = signalStoreChartParts(def);
         const seriesList = reportChartSeriesList(def);
         const basePending = availableParts.length > 0 &&
           !reportBaseLoadedCharts.has(def.key);
@@ -1616,7 +1613,7 @@
         const name = document.createElement("span");
         name.textContent = def.title;
         const rangePending = !!reportZoom &&
-          !currentReportRangeChartReady(def.key);
+          !signalStoreRangeChartReady(def.key);
         let loadingBadge = null;
         if (basePending || rangePending) {
           loadingBadge = document.createElement("span");
@@ -1818,7 +1815,9 @@
         const parsed = JSON.parse(text);
         const code = parsed && parsed.error ? parsed.error : "";
         return code === "report_queue_busy" ||
-               code === "artifact_stream_unavailable" ||
+               code === "report_queue_unavailable" ||
+               code === "report_stream_unavailable" ||
+               code === "report_stream_slots_full" ||
                code === "response_alloc";
       } catch (error) {
         return false;
@@ -1850,15 +1849,7 @@
 
       const request = new URL(url, window.location.href);
       const night = request.searchParams.get("night") || "";
-      const from = Number(request.searchParams.get("from"));
-      const to = Number(request.searchParams.get("to"));
-      const range = Number.isFinite(from) && from > 0 &&
-        Number.isFinite(to) && to > from;
       if (String(data.night || "") !== night) return false;
-      if (range) {
-        return data.kind === "range" && Number(data.from) <= from &&
-          Number(data.to) >= to;
-      }
       return data.kind === "night";
     }
 
@@ -1919,93 +1910,9 @@
         response.headers.get("X-Report-Source-Revision") || "").toLowerCase();
     }
 
-    function reportManifestModified(response) {
-      return String(
-        response.headers.get("X-Report-Manifest-Modified") || "");
-    }
-
-    async function pollReportResult(token, nightId, signal) {
-      const url = "/api/report/result?night=" + encodeURIComponent(nightId);
-      return pollReportFetch({
-        active: () => token === reportLoadToken,
-        waitUrl: url,
-        maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
-        delayMs: REPORT_POLL_DELAY_MS,
-        timeoutValue: {status: 0, etag: "", result: null},
-        request: () => {
-          const cached = lruGet(reportResultClientCache, url);
-          return AirCANnect.http.request(url, conditionalRequestOptions(cached, signal));
-        },
-        handle: async (resp) => {
-          if (resp.status === 304) {
-            const cached = lruGet(reportResultClientCache, url);
-            if (!cached) throw new Error("result cache revalidation failed");
-            const manifestModified = reportManifestModified(resp) ||
-              cached.manifestModified || "";
-            cached.manifestModified = manifestModified;
-            return {done: true, value: {
-              status: 304,
-              etag: cached.etag,
-              manifestModified,
-              result: cached.decoded,
-            }};
-          }
-          if (resp.status === 200) {
-            const decoded = decodeReportResultBinary(await resp.arrayBuffer());
-            if (!decoded.valid) throw new Error("invalid report result");
-
-            const etag = resp.headers.get("ETag") || "";
-            const revision = reportArtifactRevision(resp);
-            const manifestModified = reportManifestModified(resp);
-            if (revision && revision !== decoded.source_revision) {
-              throw new Error("report result revision mismatch");
-            }
-            lruSet(reportResultClientCache, url,
-              {etag, decoded, revision, manifestModified},
-              REPORT_RESULT_CLIENT_CACHE_MAX);
-            return {done: true, value: {
-              status: 200,
-              etag,
-              manifestModified,
-              result: decoded,
-            }};
-          }
-          if (resp.status === 202) {
-            AirCANnect.ui.message("reportMsg", "Preparing report...", true, true);
-            return {done: false, waitForReport: true};
-          }
-          if (resp.status === 404) {
-            return {done: true, value: {
-              status: 404,
-              etag: "",
-              result: null,
-            }};
-          }
-          const text = await resp.text();
-          if (resp.status === 503 && isTransientReportError(text)) {
-            return {done: false};
-          }
-          throw new Error(text);
-        },
-      });
-    }
-
-    function reportPlotUrl(nightId, from, to, part, name, tileCount) {
-      let url = "/api/report/plot?night=" + encodeURIComponent(nightId);
-      if (Number.isFinite(from) && Number.isFinite(to)) {
-        url += "&from=" + encodeURIComponent(from) +
-          "&to=" + encodeURIComponent(to);
-      }
-      if (part) url += "&part=" + encodeURIComponent(part);
-      if (name) url += "&name=" + encodeURIComponent(name);
-      if (Number.isInteger(tileCount) && tileCount > 1) {
-        url += "&tiles=" + encodeURIComponent(tileCount);
-      }
-      return url;
-    }
-
     async function runReportFetchJobs(jobs, concurrency) {
       if (!jobs.length) return;
+
       let next = 0;
       const workers = [];
       const workerCount = Math.min(concurrency || 2, jobs.length);
@@ -2020,154 +1927,702 @@
       await Promise.all(workers);
     }
 
-    function reportCacheIdentityMatches(entry, identity) {
-      return !!entry && !!identity && !!identity.manifestModified &&
-        entry.revision === identity.revision &&
-        entry.manifestModified === identity.manifestModified;
-    }
-
-    async function pollReportPlotPart(url, active, maxAttempts, delay, signal,
-                                      decode, cacheResponse = true,
-                                      cacheIdentity = null) {
-      const trusted = cacheResponse ?
-        lruGet(reportPlotClientCache, url) : null;
-      if (reportCacheIdentityMatches(trusted, cacheIdentity)) return trusted;
-
-      return pollReportFetch({
-        active,
-        waitUrl: url,
-        maxAttempts,
-        delayMs: delay,
-        request: () => {
-          const cached = cacheResponse ? lruGet(reportPlotClientCache, url) : null;
-          return AirCANnect.http.request(url, conditionalRequestOptions(cached, signal));
-        },
-        handle: async (response) => {
-          if (response.status === 304) {
-            const cached = cacheResponse ? lruGet(reportPlotClientCache, url) : null;
-            if (!cached) throw new Error("plot cache revalidation failed");
-            cached.manifestModified = reportManifestModified(response) ||
-              cached.manifestModified || "";
-            return {done: true, value: cached};
-          }
-          if (response.status === 200) {
-            const revision = reportArtifactRevision(response);
-            const manifestModified = reportManifestModified(response);
-            const decoded = decode(await response.arrayBuffer());
-            if (!decoded.valid) throw new Error("invalid plot response");
-
-            const entry = {
-              etag: response.headers.get("ETag") || "",
-              revision,
-              manifestModified,
-              decoded,
-            };
-            if (cacheResponse) {
-              lruSet(reportPlotClientCache, url, entry,
-                REPORT_PLOT_CLIENT_CACHE_MAX);
-            }
-            return {done: true, value: entry};
-          }
-          if (response.status === 202) {
-            return {done: false, waitForReport: true};
-          }
-          if (response.status === 404) throw new Error("plot not found");
-
-          const text = await response.text();
-          if (response.status === 503 && isTransientReportError(text)) {
-            return {done: false};
-          }
-          throw new Error(text || "plot request failed");
-        },
-      });
-    }
-
     function reportChartDefinition(key) {
       return reportChartDefs.find((definition) => definition.key === key) ||
         null;
     }
 
-    function reportPlotSection(name, index) {
-      const source = index || reportBasePlotIndex;
-      return source && source.sections ? source.sections[name] || null : null;
+    function reportRangeWindow(lo, hi) {
+      if (!(hi > lo)) return null;
+
+      const from = Math.floor(lo / SIGNAL_STORE_BLOCK_MS) *
+        SIGNAL_STORE_BLOCK_MS;
+      const to = Math.ceil(hi / SIGNAL_STORE_BLOCK_MS) *
+        SIGNAL_STORE_BLOCK_MS;
+      return to > from ? {from, to} : null;
     }
 
-    function reportChartPartNames(definition, index) {
+    function signalStoreMagic(bytes, expected) {
+      if (bytes.length < expected.length) return false;
+      for (let i = 0; i < expected.length; i++) {
+        if (bytes[i] !== expected.charCodeAt(i)) return false;
+      }
+      return true;
+    }
+
+    function signalStoreMetricSource(valid, str, summary, index) {
+      const bit = 1 << index;
+      if (!(valid & bit)) return "";
+      if (str & bit) return "str_edf";
+      if (summary & bit) return "summary";
+      return "calculated";
+    }
+
+    function signalStorePopcount(value) {
+      let bits = Number(value) >>> 0;
+      let count = 0;
+      while (bits) {
+        bits &= bits - 1;
+        count++;
+      }
+      return count;
+    }
+
+    function decodeSignalStoreNight(buffer) {
+      const invalid = {valid: false};
+      const bytes = new Uint8Array(buffer);
+      const view = new DataView(buffer);
+      if (buffer.byteLength < SIGNAL_STORE_NIGHT_HEADER_BYTES ||
+          !signalStoreMagic(bytes, "ACRNIG01") ||
+          view.getUint16(8, true) !== 1 ||
+          view.getUint16(10, true) !== SIGNAL_STORE_NIGHT_HEADER_BYTES ||
+          view.getUint32(12, true) !== buffer.byteLength) {
+        return invalid;
+      }
+
+      const generation = view.getUint32(20, true);
+      const revisionValue = view.getBigUint64(24, true);
+      const dayStart = Number(view.getBigInt64(32, true));
+      const dayEnd = Number(view.getBigInt64(40, true));
+      const sessionCount = view.getUint16(64, true);
+      const trackCount = view.getUint16(66, true);
+      const expectedSize = SIGNAL_STORE_NIGHT_HEADER_BYTES +
+        sessionCount * SIGNAL_STORE_SESSION_BYTES +
+        trackCount * SIGNAL_STORE_TRACK_BYTES;
+      if (!generation || revisionValue === 0n || !(dayEnd > dayStart) ||
+          expectedSize !== buffer.byteLength) {
+        return invalid;
+      }
+
+      const sessions = [];
+      let sessionOffset = SIGNAL_STORE_NIGHT_HEADER_BYTES;
+      let previousEnd = 0;
+      let durationMs = 0;
+      for (let i = 0; i < sessionCount; i++) {
+        const start = Number(view.getBigInt64(sessionOffset, true));
+        const end = Number(view.getBigInt64(sessionOffset + 8, true));
+        if (!(end > start) || start < dayStart || end > dayEnd ||
+            (i && start < previousEnd)) {
+          return invalid;
+        }
+        sessions.push({
+          start,
+          end,
+          duration_min: Math.round((end - start) / 60000),
+        });
+        durationMs += end - start;
+        previousEnd = end;
+        sessionOffset += SIGNAL_STORE_SESSION_BYTES;
+      }
+      if (BigInt(Math.round(durationMs)) !== view.getBigUint64(48, true)) {
+        return invalid;
+      }
+
+      const tracks = [];
+      const tracksByName = {};
+      let availableSignals = 0;
+      for (let index = 0; index < trackCount; index++) {
+        const offset = sessionOffset + index * SIGNAL_STORE_TRACK_BYTES;
+        const signal = view.getUint8(offset);
+        const name = SIGNAL_STORE_SIGNAL_NAMES[signal] || "";
+        const interval = view.getUint32(offset + 12, true);
+        const phase = view.getUint32(offset + 20, true);
+        const blockSlots = view.getUint16(offset + 6, true);
+        const firstBlock = Number(view.getBigInt64(offset + 24, true));
+        if (!name || view.getUint8(offset + 1) !== 1 || !interval ||
+            SIGNAL_STORE_BLOCK_MS % interval !== 0 || phase >= interval ||
+            !blockSlots || blockSlots > SIGNAL_STORE_MAX_BLOCKS ||
+            firstBlock % SIGNAL_STORE_BLOCK_MS !== 0) {
+          return invalid;
+        }
+
+        const presentBlocks = bytes.slice(
+          offset + 64, offset + 64 + SIGNAL_STORE_BITMAP_BYTES);
+        const track = {
+          metadataIndex: index,
+          signal,
+          name,
+          unit: view.getUint8(offset + 2),
+          lodMask: view.getUint8(offset + 3),
+          trackIndex: view.getUint16(offset + 4, true),
+          blockSlots,
+          presentCount: view.getUint16(offset + 8, true),
+          interval,
+          scale: view.getUint32(offset + 16, true),
+          phase,
+          firstBlock,
+          firstValid: Number(view.getBigInt64(offset + 32, true)),
+          lastValid: Number(view.getBigInt64(offset + 40, true)),
+          validSamples: view.getBigUint64(offset + 48, true),
+          expectedSamples: view.getBigUint64(offset + 56, true),
+          presentBlocks,
+        };
+        if (!track.scale || track.presentCount > track.blockSlots) {
+          return invalid;
+        }
+        tracks.push(track);
+        if (!tracksByName[name]) tracksByName[name] = [];
+        tracksByName[name].push(track);
+        availableSignals |= 1 << signal;
+      }
+
+      const requestedSignals = view.getUint32(80, true);
+      const missingRequired = view.getUint32(84, true);
+      const missingOptional = view.getUint32(88, true);
+      const requestedEventMask = view.getUint8(92);
+      const missingEventMask = view.getUint8(93);
+      const availableEventMask = view.getUint8(68);
+      const sourceFlags = view.getUint8(69);
+      const metricValid = view.getUint32(96, true);
+      const metricStr = view.getUint32(100, true);
+      const metricSummary = view.getUint32(104, true);
+      const metrics = [
+        ["average_leak", 20, view.getInt32(108, true) / 1000],
+        ["ahi", 0, view.getInt32(112, true) / 1000],
+        ["oa_index", 1, view.getInt32(116, true) / 1000],
+        ["ca_index", 2, view.getInt32(120, true) / 1000],
+        ["ua_index", 3, view.getInt32(124, true) / 1000],
+        ["hypopnea_index", 4, view.getInt32(128, true) / 1000],
+        ["arousal_index", 5, view.getInt32(132, true) / 1000],
+        ["mask_pressure_50", 6, view.getInt32(136, true) / 1000],
+        ["average_pressure", 21, view.getInt32(76, true) / 1000],
+        ["ipap_50", 22, view.getInt32(216, true) / 1000],
+        ["ipap_95", 23, view.getInt32(220, true) / 1000],
+        ["leak_50", 7, view.getInt32(140, true) / 1000],
+        ["duration_min", 8, view.getUint32(144, true)],
+        ["mask_pressure_95", 9, view.getInt32(148, true) / 1000],
+        ["leak_95", 10, view.getInt32(152, true) / 1000],
+        ["minute_ventilation_50", 11, view.getInt32(156, true) / 1000],
+        ["minute_ventilation_95", 12, view.getInt32(160, true) / 1000],
+        ["respiratory_rate_50", 13, view.getInt32(164, true) / 1000],
+        ["respiratory_rate_95", 14, view.getInt32(168, true) / 1000],
+        ["tidal_volume_50", 15, view.getInt32(172, true) / 1000],
+        ["tidal_volume_95", 16, view.getInt32(176, true) / 1000],
+        ["spo2_median", 17, view.getInt32(180, true) / 1000],
+        ["spo2_threshold_minutes", 18, view.getUint32(184, true)],
+        ["csr_minutes", 19, view.getUint32(188, true)],
+      ];
+
+      const result = {
+        valid: true,
+        state: missingRequired || missingEventMask ? "partial" : "ready",
+        error: "",
+        source_revision: revisionValue.toString(16).padStart(16, "0"),
+        generation,
+        sleep_day_epoch: view.getInt32(16, true),
+        day_start: dayStart,
+        day_end: dayEnd,
+        start: sessions.length ? sessions[0].start : dayStart,
+        end: sessions.length ? sessions[sessions.length - 1].end : dayEnd,
+        duration_min: Math.round(durationMs / 60000),
+        missing_required: signalStorePopcount(missingRequired),
+        missing_streams: signalStorePopcount(
+          missingRequired | missingOptional),
+        streams: signalStorePopcount(requestedSignals),
+        events_available: !!availableEventMask,
+        requested_event_mask: requestedEventMask,
+        missing_event_mask: missingEventMask,
+        source_flags: sourceFlags,
+        sessions,
+        stream_details: [],
+        hypopnea_count: view.getUint32(192, true),
+        ca_count: view.getUint32(196, true),
+        oa_count: view.getUint32(200, true),
+        ua_count: view.getUint32(204, true),
+        arousal_count: view.getUint32(208, true),
+        csr_count: view.getUint32(212, true),
+        store: {tracks, tracksByName},
+      };
+      metrics.forEach(([field, index, value]) => {
+        if (!(metricValid & (1 << index))) return;
+        result[field] = value;
+        result[field + "_source"] = signalStoreMetricSource(
+          metricValid, metricStr, metricSummary, index);
+      });
+      if (result.ahi !== undefined && result.arousal_index !== undefined) {
+        result.rdi = result.ahi + result.arousal_index;
+      }
+
+      SIGNAL_STORE_SIGNAL_NAMES.forEach((name, signal) => {
+        if (!name || !(requestedSignals & (1 << signal))) return;
+        const signalTracks = tracksByName[name] || [];
+        result.stream_details.push({
+          kind: "series",
+          name,
+          source: name,
+          required: signal === 0 || signal === 5,
+          complete: !!(availableSignals & (1 << signal)),
+          provider: signalTracks.length && (sourceFlags & 1) ? "edf" :
+            (signalTracks.length ? "spool" : "missing"),
+          has_edf: signalTracks.length > 0 && !!(sourceFlags & 1),
+          has_spool: signalTracks.length > 0 && !!(sourceFlags & 8),
+          low_res: signalTracks.length > 0 && signalTracks.every(
+            (track) => track.interval >= 60000),
+        });
+      });
+      return result;
+    }
+
+    async function pollSignalStoreNight(token, nightId, signal) {
+      const url = "/api/report/result?night=" + encodeURIComponent(nightId);
+      return pollReportFetch({
+        active: () => token === reportLoadToken,
+        waitUrl: url,
+        maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
+        delayMs: REPORT_POLL_DELAY_MS,
+        timeoutValue: {status: 0, result: null},
+        request: () => {
+          const cached = lruGet(reportResultClientCache, url);
+          return AirCANnect.http.request(
+            url, conditionalRequestOptions(cached, signal));
+        },
+        handle: async (response) => {
+          if (response.status === 304) {
+            const cached = lruGet(reportResultClientCache, url);
+            if (!cached) throw new Error("report cache revalidation failed");
+            return {done: true, value: {
+              status: 304,
+              result: cached.decoded,
+            }};
+          }
+          if (response.status === 200) {
+            const decoded = decodeSignalStoreNight(
+              await response.arrayBuffer());
+            if (!decoded.valid) throw new Error("invalid report metadata");
+
+            const revision = reportArtifactRevision(response);
+            const generation = Number(
+              response.headers.get("X-Report-Generation") || 0);
+            if ((revision && revision !== decoded.source_revision) ||
+                (generation && generation !== decoded.generation)) {
+              throw new Error("report metadata identity mismatch");
+            }
+            lruSet(reportResultClientCache, url, {
+              etag: response.headers.get("ETag") || "",
+              decoded,
+            }, REPORT_RESULT_CLIENT_CACHE_MAX);
+            return {done: true, value: {status: 200, result: decoded}};
+          }
+          if (response.status === 202) {
+            AirCANnect.ui.message(
+              "reportMsg", "Preparing report...", true, true);
+            return {done: false, waitForReport: true};
+          }
+          if (response.status === 404) {
+            return {done: true, value: {status: 404, result: null}};
+          }
+
+          const text = await response.text();
+          if (response.status === 503 && isTransientReportError(text)) {
+            return {done: false};
+          }
+          throw new Error(text || "report metadata request failed");
+        },
+      });
+    }
+
+    function reportSignalTracks(name, store = reportSignalStore) {
+      return store && store.tracksByName && store.tracksByName[name] || [];
+    }
+
+    function signalStoreChartParts(definition) {
       if (!definition) return [];
       if (definition.type === "events") {
-        return reportResult && reportResult.events_available &&
-          reportPlotSection("events", index) ? ["events"] : [];
+        return reportResult && reportResult.events_available ? ["events"] : [];
       }
       return (definition.series || [definition])
         .map((series) => series.key)
-        .filter((name) => reportPlotSection(name, index));
+        .filter((name) => reportSignalTracks(name).length > 0);
     }
 
-    function reportExpandedChartKeys() {
+    function signalStoreExpandedChartKeys() {
       const visible = new Set(visibleReportChartOrder());
       return reportChartPreferences.order.filter((key) =>
         visible.has(key) && !reportChartPreferences.collapsed.has(key));
     }
 
-    function reportBaseLoadKeys(keys, index = reportBasePlotIndex) {
+    function signalStoreBaseLoadKeys(keys) {
       const result = Array.from(keys || []);
-      const needsMarkers = result.some((key) => {
-        const definition = reportChartDefinition(key);
-        return definition && definition.type !== "events";
-      });
-      const events = reportChartDefinition("events");
-      if (needsMarkers && !result.includes("events") &&
-          reportChartPartNames(events, index).length) {
+      if (result.some((key) => key !== "events") &&
+          !result.includes("events") && reportResult.events_available) {
         result.unshift("events");
       }
       return result;
     }
 
-    async function fetchReportChartData(index, definition, context) {
-      const decoded = {events: [], series: {}};
-      const partNames = reportChartPartNames(definition, index);
-      for (const name of partNames) {
-        if (!context.active()) return null;
-        const section = reportPlotSection(name, index);
-        const part = name === "events" ? "events" : "series";
-        const url = reportPlotUrl(context.nightId,
-          context.from, context.to, part, part === "series" ? name : "");
-        const fetched = await pollReportPlotPart(
-          url,
-          context.active,
-          context.maxAttempts,
-          context.delay,
-          context.signal,
-          (buffer) => part === "events"
-            ? decodeReportPlotEvents(buffer, index, section)
-            : decodeReportPlotSeries(buffer, index, section),
-          context.cacheParts !== false,
-          context.cacheIdentity || null);
-        if (!fetched || !context.active()) return null;
-        if (fetched.revision && fetched.revision !== context.revision) {
-          throw new Error("report_revision_changed");
+    function signalStoreBlockPresent(track, slot) {
+      return slot >= 0 && slot < track.blockSlots &&
+        !!(track.presentBlocks[Math.floor(slot / 8)] & (1 << (slot % 8)));
+    }
+
+    function signalStoreLevel(track, spanMs) {
+      const chartHost = document.getElementById("reportCharts");
+      const width = Math.max(320,
+        chartHost ? chartHost.clientWidth : window.innerWidth || 800);
+      const targetCells = width * 2;
+      const candidates = [{name: "raw", interval: track.interval}];
+      if (track.lodMask & 1) candidates.push({name: "1s", interval: 1000});
+      if (track.lodMask & 2) candidates.push({name: "10s", interval: 10000});
+      candidates.sort((a, b) => a.interval - b.interval);
+      return candidates.find((candidate) =>
+        spanMs / candidate.interval <= targetCells) ||
+        candidates[candidates.length - 1];
+    }
+
+    function signalStoreCacheKey(track, level, blockStart) {
+      return [reportCurrentNightId, reportCurrentGeneration,
+        track.metadataIndex, level.name, blockStart].join(":");
+    }
+
+    function signalStoreTouchBlock(key) {
+      const entry = reportSignalBlockCache.get(key);
+      if (!entry) return null;
+      reportSignalBlockCache.delete(key);
+      reportSignalBlockCache.set(key, entry);
+      return entry;
+    }
+
+    function trimSignalStoreBlockCache() {
+      let bytes = 0;
+      reportSignalBlockCache.forEach((entry) => {
+        bytes += entry.estimatedBytes;
+      });
+      while (reportSignalBlockCache.size > SIGNAL_STORE_BLOCK_CACHE_MAX ||
+             bytes > SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES) {
+        const key = reportSignalBlockCache.keys().next().value;
+        if (key === undefined) break;
+        bytes -= reportSignalBlockCache.get(key).estimatedBytes;
+        reportSignalBlockCache.delete(key);
+      }
+    }
+
+    function signalStoreFirstSample(track, blockStart) {
+      let remainder = blockStart % track.interval;
+      if (remainder < 0) remainder += track.interval;
+      let delta = track.phase - remainder;
+      if (delta < 0) delta += track.interval;
+      return blockStart + delta;
+    }
+
+    function decodeSignalStoreBlock(buffer, byteOffset, track, level,
+                                    blockStart, blockBytes) {
+      const view = new DataView(buffer, byteOffset, blockBytes);
+      const points = [];
+      const cells = SIGNAL_STORE_BLOCK_MS / level.interval;
+      let haveValue = false;
+      for (let i = 0; i < cells; i++) {
+        const offset = level.name === "raw" ? i * 2 : i * 4;
+        const t = level.name === "raw"
+          ? signalStoreFirstSample(track, blockStart) + i * level.interval
+          : blockStart + i * level.interval;
+        const minimum = view.getInt16(offset, true);
+        const maximum = level.name === "raw"
+          ? minimum : view.getInt16(offset + 2, true);
+        if (minimum === SIGNAL_STORE_MISSING ||
+            maximum === SIGNAL_STORE_MISSING ||
+            t >= blockStart + SIGNAL_STORE_BLOCK_MS) {
+          if (haveValue) points.push({gap: true, t});
+          haveValue = false;
+          continue;
         }
-        if (part === "events") {
-          decoded.events = fetched.decoded.events;
+
+        const min = minimum * track.scale / 1000;
+        const max = maximum * track.scale / 1000;
+        if (level.name === "raw") {
+          points.push({t, value: min});
         } else {
-          decoded.series[name] = fetched.decoded.points;
+          points.push({
+            t,
+            end: t + level.interval,
+            min: Math.min(min, max),
+            max: Math.max(min, max),
+            value: (min + max) / 2,
+            envelope: true,
+          });
+        }
+        haveValue = true;
+      }
+      return points;
+    }
+
+    async function fetchSignalStoreBlocks(track, level, from, to, context) {
+      const blockCount = (to - from) / SIGNAL_STORE_BLOCK_MS;
+      let url = "/api/report/plot?night=" +
+        encodeURIComponent(context.nightId) + "&part=signal&track=" +
+        track.metadataIndex + "&from=" + from + "&to=" + to +
+        "&level=" + encodeURIComponent(level.name);
+      return pollReportFetch({
+        active: context.active,
+        waitUrl: url,
+        maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
+        delayMs: REPORT_POLL_DELAY_MS,
+        request: () => AirCANnect.http.request(url, {
+          cache: "no-store",
+          signal: context.signal,
+        }),
+        handle: async (response) => {
+          if (response.status === 202) {
+            return {done: false, waitForReport: true};
+          }
+          if (response.status !== 200 && response.status !== 204) {
+            const text = await response.text();
+            if (response.status === 503 && isTransientReportError(text)) {
+              return {done: false};
+            }
+            throw new Error(text || "report signal request failed");
+          }
+
+          const revision = reportArtifactRevision(response);
+          const generation = Number(
+            response.headers.get("X-Report-Generation") || 0);
+          const responseTrack = Number(
+            response.headers.get("X-Report-Track"));
+          const present = response.headers.get("X-Report-Present-Blocks") || "";
+          const interval = Number(
+            response.headers.get("X-Report-Interval-Ms") || 0);
+          const envelope = response.headers.get("X-Report-Envelope") === "1";
+          if ((revision && revision !== context.revision) ||
+              generation !== context.generation ||
+              responseTrack !== track.trackIndex ||
+              present.length !== blockCount || interval !== level.interval ||
+              envelope !== (level.name !== "raw")) {
+            throw new Error("report signal identity mismatch");
+          }
+
+          const buffer = response.status === 204
+            ? new ArrayBuffer(0) : await response.arrayBuffer();
+          const blockBytes = SIGNAL_STORE_BLOCK_MS / level.interval *
+            (envelope ? 4 : 2);
+          const presentCount = Array.from(present)
+            .filter((value) => value === "1").length;
+          if (buffer.byteLength !== presentCount * blockBytes) {
+            throw new Error("invalid report signal payload");
+          }
+
+          let packedOffset = 0;
+          for (let i = 0; i < blockCount; i++) {
+            const blockStart = from + i * SIGNAL_STORE_BLOCK_MS;
+            const key = signalStoreCacheKey(track, level, blockStart);
+            let points = [];
+            if (present[i] === "1") {
+              points = decodeSignalStoreBlock(
+                buffer, packedOffset, track, level, blockStart, blockBytes);
+              packedOffset += blockBytes;
+            }
+            reportSignalBlockCache.set(key, {
+              points,
+              present: present[i] === "1",
+              estimatedBytes: blockBytes + points.length * 40,
+            });
+          }
+          trimSignalStoreBlockCache();
+          return {done: true, value: true};
+        },
+      });
+    }
+
+    async function ensureSignalStoreTrackBlocks(track, level, from, to,
+                                                context) {
+      const missing = [];
+      for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
+        const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
+        const key = signalStoreCacheKey(track, level, block);
+        if (!signalStoreBlockPresent(track, slot)) {
+          if (!reportSignalBlockCache.has(key)) {
+            reportSignalBlockCache.set(key, {
+              points: [], present: false, estimatedBytes: 1,
+            });
+          }
+        } else if (!signalStoreTouchBlock(key)) {
+          missing.push(block);
+        }
+      }
+
+      const runs = [];
+      missing.forEach((block) => {
+        const last = runs.length ? runs[runs.length - 1] : null;
+        if (last && last.to === block) {
+          last.to += SIGNAL_STORE_BLOCK_MS;
+        } else {
+          runs.push({from: block, to: block + SIGNAL_STORE_BLOCK_MS});
+        }
+      });
+      await runReportFetchJobs(runs.map((run) => () =>
+        fetchSignalStoreBlocks(
+          track, level, run.from, run.to, context)), 2);
+    }
+
+    function appendSignalStorePoints(target, source, blockStart) {
+      if (!source.length) {
+        if (target.length && !target[target.length - 1].gap) {
+          target.push({gap: true, t: blockStart});
+        }
+        return;
+      }
+      source.forEach((point) => {
+        const previous = target.length ? target[target.length - 1] : null;
+        if (point.gap && previous && previous.gap) return;
+        if (previous && !point.gap && !previous.gap &&
+            point.t === previous.t) {
+          target[target.length - 1] = point;
+          return;
+        }
+        target.push(point);
+      });
+    }
+
+    async function loadSignalStoreTrack(track, lo, hi, context, prefetch) {
+      const trackEnd = track.firstBlock +
+        track.blockSlots * SIGNAL_STORE_BLOCK_MS;
+      let from = Math.max(track.firstBlock,
+        Math.floor(lo / SIGNAL_STORE_BLOCK_MS) * SIGNAL_STORE_BLOCK_MS);
+      let to = Math.min(trackEnd,
+        Math.ceil(hi / SIGNAL_STORE_BLOCK_MS) * SIGNAL_STORE_BLOCK_MS);
+      if (prefetch) {
+        from = Math.max(track.firstBlock,
+          from - SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS);
+        to = Math.min(trackEnd,
+          to + SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS);
+      }
+      if (!(to > from)) return [];
+
+      const level = signalStoreLevel(track, hi - lo);
+      await ensureSignalStoreTrackBlocks(track, level, from, to, context);
+      if (!context.active()) return [];
+
+      const points = [];
+      for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
+        const entry = signalStoreTouchBlock(
+          signalStoreCacheKey(track, level, block));
+        appendSignalStorePoints(points, entry ? entry.points : [], block);
+      }
+      return points.filter((point) => point.gap ||
+        reportPointOverlapsRange(point, {start: lo, end: hi}));
+    }
+
+    function mergeSignalStoreTracks(series) {
+      const points = series.flat().sort((a, b) => a.t - b.t);
+      const merged = [];
+      points.forEach((point) => {
+        const previous = merged.length ? merged[merged.length - 1] : null;
+        if (point.gap && previous && previous.gap) return;
+        if (previous && !point.gap && !previous.gap &&
+            point.t === previous.t) {
+          merged[merged.length - 1] = point;
+        } else {
+          merged.push(point);
+        }
+      });
+      return merged;
+    }
+
+    function decodeSignalStoreEvents(buffer, expected) {
+      const bytes = new Uint8Array(buffer);
+      const view = new DataView(buffer);
+      if (buffer.byteLength < SIGNAL_STORE_EVENT_HEADER_BYTES ||
+          !signalStoreMagic(bytes, "ACREVT01") ||
+          view.getUint16(8, true) !== 1 ||
+          view.getUint16(10, true) !== SIGNAL_STORE_EVENT_HEADER_BYTES ||
+          view.getUint32(12, true) !== buffer.byteLength ||
+          view.getUint32(20, true) !== expected.generation ||
+          view.getBigUint64(24, true).toString(16).padStart(16, "0") !==
+            expected.revision) {
+        throw new Error("invalid report events");
+      }
+
+      const blockCount = view.getUint16(40, true);
+      const eventCount = view.getUint32(44, true);
+      const recordsOffset = SIGNAL_STORE_EVENT_HEADER_BYTES + blockCount * 8;
+      if (!blockCount || blockCount > SIGNAL_STORE_MAX_BLOCKS ||
+          recordsOffset + eventCount * 16 !== buffer.byteLength) {
+        throw new Error("invalid report events");
+      }
+
+      const events = [];
+      for (let i = 0; i < eventCount; i++) {
+        const offset = recordsOffset + i * 16;
+        events.push({
+          t: Number(view.getBigInt64(offset, true)),
+          duration: view.getInt32(offset + 8, true),
+          code: view.getUint16(offset + 12, true),
+          flags: view.getUint16(offset + 14, true),
+        });
+      }
+      return events;
+    }
+
+    async function loadSignalStoreEvents(context) {
+      const key = [context.nightId, context.generation, "events"].join(":");
+      const cached = lruGet(reportEventClientCache, key);
+      if (cached) return cached;
+
+      const url = "/api/report/plot?night=" +
+        encodeURIComponent(context.nightId) + "&part=events";
+      const events = await pollReportFetch({
+        active: context.active,
+        waitUrl: url,
+        maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
+        delayMs: REPORT_POLL_DELAY_MS,
+        request: () => AirCANnect.http.request(url, {
+          cache: "no-store",
+          signal: context.signal,
+        }),
+        handle: async (response) => {
+          if (response.status === 202) {
+            return {done: false, waitForReport: true};
+          }
+          if (response.status !== 200) {
+            const text = await response.text();
+            if (response.status === 503 && isTransientReportError(text)) {
+              return {done: false};
+            }
+            throw new Error(text || "report events request failed");
+          }
+          return {done: true, value: decodeSignalStoreEvents(
+            await response.arrayBuffer(), context)};
+        },
+      });
+      if (events && context.active()) {
+        lruSet(reportEventClientCache, key, events,
+          SIGNAL_STORE_EVENT_CACHE_MAX);
+      }
+      return events || [];
+    }
+
+    async function fetchSignalStoreChart(definition, lo, hi, context,
+                                         prefetch) {
+      if (definition.type === "events") {
+        return {events: await loadSignalStoreEvents(context), series: {}};
+      }
+
+      const decoded = {events: [], series: {}};
+      for (const series of definition.series || [definition]) {
+        const tracks = reportSignalTracks(series.key);
+        const values = [];
+        for (const track of tracks) {
+          values.push(await loadSignalStoreTrack(
+            track, lo, hi, context, prefetch));
+          if (!context.active()) return null;
+        }
+        if (tracks.length) {
+          decoded.series[series.key] = mergeSignalStoreTracks(values);
         }
       }
       return decoded;
     }
 
-    function publishReportBaseChart(key, decoded, render = true) {
+    function publishSignalStoreBaseChart(key, decoded, render = true) {
       const definition = reportChartDefinition(key);
       if (!definition || !decoded) return;
       if (definition.type === "events") {
         reportBaseEvents = decoded.events || [];
-        if (!reportZoom || !currentReportRangeChartReady("events")) {
+        if (!reportZoom || !signalStoreRangeChartReady("events")) {
           reportEvents = reportBaseEvents;
         }
       } else {
         Object.keys(decoded.series || {}).forEach((name) => {
           reportBaseSeries[name] = decoded.series[name];
-          if (!reportZoom || !currentReportRangeChartReady(key)) {
+          if (!reportZoom || !signalStoreRangeChartReady(key)) {
             reportSeries[name] = decoded.series[name];
           }
         });
@@ -2176,41 +2631,27 @@
       if (render && !updateRenderedReportChart(key)) renderReportCharts();
     }
 
-    function loadReportBaseChart(key, token, signal) {
+    function loadSignalStoreBaseChart(key, token, signal) {
       if (reportBaseLoadedCharts.has(key)) return Promise.resolve(true);
       const pending = reportBaseChartPromises.get(key);
       if (pending) return pending;
 
       const definition = reportChartDefinition(key);
-      const index = reportBasePlotIndex;
-      if (!definition || !index) return Promise.resolve(false);
-      if (reportBasePlotBytes) {
-        const decoded = decodeReportWholeChart(
-          index, reportBasePlotBytes, definition);
-        if (!decoded) return Promise.resolve(false);
-
-        publishReportBaseChart(key, decoded);
-        return Promise.resolve(true);
-      }
+      const range = reportRange();
+      if (!definition || !validReportRange(range)) return Promise.resolve(false);
       const context = {
         nightId: reportCurrentNightId,
         revision: reportCurrentRevision,
-        from: null,
-        to: null,
+        generation: reportCurrentGeneration,
         signal,
-        maxAttempts: REPORT_PLOT_POLL_MAX_ATTEMPTS,
-        delay: REPORT_POLL_DELAY_MS,
-        cacheIdentity: {
-          revision: reportCurrentRevision,
-          manifestModified: reportCurrentManifestModified,
-        },
         active: () => token === reportLoadToken &&
-          index === reportBasePlotIndex,
+          reportCurrentGeneration === reportResult.generation,
       };
-      const promise = fetchReportChartData(index, definition, context)
+      const promise = fetchSignalStoreChart(
+        definition, range.start, range.end, context, false)
         .then((decoded) => {
           if (!decoded || !context.active()) return false;
-          publishReportBaseChart(key, decoded);
+          publishSignalStoreBaseChart(key, decoded);
           return true;
         })
         .finally(() => {
@@ -2222,90 +2663,23 @@
       return promise;
     }
 
-    async function fetchReportPlot(token, nightId, revision,
-                                   manifestModified, signal) {
-      const indexUrl = reportPlotUrl(nightId, null, null, "index");
-      const identity = {revision, manifestModified};
-      const fetched = await pollReportPlotPart(
-        indexUrl,
-        () => token === reportLoadToken,
-        REPORT_PLOT_POLL_MAX_ATTEMPTS,
-        REPORT_POLL_DELAY_MS,
-        signal,
-        decodeReportPlotIndex,
-        true,
-        identity);
-      if (!fetched || token !== reportLoadToken) return false;
-      if (fetched.revision && fetched.revision !== revision) {
-        return "revision_changed";
-      }
-
-      const activeModified = fetched.manifestModified || manifestModified;
-      const keys = reportBaseLoadKeys(
-        reportExpandedChartKeys(), fetched.decoded);
-      if (reportPlotShouldLoadWhole(fetched.decoded, keys)) {
-        const wholeUrl = reportPlotUrl(nightId);
-        const whole = await pollReportPlotPart(
-          wholeUrl,
-          () => token === reportLoadToken,
-          REPORT_PLOT_POLL_MAX_ATTEMPTS,
-          REPORT_POLL_DELAY_MS,
-          signal,
-          decodeReportWholePlot,
-          true,
-          {revision, manifestModified: activeModified});
-        if (!whole || token !== reportLoadToken) return false;
-        if (whole.revision && whole.revision !== revision) {
-          return "revision_changed";
-        }
-        if (whole.decoded.index.prefixCrc32 !==
-            fetched.decoded.prefixCrc32) {
-          return "revision_changed";
-        }
-
-        activateReportBasePlot(
-          nightId,
-          revision,
-          whole.manifestModified || activeModified,
-          whole.etag,
-          whole.decoded.index,
-          whole.decoded.bytes);
-        keys.forEach((key) => {
-          const definition = reportChartDefinition(key);
-          const decoded = decodeReportWholeChart(
-            reportBasePlotIndex, reportBasePlotBytes, definition);
-          if (decoded) publishReportBaseChart(key, decoded, false);
-        });
-        renderReportSummary();
-        renderReportCharts();
-        return true;
-      }
-
-      activateReportBasePlot(
+    async function loadSignalStoreBase(token, nightId, signal) {
+      activateSignalStoreNight(
         nightId,
-        revision,
-        activeModified,
-        fetched.etag,
-        fetched.decoded,
-        null);
+        reportResult.source_revision,
+        reportResult.generation,
+        reportResult.store);
       renderReportSummary();
       renderReportCharts();
 
-      const jobs = keys.map((key) =>
-        () => loadReportBaseChart(key, token, signal));
-      try {
-        await runReportFetchJobs(jobs, 2);
-      } catch (error) {
-        if (error && error.message === "report_revision_changed") {
-          return "revision_changed";
-        }
-        throw error;
-      }
-      return true;
+      const keys = signalStoreBaseLoadKeys(signalStoreExpandedChartKeys());
+      await runReportFetchJobs(keys.map((key) => () =>
+        loadSignalStoreBaseChart(key, token, signal)), 2);
+      return token === reportLoadToken;
     }
 
-    async function ensureReportChartLoaded(key) {
-      if (!reportBasePlotIndex || !reportCurrentNightId) return;
+    async function ensureSignalStoreChartLoaded(key) {
+      if (!reportSignalStore || !reportCurrentNightId) return;
       const token = reportLoadToken;
       let controller = reportLoadAbortController;
       let ownsController = false;
@@ -2315,15 +2689,13 @@
         ownsController = true;
       }
       try {
-        const keys = reportBaseLoadKeys([key]);
+        const keys = signalStoreBaseLoadKeys([key]);
         await runReportFetchJobs(keys.map((chartKey) =>
-          () => loadReportBaseChart(chartKey, token, controller.signal)), 2);
+          () => loadSignalStoreBaseChart(
+            chartKey, token, controller.signal)), 2);
         if (reportZoom && token === reportLoadToken) {
-          ensureReportRangeLoaded(reportZoom.start, reportZoom.end, [key]);
-        }
-      } catch (error) {
-        if (error && error.message === "report_revision_changed") {
-          loadSelectedReportNight();
+          ensureSignalStoreRangeLoaded(
+            reportZoom.start, reportZoom.end, [key]);
         }
       } finally {
         if (ownsController && reportLoadAbortController === controller) {
@@ -2332,137 +2704,30 @@
       }
     }
 
-    function reportRangeWindow(lo, hi) {
-      if (!(hi > lo)) return null;
-
-      const from = Math.floor(lo / REPORT_RANGE_TILE_MS) *
-        REPORT_RANGE_TILE_MS;
-      const to = Math.ceil(hi / REPORT_RANGE_TILE_MS) *
-        REPORT_RANGE_TILE_MS;
-      return to > from ? {from, to} : null;
+    function signalStoreRangeKey(from, to) {
+      return [reportCurrentNightId, reportCurrentGeneration, from, to].join(":");
     }
 
-    function reportRangeViewKey(nightId, revision, from, to) {
-      return String(nightId) + ":" + String(revision) + ":" + from + ":" + to;
-    }
-
-    function reportRangeTileKey(nightId, revision, from) {
-      return String(nightId) + ":" + String(revision) + ":" + from;
-    }
-
-    function reportRangeDecodedSize(decoded) {
-      if (!decoded) return 0;
-      let bytes = (decoded.events || []).length * 32;
-      Object.values(decoded.series || {}).forEach((points) => {
-        bytes += points.length * REPORT_RANGE_POINT_ESTIMATE_BYTES;
-      });
-      return bytes;
-    }
-
-    function reportRangeTileRawSize(tile) {
-      if (tile.bytes) return tile.bytes.byteLength;
-      return tile.index ? REPORT_PLOT_PREFIX_BYTES : 0;
-    }
-
-    function reportRangeTileDecodedSize(tile) {
-      let bytes = 0;
-      tile.charts.forEach((decoded) => {
-        bytes += reportRangeDecodedSize(decoded);
-      });
-      return bytes;
-    }
-
-    function trimReportRangeTileCache() {
-      let rawBytes = 0;
-      reportRangeTileCache.forEach((tile) => {
-        rawBytes += reportRangeTileRawSize(tile);
-      });
-
-      while (reportRangeTileCache.size > REPORT_RANGE_TILE_CACHE_MAX ||
-             rawBytes > REPORT_RANGE_TILE_CACHE_RAW_MAX_BYTES) {
-        const oldest = reportRangeTileCache.keys().next().value;
-        if (oldest === undefined) break;
-
-        rawBytes -= reportRangeTileRawSize(
-          reportRangeTileCache.get(oldest));
-        reportRangeTileCache.delete(oldest);
-      }
-
-      let decodedBytes = 0;
-      reportRangeTileCache.forEach((tile) => {
-        decodedBytes += reportRangeTileDecodedSize(tile);
-      });
-      if (decodedBytes <= REPORT_RANGE_TILE_CACHE_DECODED_MAX_BYTES) return;
-
-      for (const tile of reportRangeTileCache.values()) {
-        const bytes = reportRangeTileDecodedSize(tile);
-        if (!bytes) continue;
-
-        tile.charts.clear();
-        decodedBytes -= bytes;
-        if (decodedBytes <= REPORT_RANGE_TILE_CACHE_DECODED_MAX_BYTES) break;
-      }
-    }
-
-    function touchReportRangeTile(tile) {
-      if (!tile || !reportRangeTileCache.has(tile.key)) return;
-      reportRangeTileCache.delete(tile.key);
-      reportRangeTileCache.set(tile.key, tile);
-    }
-
-    function reportRangeTile(nightId, revision, from) {
-      const key = reportRangeTileKey(nightId, revision, from);
-      let tile = lruGet(reportRangeTileCache, key);
-      if (tile) return tile;
-
-      tile = {
-        key,
-        from,
-        to: from + REPORT_RANGE_TILE_MS,
-        index: null,
-        bytes: null,
-        charts: new Map(),
-        indexPromise: null,
-        wholePromise: null,
-        chartPromises: new Map(),
-      };
-      reportRangeTileCache.set(key, tile);
-      trimReportRangeTileCache();
-      return tile;
-    }
-
-    function currentReportRangeCacheKey() {
-      if (!reportZoom || !reportCurrentNightId || !reportCurrentRevision) {
+    function currentSignalStoreRangeKey() {
+      if (!reportZoom || !reportCurrentNightId || !reportCurrentGeneration) {
         return "";
       }
-      const w = reportRangeWindow(reportZoom.start, reportZoom.end);
-      if (!w) return "";
-      return reportRangeViewKey(reportCurrentNightId,
-        reportCurrentRevision, w.from, w.to);
+      const range = reportRangeWindow(reportZoom.start, reportZoom.end);
+      return range ? signalStoreRangeKey(range.from, range.to) : "";
     }
 
-    function newReportRangeView(key, from, to) {
-      return {
-        key,
-        from,
-        to,
-        tiles: null,
-        series: {},
-        events: null,
-        loadedCharts: new Set(),
-        requestedCharts: new Set(),
-        promise: null,
-      };
+    function signalStoreRangeChartReady(key) {
+      const current = currentSignalStoreRangeKey();
+      return !!(current && reportRangeView && reportRangeView.key === current &&
+        reportRangeView.loadedCharts.has(key));
     }
 
-    function applyReportRangeChart(entry, key) {
-      if (!entry || reportRangeActiveKey !== currentReportRangeCacheKey()) {
-        return;
-      }
+    function applySignalStoreRangeChart(entry, key) {
+      if (!entry || entry.key !== currentSignalStoreRangeKey()) return;
       const definition = reportChartDefinition(key);
       if (!definition) return;
       if (definition.type === "events") {
-        if (Array.isArray(entry.events)) reportEvents = entry.events;
+        reportEvents = entry.events || reportBaseEvents;
       } else {
         (definition.series || [definition]).forEach((series) => {
           if (Object.prototype.hasOwnProperty.call(entry.series, series.key)) {
@@ -2472,839 +2737,84 @@
       }
     }
 
-    function currentReportRangeChartReady(key) {
-      const cacheKey = currentReportRangeCacheKey();
-      const entry = cacheKey && reportRangeView &&
-          reportRangeView.key === cacheKey ? reportRangeView : null;
-      return !!(entry && entry.loadedCharts.has(key));
+    function startSignalStoreRangeWorker(entry) {
+      if (!entry || entry.promise) return;
+      const controller = reportRangeAbortController || new AbortController();
+      reportRangeAbortController = controller;
+      const token = ++reportRangeToken;
+      const context = {
+        nightId: reportCurrentNightId,
+        revision: reportCurrentRevision,
+        generation: reportCurrentGeneration,
+        signal: controller.signal,
+        active: () => !controller.signal.aborted &&
+          token === reportRangeToken &&
+          entry.key === reportRangeActiveKey,
+      };
+      const promise = (async () => {
+        while (context.active()) {
+          const keys = Array.from(entry.requestedCharts)
+            .filter((key) => !entry.loadedCharts.has(key));
+          entry.requestedCharts.clear();
+          if (!keys.length) break;
+
+          await runReportFetchJobs(keys.map((key) => async () => {
+            const definition = reportChartDefinition(key);
+            if (!definition) return;
+            const decoded = await fetchSignalStoreChart(
+              definition, entry.from, entry.to, context, true);
+            if (!decoded || !context.active()) return;
+
+            if (definition.type === "events") {
+              entry.events = decoded.events;
+            } else {
+              Object.assign(entry.series, decoded.series);
+            }
+            entry.loadedCharts.add(key);
+            applySignalStoreRangeChart(entry, key);
+            if (!updateRenderedReportChart(key)) renderReportCharts();
+          }), 2);
+        }
+      })().finally(() => {
+        const restart = context.active() && entry.requestedCharts.size > 0;
+        if (entry.promise === promise) entry.promise = null;
+        if (restart) startSignalStoreRangeWorker(entry);
+      });
+      entry.promise = promise;
     }
 
-    function ensureReportRangeLoaded(lo, hi, requestedKeys) {
-      if (!reportCurrentNightId || !reportCurrentRevision) return;
-      const w = reportRangeWindow(lo, hi);
-      if (!w) return;
-      const key = reportRangeViewKey(reportCurrentNightId,
-        reportCurrentRevision, w.from, w.to);
+    function ensureSignalStoreRangeLoaded(lo, hi, requestedKeys) {
+      if (!reportCurrentNightId || !reportCurrentGeneration) return;
+      const range = reportRangeWindow(lo, hi);
+      if (!range) return;
+      const key = signalStoreRangeKey(range.from, range.to);
       if (reportRangeActiveKey !== key) {
+        cancelReportRangeRequest();
         reportRangeActiveKey = key;
-        reportRangeView = newReportRangeView(key, w.from, w.to);
+        reportRangeView = {
+          key,
+          from: range.from,
+          to: range.to,
+          series: {},
+          events: reportBaseEvents,
+          loadedCharts: new Set(),
+          requestedCharts: new Set(),
+          promise: null,
+        };
         reportSeries = {...reportBaseSeries};
         reportEvents = reportBaseEvents;
       }
 
       const entry = reportRangeView;
-      if (!entry) return;
-      const keys = requestedKeys || reportExpandedChartKeys();
+      const keys = requestedKeys || signalStoreExpandedChartKeys();
       keys.forEach((chartKey) => {
-        if (!entry.loadedCharts.has(chartKey)) {
+        if (entry.loadedCharts.has(chartKey)) {
+          applySignalStoreRangeChart(entry, chartKey);
+        } else {
           entry.requestedCharts.add(chartKey);
-        } else {
-          applyReportRangeChart(entry, chartKey);
         }
       });
-      startReportRangeWorker(key, entry);
-    }
-
-    function mergeReportPlots(plots) {
-      const merged = {series: {}, events: []};
-      const eventKeys = new Set();
-
-      plots.forEach((plot) => {
-        Object.keys(plot.series || {}).forEach((name) => {
-          if (!merged.series[name]) merged.series[name] = [];
-          const target = merged.series[name];
-          (plot.series[name] || []).forEach((point) => {
-            const previous = target.length ? target[target.length - 1] : null;
-            if (point.gap && previous && previous.gap) return;
-            if (previous && !point.gap && !previous.gap &&
-                point.t === previous.t && point.value === previous.value &&
-                point.min === previous.min && point.max === previous.max) {
-              return;
-            }
-            target.push(point);
-          });
-        });
-
-        (plot.events || []).forEach((event) => {
-          const key = [event.t, event.duration, event.code, event.flags].join(":");
-          if (eventKeys.has(key)) return;
-          eventKeys.add(key);
-          merged.events.push(event);
-        });
-      });
-      merged.events.sort((a, b) => a.t - b.t || a.code - b.code);
-      return merged;
-    }
-
-    function reportPlotPartNames(index, keys) {
-      const names = new Set();
-      keys.forEach((key) => {
-        const definition = reportChartDefinition(key);
-        reportChartPartNames(definition, index).forEach((name) => names.add(name));
-      });
-      return names;
-    }
-
-    function reportPlotShouldLoadWhole(index, keys) {
-      if (!index) return false;
-      const names = reportPlotPartNames(index, keys);
-      if (names.size < REPORT_PLOT_WHOLE_MIN_PARTS) return false;
-
-      let requestedBytes = 0;
-      names.forEach((name) => {
-        const section = reportPlotSection(name, index);
-        if (section) requestedBytes += section.length;
-      });
-      const payloadBytes = index.totalSize - REPORT_PLOT_PREFIX_BYTES;
-      return payloadBytes > 0 &&
-        requestedBytes * 100 >=
-          payloadBytes * REPORT_PLOT_WHOLE_THRESHOLD_PERCENT;
-    }
-
-    function decodeReportWholePlot(buffer) {
-      if (buffer.byteLength < REPORT_PLOT_PREFIX_BYTES) {
-        return {valid: false};
-      }
-
-      const index = decodeReportPlotIndex(
-        buffer.slice(0, REPORT_PLOT_PREFIX_BYTES));
-      if (!index.valid || index.totalSize !== buffer.byteLength) {
-        return {valid: false};
-      }
-      return {valid: true, index, bytes: buffer};
-    }
-
-    async function loadReportRangeTileIndex(tile, context, tileCount) {
-      while (context.active() && !tile.index) {
-        if (tile.indexPromise) {
-          await tile.indexPromise;
-          continue;
-        }
-
-        const url = reportPlotUrl(context.nightId,
-          tile.from, tile.to, "index", null, tileCount);
-        const promise = pollReportPlotPart(
-          url,
-          context.active,
-          REPORT_RANGE_POLL_MAX_ATTEMPTS,
-          REPORT_RANGE_POLL_DELAY_MS,
-          context.signal,
-          decodeReportPlotIndex,
-          false).then((fetched) => {
-            if (!fetched || !context.active()) return false;
-            if (fetched.revision && fetched.revision !== context.revision) {
-              throw new Error("report_revision_changed");
-            }
-
-            tile.index = fetched.decoded;
-            touchReportRangeTile(tile);
-            trimReportRangeTileCache();
-            return true;
-          }).finally(() => {
-            if (tile.indexPromise === promise) tile.indexPromise = null;
-          });
-        tile.indexPromise = promise;
-        await promise;
-      }
-      return !!tile.index;
-    }
-
-    async function loadReportRangeTileWhole(tile, context, tileCount) {
-      while (context.active() && !tile.bytes) {
-        if (tile.wholePromise) {
-          await tile.wholePromise;
-          continue;
-        }
-
-        const url = reportPlotUrl(
-          context.nightId, tile.from, tile.to, null, null, tileCount);
-        const promise = pollReportPlotPart(
-          url,
-          context.active,
-          REPORT_RANGE_POLL_MAX_ATTEMPTS,
-          REPORT_RANGE_POLL_DELAY_MS,
-          context.signal,
-          decodeReportWholePlot,
-          false).then((fetched) => {
-            if (!fetched || !context.active()) return false;
-            if (fetched.revision && fetched.revision !== context.revision) {
-              throw new Error("report_revision_changed");
-            }
-            if (tile.index &&
-                fetched.decoded.index.prefixCrc32 !== tile.index.prefixCrc32) {
-              throw new Error("report_tile_index_changed");
-            }
-
-            tile.index = fetched.decoded.index;
-            tile.bytes = fetched.decoded.bytes;
-            touchReportRangeTile(tile);
-            trimReportRangeTileCache();
-            return true;
-          }).finally(() => {
-            if (tile.wholePromise === promise) tile.wholePromise = null;
-          });
-        tile.wholePromise = promise;
-        await promise;
-      }
-      return !!tile.bytes;
-    }
-
-    async function loadReportRangeTiles(context, from, to, chartKeys) {
-      const tiles = [];
-      const jobs = [];
-      const tileContext = {...context, active: context.tileActive};
-      const loadWhole = chartKeys.length >=
-        REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS;
-      for (let tileStart = from; tileStart < to;
-           tileStart += REPORT_RANGE_TILE_MS) {
-        const tile = reportRangeTile(
-          context.nightId, context.revision, tileStart);
-        tiles.push(tile);
-      }
-
-      const tileReady = (tile) => loadWhole ? !!tile.bytes : !!tile.index;
-      const firstMissing = tiles.findIndex((tile) => !tileReady(tile));
-      if (firstMissing >= 0) {
-        let batchCount = 1;
-        while (batchCount < REPORT_RANGE_TILE_BATCH_MAX &&
-               firstMissing + batchCount < tiles.length &&
-               !tileReady(tiles[firstMissing + batchCount])) {
-          batchCount++;
-        }
-        const first = tiles[firstMissing];
-        await (loadWhole
-          ? loadReportRangeTileWhole(first, tileContext, batchCount)
-          : loadReportRangeTileIndex(first, tileContext, batchCount));
-      }
-
-      tiles.forEach((tile) => jobs.push(() => loadWhole
-        ? loadReportRangeTileWhole(tile, tileContext, 1)
-        : loadReportRangeTileIndex(tile, tileContext, 1)));
-      await runReportFetchJobs(jobs, 2);
-      return tiles.every((tile) => tile.index) ? tiles : null;
-    }
-
-    async function prefetchReportRangeNeighbors(entry, chartKeys, context) {
-      if (!entry || !context.active()) return;
-
-      const bounds = reportRange();
-      const available = validReportRange(bounds) ?
-        reportRangeWindow(bounds.start, bounds.end) : null;
-      if (!available) return;
-
-      const starts = [];
-      for (let distance = 1;
-           distance <= REPORT_RANGE_PREFETCH_TILES_PER_SIDE;
-           distance++) {
-        const before = entry.from - distance * REPORT_RANGE_TILE_MS;
-        const after = entry.to + (distance - 1) * REPORT_RANGE_TILE_MS;
-        if (before >= available.from) starts.push(before);
-        if (after < available.to) starts.push(after);
-      }
-
-      const loadWhole = chartKeys.length >=
-        REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS;
-      const prefetchContext = {...context, active: context.tileActive};
-      for (const from of starts) {
-        if (!context.active()) return;
-
-        const tile = reportRangeTile(
-          context.nightId, context.revision, from);
-        try {
-          if (loadWhole) {
-            await loadReportRangeTileWhole(tile, prefetchContext, 1);
-          } else {
-            await loadReportRangeTileIndex(tile, prefetchContext, 1);
-          }
-        } catch (_) {
-          return;
-        }
-      }
-    }
-
-    function decodeReportWholeChart(index, bytes, definition) {
-      if (!index || !bytes || !definition) return null;
-
-      const decoded = {events: [], series: {}};
-      const partNames = reportChartPartNames(definition, index);
-      for (const name of partNames) {
-        const section = reportPlotSection(name, index);
-        if (!section) continue;
-        const buffer = bytes.slice(
-          section.offset, section.offset + section.length);
-        const part = name === "events"
-          ? decodeReportPlotEvents(buffer, index, section)
-          : decodeReportPlotSeries(buffer, index, section);
-        if (!part.valid) return null;
-
-        if (name === "events") {
-          decoded.events = part.events;
-        } else {
-          decoded.series[name] = part.points;
-        }
-      }
-      return decoded;
-    }
-
-    function decodeReportRangeTileChart(tile, definition) {
-      if (!tile) return null;
-      return decodeReportWholeChart(tile.index, tile.bytes, definition);
-    }
-
-    async function loadReportRangeTileChart(tile, definition, context) {
-      const cached = tile.charts.get(definition.key);
-      if (cached) {
-        touchReportRangeTile(tile);
-        return cached;
-      }
-
-      const pending = tile.chartPromises.get(definition.key);
-      if (pending) {
-        const decoded = await pending;
-        if (decoded || !context.active()) return decoded;
-        return loadReportRangeTileChart(tile, definition, context);
-      }
-
-      const tileContext = {
-        ...context,
-        from: tile.from,
-        to: tile.to,
-        cacheParts: false,
-        active: context.tileActive,
-      };
-      const promise = (async () => {
-        let decoded = tile.bytes
-          ? decodeReportRangeTileChart(tile, definition)
-          : null;
-        if (!decoded) {
-          decoded = await fetchReportChartData(
-            tile.index, definition, tileContext);
-        }
-        if (!decoded || !tileContext.active()) return null;
-
-        tile.charts.set(definition.key, decoded);
-        touchReportRangeTile(tile);
-        trimReportRangeTileCache();
-        return decoded;
-      })().finally(() => {
-        if (tile.chartPromises.get(definition.key) === promise) {
-          tile.chartPromises.delete(definition.key);
-        }
-      });
-      tile.chartPromises.set(definition.key, promise);
-      return promise;
-    }
-
-    async function loadReportRangeChart(entry, key, context) {
-      const definition = reportChartDefinition(key);
-      if (!definition || !entry.tiles) return false;
-
-      const plots = [];
-      for (const tile of entry.tiles) {
-        const decoded = await loadReportRangeTileChart(
-          tile, definition, context);
-        if (!decoded || !context.active()) return false;
-        plots.push(decoded);
-      }
-
-      const merged = mergeReportPlots(plots);
-      if (definition.type === "events") {
-        if (entry.tiles.some((tile) =>
-          reportPlotSection("events", tile.index))) {
-          entry.events = merged.events;
-        }
-      } else {
-        (definition.series || [definition]).forEach((series) => {
-          if (Object.prototype.hasOwnProperty.call(
-            merged.series, series.key)) {
-            entry.series[series.key] = merged.series[series.key];
-          }
-        });
-      }
-      entry.loadedCharts.add(key);
-      applyReportRangeChart(entry, key);
-      if (!updateRenderedReportChart(key)) renderReportCharts();
-      return true;
-    }
-
-    async function prepareReportRangeTiles(entry, keys, context) {
-      if (!entry.tiles || !keys.length) return;
-      const tileContext = {...context, active: context.tileActive};
-      const jobs = entry.tiles
-        .filter((tile) => !tile.bytes &&
-          reportPlotShouldLoadWhole(tile.index, keys))
-        .map((tile) => async () => {
-          try {
-            return await loadReportRangeTileWhole(tile, tileContext);
-          } catch (error) {
-            if (error && (error.message === "report_revision_changed" ||
-                          error.message === "report_tile_index_changed")) {
-              throw error;
-            }
-            return false;
-          }
-        });
-      await runReportFetchJobs(jobs, 2);
-    }
-
-    function startReportRangeWorker(key, entry) {
-      if (!entry || entry.promise) return;
-      const nightId = reportCurrentNightId;
-      const revision = reportCurrentRevision;
-      let controller = reportRangeAbortController;
-      if (!controller) controller = new AbortController();
-      reportRangeAbortController = controller;
-      const token = ++reportRangeToken;
-      const context = {
-        nightId,
-        revision,
-        signal: controller.signal,
-        maxAttempts: REPORT_RANGE_POLL_MAX_ATTEMPTS,
-        delay: REPORT_RANGE_POLL_DELAY_MS,
-        tileActive: () => !controller.signal.aborted &&
-          nightId === reportCurrentNightId &&
-          revision === reportCurrentRevision,
-        active: () => token === reportRangeToken &&
-          key === reportRangeActiveKey &&
-          nightId === reportCurrentNightId &&
-          revision === reportCurrentRevision,
-      };
-      const promise = (async () => {
-        if (!entry.tiles) {
-          const initialKeys = Array.from(entry.requestedCharts);
-          entry.tiles = await loadReportRangeTiles(
-            context, entry.from, entry.to, initialKeys);
-          if (!entry.tiles || !context.active()) return;
-        }
-
-        while (context.active()) {
-          const keys = Array.from(entry.requestedCharts)
-            .filter((chartKey) => !entry.loadedCharts.has(chartKey));
-          entry.requestedCharts.clear();
-          if (!keys.length) break;
-          await prepareReportRangeTiles(entry, keys, context);
-          if (!context.active()) return;
-          await runReportFetchJobs(keys.map((chartKey) =>
-            () => loadReportRangeChart(entry, chartKey, context)), 2);
-        }
-
-        if (context.active()) {
-          prefetchReportRangeNeighbors(
-            entry, Array.from(entry.loadedCharts), context);
-        }
-      })().catch((error) => {
-        if (error && (error.message === "report_revision_changed" ||
-                      error.message === "report_tile_index_changed") &&
-            context.active()) {
-          loadSelectedReportNight();
-        }
-      }).finally(() => {
-        const restart = context.active() &&
-          entry.requestedCharts.size > 0;
-        if (entry.promise === promise) entry.promise = null;
-        if (restart) startReportRangeWorker(key, entry);
-      });
-      entry.promise = promise;
-    }
-
-    function reportCrc32(bytes, start, length) {
-      let crc = 0xFFFFFFFF;
-      const end = start + length;
-      for (let offset = start; offset < end; offset++) {
-        crc ^= bytes[offset];
-        for (let bit = 0; bit < 8; bit++) {
-          crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
-        }
-      }
-      return (crc ^ 0xFFFFFFFF) >>> 0;
-    }
-
-    function reportPopcount(value) {
-      let bits = Number(value) >>> 0;
-      let count = 0;
-      while (bits) {
-        bits &= bits - 1;
-        count++;
-      }
-      return count;
-    }
-
-    function reportMetricSource(validMask, strMask, summaryMask, index) {
-      const bit = 1 << index;
-      if (!(validMask & bit)) return "";
-      if (strMask & bit) return "str_edf";
-      if (summaryMask & bit) return "summary";
-      return "calculated";
-    }
-
-    function decodeReportResultBinary(buf) {
-      const invalid = {valid: false};
-      const dv = new DataView(buf);
-      const bytes = new Uint8Array(buf);
-      if (dv.byteLength < 160 ||
-          dv.getUint32(0, true) !== 0x36524341 ||
-          dv.getUint32(8, true) !== dv.byteLength) {
-        return invalid;
-      }
-
-      const version = dv.getUint16(4, true);
-      const legacy = version === 1;
-      const headerBytes = legacy ? 160 : (version === 2 ? 216 : 228);
-      const bodyCrcOffset = legacy ? 148 : (version === 2 ? 204 : 216);
-      const headerCrcOffset = legacy ? 152 : (version === 2 ? 208 : 220);
-      const eventsOffset = legacy ? 124 : 180;
-      if ((!legacy && version !== 2 && version !== 3) ||
-          dv.getUint16(6, true) !== headerBytes ||
-          dv.byteLength < headerBytes) {
-        return invalid;
-      }
-
-      const sessionCount = dv.getUint16(78, true);
-      if (headerBytes + sessionCount * 16 !== dv.byteLength ||
-          reportCrc32(bytes, 0, headerCrcOffset) !==
-            dv.getUint32(headerCrcOffset, true) ||
-          reportCrc32(bytes, headerBytes,
-            dv.byteLength - headerBytes) !==
-            dv.getUint32(bodyCrcOffset, true)) {
-        return invalid;
-      }
-
-      const revision = dv.getBigUint64(16, true);
-      const dayStart = Number(dv.getBigInt64(24, true));
-      const dayEnd = Number(dv.getBigInt64(32, true));
-      const therapyStart = Number(dv.getBigInt64(40, true));
-      const therapyEnd = Number(dv.getBigInt64(48, true));
-      if (revision === 0n || !(dayEnd > dayStart)) return invalid;
-
-      const sessions = [];
-      let previousEnd = 0;
-      for (let index = 0; index < sessionCount; index++) {
-        const offset = headerBytes + index * 16;
-        const start = Number(dv.getBigInt64(offset, true));
-        const end = Number(dv.getBigInt64(offset + 8, true));
-        if (!(end > start) || start < dayStart || end > dayEnd ||
-            (index > 0 && start < previousEnd)) {
-          return invalid;
-        }
-        sessions.push({
-          start,
-          end,
-          duration_min: Math.round((end - start) / 60000),
-        });
-        previousEnd = end;
-      }
-      if ((sessionCount === 0 && (therapyStart || therapyEnd)) ||
-          (sessionCount > 0 &&
-           (sessions[0].start !== therapyStart ||
-            sessions[sessionCount - 1].end !== therapyEnd))) {
-        return invalid;
-      }
-
-      const requestedSignals = dv.getUint32(60, true);
-      const availableSignals = dv.getUint32(64, true);
-      const missingRequired = dv.getUint32(68, true);
-      const missingOptional = dv.getUint32(72, true);
-      const flags = dv.getUint16(76, true);
-      const sourceFlags = dv.getUint8(82);
-      const metricValid = legacy ? dv.getUint16(84, true) :
-        dv.getUint32(84, true);
-      const metricStr = legacy ? dv.getUint16(86, true) :
-        dv.getUint32(88, true);
-      const metricSummary = legacy ? dv.getUint16(88, true) :
-        dv.getUint32(92, true);
-      const metricOffsets = legacy ?
-        [92, 96, 100, 104, 108, 112, 116, 120] :
-        Array.from({length: 20}, (_, index) => 100 + index * 4).concat(96);
-      if (version === 3) metricOffsets.push(204, 208, 212);
-      const metrics = metricOffsets.map((offset, index) => {
-        if (!legacy && (index === 8 || index === 18 || index === 19)) {
-          return dv.getUint32(offset, true);
-        }
-        return dv.getInt32(offset, true) / 1000;
-      });
-      const signalNames = [
-        "flow",
-        "inspiratory_pressure",
-        "expiratory_pressure",
-        "leak",
-        "minute_ventilation",
-        "mask_pressure",
-        "inspiratory_duration",
-        "respiratory_rate",
-        "ie_ratio",
-        "flow_limitation",
-        null,
-        "snore",
-        "tidal_volume",
-        "spo2",
-        "pulse",
-      ];
-      const streamDetails = [];
-      signalNames.forEach((name, index) => {
-        if (!name) return;
-        const bit = 1 << index;
-        if (!(requestedSignals & bit)) return;
-
-        const complete = !!(availableSignals & bit);
-        streamDetails.push({
-          kind: "series",
-          name,
-          source: name,
-          required: index === 0 || index === 5,
-          complete,
-          provider: complete && (sourceFlags & 1) ? "edf" :
-            (complete ? "spool" : "missing"),
-          has_edf: complete && !!(sourceFlags & 1),
-          has_spool: complete && !!(sourceFlags & 8),
-          low_res: false,
-        });
-      });
-
-      const result = {
-        valid: true,
-        state: flags & 1 ? "ready" : "partial",
-        error: "",
-        source_revision: revision.toString(16).padStart(16, "0"),
-        sleep_day_epoch: dv.getInt32(12, true),
-        day_start: dayStart,
-        day_end: dayEnd,
-        start: therapyStart || dayStart,
-        end: therapyEnd || dayEnd,
-        duration_min: dv.getUint32(56, true),
-        missing_required: reportPopcount(missingRequired),
-        missing_streams: reportPopcount(missingRequired | missingOptional),
-        streams: reportPopcount(requestedSignals),
-        events_available: !!(flags & 2),
-        requested_event_mask: dv.getUint8(80),
-        missing_event_mask: dv.getUint8(81),
-        source_flags: sourceFlags,
-        sessions,
-        stream_details: streamDetails,
-        hypopnea_count: dv.getUint32(eventsOffset, true),
-        ca_count: dv.getUint32(eventsOffset + 4, true),
-        oa_count: dv.getUint32(eventsOffset + 8, true),
-        ua_count: dv.getUint32(eventsOffset + 12, true),
-        arousal_count: dv.getUint32(eventsOffset + 16, true),
-        csr_count: dv.getUint32(eventsOffset + 20, true),
-      };
-      const baseMetricFields = [
-        "ahi",
-        "oa_index",
-        "ca_index",
-        "ua_index",
-        "hypopnea_index",
-        "arousal_index",
-        "mask_pressure_50",
-        "leak_50",
-      ];
-      const metricFields = legacy ? baseMetricFields : baseMetricFields.concat([
-        null,
-        "mask_pressure_95",
-        "leak_95",
-        "minute_ventilation_50",
-        "minute_ventilation_95",
-        "respiratory_rate_50",
-        "respiratory_rate_95",
-        "tidal_volume_50",
-        "tidal_volume_95",
-        "spo2_median",
-        "spo2_threshold_minutes",
-        "csr_minutes",
-        "average_leak",
-      ]);
-      if (version === 3) {
-        metricFields.push("average_pressure", "ipap_50", "ipap_95");
-      }
-      metricFields.forEach((field, index) => {
-        if (!field || !(metricValid & (1 << index))) return;
-        result[field] = metrics[index];
-        result[field + "_source"] = reportMetricSource(
-          metricValid, metricStr, metricSummary, index);
-      });
-      if (result.ahi !== undefined && result.arousal_index !== undefined) {
-        result.rdi = result.ahi + result.arousal_index;
-      }
-      return result;
-    }
-
-    function reportPlotSectionCrcValid(buffer, section) {
-      if (!section || buffer.byteLength !== section.length) return false;
-      return reportCrc32(new Uint8Array(buffer), 0, buffer.byteLength) ===
-        section.crc32;
-    }
-
-    // Decode the fixed PLOT v6 directory. Stable section names are the only
-    // identity consumed by WebUI; entry positions are deliberately ignored.
-    function decodeReportPlotIndex(buffer) {
-      const invalid = {valid: false, sections: {}};
-      const HEADER_BYTES = 64;
-      const ENTRY_BYTES = 48;
-      const NAME_BYTES = 32;
-      if (buffer.byteLength !== REPORT_PLOT_PREFIX_BYTES) return invalid;
-
-      const bytes = new Uint8Array(buffer);
-      const dv = new DataView(buffer);
-      if (dv.getUint32(0, true) !== 0x42504341 ||
-          dv.getUint16(4, true) !== 6 ||
-          dv.getUint32(8, true) !== REPORT_PLOT_PREFIX_BYTES) {
-        return invalid;
-      }
-
-      const expectedCrc = dv.getUint32(48, true);
-      const crcBytes = bytes.slice();
-      crcBytes.fill(0, 48, 52);
-      if (reportCrc32(crcBytes, 0, crcBytes.length) !== expectedCrc) {
-        return invalid;
-      }
-
-      const totalSize = dv.getUint32(12, true);
-      const base = Number(dv.getBigInt64(16, true));
-      const start = Number(dv.getBigInt64(24, true));
-      const end = Number(dv.getBigInt64(32, true));
-      const count = dv.getUint16(40, true);
-      if (totalSize < REPORT_PLOT_PREFIX_BYTES || !(end > start) ||
-          count < 1 || count > 32) {
-        return invalid;
-      }
-
-      const decoder = new TextDecoder();
-      const sections = {};
-      const order = [];
-      let expectedOffset = REPORT_PLOT_PREFIX_BYTES;
-      for (let i = 0; i < count; i++) {
-        const offset = HEADER_BYTES + i * ENTRY_BYTES;
-        const nameBytes = bytes.subarray(offset + 4, offset + 4 + NAME_BYTES);
-        const nul = nameBytes.indexOf(0);
-        if (nul <= 0) return invalid;
-        const name = decoder.decode(nameBytes.subarray(0, nul));
-        if (!/^[a-z0-9_]+$/.test(name) || sections[name]) return invalid;
-
-        const section = {
-          kind: dv.getUint8(offset),
-          encoding: dv.getUint8(offset + 1),
-          flags: dv.getUint16(offset + 2, true),
-          name,
-          offset: dv.getUint32(offset + 36, true),
-          length: dv.getUint32(offset + 40, true),
-          crc32: dv.getUint32(offset + 44, true),
-        };
-        if (!section.length || section.offset !== expectedOffset ||
-            section.length > totalSize - section.offset ||
-            (i === 0 && (section.kind !== 0 || name !== "events")) ||
-            (i > 0 && (section.kind !== 1 || section.encoding > 1))) {
-          return invalid;
-        }
-        expectedOffset += section.length;
-        sections[name] = section;
-        order.push(name);
-      }
-      if (expectedOffset !== totalSize) return invalid;
-
-      return {
-        valid: true,
-        base,
-        start,
-        end,
-        totalSize,
-        prefixCrc32: expectedCrc,
-        sections,
-        order,
-      };
-    }
-
-    function decodeReportPlotEvents(buffer, index, section) {
-      const invalid = {valid: false, events: []};
-      if (!index || !reportPlotSectionCrcValid(buffer, section) ||
-          buffer.byteLength < 4) {
-        return invalid;
-      }
-
-      const dv = new DataView(buffer);
-      const count = dv.getUint32(0, true);
-      if (buffer.byteLength !== 4 + count * 16) return invalid;
-      const events = [];
-      let offset = 4;
-      for (let i = 0; i < count; i++, offset += 16) {
-        events.push({
-          t: index.base + dv.getInt32(offset, true),
-          duration: dv.getInt32(offset + 4, true),
-          code: dv.getInt32(offset + 8, true),
-          flags: dv.getInt32(offset + 12, true),
-        });
-      }
-      return {valid: true, events};
-    }
-
-    function decodeReportPlotSeries(buffer, index, section) {
-      const invalid = {valid: false, points: []};
-      if (!index || !reportPlotSectionCrcValid(buffer, section) ||
-          buffer.byteLength < 16) {
-        return invalid;
-      }
-
-      const dv = new DataView(buffer);
-      const points = [];
-      let offset = 0;
-      if (section.encoding === 0) {
-        const seriesBaseDelta = dv.getInt32(offset, true); offset += 4;
-        const timeUnitMs = dv.getUint32(offset, true); offset += 4;
-        const valueScaleMilli = dv.getUint32(offset, true); offset += 4;
-        const pointCount = dv.getUint32(offset, true); offset += 4;
-        if (!timeUnitMs || !valueScaleMilli ||
-            buffer.byteLength !== offset + pointCount * 4) {
-          return invalid;
-        }
-
-        let lastPointT = index.base;
-        for (let i = 0; i < pointCount; i++, offset += 4) {
-          const timeIndex = dv.getUint16(offset, true);
-          if (timeIndex === 0xFFFF) {
-            points.push({gap: true, t: lastPointT});
-            continue;
-          }
-          const t = index.base + seriesBaseDelta + timeIndex * timeUnitMs;
-          const value = dv.getInt16(offset + 2, true) *
-            valueScaleMilli / 1000;
-          lastPointT = t;
-          points.push({t, value});
-        }
-      } else if (section.encoding === 1) {
-        const axisBaseDelta = dv.getInt32(offset, true); offset += 4;
-        const bucketMs = dv.getUint32(offset, true); offset += 4;
-        const valueScaleMilli = dv.getUint32(offset, true); offset += 4;
-        const runCount = dv.getUint32(offset, true); offset += 4;
-        if (!bucketMs || !valueScaleMilli) return invalid;
-
-        for (let run = 0; run < runCount; run++) {
-          if (offset + 6 > buffer.byteLength) return invalid;
-          const startBucket = dv.getUint32(offset, true); offset += 4;
-          const bucketCount = dv.getUint16(offset, true); offset += 2;
-          if (offset + bucketCount * 4 > buffer.byteLength) return invalid;
-          const runStart = index.base + axisBaseDelta +
-            startBucket * bucketMs;
-          if (run > 0) points.push({gap: true, t: runStart});
-          for (let bucket = 0; bucket < bucketCount;
-               bucket++, offset += 4) {
-            const minimum = dv.getInt16(offset, true) *
-              valueScaleMilli / 1000;
-            const maximum = dv.getInt16(offset + 2, true) *
-              valueScaleMilli / 1000;
-            const t = runStart + bucket * bucketMs;
-            points.push({
-              t,
-              end: t + bucketMs,
-              min: Math.min(minimum, maximum),
-              max: Math.max(minimum, maximum),
-              value: (minimum + maximum) / 2,
-              envelope: true,
-            });
-          }
-        }
-        if (offset !== buffer.byteLength) return invalid;
-      } else {
-        return invalid;
-      }
-      return {valid: true, points};
+      startSignalStoreRangeWorker(entry);
     }
 
     async function loadSelectedReportNight() {
@@ -3324,45 +2834,36 @@
       renderReportSummary();
       AirCANnect.ui.message("reportMsg", "Loading report...", true, true);
       try {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const res = await pollReportResult(
-            token, nightId, controller.signal);
-          if (!res || token !== reportLoadToken) return;
-          if (res.status === 404) {
-            AirCANnect.ui.message("reportMsg", "Night not found", false, true);
-            return;
-          }
-          if ((res.status !== 200 && res.status !== 304) || !res.result) {
-            AirCANnect.ui.message("reportMsg", "Report not ready", false, true);
-            renderReportSummary();
-            return;
-          }
-          reportResult = res.result;
-          if (reportResult.state !== "ready" &&
-              reportResult.state !== "partial") {
-            AirCANnect.ui.message("reportMsg", reportResult.error || "Report incomplete",
-                false, true);
-            renderReportSummary();
-            return;
-          }
-
-          const plotStatus = await fetchReportPlot(
-            token,
-            nightId,
-            reportResult.source_revision,
-            res.manifestModified,
-            controller.signal);
-          if (!plotStatus || token !== reportLoadToken) return;
-          if (plotStatus === "revision_changed") continue;
-
-          renderReportSummary();
-          AirCANnect.ui.message("reportMsg",
-              reportResult.state === "partial"
-                ? "Report loaded (incomplete - some data missing)"
-                : "Report loaded", true);
+        const res = await pollSignalStoreNight(
+          token, nightId, controller.signal);
+        if (!res || token !== reportLoadToken) return;
+        if (res.status === 404) {
+          AirCANnect.ui.message("reportMsg", "Night not found", false, true);
           return;
         }
-        throw new Error("report changed while loading");
+        if ((res.status !== 200 && res.status !== 304) || !res.result) {
+          AirCANnect.ui.message("reportMsg", "Report not ready", false, true);
+          renderReportSummary();
+          return;
+        }
+        reportResult = res.result;
+        if (reportResult.state !== "ready" &&
+            reportResult.state !== "partial") {
+          AirCANnect.ui.message(
+            "reportMsg", reportResult.error || "Report incomplete", false, true);
+          renderReportSummary();
+          return;
+        }
+
+        const loaded = await loadSignalStoreBase(
+          token, nightId, controller.signal);
+        if (!loaded || token !== reportLoadToken) return;
+
+        renderReportSummary();
+        AirCANnect.ui.message("reportMsg",
+          reportResult.state === "partial"
+            ? "Report loaded (incomplete - some data missing)"
+            : "Report loaded", true);
       } catch (error) {
         if (token !== reportLoadToken) return;
         AirCANnect.ui.message("reportMsg", error.message, false, true);
@@ -3423,13 +2924,11 @@
           reportResultClientCache.delete(key);
         }
       }
-      for (const key of reportPlotClientCache.keys()) {
-        if (reportCacheUrlNight(key) === nightId) {
-          reportPlotClientCache.delete(key);
-        }
+      for (const key of reportSignalBlockCache.keys()) {
+        if (key.startsWith(nightId + ":")) reportSignalBlockCache.delete(key);
       }
-      for (const key of reportRangeTileCache.keys()) {
-        if (key.startsWith(nightId + ":")) reportRangeTileCache.delete(key);
+      for (const key of reportEventClientCache.keys()) {
+        if (key.startsWith(nightId + ":")) reportEventClientCache.delete(key);
       }
     }
 
@@ -3445,7 +2944,7 @@
         data.to || "",
         data.success ? 1 : 0,
         data.forced ? 1 : 0,
-        data.manifest_modified || "",
+        data.generation || "",
         data.error || "",
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
@@ -3496,20 +2995,18 @@
     let reportDrawPending = false;
     let reportDrawRetryCount = 0;
     let reportResizeObserver = null;
-    const reportPlotClientCache = new Map();
     let reportZoom = null;
     let reportBaseSeries = {};
     let reportBaseEvents = [];
-    let reportBasePlotIndex = null;
-    let reportBasePlotBytes = null;
+    let reportSignalStore = null;
     const reportBaseLoadedCharts = new Set();
     const reportBaseChartPromises = new Map();
     let reportCurrentNightId = "";
     let reportCurrentRevision = "";
-    let reportCurrentManifestModified = "";
-    let reportCurrentPlotEtag = "";
+    let reportCurrentGeneration = 0;
     let reportHandledCompletionKey = "";
-    const reportRangeTileCache = new Map();
+    const reportSignalBlockCache = new Map();
+    const reportEventClientCache = new Map();
     let reportRangeView = null;
     let reportRangeActiveKey = "";
     let reportRangeToken = 0;
@@ -3521,23 +3018,38 @@
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
-    const REPORT_PLOT_CLIENT_CACHE_MAX = 32;
-    const REPORT_PLOT_PREFIX_BYTES = 1600;
-    const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
-    const REPORT_RANGE_TILE_BATCH_MAX = 12;
-    const REPORT_RANGE_TILE_CACHE_MAX = 96;
-    const REPORT_RANGE_TILE_CACHE_RAW_MAX_BYTES = 6 * 1024 * 1024;
-    const REPORT_RANGE_TILE_CACHE_DECODED_MAX_BYTES = 6 * 1024 * 1024;
-    const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;
-    const REPORT_RANGE_PREFETCH_TILES_PER_SIDE = 2;
-    const REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS = 2;
-    const REPORT_PLOT_WHOLE_MIN_PARTS = 2;
-    const REPORT_PLOT_WHOLE_THRESHOLD_PERCENT = 60;
+    const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
+    const SIGNAL_STORE_NIGHT_HEADER_BYTES = 224;
+    const SIGNAL_STORE_SESSION_BYTES = 16;
+    const SIGNAL_STORE_TRACK_BYTES = 80;
+    const SIGNAL_STORE_EVENT_HEADER_BYTES = 96;
+    const SIGNAL_STORE_BITMAP_BYTES = 16;
+    const SIGNAL_STORE_MAX_BLOCKS = 128;
+    const SIGNAL_STORE_MISSING = -32768;
+    const SIGNAL_STORE_BLOCK_CACHE_MAX = 512;
+    const SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+    const SIGNAL_STORE_EVENT_CACHE_MAX = 8;
+    const SIGNAL_STORE_PREFETCH_BLOCKS = 2;
+    const SIGNAL_STORE_SIGNAL_NAMES = [
+      "flow",
+      "inspiratory_pressure",
+      "expiratory_pressure",
+      "leak",
+      "minute_ventilation",
+      "mask_pressure",
+      "inspiratory_duration",
+      "respiratory_rate",
+      "ie_ratio",
+      "flow_limitation",
+      "",
+      "snore",
+      "tidal_volume",
+      "spo2",
+      "pulse",
+    ];
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
-    const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
-    const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
+    const REPORT_SIGNAL_POLL_MAX_ATTEMPTS = 120;
     const REPORT_POLL_DELAY_MS = 300;
-    const REPORT_RANGE_POLL_DELAY_MS = 250;
     const REPORT_SSE_FALLBACK_MS = 1000;
     const REPORT_CHART_PREFERENCES_KEY = "aircannect.reportCharts.v1";
     const reportChartDefs = [

@@ -20,7 +20,6 @@ enum class ReportReadOperationKind : uint8_t {
     ScoredEvents,
     CsrEvents,
     FallbackSeries,
-    FallbackSeriesSlice,
     FallbackEvents,
 };
 

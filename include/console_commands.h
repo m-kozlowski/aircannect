@@ -3,7 +3,7 @@
 #include "board_net.h"
 #include "console_command_router.h"
 #include "large_scratch_array.h"
-#include "report_artifact_key.h"
+#include "sleep_day_id.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_path_port.h"

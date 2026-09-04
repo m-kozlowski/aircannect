@@ -8,6 +8,7 @@
 
 #include "large_object.h"
 #include "memory_manager.h"
+#include "report_night_summary.h"
 
 namespace aircannect {
 namespace {
@@ -91,6 +92,7 @@ struct ReportSignalStoreBuilder::Runtime {
     int64_t first_block_start_ms = 0;
     uint16_t block_slot_count = 0;
     uint32_t store_generation = 0;
+    ReportMetricAccumulator metrics;
     bool active = false;
     std::shared_ptr<ReportSignalStoreBundle> completed;
 
@@ -121,6 +123,8 @@ struct ReportSignalStoreBuilder::Runtime {
         events = nullptr;
         event_count = 0;
         event_capacity = 0;
+
+        metrics.clear();
 
         request = {};
         plan = nullptr;
@@ -169,7 +173,6 @@ bool ReportSignalStoreBuilder::begin_build(
     runtime_->clear_work();
     runtime_->completed.reset();
     if (!request.ticket.valid() || request.artifact != plan.key() ||
-        request.artifact.kind != ReportArtifactKind::Result ||
         store_generation == 0 || !plan.night().sleep_day.valid() ||
         !plan.night().source_revision.valid() ||
         plan.night().day_end_ms <= plan.night().day_start_ms) {
@@ -222,6 +225,11 @@ bool ReportSignalStoreBuilder::begin_build(
     runtime_->first_block_start_ms = first_block;
     runtime_->block_slot_count = static_cast<uint16_t>(slot_count);
     runtime_->store_generation = store_generation;
+    if (!runtime_->metrics.begin(plan)) {
+        failure_reason_ = "report_signal_store_metrics_allocation_failed";
+        runtime_->clear_work();
+        return false;
+    }
     runtime_->active = true;
     return true;
 }
@@ -315,11 +323,12 @@ bool ReportSignalStoreBuilder::accept_series(
         return false;
     }
 
+    const int32_t canonical_value = report_series_canonical_value_milli(
+        series, sample.value_milli);
     int16_t encoded = 0;
     if (!report_signal_store_quantize(
             series.signal,
-            report_series_canonical_value_milli(
-                series, sample.value_milli),
+            canonical_value,
             encoded)) {
         failure_reason_ = "report_signal_store_value_invalid";
         return false;
@@ -349,6 +358,7 @@ bool ReportSignalStoreBuilder::accept_series(
         return true;
     }
     target = encoded;
+    runtime_->metrics.accept(series.signal, canonical_value);
 
     ReportSignalStoreTrack &track = work->track;
     if (track.valid_sample_count == 0) {
@@ -449,6 +459,20 @@ bool ReportSignalStoreBuilder::finish_build() {
     }
     runtime_->event_count = unique_events;
 
+    ReportEventCounts event_counts;
+    uint64_t csr_duration_ms = 0;
+    for (size_t i = 0; i < runtime_->event_count; ++i) {
+        const ReportEventRecord &event = runtime_->events[i];
+        report_night_count_event(event_counts, event);
+        if (static_cast<ReportEventCode>(event.code) == ReportEventCode::Csr &&
+            event.duration_ms > 0) {
+            const uint64_t duration = static_cast<uint64_t>(event.duration_ms);
+            csr_duration_ms = csr_duration_ms > UINT64_MAX - duration
+                ? UINT64_MAX
+                : csr_duration_ms + duration;
+        }
+    }
+
     void *bundle_storage = Memory::alloc_large(
         sizeof(ReportSignalStoreBundle), false);
     if (!bundle_storage) {
@@ -531,6 +555,30 @@ bool ReportSignalStoreBuilder::finish_build() {
         ~runtime_->plan->missing_event_mask();
     night.source_flags = runtime_->plan->night().source_flags;
     night.event_count = static_cast<uint32_t>(runtime_->event_count);
+    night.requested_signal_mask = runtime_->plan->requested_signal_mask();
+    night.missing_required_signal_mask =
+        runtime_->plan->missing_required_signal_mask();
+    night.missing_optional_signal_mask =
+        runtime_->plan->missing_optional_signal_mask();
+    night.requested_event_mask = runtime_->plan->requested_event_mask();
+    night.missing_event_mask = runtime_->plan->missing_event_mask();
+    night.events = event_counts;
+    report_night_metrics_from_catalog(
+        runtime_->plan->night().metrics, night.metrics);
+    if (!runtime_->plan->night().metrics.has(
+            NightCatalogMetric::DurationMinutes)) {
+        const uint64_t minutes = (duration_ms + 30000ULL) / 60000ULL;
+        night.metrics.duration_minutes = minutes > UINT32_MAX
+            ? UINT32_MAX
+            : static_cast<uint32_t>(minutes);
+    }
+    report_night_complete_metrics(
+        night.metrics,
+        night.events,
+        runtime_->metrics.finish(),
+        night.requested_event_mask,
+        night.missing_event_mask,
+        csr_duration_ms);
     night.session_count = runtime_->plan->session_count();
     night.track_count = runtime_->track_count;
 

@@ -4,12 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "report_artifact_lookup_service.h"
-#include "report_artifact_store_service.h"
 #include "report_executor.h"
 #include "report_fallback_acquisition_service.h"
 #include "report_planner.h"
 #include "report_request_queue.h"
+#include "report_signal_store_builder.h"
+#include "report_signal_store_catalog.h"
+#include "report_signal_store_service.h"
 #include "report_spool_availability.h"
 
 namespace aircannect {
@@ -18,7 +19,6 @@ enum class ReportEngineState : uint8_t {
     Idle,
     Queued,
     WaitingForCatalog,
-    LookingUp,
     AcquiringFallback,
     Executing,
     Publishing,
@@ -30,7 +30,7 @@ struct ReportEngineCompletion {
     ReportPlanStatus plan_status = ReportPlanStatus::InvalidRequest;
     ReportExecutorError executor_error = ReportExecutorError::None;
     ReportSourceId fallback_source = ReportSourceId::Summary;
-    uint64_t manifest_modified = 0;
+    uint32_t store_generation = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }
@@ -41,24 +41,11 @@ struct ReportEngineStatus {
     size_t queued = 0;
     bool foreground_active = false;
     ReportArtifactRequest active_request;
-    ReportArtifactLookupStatus lookup;
     ReportFallbackAcquisitionStatus fallback;
     ReportExecutorStatus executor;
-    ReportArtifactStoreStatus store;
+    ReportSignalStoreStatus store;
     uint64_t awaited_fallback_identity = 0;
     ReportEngineCompletion last_completion;
-};
-
-class ReportArtifactAssembler : public ReportExecutionSink {
-public:
-    ~ReportArtifactAssembler() override = default;
-
-    virtual bool begin_build(const ReportArtifactRequest &request,
-                             const ReportReadPlan &plan) = 0;
-    virtual bool finish_build() = 0;
-    virtual void discard_build() = 0;
-    virtual std::shared_ptr<const ReportArtifactBundle> take_completed() = 0;
-    virtual const char *failure_reason() const { return nullptr; }
 };
 
 class ReportEngine {
@@ -70,10 +57,11 @@ public:
 
     void begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
-               ReportSpoolPort &spool_port,
-               ReportArtifactAssembler &assembler);
+               ReportSpoolPort &spool_port);
 
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog);
+    void publish_store_catalog(
+        std::shared_ptr<const ReportSignalStoreCatalog> catalog);
     void publish_spool_availability(
         const ReportSpoolAvailability &availability,
         bool complete);
@@ -85,39 +73,31 @@ public:
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
         uint32_t generation,
-        bool force_rebuild = false,
-        uint8_t range_tile_count = 1);
+        bool force_rebuild = false);
     size_t cancel_background();
     void clear();
 
-    bool foreground_range_execution_active() const;
     bool poll(uint32_t now_ms, size_t record_budget = 1);
     ReportEngineStatus status() const;
-    ReportArtifactAvailability take_available();
-    std::shared_ptr<const ReportArtifactBundle> take_built_bundle();
+    ReportSignalStoreCatalogInput take_published();
 
 private:
     enum class ActivePhase : uint8_t {
         Idle,
-        LookingUp,
         AcquiringFallback,
         WaitingForCatalog,
         Executing,
         Publishing,
     };
 
-    static ReportArtifactKey build_key(const ReportArtifactKey &artifact);
-    static bool same_build(const ReportArtifactKey &lhs,
-                           const ReportArtifactKey &rhs);
-
-    bool artifact_current(const ReportArtifactKey &artifact) const;
+    bool source_current(const ReportArtifactKey &artifact) const;
+    uint32_t next_store_generation(SleepDayId sleep_day) const;
     bool start_next(uint32_t now_ms);
     bool start_request(ReportArtifactRequest request, uint32_t now_ms);
-    bool finish_lookup(uint32_t now_ms);
-    bool start_build(const ReportArtifactKey &artifact, uint32_t now_ms);
+    bool start_build(uint32_t now_ms);
     bool finish_fallback_acquisition();
     bool finish_execution(uint32_t now_ms);
-    bool finish_publication(uint32_t now_ms);
+    bool finish_publication();
     bool retry_active(uint32_t now_ms, uint32_t delay_ms);
     void cancel_active_work();
     void complete_active(OperationOutcome outcome,
@@ -129,25 +109,21 @@ private:
     void reset_active();
 
     ReportRequestQueue queue_;
-    ReportArtifactLookupService lookup_;
     ReportFallbackAcquisitionService fallback_acquisition_;
     ReportExecutor executor_;
-    ReportArtifactStoreService artifact_store_;
-    StorageReadPort *read_port_ = nullptr;
-    ReportArtifactAssembler *assembler_ = nullptr;
+    ReportSignalStoreBuilder builder_;
+    ReportSignalStoreService store_;
     std::shared_ptr<const NightCatalog> catalog_;
+    std::shared_ptr<const ReportSignalStoreCatalog> store_catalog_;
     ReportSpoolAvailability spool_availability_;
     bool spool_availability_complete_ = false;
     std::shared_ptr<const ReportReadPlan> active_plan_;
     ReportArtifactRequest active_request_;
-    ReportArtifactRequest build_request_;
     ReportEngineCompletion last_completion_;
-    ReportArtifactAvailability active_availability_;
-    ReportArtifactAvailability available_;
-    std::shared_ptr<const ReportArtifactBundle> built_bundle_;
+    ReportSignalStoreCatalogInput published_;
     uint64_t awaited_fallback_identity_ = 0;
+    uint32_t active_store_generation_ = 0;
     ActivePhase phase_ = ActivePhase::Idle;
-    bool build_tile_after_pair_ = false;
     bool clear_after_fallback_cancel_ = false;
 };
 

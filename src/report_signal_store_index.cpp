@@ -267,6 +267,47 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
     bytes[68] = night.available_event_mask;
     bytes[69] = night.source_flags;
     put_le32(bytes + 72, night.event_count);
+    put_le32(bytes + 80, night.requested_signal_mask);
+    put_le32(bytes + 84, night.missing_required_signal_mask);
+    put_le32(bytes + 88, night.missing_optional_signal_mask);
+    bytes[92] = night.requested_event_mask;
+    bytes[93] = night.missing_event_mask;
+
+    const ReportNightMetrics &metrics = night.metrics;
+    put_le32(bytes + 96, metrics.valid_mask);
+    put_le32(bytes + 100, metrics.str_mask);
+    put_le32(bytes + 104, metrics.summary_mask);
+    put_i32(bytes + 108, metrics.leak_mean_milli);
+    put_i32(bytes + 112, metrics.ahi_milli);
+    put_i32(bytes + 116, metrics.obstructive_apnea_index_milli);
+    put_i32(bytes + 120, metrics.central_apnea_index_milli);
+    put_i32(bytes + 124, metrics.unknown_apnea_index_milli);
+    put_i32(bytes + 128, metrics.hypopnea_index_milli);
+    put_i32(bytes + 132, metrics.arousal_index_milli);
+    put_i32(bytes + 136, metrics.mask_pressure_50_milli);
+    put_i32(bytes + 140, metrics.leak_50_milli);
+    put_le32(bytes + 144, metrics.duration_minutes);
+    put_i32(bytes + 148, metrics.mask_pressure_95_milli);
+    put_i32(bytes + 152, metrics.leak_95_milli);
+    put_i32(bytes + 156, metrics.minute_ventilation_50_milli);
+    put_i32(bytes + 160, metrics.minute_ventilation_95_milli);
+    put_i32(bytes + 164, metrics.respiratory_rate_50_milli);
+    put_i32(bytes + 168, metrics.respiratory_rate_95_milli);
+    put_i32(bytes + 172, metrics.tidal_volume_50_milli);
+    put_i32(bytes + 176, metrics.tidal_volume_95_milli);
+    put_i32(bytes + 180, metrics.spo2_median_milli);
+    put_le32(bytes + 184, metrics.spo2_threshold_minutes);
+    put_le32(bytes + 188, metrics.csr_minutes);
+    put_i32(bytes + 76, metrics.ipap_mean_milli);
+    put_i32(bytes + 216, metrics.ipap_50_milli);
+    put_i32(bytes + 220, metrics.ipap_95_milli);
+
+    put_le32(bytes + 192, night.events.hypopnea);
+    put_le32(bytes + 196, night.events.central_apnea);
+    put_le32(bytes + 200, night.events.obstructive_apnea);
+    put_le32(bytes + 204, night.events.unknown_apnea);
+    put_le32(bytes + 208, night.events.arousal);
+    put_le32(bytes + 212, night.events.csr);
 
     uint8_t *session_records = bytes + HeaderBytes;
     for (size_t i = 0; i < night.session_count; ++i) {
@@ -314,6 +355,47 @@ bool ReportSignalStoreNightCodec::decode(
     night.available_event_mask = bytes[68];
     night.source_flags = bytes[69];
     night.event_count = get_le32(bytes + 72);
+    night.requested_signal_mask = get_le32(bytes + 80);
+    night.missing_required_signal_mask = get_le32(bytes + 84);
+    night.missing_optional_signal_mask = get_le32(bytes + 88);
+    night.requested_event_mask = bytes[92];
+    night.missing_event_mask = bytes[93];
+
+    ReportNightMetrics &metrics = night.metrics;
+    metrics.valid_mask = get_le32(bytes + 96);
+    metrics.str_mask = get_le32(bytes + 100);
+    metrics.summary_mask = get_le32(bytes + 104);
+    metrics.leak_mean_milli = get_i32(bytes + 108);
+    metrics.ahi_milli = get_i32(bytes + 112);
+    metrics.obstructive_apnea_index_milli = get_i32(bytes + 116);
+    metrics.central_apnea_index_milli = get_i32(bytes + 120);
+    metrics.unknown_apnea_index_milli = get_i32(bytes + 124);
+    metrics.hypopnea_index_milli = get_i32(bytes + 128);
+    metrics.arousal_index_milli = get_i32(bytes + 132);
+    metrics.mask_pressure_50_milli = get_i32(bytes + 136);
+    metrics.leak_50_milli = get_i32(bytes + 140);
+    metrics.duration_minutes = get_le32(bytes + 144);
+    metrics.mask_pressure_95_milli = get_i32(bytes + 148);
+    metrics.leak_95_milli = get_i32(bytes + 152);
+    metrics.minute_ventilation_50_milli = get_i32(bytes + 156);
+    metrics.minute_ventilation_95_milli = get_i32(bytes + 160);
+    metrics.respiratory_rate_50_milli = get_i32(bytes + 164);
+    metrics.respiratory_rate_95_milli = get_i32(bytes + 168);
+    metrics.tidal_volume_50_milli = get_i32(bytes + 172);
+    metrics.tidal_volume_95_milli = get_i32(bytes + 176);
+    metrics.spo2_median_milli = get_i32(bytes + 180);
+    metrics.spo2_threshold_minutes = get_le32(bytes + 184);
+    metrics.csr_minutes = get_le32(bytes + 188);
+    metrics.ipap_mean_milli = get_i32(bytes + 76);
+    metrics.ipap_50_milli = get_i32(bytes + 216);
+    metrics.ipap_95_milli = get_i32(bytes + 220);
+
+    night.events.hypopnea = get_le32(bytes + 192);
+    night.events.central_apnea = get_le32(bytes + 196);
+    night.events.obstructive_apnea = get_le32(bytes + 200);
+    night.events.unknown_apnea = get_le32(bytes + 204);
+    night.events.arousal = get_le32(bytes + 208);
+    night.events.csr = get_le32(bytes + 212);
     if (!night_header_valid(night)) return false;
 
     size_t expected = HeaderBytes;
@@ -533,6 +615,19 @@ bool ReportSignalStoreEventCodec::inspect(
         return false;
     }
     return true;
+}
+
+bool ReportSignalStoreEventCodec::file_size(
+    uint16_t block_slot_count,
+    uint32_t event_count,
+    size_t &size) {
+    size = HeaderBytes;
+    return block_slot_count > 0 &&
+           block_slot_count <= REPORT_SIGNAL_STORE_MAX_BLOCKS &&
+           CheckedSize::add_array(
+               size, block_slot_count, BlockDirectoryBytes) &&
+           CheckedSize::add_array(size, event_count, EventBytes) &&
+           size <= UINT32_MAX;
 }
 
 bool ReportSignalStoreEventCodec::block(

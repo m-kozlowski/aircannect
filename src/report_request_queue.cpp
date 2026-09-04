@@ -11,9 +11,7 @@ ReportRequestQueue::ReportRequestQueue(ReportArtifactRequest *slots,
 bool ReportRequestQueue::same_artifact_identity(
     const ReportArtifactKey &lhs,
     const ReportArtifactKey &rhs) {
-    return lhs.sleep_day == rhs.sleep_day && lhs.kind == rhs.kind &&
-           lhs.range_start_ms == rhs.range_start_ms &&
-           lhs.range_end_ms == rhs.range_end_ms;
+    return lhs.sleep_day == rhs.sleep_day;
 }
 
 bool ReportRequestQueue::ready(const ReportArtifactRequest &request,
@@ -69,11 +67,8 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild,
-    uint8_t range_tile_count) {
-    if (!artifact.valid() || generation == 0 || !slots_ ||
-        !report_artifact_batch_count_valid(
-            artifact.kind, range_tile_count)) {
+    bool force_rebuild) {
+    if (!artifact.valid() || generation == 0 || !slots_) {
         return {};
     }
 
@@ -86,15 +81,11 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
                 priority, request.priority);
             const bool rebuild_upgrade =
                 force_rebuild && !request.force_rebuild;
-            const bool range_upgrade =
-                range_tile_count > request.range_tile_count;
-            if (priority_upgrade || rebuild_upgrade || range_upgrade) {
+            if (priority_upgrade || rebuild_upgrade) {
                 request.ticket = next_ticket(generation);
                 if (priority_upgrade) request.priority = priority;
                 request.force_rebuild =
                     request.force_rebuild || force_rebuild;
-                request.range_tile_count = std::max(
-                    request.range_tile_count, range_tile_count);
                 request.ready_at_ms = 0;
                 request.attempts = 0;
                 return {ReportRequestEnqueueStatus::Replaced,
@@ -123,8 +114,6 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     request.ticket = next_ticket(generation);
     request.priority = priority;
     request.force_rebuild = force_rebuild;
-    request.range_tile_count = range_tile_count;
-
     return {replaced ? ReportRequestEnqueueStatus::Replaced
                      : ReportRequestEnqueueStatus::Queued,
             request.ticket};
