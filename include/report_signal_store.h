@@ -129,13 +129,13 @@ struct ReportSignalStoreFileView {
     ReportSignalStoreTrack track;
     const uint8_t *bytes = nullptr;
     size_t length = 0;
-    uint32_t data_offset = 0;
-    uint32_t block_stride = 0;
     uint32_t raw_plane_offset = 0;
     uint32_t raw_plane_bytes = 0;
     uint32_t one_second_plane_offset = 0;
+    uint32_t one_second_plane_bytes = 0;
     uint32_t one_second_cell_count = 0;
     uint32_t ten_second_plane_offset = 0;
+    uint32_t ten_second_plane_bytes = 0;
     uint32_t ten_second_cell_count = 0;
     uint32_t samples_per_block = 0;
 };
@@ -152,6 +152,11 @@ public:
                         ReportSignalStoreFileView &view);
     static bool plane_range(const ReportSignalStoreFileView &view,
                             int64_t block_start_ms,
+                            ReportSignalStoreLevel level,
+                            ReportSignalStorePlaneRange &range);
+    static bool plane_range(const ReportSignalStoreTrack &track,
+                            int64_t first_block_start_ms,
+                            size_t block_count,
                             ReportSignalStoreLevel level,
                             ReportSignalStorePlaneRange &range);
     static bool sample(const ReportSignalStoreFileView &view,
