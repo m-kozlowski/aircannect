@@ -376,7 +376,6 @@
       reportCurrentRevision = "";
       reportCurrentManifestModified = "";
       reportCurrentPlotEtag = "";
-      reportRangeTileCache.clear();
       reportRangeView = null;
       reportRangeActiveKey = "";
       reportRangeToken++;
@@ -2360,8 +2359,13 @@
       return bytes;
     }
 
-    function reportRangeTileSize(tile) {
-      let bytes = tile.bytes ? tile.bytes.byteLength : 0;
+    function reportRangeTileRawSize(tile) {
+      if (tile.bytes) return tile.bytes.byteLength;
+      return tile.index ? REPORT_PLOT_PREFIX_BYTES : 0;
+    }
+
+    function reportRangeTileDecodedSize(tile) {
+      let bytes = 0;
       tile.charts.forEach((decoded) => {
         bytes += reportRangeDecodedSize(decoded);
       });
@@ -2369,13 +2373,34 @@
     }
 
     function trimReportRangeTileCache() {
-      const cacheSize = () => Array.from(reportRangeTileCache.values())
-        .reduce((total, tile) => total + reportRangeTileSize(tile), 0);
+      let rawBytes = 0;
+      reportRangeTileCache.forEach((tile) => {
+        rawBytes += reportRangeTileRawSize(tile);
+      });
+
       while (reportRangeTileCache.size > REPORT_RANGE_TILE_CACHE_MAX ||
-             cacheSize() > REPORT_RANGE_TILE_CACHE_MAX_BYTES) {
+             rawBytes > REPORT_RANGE_TILE_CACHE_RAW_MAX_BYTES) {
         const oldest = reportRangeTileCache.keys().next().value;
         if (oldest === undefined) break;
+
+        rawBytes -= reportRangeTileRawSize(
+          reportRangeTileCache.get(oldest));
         reportRangeTileCache.delete(oldest);
+      }
+
+      let decodedBytes = 0;
+      reportRangeTileCache.forEach((tile) => {
+        decodedBytes += reportRangeTileDecodedSize(tile);
+      });
+      if (decodedBytes <= REPORT_RANGE_TILE_CACHE_DECODED_MAX_BYTES) return;
+
+      for (const tile of reportRangeTileCache.values()) {
+        const bytes = reportRangeTileDecodedSize(tile);
+        if (!bytes) continue;
+
+        tile.charts.clear();
+        decodedBytes -= bytes;
+        if (decodedBytes <= REPORT_RANGE_TILE_CACHE_DECODED_MAX_BYTES) break;
       }
     }
 
@@ -3499,8 +3524,9 @@
     const REPORT_PLOT_PREFIX_BYTES = 1600;
     const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
     const REPORT_RANGE_TILE_BATCH_MAX = 12;
-    const REPORT_RANGE_TILE_CACHE_MAX = 32;
-    const REPORT_RANGE_TILE_CACHE_MAX_BYTES = 6 * 1024 * 1024;
+    const REPORT_RANGE_TILE_CACHE_MAX = 96;
+    const REPORT_RANGE_TILE_CACHE_RAW_MAX_BYTES = 6 * 1024 * 1024;
+    const REPORT_RANGE_TILE_CACHE_DECODED_MAX_BYTES = 6 * 1024 * 1024;
     const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;
     const REPORT_RANGE_PREFETCH_TILES_PER_SIDE = 2;
     const REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS = 2;
