@@ -154,6 +154,15 @@ uint32_t next_catalog_generation(uint32_t generation) {
     return generation == 0 ? 1 : generation;
 }
 
+uint32_t monotonic_catalog_generation(uint32_t requested,
+                                      uint32_t current) {
+    if (current == 0 ||
+        static_cast<int32_t>(requested - current) > 0) {
+        return requested;
+    }
+    return next_catalog_generation(current);
+}
+
 bool deadline_due(uint32_t now_ms, uint32_t deadline_ms) {
     return deadline_ms == 0 ||
            static_cast<int32_t>(now_ms - deadline_ms) >= 0;
@@ -345,8 +354,15 @@ struct ReportTask::Runtime {
         return preempt_background_work();
     }
 
-    bool background_work_blocked() const {
-        return background_suspended || engine.status().foreground_active;
+    bool local_background_work_blocked() const {
+        return activity.therapy_active || activity.realtime_stream_active ||
+            activity.foreground_report_demand || activity.ota_install_active ||
+            activity.export_work_claimed || engine.status().foreground_active;
+    }
+
+    bool rpc_background_work_blocked() const {
+        return local_background_work_blocked() ||
+            !activity.as11_rpc_available;
     }
 
     void invalidate_spool_availability() {
@@ -1289,6 +1305,8 @@ struct ReportTask::Runtime {
 
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
                         uint32_t generation) {
+        generation = monotonic_catalog_generation(generation,
+                                                  catalog_generation);
         catalog = std::move(next);
         display_summary = build_display_report_summary(*catalog);
         catalog_generation = generation;
@@ -2451,8 +2469,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    const bool background_work_blocked =
-        runtime.background_work_blocked();
+    const bool local_background_work_blocked =
+        runtime.local_background_work_blocked();
+    const bool rpc_background_work_blocked =
+        runtime.rpc_background_work_blocked();
 
     if (runtime.summary_acquisition.active()) {
         worked = runtime.summary_acquisition.poll() || worked;
@@ -2634,7 +2654,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
-    if (!background_work_blocked && startup_idle_work_allowed &&
+    if (!local_background_work_blocked && startup_idle_work_allowed &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -2643,19 +2663,24 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.pending_refresh.valid() &&
         !runtime.pending_refresh.summary_attempted &&
         !runtime.summary_acquisition.active()) {
-        const OperationAdmission admitted =
-            runtime.summary_acquisition.request(
-                runtime.pending_refresh.generation);
-        if (admitted == OperationAdmission::Accepted) {
-            worked = true;
-        } else if (admitted == OperationAdmission::Rejected) {
+        if (!runtime.activity.as11_rpc_available) {
             runtime.pending_refresh.summary_attempted = true;
-            runtime.command_failures++;
             worked = true;
+        } else {
+            const OperationAdmission admitted =
+                runtime.summary_acquisition.request(
+                    runtime.pending_refresh.generation);
+            if (admitted == OperationAdmission::Accepted) {
+                worked = true;
+            } else if (admitted == OperationAdmission::Rejected) {
+                runtime.pending_refresh.summary_attempted = true;
+                runtime.command_failures++;
+                worked = true;
+            }
         }
     }
 
-    if (!background_work_blocked && startup_idle_work_allowed &&
+    if (!local_background_work_blocked && startup_idle_work_allowed &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -2724,7 +2749,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!background_work_blocked &&
+    if (!local_background_work_blocked &&
         !runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         runtime.pending_catalog_save &&
@@ -2753,10 +2778,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.engine.catalog_update_required() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
-    if (catalog_stable && !background_work_blocked &&
+    if (catalog_stable && !local_background_work_blocked &&
         startup_idle_work_allowed) {
-        worked = runtime.start_spool_availability_probe(now_ms) || worked;
-        worked = runtime.schedule_catalog_work(now_ms) || worked;
+        if (!rpc_background_work_blocked) {
+            worked = runtime.start_spool_availability_probe(now_ms) || worked;
+            worked = runtime.schedule_catalog_work(now_ms) || worked;
+        }
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }
 
