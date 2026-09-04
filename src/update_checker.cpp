@@ -277,12 +277,14 @@ bool UpdateChecker::start_check() {
     if (Memory::psram_available()) {
         result = xTaskCreatePinnedToCoreWithCaps(
             task_entry, "ota_check", AC_OTA_URL_TASK_STACK_BYTES, this,
-            AC_OTA_URL_TASK_PRIORITY, &task_, AC_OTA_URL_TASK_CORE,
+            AC_OTA_UPDATE_CHECK_TASK_PRIORITY, &task_,
+            AC_OTA_URL_TASK_CORE,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     } else {
         result = xTaskCreatePinnedToCore(
             task_entry, "ota_check", AC_OTA_URL_TASK_STACK_BYTES, this,
-            AC_OTA_URL_TASK_PRIORITY, &task_, AC_OTA_URL_TASK_CORE);
+            AC_OTA_UPDATE_CHECK_TASK_PRIORITY, &task_,
+            AC_OTA_URL_TASK_CORE);
     }
     if (result != pdPASS) {
         check_url_ = nullptr;

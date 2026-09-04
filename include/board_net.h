@@ -133,6 +133,7 @@ static constexpr size_t AC_OTA_URL_HTTP_TX_BUFFER_BYTES = 2048;
 static constexpr uint8_t AC_OTA_URL_REDIRECT_LIMIT = 5;
 static constexpr uint32_t AC_OTA_URL_TASK_STACK_BYTES = 8192;
 static constexpr uint8_t AC_OTA_URL_TASK_PRIORITY = 1;
+static constexpr uint8_t AC_OTA_UPDATE_CHECK_TASK_PRIORITY = 0;
 static constexpr int8_t AC_OTA_URL_TASK_CORE = 0;
 static constexpr size_t AC_OTA_MANIFEST_MAX_BYTES = 16 * 1024;
 static constexpr size_t AC_OTA_RELEASE_NOTES_MAX_BYTES = 32 * 1024;
