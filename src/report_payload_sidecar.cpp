@@ -12,6 +12,7 @@ namespace aircannect {
 namespace {
 
 constexpr uint32_t SIDECAR_MAGIC = 0x31444341u;  // "ACD1"
+constexpr char SIDECAR_ROOT[] = "/aircannect/report/v8/http";
 
 using LittleEndian::get_le16;
 using LittleEndian::get_le32;
@@ -61,11 +62,19 @@ bool ReportPayloadSidecarCodec::path(
         return false;
     }
 
+    char sleep_day[9] = {};
+    if (!payload.artifact.key.sleep_day.format_yyyymmdd(
+            sleep_day, sizeof(sleep_day))) {
+        return false;
+    }
+
     const int written = snprintf(
         out,
         out_size,
-        "%s.http1-%u-%08lx.deflate",
-        artifact_path,
+        "%s/%s/%s.http1-%u-%08lx.deflate",
+        SIDECAR_ROOT,
+        sleep_day,
+        storage_basename_from_path(artifact_path),
         static_cast<unsigned>(payload.kind),
         static_cast<unsigned long>(payload.offset));
     return written > 0 && static_cast<size_t>(written) < out_size;
@@ -239,7 +248,6 @@ OperationAdmission ReportPayloadSidecarService::start_save(
             payload, runtime_->path, sizeof(runtime_->path))) {
         return OperationAdmission::Rejected;
     }
-
     runtime_->encoded_file = std::move(bytes);
     runtime_->generation = generation;
     runtime_->phase = Runtime::Phase::SubmitWrite;

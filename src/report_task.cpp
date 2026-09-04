@@ -349,6 +349,7 @@ struct ReportTask::Runtime {
             payload_loader.cancel();
             catalog_sidecar_load_payload = {};
             catalog_sidecar_pending = {};
+            catalog_sidecar_retain_payload = false;
             worked = true;
         }
 
@@ -365,6 +366,7 @@ struct ReportTask::Runtime {
             sidecar_purpose = PayloadSidecarPurpose::None;
             catalog_sidecar_pending = {};
             catalog_sidecar_load_payload = {};
+            catalog_sidecar_retain_payload = false;
             worked = true;
         }
 
@@ -382,6 +384,7 @@ struct ReportTask::Runtime {
 
         catalog_sidecar_pending = {};
         catalog_sidecar_load_payload = {};
+        catalog_sidecar_retain_payload = false;
 
         return worked;
     }
@@ -1051,6 +1054,21 @@ struct ReportTask::Runtime {
         if (load_status.state == ReportArtifactPayloadLoadState::Ready) {
             std::shared_ptr<const LargeByteBuffer> bytes =
                 payload_loader.take_completed();
+
+            if (catalog_sidecar_load &&
+                !catalog_sidecar_retain_payload) {
+                catalog_sidecar_load_payload = {};
+                payload_loader.reset();
+
+                if (!bytes || !payload_deflater.start(
+                        load_status.payload,
+                        std::move(bytes),
+                        AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE)) {
+                    complete_catalog_sidecar(load_status.payload);
+                }
+                return true;
+            }
+
             const bool cached = bytes && cache_payload(
                 load_status.payload, std::move(bytes));
             if (catalog_sidecar_load) {
@@ -1123,6 +1141,7 @@ struct ReportTask::Runtime {
         if (!(catalog_sidecar_pending == payload)) return;
 
         catalog_sidecar_pending = {};
+        catalog_sidecar_retain_payload = false;
         idle_payload_cursor++;
     }
 
@@ -1195,6 +1214,7 @@ struct ReportTask::Runtime {
                 catalog_sidecar_load_payload = payload;
             } else if (started == PayloadLoadStartResult::Busy) {
                 catalog_sidecar_pending = {};
+                catalog_sidecar_retain_payload = false;
             } else {
                 complete_catalog_sidecar(payload);
             }
@@ -1720,6 +1740,7 @@ struct ReportTask::Runtime {
         sidecar_generation = 0;
         catalog_sidecar_pending = {};
         catalog_sidecar_load_payload = {};
+        catalog_sidecar_retain_payload = false;
 
         if (lock(20)) {
             payload_cache.reconcile(*catalog);
@@ -1860,6 +1881,7 @@ struct ReportTask::Runtime {
             sidecar_purpose = PayloadSidecarPurpose::CatalogPayload;
             sidecar_generation = idle_generation;
             catalog_sidecar_pending = payload;
+            catalog_sidecar_retain_payload = warm_payload;
             return true;
         }
 
@@ -2307,6 +2329,7 @@ struct ReportTask::Runtime {
     PayloadSidecarPurpose sidecar_purpose = PayloadSidecarPurpose::None;
     ReportArtifactPayloadDescriptor catalog_sidecar_pending;
     ReportArtifactPayloadDescriptor catalog_sidecar_load_payload;
+    bool catalog_sidecar_retain_payload = false;
     uint32_t sidecar_generation = 0;
     uint32_t sidecar_generation_counter = 0;
     uint32_t spool_availability_generation = 0;

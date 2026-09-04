@@ -103,7 +103,7 @@ private:
 
     mutable SemaphoreHandle_t lock_ = nullptr;
 
-    static constexpr size_t SNAPSHOT_SLOTS = 2;
+    static constexpr size_t SNAPSHOT_SLOTS = 8;
     std::shared_ptr<const StorageDirectorySnapshot> snapshots_[SNAPSHOT_SLOTS];
     uint32_t snapshot_touches_[SNAPSHOT_SLOTS] = {};
     uint32_t snapshot_touch_counter_ = 0;
@@ -463,7 +463,12 @@ void StorageDirectoryListing::publish_locked() {
         }
     }
     if (slot < 0) {
-        slot = snapshot_touches_[0] <= snapshot_touches_[1] ? 0 : 1;
+        slot = 0;
+        for (size_t i = 1; i < SNAPSHOT_SLOTS; ++i) {
+            if (snapshot_touches_[i] < snapshot_touches_[slot]) {
+                slot = static_cast<int>(i);
+            }
+        }
     }
 
     snapshots_[slot] = build_;
