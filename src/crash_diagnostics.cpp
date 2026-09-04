@@ -697,19 +697,21 @@ void CrashDiagnostics::log_previous_crash() const {
     if (!copy_snapshot(snapshot)) return;
 
     if (snapshot.dump_state == CrashDumpState::Available) {
+        const bool task_watchdog = snapshot.rtc_task_watchdog ||
+            strstr(snapshot.reason, "Task watchdog") != nullptr;
+        const char *reason = task_watchdog
+                                 ? "task_watchdog"
+                                 : (snapshot.reason[0]
+                                        ? snapshot.reason
+                                        : "panic");
+
         Log::logf(
             CAT_GENERAL, LOG_WARN,
-            "[CRASH] previous panic dump available occurred=%s task=%s "
-            "reason=%s "
-            "pc=0x%08lx bytes=%u elf_sha=%s relation=%s rtc=%s\n",
+            "[CRASH] panic occurred=%s task=%s reason=%.48s pc=0x%08lx\n",
             snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
             snapshot.task[0] ? snapshot.task : "--",
-            snapshot.reason[0] ? snapshot.reason : "--",
-            static_cast<unsigned long>(snapshot.exception_pc),
-            static_cast<unsigned>(snapshot.dump_size),
-            snapshot.elf_sha[0] ? snapshot.elf_sha : "--",
-            crash_dump_relation_name(snapshot.dump_relation),
-            snapshot.rtc_panic_available ? "yes" : "no");
+            reason,
+            static_cast<unsigned long>(snapshot.exception_pc));
         if (!snapshot.rtc_panic_available ||
             snapshot.dump_relation == CrashDumpRelation::Current) {
             return;
@@ -722,31 +724,21 @@ void CrashDiagnostics::log_previous_crash() const {
             return;
         }
         Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CRASH] retained panic dump invalid occurred=%s error=%s "
-                  "bytes=%u relation=%s rtc=%s\n",
+                  "[CRASH] invalid dump occurred=%s error=%s bytes=%u\n",
                   snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
                   snapshot.dump_error[0] ? snapshot.dump_error : "unknown",
-                  static_cast<unsigned>(snapshot.dump_stored_size),
-                  crash_dump_relation_name(snapshot.dump_relation),
-                  snapshot.rtc_panic_available ? "yes" : "no");
+                  static_cast<unsigned>(snapshot.dump_stored_size));
     }
 
     if (snapshot.rtc_panic_available) {
         Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CRASH] previous panic breadcrumb available occurred=%s "
-                  "firmware=%s "
-                  "source=%s core=%d pc=0x%08lx backtrace_depth=%u\n",
+                  "[CRASH] breadcrumb occurred=%s source=%s core=%d "
+                  "pc=0x%08lx depth=%u\n",
                   snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
-                  snapshot.rtc_firmware[0] ? snapshot.rtc_firmware : "--",
                   snapshot.rtc_task_watchdog ? "task_watchdog" : "panic",
                   static_cast<int>(snapshot.rtc_core),
                   static_cast<unsigned long>(snapshot.rtc_pc),
                   static_cast<unsigned>(snapshot.rtc_backtrace_depth));
-        if (snapshot.rtc_detail[0]) {
-            Log::logf(CAT_GENERAL, LOG_WARN,
-                      "[CRASH] breadcrumb detail=%s\n",
-                      snapshot.rtc_detail);
-        }
     }
 }
 
