@@ -30,7 +30,7 @@ public:
     bool finish_build();
     void discard_build();
 
-    std::shared_ptr<const ReportSignalStoreBundle> take_completed();
+    std::shared_ptr<ReportSignalStoreBundle> take_completed();
     const char *failure_reason() const { return failure_reason_; }
 
 private:

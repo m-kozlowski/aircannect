@@ -11,12 +11,26 @@
 #include "memory_manager.h"
 #include "report_plot_accumulator.h"
 #include "report_records.h"
+#include "report_signal_store_builder.h"
 
 namespace aircannect {
 namespace {
 
 uint32_t metric_bit(NightCatalogMetric metric) {
     return 1u << static_cast<uint8_t>(metric);
+}
+
+uint32_t signal_store_generation(const ReportArtifactRequest &request,
+                                 SourceRevision source_revision) {
+    uint64_t mixed = source_revision.value();
+    mixed ^= static_cast<uint64_t>(request.ticket.generation) << 32;
+    mixed ^= request.ticket.id;
+    mixed ^= mixed >> 33;
+    mixed *= UINT64_C(0xff51afd7ed558ccd);
+    mixed ^= mixed >> 33;
+
+    const uint32_t generation = static_cast<uint32_t>(mixed ^ (mixed >> 32));
+    return generation == 0 ? 1 : generation;
 }
 
 int32_t to_milli(float value) {
@@ -237,10 +251,13 @@ struct ReportNightArtifactBuilder::Runtime {
     ReportPlotAccumulator plot;
     ReportPlotAccumulator *tile_plots = nullptr;
     size_t tile_plot_count = 0;
+    ReportSignalStoreBuilder signal_store;
     bool active = false;
     std::shared_ptr<const ReportArtifactBundle> completed;
+    std::shared_ptr<ReportSignalStoreBundle> signal_store_completed;
 
     void clear_work() {
+        signal_store.discard_build();
         plot.clear();
         for (size_t i = 0; i < tile_plot_count; ++i) {
             tile_plots[i].~ReportPlotAccumulator();
@@ -278,6 +295,7 @@ bool ReportNightArtifactBuilder::begin_build(
 
     runtime_->clear_work();
     runtime_->completed.reset();
+    runtime_->signal_store_completed.reset();
     if (!request.ticket.valid() || request.artifact != plan.key() ||
         (request.artifact.kind != ReportArtifactKind::Result &&
          !valid_tile_key(request.artifact)) ||
@@ -289,6 +307,18 @@ bool ReportNightArtifactBuilder::begin_build(
 
     runtime_->request = request;
     runtime_->plan = &plan;
+
+    if (request.artifact.kind == ReportArtifactKind::Result) {
+        if (!runtime_->signal_store.begin_build(
+                request,
+                plan,
+                signal_store_generation(
+                    request, plan.night().source_revision))) {
+            failure_reason_ = runtime_->signal_store.failure_reason();
+            runtime_->clear_work();
+            return false;
+        }
+    }
 
     if (request.artifact.kind == ReportArtifactKind::Result) {
         if (plan.session_count() > 0) {
@@ -401,6 +431,13 @@ bool ReportNightArtifactBuilder::accept_series(
         failure_reason_ = plot->failure_reason();
         return false;
     }
+
+    if (runtime_->request.artifact.kind == ReportArtifactKind::Result &&
+        !runtime_->signal_store.accept_series(
+            session_index, series, sample)) {
+        failure_reason_ = runtime_->signal_store.failure_reason();
+        return false;
+    }
     return true;
 }
 
@@ -414,6 +451,11 @@ bool ReportNightArtifactBuilder::accept_event(
     if (runtime_->request.artifact.kind == ReportArtifactKind::Result) {
         if (!runtime_->plot.accept_event(session_index, event)) {
             failure_reason_ = runtime_->plot.failure_reason();
+            return false;
+        }
+
+        if (!runtime_->signal_store.accept_event(session_index, event)) {
+            failure_reason_ = runtime_->signal_store.failure_reason();
             return false;
         }
         return true;
@@ -545,6 +587,21 @@ bool ReportNightArtifactBuilder::finish_build() {
         failure_reason_ = "report_builder_bundle_invalid";
         return false;
     }
+
+    if (bundle->key.kind == ReportArtifactKind::Result) {
+        if (!runtime_->signal_store.finish_build()) {
+            failure_reason_ = runtime_->signal_store.failure_reason();
+            return false;
+        }
+        runtime_->signal_store_completed =
+            runtime_->signal_store.take_completed();
+        if (!runtime_->signal_store_completed ||
+            !runtime_->signal_store_completed->valid()) {
+            failure_reason_ = "report_signal_store_bundle_invalid";
+            return false;
+        }
+    }
+
     runtime_->completed = std::move(bundle);
     runtime_->clear_work();
     failure_reason_ = nullptr;
@@ -555,12 +612,19 @@ void ReportNightArtifactBuilder::discard_build() {
     if (!runtime_) return;
     runtime_->clear_work();
     runtime_->completed.reset();
+    runtime_->signal_store_completed.reset();
 }
 
 std::shared_ptr<const ReportArtifactBundle>
 ReportNightArtifactBuilder::take_completed() {
     if (!runtime_) return {};
     return std::move(runtime_->completed);
+}
+
+std::shared_ptr<ReportSignalStoreBundle>
+ReportNightArtifactBuilder::take_signal_store_completed() {
+    if (!runtime_) return {};
+    return std::move(runtime_->signal_store_completed);
 }
 
 }  // namespace aircannect

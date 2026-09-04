@@ -42,7 +42,7 @@ public:
 
     void begin(StorageAtomicWritePort &write_port);
     OperationAdmission start(
-        std::shared_ptr<const ReportSignalStoreBundle> bundle,
+        std::shared_ptr<ReportSignalStoreBundle> bundle,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane);
     bool poll();
@@ -50,8 +50,6 @@ public:
     void reset();
 
     const ReportSignalStoreStatus &status() const { return status_; }
-    std::shared_ptr<const ReportSignalStoreBundle> published() const;
-
 private:
     enum class Phase : uint8_t {
         Idle,
@@ -74,7 +72,7 @@ private:
     void clear_operation();
 
     StorageAtomicWritePort *write_port_ = nullptr;
-    std::shared_ptr<const ReportSignalStoreBundle> bundle_;
+    std::shared_ptr<ReportSignalStoreBundle> bundle_;
     OperationTicket write_ticket_;
     uint32_t operation_generation_ = 0;
     StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;

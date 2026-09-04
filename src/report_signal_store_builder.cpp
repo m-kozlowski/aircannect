@@ -92,16 +92,22 @@ struct ReportSignalStoreBuilder::Runtime {
     uint16_t block_slot_count = 0;
     uint32_t store_generation = 0;
     bool active = false;
-    std::shared_ptr<const ReportSignalStoreBundle> completed;
+    std::shared_ptr<ReportSignalStoreBundle> completed;
+
+    void release_track_blocks(TrackWork &track) {
+        for (size_t slot = 0;
+             slot < REPORT_SIGNAL_STORE_MAX_BLOCKS;
+             ++slot) {
+            Memory::free(track.raw_blocks[slot]);
+            track.raw_blocks[slot] = nullptr;
+        }
+        Memory::free(track.sessions_seen);
+        track.sessions_seen = nullptr;
+    }
 
     void clear_work() {
         for (size_t i = 0; i < track_count; ++i) {
-            for (size_t slot = 0;
-                 slot < REPORT_SIGNAL_STORE_MAX_BLOCKS;
-                 ++slot) {
-                Memory::free(tracks[i].raw_blocks[slot]);
-            }
-            Memory::free(tracks[i].sessions_seen);
+            release_track_blocks(tracks[i]);
         }
         for (size_t i = 0; i < track_capacity; ++i) {
             tracks[i].~TrackWork();
@@ -477,6 +483,7 @@ bool ReportSignalStoreBuilder::finish_build() {
             failure_reason_ = "report_signal_store_file_encode_failed";
             return false;
         }
+        runtime_->release_track_blocks(work);
     }
 
     ReportSignalStoreEventFileData event_data;
@@ -577,7 +584,7 @@ void ReportSignalStoreBuilder::discard_build() {
     runtime_->completed.reset();
 }
 
-std::shared_ptr<const ReportSignalStoreBundle>
+std::shared_ptr<ReportSignalStoreBundle>
 ReportSignalStoreBuilder::take_completed() {
     if (!runtime_) return {};
     return std::move(runtime_->completed);

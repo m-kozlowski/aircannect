@@ -4,6 +4,7 @@
 
 #include "report_artifacts.h"
 #include "report_engine.h"
+#include "report_signal_store.h"
 
 namespace aircannect {
 
@@ -27,6 +28,7 @@ public:
     void discard_build() override;
 
     std::shared_ptr<const ReportArtifactBundle> take_completed() override;
+    std::shared_ptr<ReportSignalStoreBundle> take_signal_store_completed();
     const char *failure_reason() const override { return failure_reason_; }
 
 private:

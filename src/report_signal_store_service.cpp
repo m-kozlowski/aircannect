@@ -34,7 +34,7 @@ void ReportSignalStoreService::begin(StorageAtomicWritePort &write_port) {
 }
 
 OperationAdmission ReportSignalStoreService::start(
-    std::shared_ptr<const ReportSignalStoreBundle> bundle,
+    std::shared_ptr<ReportSignalStoreBundle> bundle,
     uint32_t operation_generation,
     StorageAtomicWriteLane lane) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
@@ -94,7 +94,10 @@ bool ReportSignalStoreService::current_path(
         case Phase::SubmitEvents:
         case Phase::WaitEvents:
             return report_signal_store_events_path(
-                bundle_->sleep_day, path, path_size);
+                bundle_->sleep_day,
+                bundle_->generation,
+                path,
+                path_size);
         case Phase::SubmitMetadata:
         case Phase::WaitMetadata:
             return report_signal_store_night_path(
@@ -164,6 +167,7 @@ bool ReportSignalStoreService::finish_current() {
 
     switch (phase_) {
         case Phase::WaitSignal:
+            bundle_->release_signal_bytes(status_.signal_index);
             ++status_.signal_index;
             if (status_.signal_index < status_.signal_count) {
                 phase_ = Phase::SubmitSignal;
@@ -173,6 +177,7 @@ bool ReportSignalStoreService::finish_current() {
             }
             break;
         case Phase::WaitEvents:
+            bundle_->release_events();
             phase_ = Phase::SubmitMetadata;
             status_.state = ReportSignalStoreState::PublishingMetadata;
             break;
@@ -180,6 +185,7 @@ bool ReportSignalStoreService::finish_current() {
             status_.metadata_modified = completion.modified;
             phase_ = Phase::Ready;
             status_.state = ReportSignalStoreState::Ready;
+            bundle_.reset();
             break;
         default:
             fail("report_signal_store_publish_phase_invalid");
@@ -245,11 +251,6 @@ void ReportSignalStoreService::reset() {
     clear_operation();
     phase_ = Phase::Idle;
     status_ = {};
-}
-
-std::shared_ptr<const ReportSignalStoreBundle>
-ReportSignalStoreService::published() const {
-    return phase_ == Phase::Ready ? bundle_ : nullptr;
 }
 
 }  // namespace aircannect

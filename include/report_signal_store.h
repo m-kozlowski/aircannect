@@ -11,6 +11,8 @@
 
 namespace aircannect {
 
+class ReportSignalStoreService;
+
 static constexpr const char *REPORT_SIGNAL_STORE_ROOT =
     "/aircannect/report/v9/nights";
 static constexpr int64_t REPORT_SIGNAL_STORE_BLOCK_MS =
@@ -105,11 +107,14 @@ public:
 
 private:
     bool allocate_signals(size_t count);
+    void release_signal_bytes(size_t index);
+    void release_events();
 
     ReportSignalStoreFilePayload *signals_ = nullptr;
     size_t signal_count_ = 0;
 
     friend class ReportSignalStoreBuilder;
+    friend class ReportSignalStoreService;
 };
 
 struct ReportSignalStorePlaneRange {
@@ -253,6 +258,7 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
                                      char *out,
                                      size_t out_size);
 bool report_signal_store_events_path(SleepDayId sleep_day,
+                                     uint32_t generation,
                                      char *out,
                                      size_t out_size);
 

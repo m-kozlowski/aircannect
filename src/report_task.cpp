@@ -15,6 +15,7 @@
 #include "report_payload_deflater.h"
 #include "report_payload_sidecar.h"
 #include "report_plot_format.h"
+#include "report_signal_store_service.h"
 #include "report_spool_availability.h"
 #include "string_util.h"
 
@@ -363,6 +364,18 @@ struct ReportTask::Runtime {
 
     bool preempt_background_work() {
         bool worked = engine.cancel_background() > 0;
+
+        if (signal_store_lane != StorageAtomicWriteLane::Foreground) {
+            if (pending_signal_store) {
+                pending_signal_store.reset();
+                worked = true;
+            }
+            if (signal_store.status().active()) {
+                signal_store.cancel();
+                signal_store.reset();
+                worked = true;
+            }
+        }
 
         const ReportArtifactPayloadLoadStatus payload_status =
             payload_loader.status();
@@ -992,6 +1005,53 @@ struct ReportTask::Runtime {
 
         pending_built_bundle.reset();
         return true;
+    }
+
+    bool poll_signal_store_publish() {
+        bool worked = false;
+        if (signal_store.status().active()) {
+            worked = signal_store.poll() || worked;
+        }
+
+        const ReportSignalStoreStatus store_status = signal_store.status();
+        if (store_status.terminal()) {
+            if (store_status.state == ReportSignalStoreState::Failed) {
+                ++command_failures;
+#ifdef ARDUINO
+                char day[9] = {};
+                store_status.sleep_day.format_yyyymmdd(day, sizeof(day));
+
+                Log::logf(CAT_REPORT,
+                          LOG_WARN,
+                          "signal store publish failed night=%s error=%s",
+                          day[0] ? day : "invalid",
+                          store_status.error[0]
+                              ? store_status.error
+                              : "report_signal_store_publish_failed");
+#endif
+            }
+            signal_store.reset();
+            worked = true;
+        }
+
+        if (!pending_signal_store || signal_store.status().active()) {
+            return worked;
+        }
+
+        const OperationAdmission admitted = signal_store.start(
+            pending_signal_store,
+            pending_signal_store->generation,
+            signal_store_lane);
+        if (admitted == OperationAdmission::Accepted) {
+            pending_signal_store.reset();
+            return true;
+        }
+        if (admitted == OperationAdmission::Rejected) {
+            ++command_failures;
+            pending_signal_store.reset();
+            return true;
+        }
+        return worked;
     }
 
     PayloadLoadStartResult start_exact_payload_load(
@@ -2091,6 +2151,14 @@ struct ReportTask::Runtime {
             return out;
         }
 
+        if (pending_signal_store || signal_store.status().active()) {
+            out.operation = ReportTaskOperation::Publishing;
+            out.sleep_day = pending_signal_store
+                ? pending_signal_store->sleep_day
+                : signal_store.status().sleep_day;
+            return out;
+        }
+
         switch (engine_status.state) {
             case ReportEngineState::LookingUp:
                 out.operation = ReportTaskOperation::LookingUp;
@@ -2317,6 +2385,8 @@ struct ReportTask::Runtime {
         }
         next.foreground_active =
             foreground_command || next.engine.foreground_active ||
+            ((pending_signal_store || signal_store.status().active()) &&
+             signal_store_lane == StorageAtomicWriteLane::Foreground) ||
             (next.payload_load.active() &&
              next.payload_load.lane == StorageReadLane::Foreground) ||
             (payload_sidecar.status().active() &&
@@ -2333,7 +2403,8 @@ struct ReportTask::Runtime {
                    refresh_generation != 0 ||
                    engine.catalog_update_required()) {
             next.state = ReportTaskState::RefreshingCatalog;
-        } else if (pending_built_bundle) {
+        } else if (pending_built_bundle || pending_signal_store ||
+                   signal_store.status().active()) {
             next.state = ReportTaskState::Publishing;
         } else {
             switch (next.engine.state) {
@@ -2364,6 +2435,8 @@ struct ReportTask::Runtime {
             queued > 0 || static_cast<bool>(rebuild_catalog) ||
             catalog_commit_pending ||
             static_cast<bool>(pending_built_bundle) ||
+            static_cast<bool>(pending_signal_store) ||
+            signal_store.status().active() ||
             spool_availability_probe.status().active() ||
             next.payload_load.active() || payload_deflater.active() ||
             payload_sidecar.status().active() ||
@@ -2384,6 +2457,10 @@ struct ReportTask::Runtime {
     ReportPayloadSidecarService payload_sidecar;
     std::shared_ptr<const ReportArtifactBundle> pending_built_bundle;
     ReportNightArtifactBuilder builder;
+    ReportSignalStoreService signal_store;
+    std::shared_ptr<ReportSignalStoreBundle> pending_signal_store;
+    StorageAtomicWriteLane signal_store_lane =
+        StorageAtomicWriteLane::Maintenance;
     ReportSummaryAcquisition summary_acquisition;
     ReportSpoolAvailabilityProbe spool_availability_probe;
     NightCatalogRefreshService catalog_refresh;
@@ -2519,6 +2596,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->payload_loader.begin(read_port);
     runtime_->payload_sidecar.begin(read_port, write_port);
+    runtime_->signal_store.begin(write_port);
     runtime_->delete_port = &delete_port;
     runtime_->engine.begin(read_port,
                            write_port,
@@ -2985,6 +3063,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     worked = runtime.finish_payload_deflate() || worked;
     worked = runtime.start_pending_sidecar_lookup() || worked;
     worked = runtime.start_pending_deflate() || worked;
+    worked = runtime.poll_signal_store_publish() || worked;
 
     ReportTaskCommand command;
     const ReportArtifactPayloadLoadStatus command_payload_status =
@@ -3452,7 +3531,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     worked = runtime.finish_built_bundle_cache() || worked;
-    if (!runtime.pending_built_bundle) {
+    if (!runtime.pending_built_bundle && !runtime.pending_signal_store &&
+        !runtime.signal_store.status().active()) {
         const bool batch_range_records = record_budget > 1 &&
             runtime.engine.foreground_range_execution_active();
 
@@ -3491,6 +3571,27 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         } else {
             runtime.pending_built_bundle = std::move(built_bundle);
         }
+
+        if (runtime.pending_built_bundle &&
+            runtime.pending_built_bundle->key.kind ==
+                ReportArtifactKind::Result) {
+            std::shared_ptr<ReportSignalStoreBundle> signal_bundle =
+                runtime.builder.take_signal_store_completed();
+            if (!signal_bundle || runtime.pending_signal_store ||
+                runtime.signal_store.status().active()) {
+                ++runtime.command_failures;
+            } else {
+                const ReportEngineCompletion completion =
+                    runtime.engine.status().last_completion;
+                runtime.signal_store_lane =
+                    completion.valid() &&
+                    completion.request.priority ==
+                        ReportRequestPriority::Foreground
+                        ? StorageAtomicWriteLane::Foreground
+                        : StorageAtomicWriteLane::Maintenance;
+                runtime.pending_signal_store = std::move(signal_bundle);
+            }
+        }
         worked = true;
     }
 
@@ -3504,6 +3605,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     worked = runtime.finish_built_bundle_cache() || worked;
+    worked = runtime.poll_signal_store_publish() || worked;
     runtime.observe_engine_completion(now_ms);
     worked = runtime.advance_rebuild() || worked;
 

@@ -99,6 +99,14 @@ bool ReportSignalStoreBundle::allocate_signals(size_t count) {
     return true;
 }
 
+void ReportSignalStoreBundle::release_signal_bytes(size_t index) {
+    if (index < signal_count_) signals_[index].bytes.reset();
+}
+
+void ReportSignalStoreBundle::release_events() {
+    events.reset();
+}
+
 bool ReportSignalStoreBundle::valid() const {
     if (!sleep_day.valid() || !source_revision.valid() || generation == 0 ||
         !metadata || !events || (signal_count_ > 0 && !signals_)) {
@@ -212,17 +220,19 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
     const int written = track.track_index == 0
         ? snprintf(out,
                    out_size,
-                   "%s/%s/signals/%s.%s.%s",
+                   "%s/%s/g%08x/signals/%s.%s.%s",
                    REPORT_SIGNAL_STORE_ROOT,
                    day,
+                   track.generation,
                    name,
                    cadence,
                    suffix)
         : snprintf(out,
                    out_size,
-                   "%s/%s/signals/%s.%s.%u.%s",
+                   "%s/%s/g%08x/signals/%s.%s.%u.%s",
                    REPORT_SIGNAL_STORE_ROOT,
                    day,
+                   track.generation,
                    name,
                    cadence,
                    track.track_index,
@@ -231,16 +241,19 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
 }
 
 bool report_signal_store_events_path(SleepDayId sleep_day,
+                                     uint32_t generation,
                                      char *out,
                                      size_t out_size) {
     char day[9] = {};
-    if (!out || !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
+    if (!out || generation == 0 ||
+        !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
 
     const int written = snprintf(out,
                                  out_size,
-                                 "%s/%s/events.evt",
+                                 "%s/%s/g%08x/events.evt",
                                  REPORT_SIGNAL_STORE_ROOT,
-                                 day);
+                                 day,
+                                 generation);
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
