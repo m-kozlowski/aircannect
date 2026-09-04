@@ -209,23 +209,11 @@ void finish_metric_histogram(const MetricHistogram &histogram,
 }
 
 bool event_less(const EventSlot &lhs, const EventSlot &rhs) {
-    if (lhs.event.start_ms != rhs.event.start_ms) {
-        return lhs.event.start_ms < rhs.event.start_ms;
-    }
-    if (lhs.event.duration_ms != rhs.event.duration_ms) {
-        return lhs.event.duration_ms < rhs.event.duration_ms;
-    }
-    if (lhs.event.code != rhs.event.code) {
-        return lhs.event.code < rhs.event.code;
-    }
-    return lhs.event.flags < rhs.event.flags;
+    return report_event_record_less(lhs.event, rhs.event);
 }
 
 bool same_event(const EventSlot &lhs, const EventSlot &rhs) {
-    return lhs.event.start_ms == rhs.event.start_ms &&
-           lhs.event.duration_ms == rhs.event.duration_ms &&
-           lhs.event.code == rhs.event.code &&
-           lhs.event.flags == rhs.event.flags;
+    return report_event_record_equal(lhs.event, rhs.event);
 }
 
 void add_event_count(ReportArtifactEventCounts &counts,

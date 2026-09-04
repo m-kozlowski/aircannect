@@ -59,6 +59,10 @@ bool report_series_v2_uniform_unmasked_slice(
 size_t report_event_record_wire_size();
 
 uint8_t report_event_source_mask(const ReportEventRecord &event);
+bool report_event_record_less(const ReportEventRecord &lhs,
+                              const ReportEventRecord &rhs);
+bool report_event_record_equal(const ReportEventRecord &lhs,
+                               const ReportEventRecord &rhs);
 
 bool report_append_event_record(ReportSpoolBuffer &out,
                                 const ReportEventRecord &event);

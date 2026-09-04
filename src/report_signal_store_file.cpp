@@ -231,11 +231,8 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode(
         return {};
     }
 
-    size_t expected_values = 0;
-    if (!CheckedSize::multiply(data.track.present_block_count,
-                               samples_per_block,
-                               expected_values) ||
-        !data.raw_blocks || data.raw_value_count != expected_values) {
+    if (!data.raw_block_slots ||
+        data.raw_block_slot_count != data.track.block_slot_count) {
         return {};
     }
 
@@ -286,11 +283,14 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode(
 
     size_t packed = 0;
     for (size_t slot = 0; slot < data.track.block_slot_count; ++slot) {
-        if (!bit(data.track.present_blocks, slot)) continue;
+        const int16_t *raw = data.raw_block_slots[slot];
+        if (!bit(data.track.present_blocks, slot)) {
+            if (raw) return {};
+            continue;
+        }
+        if (!raw) return {};
 
         uint8_t *block = bytes + HeaderBytes + packed * block_stride;
-        const int16_t *raw =
-            data.raw_blocks + packed * samples_per_block;
         for (uint32_t i = 0; i < samples_per_block; ++i) {
             put_i16(block + static_cast<size_t>(i) * 2, raw[i]);
         }

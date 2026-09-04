@@ -72,8 +72,44 @@ struct ReportSignalStoreTrack {
 
 struct ReportSignalStoreFileData {
     ReportSignalStoreTrack track;
-    const int16_t *raw_blocks = nullptr;
-    size_t raw_value_count = 0;
+    const int16_t *const *raw_block_slots = nullptr;
+    size_t raw_block_slot_count = 0;
+};
+
+struct ReportSignalStoreFilePayload {
+    ReportSignalStoreTrack track;
+    std::shared_ptr<const LargeByteBuffer> bytes;
+
+    bool valid() const;
+    bool path(char *out, size_t out_size) const;
+};
+
+class ReportSignalStoreBundle {
+public:
+    ReportSignalStoreBundle() = default;
+    ~ReportSignalStoreBundle();
+
+    ReportSignalStoreBundle(const ReportSignalStoreBundle &) = delete;
+    ReportSignalStoreBundle &operator=(
+        const ReportSignalStoreBundle &) = delete;
+
+    SleepDayId sleep_day;
+    SourceRevision source_revision;
+    uint32_t generation = 0;
+    std::shared_ptr<const LargeByteBuffer> metadata;
+    std::shared_ptr<const LargeByteBuffer> events;
+
+    size_t signal_count() const { return signal_count_; }
+    const ReportSignalStoreFilePayload *signal(size_t index) const;
+    bool valid() const;
+
+private:
+    bool allocate_signals(size_t count);
+
+    ReportSignalStoreFilePayload *signals_ = nullptr;
+    size_t signal_count_ = 0;
+
+    friend class ReportSignalStoreBuilder;
 };
 
 struct ReportSignalStorePlaneRange {

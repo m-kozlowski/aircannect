@@ -159,23 +159,6 @@ bool decode_track(const uint8_t *in,
     return report_signal_store_track_valid(track);
 }
 
-bool event_before(const ReportEventRecord &lhs,
-                  const ReportEventRecord &rhs) {
-    if (lhs.start_ms != rhs.start_ms) return lhs.start_ms < rhs.start_ms;
-    if (lhs.duration_ms != rhs.duration_ms) {
-        return lhs.duration_ms < rhs.duration_ms;
-    }
-    if (lhs.code != rhs.code) return lhs.code < rhs.code;
-    return lhs.flags < rhs.flags;
-}
-
-bool event_equal(const ReportEventRecord &lhs,
-                 const ReportEventRecord &rhs) {
-    return lhs.start_ms == rhs.start_ms &&
-           lhs.duration_ms == rhs.duration_ms && lhs.code == rhs.code &&
-           lhs.flags == rhs.flags;
-}
-
 bool event_data_valid(const ReportSignalStoreEventFileData &data) {
     if (!data.sleep_day.valid() || !data.source_revision.valid() ||
         data.generation == 0 || data.first_block_start_ms <= 0 ||
@@ -195,8 +178,9 @@ bool event_data_valid(const ReportSignalStoreEventFileData &data) {
         if (event.start_ms < data.first_block_start_ms ||
             event.start_ms >= end_ms || event.duration_ms < 0 ||
             event.code == 0 ||
-            (i > 0 && !event_before(data.events[i - 1], event) &&
-             !event_equal(data.events[i - 1], event))) {
+            (i > 0 &&
+             !report_event_record_less(data.events[i - 1], event) &&
+             !report_event_record_equal(data.events[i - 1], event))) {
             return false;
         }
     }
@@ -534,8 +518,9 @@ bool ReportSignalStoreEventCodec::inspect(
                             current.start_ms,
                             event_block) ||
                 event_block != slot ||
-                (cursor + i > 0 && !event_before(previous, current) &&
-                 !event_equal(previous, current))) {
+                (cursor + i > 0 &&
+                 !report_event_record_less(previous, current) &&
+                 !report_event_record_equal(previous, current))) {
                 view = {};
                 return false;
             }

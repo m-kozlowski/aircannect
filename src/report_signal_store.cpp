@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "memory_manager.h"
+
 namespace aircannect {
 namespace {
 
@@ -50,6 +52,92 @@ const char *encoding_suffix(ReportSignalStoreEncoding encoding) {
 }
 
 }  // namespace
+
+bool ReportSignalStoreFilePayload::valid() const {
+    ReportSignalStoreFileView view;
+    return bytes && report_signal_store_track_valid(track) &&
+           ReportSignalStoreFileCodec::inspect(
+               bytes->data(), bytes->size(), view) &&
+           view.track.signal == track.signal &&
+           view.track.sample_interval_ms == track.sample_interval_ms &&
+           view.track.grid_phase_ms == track.grid_phase_ms &&
+           view.track.track_index == track.track_index;
+}
+
+bool ReportSignalStoreFilePayload::path(char *out, size_t out_size) const {
+    return valid() &&
+           report_signal_store_signal_path(track, out, out_size);
+}
+
+ReportSignalStoreBundle::~ReportSignalStoreBundle() {
+    for (size_t i = 0; i < signal_count_; ++i) {
+        signals_[i].~ReportSignalStoreFilePayload();
+    }
+    Memory::free(signals_);
+}
+
+const ReportSignalStoreFilePayload *ReportSignalStoreBundle::signal(
+    size_t index) const {
+    return index < signal_count_ ? &signals_[index] : nullptr;
+}
+
+bool ReportSignalStoreBundle::allocate_signals(size_t count) {
+    if (signals_ || signal_count_ != 0 || count == 0 ||
+        count > SIZE_MAX / sizeof(ReportSignalStoreFilePayload)) {
+        return false;
+    }
+
+    signals_ = static_cast<ReportSignalStoreFilePayload *>(
+        Memory::alloc_large(
+            count * sizeof(ReportSignalStoreFilePayload), false));
+    if (!signals_) return false;
+
+    for (size_t i = 0; i < count; ++i) {
+        new (&signals_[i]) ReportSignalStoreFilePayload();
+    }
+    signal_count_ = count;
+    return true;
+}
+
+bool ReportSignalStoreBundle::valid() const {
+    if (!sleep_day.valid() || !source_revision.valid() || generation == 0 ||
+        !metadata || !events || (signal_count_ > 0 && !signals_)) {
+        return false;
+    }
+
+    ReportSignalStoreNightView night;
+    if (!ReportSignalStoreNightCodec::decode(
+            metadata->data(), metadata->size(), night) ||
+        night.night.sleep_day != sleep_day ||
+        night.night.source_revision != source_revision ||
+        night.night.generation != generation ||
+        night.night.track_count != signal_count_) {
+        return false;
+    }
+
+    ReportSignalStoreEventFileView event_view;
+    if (!ReportSignalStoreEventCodec::inspect(
+            events->data(), events->size(), event_view) ||
+        event_view.sleep_day != sleep_day ||
+        event_view.source_revision != source_revision ||
+        event_view.generation != generation ||
+        event_view.event_count != night.night.event_count) {
+        return false;
+    }
+
+    for (size_t i = 0; i < signal_count_; ++i) {
+        ReportSignalStoreTrack indexed;
+        if (!signals_[i].valid() || !night.track(i, indexed) ||
+            indexed.signal != signals_[i].track.signal ||
+            indexed.sample_interval_ms !=
+                signals_[i].track.sample_interval_ms ||
+            indexed.grid_phase_ms != signals_[i].track.grid_phase_ms ||
+            indexed.track_index != signals_[i].track.track_index) {
+            return false;
+        }
+    }
+    return true;
+}
 
 bool report_signal_store_track_valid(
     const ReportSignalStoreTrack &track) {

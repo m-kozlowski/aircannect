@@ -36,6 +36,23 @@ uint8_t report_event_source_mask(const ReportEventRecord &event) {
     return 0;
 }
 
+bool report_event_record_less(const ReportEventRecord &lhs,
+                              const ReportEventRecord &rhs) {
+    if (lhs.start_ms != rhs.start_ms) return lhs.start_ms < rhs.start_ms;
+    if (lhs.duration_ms != rhs.duration_ms) {
+        return lhs.duration_ms < rhs.duration_ms;
+    }
+    if (lhs.code != rhs.code) return lhs.code < rhs.code;
+    return lhs.flags < rhs.flags;
+}
+
+bool report_event_record_equal(const ReportEventRecord &lhs,
+                               const ReportEventRecord &rhs) {
+    return lhs.start_ms == rhs.start_ms &&
+           lhs.duration_ms == rhs.duration_ms && lhs.code == rhs.code &&
+           lhs.flags == rhs.flags;
+}
+
 bool report_event_overlaps_window(const ReportEventRecord &event,
                                   int64_t window_start_ms,
                                   int64_t window_end_ms,
