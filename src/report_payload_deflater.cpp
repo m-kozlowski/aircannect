@@ -167,6 +167,7 @@ void ReportPayloadDeflater::finish() {
 
     if (!smaller || saved < minimum_saved) {
         output_.reset();
+        result_ = ReportPayloadDeflateResult::NotBeneficial;
     } else {
         std::unique_ptr<LargeByteBuffer> compact =
             LargeByteBuffer::allocate(output_offset_);
@@ -176,6 +177,8 @@ void ReportPayloadDeflater::finish() {
             completed_ = LargeByteBuffer::freeze(std::move(compact));
         }
         output_.reset();
+        result_ = completed_ ? ReportPayloadDeflateResult::Ready
+                             : ReportPayloadDeflateResult::Failed;
     }
 
     source_.reset();
@@ -187,6 +190,7 @@ void ReportPayloadDeflater::fail() {
     source_.reset();
     output_.reset();
     completed_.reset();
+    result_ = ReportPayloadDeflateResult::Failed;
     release_compressor();
     state_ = State::Finished;
 }
@@ -210,6 +214,7 @@ void ReportPayloadDeflater::reset() {
     payload_ = {};
     source_offset_ = 0;
     output_offset_ = 0;
+    result_ = ReportPayloadDeflateResult::None;
     state_ = State::Idle;
 }
 

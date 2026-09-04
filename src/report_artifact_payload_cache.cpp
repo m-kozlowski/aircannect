@@ -33,8 +33,9 @@ size_t ReportArtifactPayloadCache::find_exact(
 size_t ReportArtifactPayloadCache::find_whole(
     const ReportArtifactPayloadDescriptor &payload) const {
     if (payload.is_whole()) return SIZE_MAX;
-    return find_exact(ReportArtifactPayloadDescriptor::whole(
-        payload.artifact));
+    const size_t index = find_exact(
+        ReportArtifactPayloadDescriptor::whole(payload.artifact));
+    return index != SIZE_MAX && entries_[index].bytes ? index : SIZE_MAX;
 }
 
 size_t ReportArtifactPayloadCache::find_key(
@@ -84,7 +85,9 @@ void ReportArtifactPayloadCache::erase(size_t index, bool eviction) {
         return;
     }
 
-    bytes_ -= entries_[index].bytes->size();
+    if (entries_[index].bytes) {
+        bytes_ -= entries_[index].bytes->size();
+    }
     if (entries_[index].deflated) {
         bytes_ -= entries_[index].deflated->size();
     }
@@ -110,7 +113,17 @@ bool ReportArtifactPayloadCache::can_hold(
 
 bool ReportArtifactPayloadCache::contains(
     const ReportArtifactPayloadDescriptor &payload) const {
-    return find_exact(payload) != SIZE_MAX || find_whole(payload) != SIZE_MAX;
+    const size_t exact = find_exact(payload);
+    return (exact != SIZE_MAX && entries_[exact].bytes) ||
+           find_whole(payload) != SIZE_MAX;
+}
+
+bool ReportArtifactPayloadCache::contains_deflate(
+    const ReportArtifactPayloadDescriptor &payload) const {
+    const size_t exact = find_exact(payload);
+    return exact != SIZE_MAX &&
+           entries_[exact].deflate_state == DeflateState::Ready &&
+           entries_[exact].deflated != nullptr;
 }
 
 bool ReportArtifactPayloadCache::describe(
@@ -141,7 +154,7 @@ bool ReportArtifactPayloadCache::describe_ready(
 std::shared_ptr<const LargeByteBuffer> ReportArtifactPayloadCache::find(
     const ReportArtifactPayloadDescriptor &payload) {
     size_t index = find_exact(payload);
-    if (index != SIZE_MAX) {
+    if (index != SIZE_MAX && entries_[index].bytes) {
         entries_[index].last_used = next_use();
         hits_++;
         return entries_[index].bytes;
@@ -163,7 +176,7 @@ std::shared_ptr<const LargeByteBuffer>
 ReportArtifactPayloadCache::find_if_present(
     const ReportArtifactPayloadDescriptor &payload) {
     size_t index = find_exact(payload);
-    if (index != SIZE_MAX) {
+    if (index != SIZE_MAX && entries_[index].bytes) {
         entries_[index].last_used = next_use();
         hits_++;
         return entries_[index].bytes;
@@ -200,14 +213,18 @@ ReportArtifactPayloadSelection ReportArtifactPayloadCache::select_at(
     }
 
     Entry &entry = entries_[index];
-    out.state = ReportArtifactPayloadSelectionState::Ready;
     if (prefer_deflate && entry.deflate_state == DeflateState::Ready &&
         entry.deflated) {
+        out.state = ReportArtifactPayloadSelectionState::Ready;
         out.encoding = ReportArtifactPayloadEncoding::Deflate;
         out.bytes = entry.deflated;
-    } else {
+    } else if (entry.bytes) {
+        out.state = ReportArtifactPayloadSelectionState::Ready;
         out.encoding = ReportArtifactPayloadEncoding::Identity;
         out.bytes = entry.bytes;
+    } else {
+        if (count_miss) misses_++;
+        return out;
     }
     entry.last_used = next_use();
     hits_++;
@@ -220,7 +237,9 @@ ReportArtifactPayloadSelection ReportArtifactPayloadCache::select_payload(
     bool count_miss) {
     const size_t exact = find_exact(payload);
     if (exact != SIZE_MAX) {
-        return select_at(exact, prefer_deflate, count_miss);
+        ReportArtifactPayloadSelection selected =
+            select_at(exact, prefer_deflate, false);
+        if (selected.ready()) return selected;
     }
 
     const size_t whole = find_whole(payload);
@@ -277,7 +296,7 @@ void ReportArtifactPayloadCache::prepare_entry(
     entry.bytes = std::move(bytes);
     entry.deflated.reset();
     entry.deflate_state = payload.size >= AC_REPORT_HTTP_DEFLATE_MIN_BYTES
-        ? DeflateState::Pending
+        ? DeflateState::Unchecked
         : DeflateState::Unavailable;
     entry.last_used = next_use();
 }
@@ -291,6 +310,11 @@ bool ReportArtifactPayloadCache::insert(
 
     const size_t exact = find_exact(payload);
     if (exact != SIZE_MAX) {
+        if (!entries_[exact].bytes) {
+            if (!reserve(bytes->size(), exact)) return false;
+            entries_[exact].bytes = std::move(bytes);
+            bytes_ += entries_[exact].bytes->size();
+        }
         entries_[exact].last_used = next_use();
         return true;
     }
@@ -302,16 +326,49 @@ bool ReportArtifactPayloadCache::insert(
         }
     }
 
-    while (bytes_ + bytes->size() > byte_budget_ ||
-           find_free() == SIZE_MAX) {
-        if (!evict_lru()) return false;
-    }
+    if (!reserve(bytes->size())) return false;
 
     const size_t index = find_free();
     if (index == SIZE_MAX) return false;
 
     prepare_entry(entries_[index], payload, std::move(bytes));
     bytes_ += entries_[index].bytes->size();
+    return true;
+}
+
+bool ReportArtifactPayloadCache::insert_deflate(
+    const ReportArtifactPayloadDescriptor &payload,
+    std::shared_ptr<const LargeByteBuffer> bytes) {
+    if (!payload.valid() || !bytes || bytes->size() == 0 ||
+        bytes->size() >= payload.size || bytes->size() > byte_budget_) {
+        return false;
+    }
+
+    size_t exact = find_exact(payload);
+    if (exact == SIZE_MAX) {
+        for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
+            if (entries_[i].valid() &&
+                same_payload_identity(entries_[i].payload, payload)) {
+                erase(i, false);
+            }
+        }
+
+        if (!reserve(bytes->size())) return false;
+        exact = find_free();
+        if (exact == SIZE_MAX) return false;
+        entries_[exact].payload = payload;
+    } else if (entries_[exact].deflated) {
+        entries_[exact].last_used = next_use();
+        return true;
+    } else if (!reserve(bytes->size(), exact)) {
+        return false;
+    }
+
+    Entry &entry = entries_[exact];
+    entry.deflated = std::move(bytes);
+    entry.deflate_state = DeflateState::Ready;
+    entry.last_used = next_use();
+    bytes_ += entry.deflated->size();
     return true;
 }
 
@@ -389,6 +446,55 @@ bool ReportArtifactPayloadCache::next_deflate_candidate(
     return true;
 }
 
+bool ReportArtifactPayloadCache::next_deflate_lookup_candidate(
+    ReportArtifactPayloadDescriptor &payload) const {
+    payload = {};
+
+    size_t selected = SIZE_MAX;
+    uint64_t newest = 0;
+    for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
+        const Entry &entry = entries_[i];
+        if (!entry.valid() || !entry.bytes ||
+            entry.deflate_state != DeflateState::Unchecked ||
+            entry.last_used < newest) {
+            continue;
+        }
+
+        selected = i;
+        newest = entry.last_used;
+    }
+    if (selected == SIZE_MAX) return false;
+
+    payload = entries_[selected].payload;
+    return true;
+}
+
+bool ReportArtifactPayloadCache::mark_deflate_pending(
+    const ReportArtifactPayloadDescriptor &payload) {
+    const size_t index = find_exact(payload);
+    if (index == SIZE_MAX || !entries_[index].bytes) return false;
+
+    if (entries_[index].deflated) {
+        bytes_ -= entries_[index].deflated->size();
+    }
+    entries_[index].deflated.reset();
+    entries_[index].deflate_state = DeflateState::Pending;
+    return true;
+}
+
+bool ReportArtifactPayloadCache::mark_deflate_unavailable(
+    const ReportArtifactPayloadDescriptor &payload) {
+    const size_t index = find_exact(payload);
+    if (index == SIZE_MAX) return false;
+
+    if (entries_[index].deflated) {
+        bytes_ -= entries_[index].deflated->size();
+    }
+    entries_[index].deflated.reset();
+    entries_[index].deflate_state = DeflateState::Unavailable;
+    return true;
+}
+
 bool ReportArtifactPayloadCache::next_deflate_candidate(
     ReportArtifactDescriptor &artifact,
     std::shared_ptr<const LargeByteBuffer> &bytes) const {
@@ -410,7 +516,7 @@ bool ReportArtifactPayloadCache::complete_deflate(
     if (index == SIZE_MAX) return false;
 
     Entry &entry = entries_[index];
-    if (!bytes || bytes->size() >= entry.bytes->size()) {
+    if (!entry.bytes || !bytes || bytes->size() >= entry.bytes->size()) {
         entry.deflated.reset();
         entry.deflate_state = DeflateState::Unavailable;
         return true;
@@ -430,6 +536,17 @@ bool ReportArtifactPayloadCache::complete_deflate(
     entry.deflate_state = DeflateState::Ready;
     entry.last_used = next_use();
     bytes_ += entry.deflated->size();
+    return true;
+}
+
+bool ReportArtifactPayloadCache::reserve(size_t wanted, size_t excluded) {
+    if (wanted > byte_budget_) return false;
+    while (bytes_ + wanted > byte_budget_ ||
+           (excluded == SIZE_MAX && find_free() == SIZE_MAX)) {
+        const size_t evicted = find_lru(excluded);
+        if (evicted == SIZE_MAX) return false;
+        erase(evicted, true);
+    }
     return true;
 }
 

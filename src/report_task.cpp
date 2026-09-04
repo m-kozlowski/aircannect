@@ -13,6 +13,7 @@
 #include "report_fallback_artifact.h"
 #include "report_night_artifact_builder.h"
 #include "report_payload_deflater.h"
+#include "report_payload_sidecar.h"
 #include "report_plot_format.h"
 #include "report_spool_availability.h"
 #include "string_util.h"
@@ -73,12 +74,21 @@ enum class PlotPayloadResolveResult : uint8_t {
     Invalid,
 };
 
+enum class PayloadSidecarPurpose : uint8_t {
+    None,
+    CachedPayload,
+    ForegroundPayload,
+    CatalogPayload,
+    PersistPayload,
+};
+
 struct ReportTaskCommand {
     ReportTaskCommandKind kind = ReportTaskCommandKind::Artifact;
     ReportArtifactKey artifact;
     ReportArtifactPayloadDescriptor payload;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
     bool force_rebuild = false;
+    bool prefer_deflate = false;
     uint8_t range_tile_count = 1;
     uint32_t generation = 0;
     bool current_offset_valid = false;
@@ -227,6 +237,8 @@ struct ReportTask::Runtime {
             if (command.kind == ReportTaskCommandKind::CacheArtifact &&
                 queued.kind == command.kind &&
                 queued.payload == command.payload) {
+                command.prefer_deflate =
+                    command.prefer_deflate || queued.prefer_deflate;
                 queued = command;
                 unlock();
                 wake();
@@ -335,6 +347,24 @@ struct ReportTask::Runtime {
         if (payload_status.active() &&
             payload_status.lane != StorageReadLane::Foreground) {
             payload_loader.cancel();
+            catalog_sidecar_load_payload = {};
+            catalog_sidecar_pending = {};
+            worked = true;
+        }
+
+        if (payload_deflater.active() || payload_deflater.finished()) {
+            payload_deflater.reset();
+            worked = true;
+        }
+
+        const ReportPayloadSidecarStatus sidecar_status =
+            payload_sidecar.status();
+        if (sidecar_status.active() &&
+            sidecar_status.lane != StorageReadLane::Foreground) {
+            payload_sidecar.cancel();
+            sidecar_purpose = PayloadSidecarPurpose::None;
+            catalog_sidecar_pending = {};
+            catalog_sidecar_load_payload = {};
             worked = true;
         }
 
@@ -349,6 +379,9 @@ struct ReportTask::Runtime {
         }
 
         worked = defer_active_catalog_refresh() || worked;
+
+        catalog_sidecar_pending = {};
+        catalog_sidecar_load_payload = {};
 
         return worked;
     }
@@ -377,6 +410,7 @@ struct ReportTask::Runtime {
         engine.publish_spool_availability({}, false);
 
         idle_cursor = 0;
+        idle_payload_cursor = 0;
         idle_retry_at_ms = 0;
         idle_retry_attempt = 0;
         idle_pass_failed = false;
@@ -429,6 +463,7 @@ struct ReportTask::Runtime {
             spool_availability_needed = false;
             spool_availability_retry_at_ms = 0;
             idle_cursor = 0;
+            idle_payload_cursor = 0;
             idle_retry_at_ms = 0;
             idle_retry_attempt = 0;
             idle_pass_failed = false;
@@ -464,28 +499,16 @@ struct ReportTask::Runtime {
             activity.foreground_report_demand ||
             activity.ota_install_active || activity.export_work_claimed;
         if (therapy_ended) invalidate_spool_availability();
-        if (rpc_became_available) idle_cursor = 0;
+        if (rpc_became_available) {
+            idle_cursor = 0;
+            idle_payload_cursor = 0;
+        }
         if (!background_suspended || was_suspended) return true;
 
         (void)engine.cancel_background();
         idle_cursor = 0;
-
-        if (summary_acquisition.active()) {
-            summary_acquisition.cancel();
-        }
-
-        if (spool_availability_probe.status().active()) {
-            spool_availability_probe.cancel();
-        }
-
-        const ReportArtifactPayloadLoadStatus payload_status =
-            payload_loader.status();
-        if (payload_status.active() &&
-            payload_status.lane != StorageReadLane::Foreground) {
-            payload_loader.cancel();
-        }
-
-        (void)defer_active_catalog_refresh();
+        idle_payload_cursor = 0;
+        (void)preempt_background_work();
 
         return true;
     }
@@ -740,6 +763,44 @@ struct ReportTask::Runtime {
         return cached;
     }
 
+    bool payload_deflate_cached(
+        const ReportArtifactPayloadDescriptor &payload) const {
+        if (!payload.valid() || !lock(20)) return false;
+
+        const bool cached = payload_cache.contains_deflate(payload);
+        unlock();
+        return cached;
+    }
+
+    bool mark_payload_deflate_pending(
+        const ReportArtifactPayloadDescriptor &payload) {
+        if (!payload.valid() || !lock(20)) return false;
+
+        const bool marked = payload_cache.mark_deflate_pending(payload);
+        unlock();
+        return marked;
+    }
+
+    bool mark_payload_deflate_unavailable(
+        const ReportArtifactPayloadDescriptor &payload) {
+        if (!payload.valid() || !lock(20)) return false;
+
+        const bool marked = payload_cache.mark_deflate_unavailable(payload);
+        unlock();
+        return marked;
+    }
+
+    bool cache_deflated_payload(
+        const ReportArtifactPayloadDescriptor &payload,
+        std::shared_ptr<const LargeByteBuffer> bytes) {
+        if (!payload.valid() || !bytes || !lock(20)) return false;
+
+        const bool cached = payload_cache.insert_deflate(
+            payload, std::move(bytes));
+        unlock();
+        return cached;
+    }
+
     PayloadLoadStartResult prepare_payload_allocation(
         const ReportArtifactPayloadDescriptor &payload) {
         if (!payload.valid()) return PayloadLoadStartResult::Rejected;
@@ -984,11 +1045,23 @@ struct ReportTask::Runtime {
             payload_loader.status();
         if (!load_status.terminal()) return false;
 
+        const bool catalog_sidecar_load =
+            catalog_sidecar_load_payload == load_status.payload;
+
         if (load_status.state == ReportArtifactPayloadLoadState::Ready) {
             std::shared_ptr<const LargeByteBuffer> bytes =
                 payload_loader.take_completed();
             const bool cached = bytes && cache_payload(
                 load_status.payload, std::move(bytes));
+            if (catalog_sidecar_load) {
+                catalog_sidecar_load_payload = {};
+                if (!cached ||
+                    !mark_payload_deflate_pending(load_status.payload)) {
+                    complete_catalog_sidecar(load_status.payload);
+                }
+                return true;
+            }
+
             if (lock(20)) {
                 if (cached) {
                     payload_load_failed = {};
@@ -1016,6 +1089,13 @@ struct ReportTask::Runtime {
         }
 
         if (load_status.state == ReportArtifactPayloadLoadState::Error) {
+            if (catalog_sidecar_load) {
+                catalog_sidecar_load_payload = {};
+                payload_loader.reset();
+                complete_catalog_sidecar(load_status.payload);
+                return true;
+            }
+
             if (lock(20)) {
                 payload_load_failed = load_status.payload;
                 payload_load_retry_at_ms =
@@ -1038,8 +1118,136 @@ struct ReportTask::Runtime {
         return true;
     }
 
+    void complete_catalog_sidecar(
+        const ReportArtifactPayloadDescriptor &payload) {
+        if (!(catalog_sidecar_pending == payload)) return;
+
+        catalog_sidecar_pending = {};
+        idle_payload_cursor++;
+    }
+
+    bool finish_payload_sidecar() {
+        const ReportPayloadSidecarStatus sidecar_status =
+            payload_sidecar.status();
+        if (!sidecar_status.terminal()) return false;
+
+        const PayloadSidecarPurpose purpose = sidecar_purpose;
+        const ReportArtifactPayloadDescriptor payload =
+            sidecar_status.payload;
+        const uint32_t generation = sidecar_generation;
+        std::shared_ptr<const LargeByteBuffer> bytes =
+            payload_sidecar.take_completed();
+        payload_sidecar.reset();
+        sidecar_purpose = PayloadSidecarPurpose::None;
+        sidecar_generation = 0;
+
+        if (purpose == PayloadSidecarPurpose::CachedPayload) {
+            if (sidecar_status.state == ReportPayloadSidecarState::Ready &&
+                bytes) {
+                (void)cache_deflated_payload(payload, std::move(bytes));
+            } else if (sidecar_status.state ==
+                       ReportPayloadSidecarState::NotBeneficial) {
+                (void)mark_payload_deflate_unavailable(payload);
+            } else {
+                (void)mark_payload_deflate_pending(payload);
+            }
+            return true;
+        }
+
+        if (purpose == PayloadSidecarPurpose::ForegroundPayload) {
+            if (sidecar_status.state == ReportPayloadSidecarState::Ready &&
+                bytes && cache_deflated_payload(payload, std::move(bytes))) {
+                return true;
+            }
+
+            ReportTaskCommand command;
+            command.kind = ReportTaskCommandKind::CacheArtifact;
+            command.artifact = payload.artifact.key;
+            command.payload = payload;
+            command.priority = ReportRequestPriority::Foreground;
+            command.generation = generation;
+            command.prefer_deflate = false;
+            (void)enqueue(command);
+            return true;
+        }
+
+        if (purpose == PayloadSidecarPurpose::CatalogPayload) {
+            if (sidecar_status.state == ReportPayloadSidecarState::Ready) {
+                if (bytes) {
+                    (void)cache_deflated_payload(payload, std::move(bytes));
+                }
+                complete_catalog_sidecar(payload);
+                return true;
+            }
+            if (sidecar_status.state ==
+                ReportPayloadSidecarState::NotBeneficial) {
+                complete_catalog_sidecar(payload);
+                return true;
+            }
+
+            const PayloadLoadStartResult started = start_payload_load(
+                payload, generation, StorageReadLane::Maintenance);
+            if (started == PayloadLoadStartResult::AlreadyCached) {
+                if (!mark_payload_deflate_pending(payload)) {
+                    complete_catalog_sidecar(payload);
+                }
+            } else if (started == PayloadLoadStartResult::Started) {
+                catalog_sidecar_load_payload = payload;
+            } else if (started == PayloadLoadStartResult::Busy) {
+                catalog_sidecar_pending = {};
+            } else {
+                complete_catalog_sidecar(payload);
+            }
+            return true;
+        }
+
+        if (purpose == PayloadSidecarPurpose::PersistPayload) {
+            complete_catalog_sidecar(payload);
+            return true;
+        }
+        return true;
+    }
+
+    bool start_pending_sidecar_lookup() {
+        if (sidecar_purpose != PayloadSidecarPurpose::None ||
+            payload_sidecar.status().active() ||
+            payload_loader.status().active() ||
+            payload_deflater.active() || payload_deflater.finished() ||
+            local_background_work_blocked()) {
+            return false;
+        }
+
+        ReportArtifactPayloadDescriptor payload;
+        if (!lock(20)) return false;
+        const bool pending =
+            payload_cache.next_deflate_lookup_candidate(payload);
+        unlock();
+        if (!pending) return false;
+
+        sidecar_generation = next_catalog_generation(
+            sidecar_generation_counter);
+        sidecar_generation_counter = sidecar_generation;
+        const OperationAdmission admitted = payload_sidecar.request_load(
+            payload,
+            sidecar_generation,
+            StorageReadLane::Maintenance,
+            true);
+        if (admitted == OperationAdmission::Accepted) {
+            sidecar_purpose = PayloadSidecarPurpose::CachedPayload;
+            return true;
+        }
+        if (admitted == OperationAdmission::Rejected) {
+            (void)mark_payload_deflate_pending(payload);
+            return true;
+        }
+        return false;
+    }
+
     bool start_pending_deflate() {
-        if (payload_deflater.active() || payload_deflater.finished()) {
+        if (payload_deflater.active() || payload_deflater.finished() ||
+            sidecar_purpose != PayloadSidecarPurpose::None ||
+            payload_sidecar.status().active() ||
+            local_background_work_blocked()) {
             return false;
         }
 
@@ -1061,22 +1269,44 @@ struct ReportTask::Runtime {
         if (!lock(20)) return false;
         (void)payload_cache.complete_deflate(payload, {});
         unlock();
+        complete_catalog_sidecar(payload);
         return true;
     }
 
     bool finish_payload_deflate() {
         if (!payload_deflater.finished()) return false;
-        if (!lock(20)) return false;
-
         const ReportArtifactPayloadDescriptor payload =
             payload_deflater.payload();
+        const ReportPayloadDeflateResult result =
+            payload_deflater.result();
         std::shared_ptr<const LargeByteBuffer> bytes =
             payload_deflater.take_completed();
+
+        if (!lock(20)) return false;
         (void)payload_cache.complete_deflate(
-            payload, std::move(bytes));
+            payload, bytes);
         unlock();
 
         payload_deflater.reset();
+        OperationAdmission admitted = OperationAdmission::Rejected;
+        sidecar_generation = next_catalog_generation(
+            sidecar_generation_counter);
+        sidecar_generation_counter = sidecar_generation;
+        if (result == ReportPayloadDeflateResult::Ready && bytes) {
+            admitted = payload_sidecar.request_save(
+                payload, std::move(bytes), sidecar_generation);
+        } else if (result ==
+                   ReportPayloadDeflateResult::NotBeneficial) {
+            admitted = payload_sidecar.request_save_not_beneficial(
+                payload, sidecar_generation);
+        }
+
+        if (admitted == OperationAdmission::Accepted) {
+            sidecar_purpose = PayloadSidecarPurpose::PersistPayload;
+        } else {
+            sidecar_generation = 0;
+            complete_catalog_sidecar(payload);
+        }
         return true;
     }
 
@@ -1162,6 +1392,54 @@ struct ReportTask::Runtime {
         return catalog
             ? std::min(catalog->size(), AC_REPORT_IDLE_WARM_NIGHTS)
             : 0;
+    }
+
+    bool catalog_payload_at(
+        const NightCatalogRecord &night,
+        size_t index,
+        ReportArtifactPayloadDescriptor &payload) const {
+        payload = {};
+        if (!artifact_index) return false;
+
+        const ReportArtifactIndexRecord *record =
+            artifact_index->find(night.sleep_day);
+        if (!record || record->source_revision != night.source_revision) {
+            return false;
+        }
+
+        ReportArtifactDescriptor artifact;
+        artifact.manifest_modified = record->manifest_modified;
+        if (index == 0) {
+            artifact.key = ReportArtifactKey::result(
+                record->sleep_day, record->source_revision);
+            artifact.size = record->result_size;
+            artifact.crc32 = record->result_crc32;
+        } else if (index == 1) {
+            artifact.key = ReportArtifactKey::overview(
+                record->sleep_day, record->source_revision);
+            artifact.size = record->overview_size;
+            artifact.crc32 = record->overview_crc32;
+            artifact.prefix_crc32 = record->overview_prefix_crc32;
+        } else {
+            size_t tile_count = 0;
+            const ReportRangeTileArtifact *tiles = artifact_index->tiles(
+                *record, tile_count);
+            const size_t tile_index = index - 2;
+            if (!tiles || tile_index >= tile_count) return false;
+
+            const ReportRangeTileArtifact &tile = tiles[tile_index];
+            artifact.key = ReportArtifactKey::range_tile(
+                record->sleep_day,
+                record->source_revision,
+                tile.start_ms,
+                tile.end_ms);
+            artifact.size = tile.size;
+            artifact.crc32 = tile.crc32;
+            artifact.prefix_crc32 = tile.prefix_crc32;
+        }
+
+        payload = ReportArtifactPayloadDescriptor::whole(artifact);
+        return payload.valid();
     }
 
     bool missing_range_tile_batch(
@@ -1281,6 +1559,7 @@ struct ReportTask::Runtime {
                     night->source_revision ==
                         completion.request.artifact.source_revision) {
                     idle_cursor++;
+                    idle_payload_cursor = 0;
                 }
                 unlock();
                 return;
@@ -1296,6 +1575,7 @@ struct ReportTask::Runtime {
                     night->source_revision ==
                         completion.request.artifact.source_revision) {
                     idle_cursor++;
+                    idle_payload_cursor = 0;
                     if (spool_availability_probe.status().state ==
                         ReportSpoolAvailabilityProbeState::Incomplete) {
                         idle_pass_failed = true;
@@ -1325,6 +1605,7 @@ struct ReportTask::Runtime {
                     idle_cursor = periodic_stall
                         ? idle_catalog_limit()
                         : idle_cursor + 1;
+                    idle_payload_cursor = 0;
                     idle_pass_failed = true;
                     if (idle_retry_at_ms == 0) {
                         idle_retry_at_ms = now_ms +
@@ -1431,6 +1712,14 @@ struct ReportTask::Runtime {
                 payload_loader.cancel();
             }
         }
+        if (payload_sidecar.status().active()) {
+            payload_sidecar.cancel();
+        }
+        payload_sidecar.reset();
+        sidecar_purpose = PayloadSidecarPurpose::None;
+        sidecar_generation = 0;
+        catalog_sidecar_pending = {};
+        catalog_sidecar_load_payload = {};
 
         if (lock(20)) {
             payload_cache.reconcile(*catalog);
@@ -1452,6 +1741,7 @@ struct ReportTask::Runtime {
         }
 
         idle_cursor = 0;
+        idle_payload_cursor = 0;
         idle_retry_at_ms = 0;
         idle_retry_attempt = 0;
         idle_pass_failed = false;
@@ -1471,18 +1761,26 @@ struct ReportTask::Runtime {
             if (!deadline_due(now_ms, idle_retry_at_ms)) return false;
 
             idle_cursor = 0;
+            idle_payload_cursor = 0;
             idle_retry_at_ms = 0;
             idle_pass_failed = false;
             return true;
         }
 
         const ReportEngineStatus engine_status = engine.status();
-        if (payload_loader.status().active()) return false;
+        if (payload_loader.status().active() ||
+            payload_sidecar.status().active() ||
+            sidecar_purpose != PayloadSidecarPurpose::None ||
+            payload_deflater.active() || payload_deflater.finished() ||
+            catalog_sidecar_pending.valid()) {
+            return false;
+        }
 
         const NightCatalogRecord *night = catalog->record(idle_cursor);
         if (!night || !night->sleep_day.valid() ||
             !night->source_revision.valid()) {
             idle_cursor++;
+            idle_payload_cursor = 0;
             command_failures++;
             return true;
         }
@@ -1494,35 +1792,10 @@ struct ReportTask::Runtime {
             night->sleep_day, night->source_revision);
         ReportArtifactAvailability available;
         if (artifact_index && artifact_index->availability(result, available)) {
-            const bool payload_warm_available =
-                engine_status.state == ReportEngineState::Idle &&
-                engine_status.queued == 0;
-            if (idle_cursor < idle_warm_limit() &&
-                payload_warm_available) {
-                const ReportArtifactDescriptor candidates[] = {
-                    available.result,
-                    available.overview,
-                };
-                for (const ReportArtifactDescriptor &candidate : candidates) {
-                    const ReportArtifactPayloadDescriptor payload =
-                        ReportArtifactPayloadDescriptor::whole(candidate);
-                    if (!candidate.valid() || payload_cached(payload) ||
-                        payload_load_suppressed(payload, now_ms)) {
-                        continue;
-                    }
-
-                    const PayloadLoadStartResult started = start_payload_load(
-                        candidate.key,
-                        idle_generation,
-                        StorageReadLane::Maintenance);
-                    if (started == PayloadLoadStartResult::Started) return true;
-                    if (started == PayloadLoadStartResult::Busy) return false;
-                }
-            }
-
             ReportArtifactKey first_missing;
             uint8_t missing_count = 0;
-            if (missing_range_tile_batch(
+            if (idle_payload_cursor >= 2 &&
+                missing_range_tile_batch(
                     *night, first_missing, missing_count)) {
                 if (engine_status.state != ReportEngineState::Idle ||
                     engine_status.queued != 0) {
@@ -1540,23 +1813,66 @@ struct ReportTask::Runtime {
                 }
                 if (queued.status == ReportRequestEnqueueStatus::Invalid) {
                     idle_cursor++;
+                    idle_payload_cursor = 0;
                     command_failures++;
                 }
                 return true;
             }
 
-            idle_cursor++;
+            ReportArtifactPayloadDescriptor payload;
+            if (!catalog_payload_at(*night, idle_payload_cursor, payload)) {
+                idle_cursor++;
+                idle_payload_cursor = 0;
+                return true;
+            }
+
+            const bool warm_payload = idle_cursor < idle_warm_limit() &&
+                idle_payload_cursor < 2;
+            if (payload.size < AC_REPORT_HTTP_DEFLATE_MIN_BYTES) {
+                if (!warm_payload || payload_cached(payload)) {
+                    idle_payload_cursor++;
+                    return true;
+                }
+
+                const PayloadLoadStartResult started = start_payload_load(
+                    payload, idle_generation, StorageReadLane::Maintenance);
+                if (started == PayloadLoadStartResult::Busy) return false;
+
+                idle_payload_cursor++;
+                return true;
+            }
+            if (payload_deflate_cached(payload)) {
+                idle_payload_cursor++;
+                return true;
+            }
+
+            const OperationAdmission admitted = payload_sidecar.request_load(
+                payload,
+                idle_generation,
+                StorageReadLane::Maintenance,
+                warm_payload);
+            if (admitted == OperationAdmission::Busy) return false;
+            if (admitted == OperationAdmission::Rejected) {
+                idle_payload_cursor++;
+                return true;
+            }
+
+            sidecar_purpose = PayloadSidecarPurpose::CatalogPayload;
+            sidecar_generation = idle_generation;
+            catalog_sidecar_pending = payload;
             return true;
         }
 
         if ((night->source_flags &
              NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0) {
             idle_cursor++;
+            idle_payload_cursor = 0;
             return true;
         }
         if (!rpc_available &&
             (night->source_flags & NIGHT_CATALOG_SOURCE_EDF) == 0) {
             idle_cursor++;
+            idle_payload_cursor = 0;
             return true;
         }
 
@@ -1573,6 +1889,7 @@ struct ReportTask::Runtime {
 
         if (queued.status == ReportRequestEnqueueStatus::Invalid) {
             idle_cursor++;
+            idle_payload_cursor = 0;
             command_failures++;
         }
         return true;
@@ -1682,6 +1999,14 @@ struct ReportTask::Runtime {
         if (payload_status.active()) {
             out.operation = ReportTaskOperation::LoadingPayload;
             out.sleep_day = payload_status.payload.artifact.key.sleep_day;
+            return out;
+        }
+
+        const ReportPayloadSidecarStatus sidecar_status =
+            payload_sidecar.status();
+        if (sidecar_status.active()) {
+            out.operation = ReportTaskOperation::CompressingPayload;
+            out.sleep_day = sidecar_status.payload.artifact.key.sleep_day;
             return out;
         }
 
@@ -1878,7 +2203,10 @@ struct ReportTask::Runtime {
         next.foreground_active =
             foreground_command || next.engine.foreground_active ||
             (next.payload_load.active() &&
-             next.payload_load.lane == StorageReadLane::Foreground);
+             next.payload_load.lane == StorageReadLane::Foreground) ||
+            (payload_sidecar.status().active() &&
+             payload_sidecar.status().lane ==
+                 StorageReadLane::Foreground);
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -1922,6 +2250,7 @@ struct ReportTask::Runtime {
             static_cast<bool>(pending_built_bundle) ||
             spool_availability_probe.status().active() ||
             next.payload_load.active() || payload_deflater.active() ||
+            payload_sidecar.status().active() ||
             (next.state != ReportTaskState::Stopped &&
              next.state != ReportTaskState::Idle);
         next.operational = build_operational_status(next);
@@ -1936,6 +2265,7 @@ struct ReportTask::Runtime {
     ReportArtifactPayloadCache payload_cache;
     ReportArtifactPayloadLoader payload_loader;
     ReportPayloadDeflater payload_deflater;
+    ReportPayloadSidecarService payload_sidecar;
     std::shared_ptr<const ReportArtifactBundle> pending_built_bundle;
     ReportNightArtifactBuilder builder;
     ReportSummaryAcquisition summary_acquisition;
@@ -1969,10 +2299,16 @@ struct ReportTask::Runtime {
     uint32_t catalog_generation = 0;
     uint32_t durable_catalog_generation = 0;
     size_t idle_cursor = 0;
+    size_t idle_payload_cursor = 0;
     uint32_t idle_generation = 0x80000000u;
     uint32_t idle_retry_at_ms = 0;
     uint8_t idle_retry_attempt = 0;
     bool idle_pass_failed = false;
+    PayloadSidecarPurpose sidecar_purpose = PayloadSidecarPurpose::None;
+    ReportArtifactPayloadDescriptor catalog_sidecar_pending;
+    ReportArtifactPayloadDescriptor catalog_sidecar_load_payload;
+    uint32_t sidecar_generation = 0;
+    uint32_t sidecar_generation_counter = 0;
     uint32_t spool_availability_generation = 0;
     uint32_t spool_availability_retry_at_ms = 0;
     bool spool_availability_needed = true;
@@ -2061,6 +2397,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->payload_loader.begin(read_port);
+    runtime_->payload_sidecar.begin(read_port, write_port);
     runtime_->delete_port = &delete_port;
     runtime_->engine.begin(read_port,
                            write_port,
@@ -2136,7 +2473,8 @@ OperationAdmission ReportTask::request_artifact(
 
 OperationAdmission ReportTask::request_payload_cache(
     const ReportArtifactPayloadDescriptor &payload,
-    uint32_t generation) {
+    uint32_t generation,
+    bool prefer_deflate) {
     if (!runtime_ || !runtime_->initialized || !payload.valid() ||
         generation == 0) {
         return OperationAdmission::Rejected;
@@ -2148,12 +2486,14 @@ OperationAdmission ReportTask::request_payload_cache(
     command.payload = payload;
     command.priority = ReportRequestPriority::Foreground;
     command.generation = generation;
+    command.prefer_deflate = prefer_deflate;
     return runtime_->enqueue(command);
 }
 
 OperationAdmission ReportTask::request_payload_cache(
     const ReportArtifactKey &artifact,
-    uint32_t generation) {
+    uint32_t generation,
+    bool prefer_deflate) {
     const ReportArtifactQuery query = query_artifact(
         artifact.sleep_day,
         artifact.kind,
@@ -2165,7 +2505,8 @@ OperationAdmission ReportTask::request_payload_cache(
     }
     return request_payload_cache(
         ReportArtifactPayloadDescriptor::whole(query.descriptor),
-        generation);
+        generation,
+        prefer_deflate);
 }
 
 OperationAdmission ReportTask::request_catalog_refresh(
@@ -2484,6 +2825,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     const bool startup_idle_work_allowed =
         runtime.startup_idle_work_allowed(now_ms);
 
+    if (runtime.payload_sidecar.status().active()) {
+        worked = runtime.payload_sidecar.poll() || worked;
+    }
+    worked = runtime.finish_payload_sidecar() || worked;
+
     if (runtime.payload_loader.status().active()) {
         worked = runtime.payload_loader.poll() || worked;
     }
@@ -2494,13 +2840,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             AC_REPORT_DEFLATE_INPUT_CHUNK_BYTES) || worked;
     }
     worked = runtime.finish_payload_deflate() || worked;
+    worked = runtime.start_pending_sidecar_lookup() || worked;
     worked = runtime.start_pending_deflate() || worked;
 
     ReportTaskCommand command;
     const ReportArtifactPayloadLoadStatus command_payload_status =
         runtime.payload_loader.status();
     const bool cache_load_available =
-        !command_payload_status.active();
+        !command_payload_status.active() &&
+        !runtime.payload_sidecar.status().active();
     if (!command_payload_status.active() &&
         runtime.pop(command, cache_load_available)) {
         worked = true;
@@ -2555,6 +2903,28 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
             case ReportTaskCommandKind::CacheArtifact: {
                 worked = runtime.preempt_background_work() || worked;
+
+                if (command.prefer_deflate &&
+                    command.payload.size >=
+                        AC_REPORT_HTTP_DEFLATE_MIN_BYTES) {
+                    const OperationAdmission admitted =
+                        runtime.payload_sidecar.request_load(
+                            command.payload,
+                            command.generation,
+                            StorageReadLane::Foreground,
+                            true);
+                    if (admitted == OperationAdmission::Busy) {
+                        (void)runtime.enqueue(command);
+                        break;
+                    }
+                    if (admitted == OperationAdmission::Accepted) {
+                        runtime.sidecar_purpose =
+                            PayloadSidecarPurpose::ForegroundPayload;
+                        runtime.sidecar_generation = command.generation;
+                        break;
+                    }
+                }
+
                 const PayloadLoadStartResult started =
                     runtime.start_payload_load(
                         command.payload,

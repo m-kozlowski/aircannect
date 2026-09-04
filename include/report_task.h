@@ -217,10 +217,12 @@ public:
         uint8_t range_tile_count = 1);
     OperationAdmission request_payload_cache(
         const ReportArtifactPayloadDescriptor &payload,
-        uint32_t generation);
+        uint32_t generation,
+        bool prefer_deflate = false);
     OperationAdmission request_payload_cache(
         const ReportArtifactKey &artifact,
-        uint32_t generation);
+        uint32_t generation,
+        bool prefer_deflate = false);
     OperationAdmission request_catalog_refresh(
         bool current_offset_valid,
         int32_t current_offset_minutes,

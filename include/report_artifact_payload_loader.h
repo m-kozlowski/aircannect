@@ -45,6 +45,13 @@ public:
     OperationAdmission start(const ReportArtifactPayloadDescriptor &payload,
                              uint32_t generation,
                              StorageReadLane lane);
+    OperationAdmission start_encoded(
+        const ReportArtifactPayloadDescriptor &payload,
+        const char *path,
+        uint64_t source_offset,
+        size_t encoded_size,
+        uint32_t generation,
+        StorageReadLane lane);
     OperationAdmission start(const ReportArtifactDescriptor &artifact,
                              uint32_t generation,
                              StorageReadLane lane) {
@@ -75,9 +82,12 @@ private:
     StoragePreparedRead prepared_;
     uint32_t generation_ = 0;
     uint32_t crc_state_ = 0;
+    uint64_t source_offset_ = 0;
     size_t offset_ = 0;
     size_t chunk_length_ = 0;
     size_t chunk_copied_ = 0;
+    char source_path_[AC_STORAGE_PATH_MAX] = {};
+    bool verify_payload_ = true;
     StorageReadLane lane_ = StorageReadLane::Maintenance;
     ReportArtifactPayloadLoadStatus status_;
 };

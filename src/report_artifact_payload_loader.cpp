@@ -33,19 +33,48 @@ OperationAdmission ReportArtifactPayloadLoader::start(
     const ReportArtifactPayloadDescriptor &payload,
     uint32_t generation,
     StorageReadLane lane) {
+    char path[AC_STORAGE_PATH_MAX] = {};
+    if (!payload.valid() || !payload.artifact.path(path, sizeof(path))) {
+        return OperationAdmission::Rejected;
+    }
+
+    const OperationAdmission admitted = start_encoded(
+        payload,
+        path,
+        payload.offset,
+        payload.size,
+        generation,
+        lane);
+    if (admitted == OperationAdmission::Accepted) {
+        verify_payload_ = true;
+        crc_state_ = crc32_ieee_initial_state();
+    }
+    return admitted;
+}
+
+OperationAdmission ReportArtifactPayloadLoader::start_encoded(
+    const ReportArtifactPayloadDescriptor &payload,
+    const char *path,
+    uint64_t source_offset,
+    size_t encoded_size,
+    uint32_t generation,
+    StorageReadLane lane) {
     if (!read_port_) return OperationAdmission::Rejected;
     if (status_.active()) return OperationAdmission::Busy;
-    if (!payload.valid() || generation == 0) {
+    if (!payload.valid() || !path || !storage_user_path_valid(path) ||
+        encoded_size == 0 || generation == 0) {
         return OperationAdmission::Rejected;
     }
 
     reset();
-    buffer_ = LargeByteBuffer::allocate(payload.size);
+    buffer_ = LargeByteBuffer::allocate(encoded_size);
     if (!buffer_) return OperationAdmission::Rejected;
 
     generation_ = generation;
     lane_ = lane;
-    crc_state_ = crc32_ieee_initial_state();
+    source_offset_ = source_offset;
+    copy_cstr(source_path_, sizeof(source_path_), path);
+    verify_payload_ = false;
     status_.payload = payload;
     status_.lane = lane;
     status_.state = ReportArtifactPayloadLoadState::Submitting;
@@ -58,19 +87,13 @@ bool ReportArtifactPayloadLoader::submit_chunk() {
         return true;
     }
 
-    char path[AC_STORAGE_PATH_MAX] = {};
-    if (!status_.payload.artifact.path(path, sizeof(path))) {
-        fail("report_payload_path_invalid");
-        return true;
-    }
-
     chunk_length_ = std::min(
         buffer_->size() - offset_, AC_STORAGE_PREPARED_READ_MAX_BYTES);
     chunk_copied_ = 0;
 
     StorageReadCommand command;
-    command.path = path;
-    command.offset = status_.payload.offset + offset_;
+    command.path = source_path_;
+    command.offset = source_offset_ + offset_;
     command.length = chunk_length_;
     command.lane = lane_;
     command.generation = generation_;
@@ -134,8 +157,10 @@ bool ReportArtifactPayloadLoader::copy_chunk() {
         return true;
     }
 
-    crc_state_ = crc32_ieee_update_state(
-        crc_state_, destination, read.bytes);
+    if (verify_payload_) {
+        crc_state_ = crc32_ieee_update_state(
+            crc_state_, destination, read.bytes);
+    }
     chunk_copied_ += read.bytes;
     status_.bytes_loaded = offset_ + chunk_copied_;
     if (chunk_copied_ < chunk_length_) return true;
@@ -155,14 +180,15 @@ bool ReportArtifactPayloadLoader::copy_chunk() {
 }
 
 void ReportArtifactPayloadLoader::finish() {
-    bool valid = false;
-    if (status_.payload.kind == ReportPayloadKind::PlotIndex) {
+    bool valid = !verify_payload_;
+    if (verify_payload_ &&
+        status_.payload.kind == ReportPayloadKind::PlotIndex) {
         ReportPlotIndexView index;
         valid = report_plot_decode_prefix(
                     buffer_->data(), buffer_->size(), index) &&
                 index.total_size == status_.payload.artifact.size &&
                 index.prefix_crc32 == status_.payload.crc32;
-    } else {
+    } else if (verify_payload_) {
         valid = crc32_ieee_finish_state(crc_state_) ==
                 status_.payload.crc32;
     }
@@ -237,9 +263,12 @@ void ReportArtifactPayloadLoader::release_operation() {
     completed_.reset();
     generation_ = 0;
     crc_state_ = 0;
+    source_offset_ = 0;
     offset_ = 0;
     chunk_length_ = 0;
     chunk_copied_ = 0;
+    source_path_[0] = '\0';
+    verify_payload_ = true;
     lane_ = StorageReadLane::Maintenance;
 }
 

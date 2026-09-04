@@ -50,6 +50,8 @@ public:
 
     bool can_hold(const ReportArtifactPayloadDescriptor &payload) const;
     bool contains(const ReportArtifactPayloadDescriptor &payload) const;
+    bool contains_deflate(
+        const ReportArtifactPayloadDescriptor &payload) const;
     bool can_hold(const ReportArtifactDescriptor &artifact) const {
         return can_hold(ReportArtifactPayloadDescriptor::whole(artifact));
     }
@@ -82,6 +84,9 @@ public:
         bool prefer_deflate);
     bool insert(const ReportArtifactPayloadDescriptor &payload,
                 std::shared_ptr<const LargeByteBuffer> bytes);
+    bool insert_deflate(
+        const ReportArtifactPayloadDescriptor &payload,
+        std::shared_ptr<const LargeByteBuffer> bytes);
     bool insert(const ReportArtifactDescriptor &artifact,
                 std::shared_ptr<const LargeByteBuffer> bytes) {
         return insert(ReportArtifactPayloadDescriptor::whole(artifact),
@@ -94,6 +99,12 @@ public:
     bool next_deflate_candidate(
         ReportArtifactPayloadDescriptor &payload,
         std::shared_ptr<const LargeByteBuffer> &bytes) const;
+    bool next_deflate_lookup_candidate(
+        ReportArtifactPayloadDescriptor &payload) const;
+    bool mark_deflate_pending(
+        const ReportArtifactPayloadDescriptor &payload);
+    bool mark_deflate_unavailable(
+        const ReportArtifactPayloadDescriptor &payload);
     bool next_deflate_candidate(
         ReportArtifactDescriptor &artifact,
         std::shared_ptr<const LargeByteBuffer> &bytes) const;
@@ -116,6 +127,7 @@ public:
 
 private:
     enum class DeflateState : uint8_t {
+        Unchecked,
         Pending,
         Ready,
         Unavailable,
@@ -128,7 +140,9 @@ private:
         DeflateState deflate_state = DeflateState::Unavailable;
         uint64_t last_used = 0;
 
-        bool valid() const { return payload.valid() && bytes != nullptr; }
+        bool valid() const {
+            return payload.valid() && (bytes != nullptr || deflated != nullptr);
+        }
     };
 
     static bool same_descriptor(const ReportArtifactDescriptor &lhs,
@@ -156,6 +170,7 @@ private:
     void prepare_entry(Entry &entry,
                        const ReportArtifactPayloadDescriptor &payload,
                        std::shared_ptr<const LargeByteBuffer> bytes);
+    bool reserve(size_t wanted, size_t excluded = SIZE_MAX);
     uint64_t next_use();
 
     Entry entries_[AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY] = {};

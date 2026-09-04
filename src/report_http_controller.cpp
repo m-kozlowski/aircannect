@@ -560,7 +560,9 @@ void ReportHttpController::poll() {
             if (section.state == ReportArtifactQueryState::Ready) {
                 const OperationAdmission admitted =
                     report_task_->request_payload_cache(
-                        section.payload, next_generation());
+                        section.payload,
+                        next_generation(),
+                        entry.prefer_deflate);
                 if (admitted == OperationAdmission::Accepted) {
                     entry.payload = section.payload;
                     continue;
@@ -739,7 +741,7 @@ void ReportHttpController::queue_payload_response(
     }
 
     const OperationAdmission admitted = report_task_->request_payload_cache(
-        payload, next_generation());
+        payload, next_generation(), prefer_deflate);
     if (admitted != OperationAdmission::Accepted) {
         if (admitted == OperationAdmission::Busy) {
             send_preparing(request);

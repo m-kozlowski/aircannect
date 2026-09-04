@@ -8,6 +8,13 @@
 
 namespace aircannect {
 
+enum class ReportPayloadDeflateResult : uint8_t {
+    None,
+    Ready,
+    NotBeneficial,
+    Failed,
+};
+
 class ReportPayloadDeflater {
 public:
     ReportPayloadDeflater() = default;
@@ -24,6 +31,7 @@ public:
 
     bool active() const { return state_ == State::Compressing; }
     bool finished() const { return state_ == State::Finished; }
+    ReportPayloadDeflateResult result() const { return result_; }
     const ReportArtifactPayloadDescriptor &payload() const {
         return payload_;
     }
@@ -41,6 +49,7 @@ private:
     void release_compressor();
 
     State state_ = State::Idle;
+    ReportPayloadDeflateResult result_ = ReportPayloadDeflateResult::None;
     ReportArtifactPayloadDescriptor payload_;
     std::shared_ptr<const LargeByteBuffer> source_;
     std::unique_ptr<LargeByteBuffer> output_;
