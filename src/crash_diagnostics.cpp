@@ -7,6 +7,7 @@
 #include <esp_partition.h>
 #include <esp_rom_crc.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <sdkconfig.h>
 
 #include <algorithm>
@@ -26,6 +27,15 @@ static constexpr uint16_t RTC_PANIC_SCHEMA = 1;
 static constexpr uint32_t RTC_PANIC_CAPTURED = 1u << 0;
 static constexpr uint32_t RTC_BACKTRACE_CORRUPT = 1u << 1;
 static constexpr uint32_t RTC_BACKTRACE_CONTINUES = 1u << 2;
+static constexpr uint32_t RTC_PANIC_TASK_WDT = 1u << 3;
+static constexpr uint32_t RTC_DUMP_RELATION_KNOWN = 1u << 4;
+static constexpr uint32_t RTC_DUMP_RELATION_CURRENT = 1u << 5;
+static constexpr uint32_t RTC_ARM_MAGIC = 0x41524343u;
+static constexpr uint16_t RTC_ARM_SCHEMA = 1;
+static constexpr uint32_t RTC_ARM_FINGERPRINT_VALID = 1u << 0;
+static constexpr uint32_t RTC_ARM_TAIL_VALID = 1u << 1;
+static constexpr uint32_t RTC_WDT_MAGIC = 0x57444343u;
+static constexpr uint16_t RTC_WDT_SCHEMA = 1;
 
 struct RtcPanicRecord {
     uint32_t magic;
@@ -40,63 +50,152 @@ struct RtcPanicRecord {
     char firmware[AC_CRASH_FIRMWARE_VERSION_MAX];
 };
 
-RTC_NOINIT_ATTR RtcPanicRecord rtc_panic_record;
+struct RtcCrashArmRecord {
+    uint32_t magic;
+    uint16_t schema;
+    uint16_t size;
+    uint32_t checksum;
+    uint32_t flags;
+    uint32_t dump_size;
+    uint32_t dump_tail;
+    char firmware[AC_CRASH_FIRMWARE_VERSION_MAX];
+};
 
-uint32_t IRAM_ATTR rtc_record_checksum(RtcPanicRecord &record) {
+struct RtcTaskWatchdogRecord {
+    uint32_t magic;
+    uint16_t schema;
+    uint16_t size;
+    uint32_t checksum;
+    char detail[AC_CRASH_REASON_MAX];
+};
+
+RTC_NOINIT_ATTR RtcPanicRecord rtc_panic_record;
+RTC_NOINIT_ATTR RtcCrashArmRecord rtc_crash_arm_record;
+RTC_NOINIT_ATTR RtcTaskWatchdogRecord rtc_task_watchdog_record;
+DRAM_ATTR volatile bool rtc_task_watchdog_pending;
+
+struct FlashDumpFingerprint {
+    bool valid = false;
+    bool tail_valid = false;
+    uint32_t size = 0;
+    uint32_t tail = 0;
+};
+
+template <typename Record>
+uint32_t IRAM_ATTR rtc_record_checksum(Record &record) {
     const uint32_t saved = record.checksum;
     record.checksum = 0;
 
-    const size_t offset = offsetof(RtcPanicRecord, schema);
-    const uint32_t checksum = esp_rom_crc32_le(
+    const size_t offset = offsetof(Record, schema);
+    const uint32_t result = esp_rom_crc32_le(
         0,
         reinterpret_cast<const uint8_t *>(&record) + offset,
         sizeof(record) - offset);
     record.checksum = saved;
-    return checksum;
+    return result;
 }
 
-bool rtc_record_valid(RtcPanicRecord record) {
-    if (record.magic != RTC_PANIC_MAGIC ||
-        record.schema != RTC_PANIC_SCHEMA ||
-        record.size != sizeof(record)) {
+template <typename Record>
+bool rtc_record_valid(Record record, uint32_t magic, uint16_t schema) {
+    if (record.magic != magic || record.schema != schema ||
+        record.size != sizeof(Record)) {
         return false;
     }
 
     return record.checksum == rtc_record_checksum(record);
 }
 
-bool crash_reset_reason(esp_reset_reason_t reason) {
-    switch (reason) {
-        case ESP_RST_PANIC:
-        case ESP_RST_INT_WDT:
-        case ESP_RST_TASK_WDT:
-        case ESP_RST_WDT:
-        case ESP_RST_CPU_LOCKUP:
-            return true;
-        default:
-            return false;
-    }
+template <typename Record>
+void IRAM_ATTR finish_rtc_record(Record &record, uint32_t magic) {
+    record.checksum = rtc_record_checksum(record);
+    __asm__ __volatile__("memw" ::: "memory");
+    record.magic = magic;
+    __asm__ __volatile__("memw" ::: "memory");
 }
 
-void prepare_rtc_record() {
+void clear_rtc_panic_record() {
     rtc_panic_record.magic = 0;
     memset(&rtc_panic_record, 0, sizeof(rtc_panic_record));
     rtc_panic_record.schema = RTC_PANIC_SCHEMA;
     rtc_panic_record.size = sizeof(rtc_panic_record);
     rtc_panic_record.core = -1;
-    strncpy(rtc_panic_record.firmware, aircannect_version(),
-            sizeof(rtc_panic_record.firmware) - 1);
-    rtc_panic_record.checksum = rtc_record_checksum(rtc_panic_record);
+    finish_rtc_record(rtc_panic_record, RTC_PANIC_MAGIC);
 
-    __asm__ __volatile__("memw" ::: "memory");
-    rtc_panic_record.magic = RTC_PANIC_MAGIC;
+    memset(&rtc_task_watchdog_record, 0,
+           sizeof(rtc_task_watchdog_record));
+    rtc_task_watchdog_pending = false;
+}
+
+void IRAM_ATTR copy_rtc_text(char *out, size_t out_size, const char *text) {
+    if (!out || out_size == 0) return;
+
+    size_t i = 0;
+    if (text) {
+        while (i + 1 < out_size && text[i]) {
+            out[i] = text[i];
+            ++i;
+        }
+    }
+    out[i] = 0;
+    while (++i < out_size) out[i] = 0;
+}
+
+void IRAM_ATTR append_rtc_text(void *opaque, const char *text) {
+    auto *record = static_cast<RtcTaskWatchdogRecord *>(opaque);
+    if (!record || !text) return;
+
+    size_t used = 0;
+    while (used < sizeof(record->detail) && record->detail[used]) ++used;
+    size_t source = 0;
+    while (used + 1 < sizeof(record->detail) && text[source]) {
+        record->detail[used++] = text[source++];
+    }
+    record->detail[used] = 0;
+}
+
+const char *IRAM_ATTR armed_firmware() {
+    if (rtc_crash_arm_record.magic != RTC_ARM_MAGIC ||
+        rtc_crash_arm_record.schema != RTC_ARM_SCHEMA ||
+        rtc_crash_arm_record.size != sizeof(rtc_crash_arm_record)) {
+        return nullptr;
+    }
+    return rtc_crash_arm_record.firmware;
+}
+
+void IRAM_ATTR capture_rtc_task_watchdog() {
+    rtc_task_watchdog_pending = true;
+
+    rtc_panic_record.magic = 0;
+    rtc_panic_record.schema = RTC_PANIC_SCHEMA;
+    rtc_panic_record.size = sizeof(rtc_panic_record);
+    rtc_panic_record.flags = RTC_PANIC_CAPTURED | RTC_PANIC_TASK_WDT;
+    rtc_panic_record.core = xPortGetCoreID();
+    rtc_panic_record.pc = 0;
+    rtc_panic_record.backtrace_depth = 0;
+    for (size_t i = 0; i < AC_CRASH_BACKTRACE_MAX; ++i) {
+        rtc_panic_record.backtrace[i] = 0;
+    }
+    copy_rtc_text(rtc_panic_record.firmware,
+                  sizeof(rtc_panic_record.firmware), armed_firmware());
+    finish_rtc_record(rtc_panic_record, RTC_PANIC_MAGIC);
+
+    rtc_task_watchdog_record.magic = 0;
+    rtc_task_watchdog_record.schema = RTC_WDT_SCHEMA;
+    rtc_task_watchdog_record.size = sizeof(rtc_task_watchdog_record);
+    rtc_task_watchdog_record.detail[0] = 0;
+    (void)esp_task_wdt_print_triggered_tasks(
+        append_rtc_text, &rtc_task_watchdog_record, nullptr);
+    finish_rtc_record(rtc_task_watchdog_record, RTC_WDT_MAGIC);
 }
 
 void IRAM_ATTR capture_rtc_panic(arduino_panic_info_t *info, void *) {
     if (!info) return;
 
     rtc_panic_record.magic = 0;
-    rtc_panic_record.flags = RTC_PANIC_CAPTURED;
+    rtc_panic_record.schema = RTC_PANIC_SCHEMA;
+    rtc_panic_record.size = sizeof(rtc_panic_record);
+    rtc_panic_record.flags = RTC_PANIC_CAPTURED |
+        (rtc_task_watchdog_pending ? RTC_PANIC_TASK_WDT : 0);
     if (info->backtrace_corrupt) {
         rtc_panic_record.flags |= RTC_BACKTRACE_CORRUPT;
     }
@@ -120,9 +219,12 @@ void IRAM_ATTR capture_rtc_panic(arduino_panic_info_t *info, void *) {
         rtc_panic_record.backtrace[i] = 0;
     }
 
-    rtc_panic_record.checksum = rtc_record_checksum(rtc_panic_record);
-    __asm__ __volatile__("memw" ::: "memory");
-    rtc_panic_record.magic = RTC_PANIC_MAGIC;
+    copy_rtc_text(rtc_panic_record.firmware,
+                  sizeof(rtc_panic_record.firmware), armed_firmware());
+    if (!rtc_task_watchdog_pending) {
+        rtc_task_watchdog_record.magic = 0;
+    }
+    finish_rtc_record(rtc_panic_record, RTC_PANIC_MAGIC);
 }
 
 void copy_text(char *out, size_t out_size, const char *text) {
@@ -138,11 +240,23 @@ void copy_error(char *out, size_t out_size, esp_err_t error) {
     copy_text(out, out_size, esp_err_to_name(error));
 }
 
+bool crash_reset_reason(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_PANIC:
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+        case ESP_RST_CPU_LOCKUP:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void import_rtc_snapshot(CrashDiagnosticsSnapshot &out) {
     const RtcPanicRecord retained = rtc_panic_record;
-    if (!rtc_record_valid(retained) ||
-        !(retained.flags & RTC_PANIC_CAPTURED) ||
-        !crash_reset_reason(esp_reset_reason())) {
+    if (!rtc_record_valid(retained, RTC_PANIC_MAGIC, RTC_PANIC_SCHEMA) ||
+        !(retained.flags & RTC_PANIC_CAPTURED)) {
         return;
     }
 
@@ -159,9 +273,103 @@ void import_rtc_snapshot(CrashDiagnosticsSnapshot &out) {
         retained.flags & RTC_BACKTRACE_CORRUPT;
     out.rtc_backtrace_continues =
         retained.flags & RTC_BACKTRACE_CONTINUES;
+    out.rtc_task_watchdog = retained.flags & RTC_PANIC_TASK_WDT;
+    if (retained.flags & RTC_DUMP_RELATION_KNOWN) {
+        out.dump_relation = retained.flags & RTC_DUMP_RELATION_CURRENT
+                                ? CrashDumpRelation::Current
+                                : CrashDumpRelation::Stale;
+    }
+
+    const RtcTaskWatchdogRecord watchdog = rtc_task_watchdog_record;
+    if (out.rtc_task_watchdog &&
+        rtc_record_valid(watchdog, RTC_WDT_MAGIC, RTC_WDT_SCHEMA)) {
+        copy_text(out.rtc_detail, sizeof(out.rtc_detail), watchdog.detail);
+    }
+}
+
+FlashDumpFingerprint read_dump_fingerprint(
+    const esp_partition_t *partition) {
+    FlashDumpFingerprint fingerprint;
+    if (!partition ||
+        esp_partition_read(partition, 0, &fingerprint.size,
+                           sizeof(fingerprint.size)) != ESP_OK) {
+        return fingerprint;
+    }
+
+    fingerprint.valid = true;
+    if (fingerprint.size == UINT32_MAX ||
+        fingerprint.size < sizeof(uint32_t) ||
+        fingerprint.size > partition->size) {
+        return fingerprint;
+    }
+
+    fingerprint.tail_valid = esp_partition_read(
+        partition, fingerprint.size - sizeof(fingerprint.tail),
+        &fingerprint.tail, sizeof(fingerprint.tail)) == ESP_OK;
+    return fingerprint;
+}
+
+bool fingerprint_matches_arm(
+    const FlashDumpFingerprint &fingerprint,
+    const RtcCrashArmRecord &arm) {
+    if (!fingerprint.valid ||
+        !(arm.flags & RTC_ARM_FINGERPRINT_VALID) ||
+        fingerprint.size != arm.dump_size) {
+        return false;
+    }
+    const bool arm_tail_valid = arm.flags & RTC_ARM_TAIL_VALID;
+    return fingerprint.tail_valid == arm_tail_valid &&
+        (!fingerprint.tail_valid || fingerprint.tail == arm.dump_tail);
+}
+
+void record_dump_relation(
+    CrashDiagnosticsSnapshot &snapshot,
+    const RtcCrashArmRecord &previous_arm,
+    const FlashDumpFingerprint &fingerprint) {
+    if (!snapshot.rtc_panic_available ||
+        snapshot.dump_relation != CrashDumpRelation::Unknown ||
+        !rtc_record_valid(previous_arm, RTC_ARM_MAGIC, RTC_ARM_SCHEMA) ||
+        !fingerprint.valid) {
+        return;
+    }
+
+    snapshot.dump_relation = fingerprint_matches_arm(
+        fingerprint, previous_arm)
+        ? CrashDumpRelation::Stale
+        : CrashDumpRelation::Current;
+    rtc_panic_record.magic = 0;
+    rtc_panic_record.flags |= RTC_DUMP_RELATION_KNOWN;
+    if (snapshot.dump_relation == CrashDumpRelation::Current) {
+        rtc_panic_record.flags |= RTC_DUMP_RELATION_CURRENT;
+    } else {
+        rtc_panic_record.flags &= ~RTC_DUMP_RELATION_CURRENT;
+    }
+    finish_rtc_record(rtc_panic_record, RTC_PANIC_MAGIC);
+}
+
+void arm_crash_capture(const FlashDumpFingerprint &fingerprint) {
+    rtc_crash_arm_record.magic = 0;
+    memset(&rtc_crash_arm_record, 0, sizeof(rtc_crash_arm_record));
+    rtc_crash_arm_record.schema = RTC_ARM_SCHEMA;
+    rtc_crash_arm_record.size = sizeof(rtc_crash_arm_record);
+    if (fingerprint.valid) {
+        rtc_crash_arm_record.flags |= RTC_ARM_FINGERPRINT_VALID;
+        rtc_crash_arm_record.dump_size = fingerprint.size;
+    }
+    if (fingerprint.tail_valid) {
+        rtc_crash_arm_record.flags |= RTC_ARM_TAIL_VALID;
+        rtc_crash_arm_record.dump_tail = fingerprint.tail;
+    }
+    copy_text(rtc_crash_arm_record.firmware,
+              sizeof(rtc_crash_arm_record.firmware), aircannect_version());
+    finish_rtc_record(rtc_crash_arm_record, RTC_ARM_MAGIC);
 }
 
 }  // namespace
+
+extern "C" void IRAM_ATTR esp_task_wdt_isr_user_handler(void) {
+    capture_rtc_task_watchdog();
+}
 
 const char *crash_dump_state_name(CrashDumpState state) {
     switch (state) {
@@ -173,9 +381,21 @@ const char *crash_dump_state_name(CrashDumpState state) {
     return "unknown";
 }
 
+const char *crash_dump_relation_name(CrashDumpRelation relation) {
+    switch (relation) {
+        case CrashDumpRelation::Unknown: return "unknown";
+        case CrashDumpRelation::Current: return "current";
+        case CrashDumpRelation::Stale: return "stale";
+    }
+    return "unknown";
+}
+
 bool CrashDiagnostics::begin() {
     import_rtc_snapshot(snapshot_);
-    prepare_rtc_record();
+    if (!rtc_record_valid(
+            rtc_panic_record, RTC_PANIC_MAGIC, RTC_PANIC_SCHEMA)) {
+        clear_rtc_panic_record();
+    }
     set_arduino_panic_handler(capture_rtc_panic, nullptr);
 
     if (!mutex_) {
@@ -184,7 +404,12 @@ bool CrashDiagnostics::begin() {
     if (!mutex_) return false;
 
     if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    const RtcCrashArmRecord previous_arm = rtc_crash_arm_record;
     refresh_dump_locked();
+    const FlashDumpFingerprint fingerprint = read_dump_fingerprint(
+        static_cast<const esp_partition_t *>(partition_));
+    record_dump_relation(snapshot_, previous_arm, fingerprint);
+    arm_crash_capture(fingerprint);
     xSemaphoreGive(mutex_);
     return true;
 }
@@ -198,10 +423,15 @@ void CrashDiagnostics::refresh_dump_locked() {
     const uint8_t rtc_depth = snapshot_.rtc_backtrace_depth;
     const bool rtc_corrupt = snapshot_.rtc_backtrace_corrupt;
     const bool rtc_continues = snapshot_.rtc_backtrace_continues;
+    const bool rtc_task_watchdog = snapshot_.rtc_task_watchdog;
+    const CrashDumpRelation dump_relation = snapshot_.dump_relation;
+    char rtc_detail[sizeof(snapshot_.rtc_detail)] = {};
     memcpy(rtc_firmware, snapshot_.rtc_firmware, sizeof(rtc_firmware));
     memcpy(rtc_backtrace, snapshot_.rtc_backtrace, sizeof(rtc_backtrace));
+    memcpy(rtc_detail, snapshot_.rtc_detail, sizeof(rtc_detail));
 
     snapshot_ = {};
+    snapshot_.dump_relation = dump_relation;
     snapshot_.rtc_panic_available = rtc_available;
     memcpy(snapshot_.rtc_firmware, rtc_firmware, sizeof(rtc_firmware));
     snapshot_.rtc_core = rtc_core;
@@ -210,6 +440,8 @@ void CrashDiagnostics::refresh_dump_locked() {
     memcpy(snapshot_.rtc_backtrace, rtc_backtrace, sizeof(rtc_backtrace));
     snapshot_.rtc_backtrace_corrupt = rtc_corrupt;
     snapshot_.rtc_backtrace_continues = rtc_continues;
+    snapshot_.rtc_task_watchdog = rtc_task_watchdog;
+    memcpy(snapshot_.rtc_detail, rtc_detail, sizeof(rtc_detail));
 
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA,
@@ -234,6 +466,7 @@ void CrashDiagnostics::refresh_dump_locked() {
         snapshot_.dump_state = CrashDumpState::Empty;
         return;
     }
+    snapshot_.dump_stored_size = stored_size;
 
     const esp_err_t check = esp_core_dump_image_check();
     if (check == ESP_ERR_NOT_FOUND) {
@@ -241,15 +474,6 @@ void CrashDiagnostics::refresh_dump_locked() {
         return;
     }
     if (check != ESP_OK) {
-        const bool corrupt_image =
-            check == ESP_ERR_INVALID_SIZE || check == ESP_ERR_INVALID_CRC;
-        const bool follows_crash =
-            crash_reset_reason(esp_reset_reason()) || rtc_available;
-        if (corrupt_image && !follows_crash) {
-            snapshot_.dump_state = CrashDumpState::Empty;
-            return;
-        }
-
         snapshot_.dump_state = CrashDumpState::Invalid;
         copy_error(snapshot_.dump_error, sizeof(snapshot_.dump_error), check);
         return;
@@ -361,7 +585,9 @@ bool CrashDiagnostics::clear(char *error, size_t error_size) {
 
     if (!partition_) {
         if (snapshot_.rtc_panic_available) {
-            snapshot_.rtc_panic_available = false;
+            clear_rtc_panic_record();
+            snapshot_ = {};
+            snapshot_.dump_state = CrashDumpState::Unsupported;
             xSemaphoreGive(mutex_);
             return true;
         }
@@ -378,8 +604,11 @@ bool CrashDiagnostics::clear(char *error, size_t error_size) {
         return false;
     }
 
-    snapshot_.rtc_panic_available = false;
+    clear_rtc_panic_record();
+    snapshot_ = {};
     refresh_dump_locked();
+    arm_crash_capture(read_dump_fingerprint(
+        static_cast<const esp_partition_t *>(partition_)));
     xSemaphoreGive(mutex_);
     return true;
 }
@@ -392,32 +621,48 @@ void CrashDiagnostics::log_previous_crash() const {
         Log::logf(
             CAT_GENERAL, LOG_WARN,
             "[CRASH] previous panic dump available task=%s reason=%s "
-            "pc=0x%08lx bytes=%u elf_sha=%s rtc=%s\n",
+            "pc=0x%08lx bytes=%u elf_sha=%s relation=%s rtc=%s\n",
             snapshot.task[0] ? snapshot.task : "--",
             snapshot.reason[0] ? snapshot.reason : "--",
             static_cast<unsigned long>(snapshot.exception_pc),
             static_cast<unsigned>(snapshot.dump_size),
             snapshot.elf_sha[0] ? snapshot.elf_sha : "--",
+            crash_dump_relation_name(snapshot.dump_relation),
             snapshot.rtc_panic_available ? "yes" : "no");
-        return;
+        if (!snapshot.rtc_panic_available ||
+            snapshot.dump_relation == CrashDumpRelation::Current) {
+            return;
+        }
     }
 
     if (snapshot.dump_state == CrashDumpState::Invalid) {
+        if (!snapshot.rtc_panic_available &&
+            !crash_reset_reason(esp_reset_reason())) {
+            return;
+        }
         Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CRASH] retained panic dump invalid error=%s rtc=%s\n",
+                  "[CRASH] retained panic dump invalid error=%s bytes=%u "
+                  "relation=%s rtc=%s\n",
                   snapshot.dump_error[0] ? snapshot.dump_error : "unknown",
+                  static_cast<unsigned>(snapshot.dump_stored_size),
+                  crash_dump_relation_name(snapshot.dump_relation),
                   snapshot.rtc_panic_available ? "yes" : "no");
-        return;
     }
 
     if (snapshot.rtc_panic_available) {
         Log::logf(CAT_GENERAL, LOG_WARN,
                   "[CRASH] previous panic breadcrumb available firmware=%s "
-                  "core=%d pc=0x%08lx backtrace_depth=%u\n",
+                  "source=%s core=%d pc=0x%08lx backtrace_depth=%u\n",
                   snapshot.rtc_firmware[0] ? snapshot.rtc_firmware : "--",
+                  snapshot.rtc_task_watchdog ? "task_watchdog" : "panic",
                   static_cast<int>(snapshot.rtc_core),
                   static_cast<unsigned long>(snapshot.rtc_pc),
                   static_cast<unsigned>(snapshot.rtc_backtrace_depth));
+        if (snapshot.rtc_detail[0]) {
+            Log::logf(CAT_GENERAL, LOG_WARN,
+                      "[CRASH] breadcrumb detail=%s\n",
+                      snapshot.rtc_detail);
+        }
     }
 }
 

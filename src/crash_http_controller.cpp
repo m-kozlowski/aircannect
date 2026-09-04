@@ -18,7 +18,7 @@ namespace aircannect {
 namespace {
 
 void append_hex_address(LargeTextBuffer &json, uint32_t address) {
-    char text[11] = {};
+    char text[13] = {};
     snprintf(text, sizeof(text), "\"0x%08lx\"",
              static_cast<unsigned long>(address));
     json += text;
@@ -30,7 +30,11 @@ bool build_status_json(const CrashDiagnosticsSnapshot &snapshot,
     json_add_bool(json, "ok", true, false);
     json_add_string(json, "state",
                     crash_dump_state_name(snapshot.dump_state));
+    json_add_string(json, "relation",
+                    crash_dump_relation_name(snapshot.dump_relation));
     json_add_int(json, "size", static_cast<long>(snapshot.dump_size));
+    json_add_int(json, "stored_size",
+                 static_cast<long>(snapshot.dump_stored_size));
     json_add_string(json, "error", snapshot.dump_error);
     json_add_bool(json, "summary_available", snapshot.summary_available);
 
@@ -57,6 +61,9 @@ bool build_status_json(const CrashDiagnosticsSnapshot &snapshot,
     json += ",\"rtc\":{";
     json_add_bool(json, "available", snapshot.rtc_panic_available, false);
     if (snapshot.rtc_panic_available) {
+        json_add_string(json, "source", snapshot.rtc_task_watchdog
+                                           ? "task_watchdog"
+                                           : "panic");
         json_add_string(json, "firmware", snapshot.rtc_firmware);
         json_add_int(json, "core", snapshot.rtc_core);
         json += ",\"pc\":";
@@ -65,6 +72,7 @@ bool build_status_json(const CrashDiagnosticsSnapshot &snapshot,
                       snapshot.rtc_backtrace_corrupt);
         json_add_bool(json, "backtrace_continues",
                       snapshot.rtc_backtrace_continues);
+        json_add_string(json, "detail", snapshot.rtc_detail);
         json += ",\"backtrace\":[";
         for (size_t i = 0; i < snapshot.rtc_backtrace_depth; ++i) {
             if (i) json += ',';

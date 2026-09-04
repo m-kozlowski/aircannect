@@ -25,11 +25,20 @@ enum class CrashDumpState : uint8_t {
     Invalid,
 };
 
+enum class CrashDumpRelation : uint8_t {
+    Unknown,
+    Current,
+    Stale,
+};
+
 const char *crash_dump_state_name(CrashDumpState state);
+const char *crash_dump_relation_name(CrashDumpRelation relation);
 
 struct CrashDiagnosticsSnapshot {
     CrashDumpState dump_state = CrashDumpState::Unsupported;
+    CrashDumpRelation dump_relation = CrashDumpRelation::Unknown;
     size_t dump_size = 0;
+    size_t dump_stored_size = 0;
     char dump_error[AC_CRASH_ERROR_MAX] = {};
 
     bool summary_available = false;
@@ -51,6 +60,8 @@ struct CrashDiagnosticsSnapshot {
     uint8_t rtc_backtrace_depth = 0;
     bool rtc_backtrace_corrupt = false;
     bool rtc_backtrace_continues = false;
+    bool rtc_task_watchdog = false;
+    char rtc_detail[AC_CRASH_REASON_MAX] = {};
 };
 
 class CrashDiagnostics {

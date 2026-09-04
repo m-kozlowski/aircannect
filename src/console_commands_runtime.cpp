@@ -92,13 +92,25 @@ bool CoreDiagnosticsConsoleCommands::execute(
         if (snapshot.dump_size) {
             out.print(" bytes=");
             out.print(static_cast<unsigned long>(snapshot.dump_size));
+        } else if (snapshot.dump_stored_size) {
+            out.print(" stored_bytes=");
+            out.print(static_cast<unsigned long>(snapshot.dump_stored_size));
         }
         if (snapshot.dump_error[0]) {
             out.print(" error=");
             out.print(snapshot.dump_error);
         }
+        out.print(" relation=");
+        out.print(crash_dump_relation_name(snapshot.dump_relation));
         out.print(" rtc=");
-        out.println(snapshot.rtc_panic_available ? "available" : "empty");
+        out.print(snapshot.rtc_panic_available ? "available" : "empty");
+        if (snapshot.rtc_panic_available) {
+            out.print(" source=");
+            out.print(snapshot.rtc_task_watchdog
+                          ? "task_watchdog"
+                          : "panic");
+        }
+        out.println();
 
         if (rest != "summary") return true;
 
@@ -141,6 +153,11 @@ bool CoreDiagnosticsConsoleCommands::execute(
             out.print(snapshot.rtc_backtrace_corrupt ? "yes" : "no");
             out.print(" continues=");
             out.println(snapshot.rtc_backtrace_continues ? "yes" : "no");
+
+            if (snapshot.rtc_detail[0]) {
+                out.print("[CRASH RTC] detail=");
+                out.println(snapshot.rtc_detail);
+            }
 
             out.print("[CRASH RTC] backtrace=");
             for (size_t i = 0; i < snapshot.rtc_backtrace_depth; ++i) {
