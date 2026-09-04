@@ -1,7 +1,9 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
+#include "report_range_tile.h"
 #include "sleep_day_id.h"
 
 namespace aircannect {
@@ -32,6 +34,13 @@ enum class ReportArtifactKind : uint8_t {
     Overview,
     RangeTile,
 };
+
+constexpr bool report_artifact_batch_count_valid(ReportArtifactKind kind,
+                                                  size_t count) {
+    return kind == ReportArtifactKind::RangeTile
+        ? count > 0 && count <= REPORT_RANGE_TILE_BATCH_MAX
+        : count == 1;
+}
 
 struct ReportArtifactKey {
     SleepDayId sleep_day;

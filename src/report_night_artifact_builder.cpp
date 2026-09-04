@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <math.h>
+#include <new>
 #include <utility>
 
 #include "board_report.h"
@@ -9,6 +10,7 @@
 #include "large_object.h"
 #include "memory_manager.h"
 #include "report_plot_accumulator.h"
+#include "report_records.h"
 
 namespace aircannect {
 namespace {
@@ -225,11 +227,19 @@ struct ReportNightArtifactBuilder::Runtime {
     int64_t plot_start_ms = 0;
     int64_t plot_end_ms = 0;
     ReportPlotAccumulator plot;
+    ReportPlotAccumulator *tile_plots = nullptr;
+    size_t tile_plot_count = 0;
     bool active = false;
     std::shared_ptr<const ReportArtifactBundle> completed;
 
     void clear_work() {
         plot.clear();
+        for (size_t i = 0; i < tile_plot_count; ++i) {
+            tile_plots[i].~ReportPlotAccumulator();
+        }
+        Memory::free(tile_plots);
+        tile_plots = nullptr;
+        tile_plot_count = 0;
         Memory::free(session_ranges);
         session_ranges = nullptr;
         session_count = 0;
@@ -262,7 +272,9 @@ bool ReportNightArtifactBuilder::begin_build(
     runtime_->completed.reset();
     if (!request.ticket.valid() || request.artifact != plan.key() ||
         (request.artifact.kind != ReportArtifactKind::Result &&
-         !valid_tile_key(request.artifact))) {
+         !valid_tile_key(request.artifact)) ||
+        !report_artifact_batch_count_valid(
+            request.artifact.kind, request.range_tile_count)) {
         failure_reason_ = "report_builder_request_invalid";
         return false;
     }
@@ -302,22 +314,50 @@ bool ReportNightArtifactBuilder::begin_build(
         }
     } else {
         runtime_->plot_start_ms = request.artifact.range_start_ms;
-        runtime_->plot_end_ms = request.artifact.range_end_ms;
+        runtime_->plot_end_ms = request.artifact.range_end_ms +
+            static_cast<int64_t>(request.range_tile_count - 1) *
+                REPORT_RANGE_TILE_MS;
     }
 
-    const size_t bucket_budget =
-        request.artifact.kind == ReportArtifactKind::Result
-            ? AC_REPORT_PLOT_BUCKETS
-            : AC_REPORT_RANGE_PLOT_BUCKETS;
-    if (!runtime_->plot.begin(plan,
-                              runtime_->plot_start_ms,
-                              runtime_->plot_end_ms,
-                              bucket_budget,
-                              request.artifact.kind ==
-                                  ReportArtifactKind::Result)) {
-        failure_reason_ = runtime_->plot.failure_reason();
-        runtime_->clear_work();
-        return false;
+    if (request.artifact.kind == ReportArtifactKind::Result) {
+        if (!runtime_->plot.begin(plan,
+                                  runtime_->plot_start_ms,
+                                  runtime_->plot_end_ms,
+                                  AC_REPORT_PLOT_BUCKETS,
+                                  true)) {
+            failure_reason_ = runtime_->plot.failure_reason();
+            runtime_->clear_work();
+            return false;
+        }
+    } else {
+        runtime_->tile_plots = static_cast<ReportPlotAccumulator *>(
+            Memory::calloc_large(request.range_tile_count,
+                                 sizeof(ReportPlotAccumulator),
+                                 false));
+        if (!runtime_->tile_plots) {
+            failure_reason_ = "report_builder_tiles_allocation_failed";
+            runtime_->clear_work();
+            return false;
+        }
+
+        for (size_t i = 0; i < request.range_tile_count; ++i) {
+            new (&runtime_->tile_plots[i]) ReportPlotAccumulator();
+            runtime_->tile_plot_count++;
+
+            const int64_t tile_start = runtime_->plot_start_ms +
+                static_cast<int64_t>(i) * REPORT_RANGE_TILE_MS;
+            if (!runtime_->tile_plots[i].begin(
+                    plan,
+                    tile_start,
+                    tile_start + REPORT_RANGE_TILE_MS,
+                    AC_REPORT_RANGE_PLOT_BUCKETS,
+                    false)) {
+                failure_reason_ =
+                    runtime_->tile_plots[i].failure_reason();
+                runtime_->clear_work();
+                return false;
+            }
+        }
     }
 
     runtime_->active = true;
@@ -332,8 +372,25 @@ bool ReportNightArtifactBuilder::accept_series(
         failure_reason_ = "report_builder_series_context_invalid";
         return false;
     }
-    if (!runtime_->plot.accept_series(session_index, series, sample)) {
-        failure_reason_ = runtime_->plot.failure_reason();
+    ReportPlotAccumulator *plot = &runtime_->plot;
+    if (runtime_->request.artifact.kind == ReportArtifactKind::RangeTile) {
+        if (sample.timestamp_ms < runtime_->plot_start_ms ||
+            sample.timestamp_ms >= runtime_->plot_end_ms) {
+            failure_reason_ = "report_builder_series_outside_batch";
+            return false;
+        }
+
+        const size_t tile_index = static_cast<size_t>(
+            (sample.timestamp_ms - runtime_->plot_start_ms) /
+            REPORT_RANGE_TILE_MS);
+        if (tile_index >= runtime_->tile_plot_count) {
+            failure_reason_ = "report_builder_series_tile_invalid";
+            return false;
+        }
+        plot = &runtime_->tile_plots[tile_index];
+    }
+    if (!plot->accept_series(session_index, series, sample)) {
+        failure_reason_ = plot->failure_reason();
         return false;
     }
     return true;
@@ -346,9 +403,26 @@ bool ReportNightArtifactBuilder::accept_event(
         failure_reason_ = "report_builder_event_context_invalid";
         return false;
     }
-    if (!runtime_->plot.accept_event(session_index, event)) {
-        failure_reason_ = runtime_->plot.failure_reason();
-        return false;
+    if (runtime_->request.artifact.kind == ReportArtifactKind::Result) {
+        if (!runtime_->plot.accept_event(session_index, event)) {
+            failure_reason_ = runtime_->plot.failure_reason();
+            return false;
+        }
+        return true;
+    }
+
+    for (size_t i = 0; i < runtime_->tile_plot_count; ++i) {
+        const int64_t tile_start = runtime_->plot_start_ms +
+            static_cast<int64_t>(i) * REPORT_RANGE_TILE_MS;
+        if (!report_event_overlaps_window(
+                event, tile_start, tile_start + REPORT_RANGE_TILE_MS)) {
+            continue;
+        }
+        if (!runtime_->tile_plots[i].accept_event(
+                session_index, event)) {
+            failure_reason_ = runtime_->tile_plots[i].failure_reason();
+            return false;
+        }
     }
     return true;
 }
@@ -359,24 +433,44 @@ bool ReportNightArtifactBuilder::finish_build() {
         return false;
     }
 
-    ReportPlotAccumulatorSummary plot_summary;
-    std::shared_ptr<const LargeByteBuffer> plot =
-        runtime_->plot.finish(plot_summary);
-    if (!plot) {
-        failure_reason_ = runtime_->plot.failure_reason();
-        return false;
-    }
-
     std::shared_ptr<ReportArtifactBundle> bundle =
         std::make_shared<ReportArtifactBundle>();
     bundle->key = runtime_->request.artifact;
 
     if (bundle->key.kind == ReportArtifactKind::RangeTile) {
-        bundle->range_tile = std::move(plot);
-        bundle->range_tile_crc32 = crc32_ieee(
-            bundle->range_tile->data(), bundle->range_tile->size());
-        bundle->range_tile_prefix_crc32 = plot_summary.prefix_crc32;
+        bundle->range_tile_count = runtime_->tile_plot_count;
+        for (size_t i = 0; i < runtime_->tile_plot_count; ++i) {
+            ReportPlotAccumulatorSummary tile_summary;
+            std::shared_ptr<const LargeByteBuffer> plot =
+                runtime_->tile_plots[i].finish(tile_summary);
+            if (!plot) {
+                failure_reason_ =
+                    runtime_->tile_plots[i].failure_reason();
+                return false;
+            }
+
+            ReportRangeTilePayload &tile = bundle->range_tiles[i];
+            const int64_t tile_start = runtime_->plot_start_ms +
+                static_cast<int64_t>(i) * REPORT_RANGE_TILE_MS;
+            tile.key = ReportArtifactKey::range_tile(
+                bundle->key.sleep_day,
+                bundle->key.source_revision,
+                tile_start,
+                tile_start + REPORT_RANGE_TILE_MS);
+            tile.bytes = std::move(plot);
+            tile.crc32 = crc32_ieee(
+                tile.bytes->data(), tile.bytes->size());
+            tile.prefix_crc32 = tile_summary.prefix_crc32;
+        }
     } else {
+        ReportPlotAccumulatorSummary plot_summary;
+        std::shared_ptr<const LargeByteBuffer> plot =
+            runtime_->plot.finish(plot_summary);
+        if (!plot) {
+            failure_reason_ = runtime_->plot.failure_reason();
+            return false;
+        }
+
         ReportResultArtifactData result;
         result.key = bundle->key;
         result.day_start_ms = runtime_->plan->night().day_start_ms;

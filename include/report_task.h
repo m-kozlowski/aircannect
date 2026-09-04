@@ -213,7 +213,8 @@ public:
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
         uint32_t generation,
-        bool force_rebuild = false);
+        bool force_rebuild = false,
+        uint8_t range_tile_count = 1);
     OperationAdmission request_payload_cache(
         const ReportArtifactPayloadDescriptor &payload,
         uint32_t generation);

@@ -1,5 +1,7 @@
 #include "report_request_queue.h"
 
+#include <algorithm>
+
 namespace aircannect {
 
 ReportRequestQueue::ReportRequestQueue(ReportArtifactRequest *slots,
@@ -67,8 +69,13 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild) {
-    if (!artifact.valid() || generation == 0 || !slots_) return {};
+    bool force_rebuild,
+    uint8_t range_tile_count) {
+    if (!artifact.valid() || generation == 0 || !slots_ ||
+        !report_artifact_batch_count_valid(
+            artifact.kind, range_tile_count)) {
+        return {};
+    }
 
     bool replaced = false;
     const size_t existing = find_artifact(artifact);
@@ -79,11 +86,15 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
                 priority, request.priority);
             const bool rebuild_upgrade =
                 force_rebuild && !request.force_rebuild;
-            if (priority_upgrade || rebuild_upgrade) {
+            const bool range_upgrade =
+                range_tile_count > request.range_tile_count;
+            if (priority_upgrade || rebuild_upgrade || range_upgrade) {
                 request.ticket = next_ticket(generation);
                 if (priority_upgrade) request.priority = priority;
                 request.force_rebuild =
                     request.force_rebuild || force_rebuild;
+                request.range_tile_count = std::max(
+                    request.range_tile_count, range_tile_count);
                 request.ready_at_ms = 0;
                 request.attempts = 0;
                 return {ReportRequestEnqueueStatus::Replaced,
@@ -112,6 +123,7 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     request.ticket = next_ticket(generation);
     request.priority = priority;
     request.force_rebuild = force_rebuild;
+    request.range_tile_count = range_tile_count;
 
     return {replaced ? ReportRequestEnqueueStatus::Replaced
                      : ReportRequestEnqueueStatus::Queued,

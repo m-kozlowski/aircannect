@@ -57,6 +57,7 @@ OperationAdmission ReportArtifactStoreService::start(
     bundle_ = std::move(bundle);
     generation_ = generation;
     lane_ = lane;
+    range_tile_index_ = 0;
     status_ = {};
     status_.key = bundle_->key;
 
@@ -162,13 +163,22 @@ bool ReportArtifactStoreService::finish_manifest_read() {
         return true;
     }
 
-    ReportRangeTileArtifact tile;
-    tile.start_ms = bundle_->key.range_start_ms;
-    tile.end_ms = bundle_->key.range_end_ms;
-    tile.size = bundle_->range_tile->size();
-    tile.crc32 = bundle_->range_tile_crc32;
-    tile.prefix_crc32 = bundle_->range_tile_prefix_crc32;
-    manifest_bytes_ = ReportArtifactManifestCodec::add_tile(manifest, tile);
+    ReportRangeTileArtifact tiles[REPORT_RANGE_TILE_BATCH_MAX] = {};
+    for (size_t i = 0; i < bundle_->range_tile_count; ++i) {
+        const ReportRangeTilePayload *payload = bundle_->range_tile(i);
+        if (!payload) {
+            fail("report_artifact_tile_batch_invalid");
+            return true;
+        }
+
+        tiles[i].start_ms = payload->key.range_start_ms;
+        tiles[i].end_ms = payload->key.range_end_ms;
+        tiles[i].size = payload->bytes->size();
+        tiles[i].crc32 = payload->crc32;
+        tiles[i].prefix_crc32 = payload->prefix_crc32;
+    }
+    manifest_bytes_ = ReportArtifactManifestCodec::add_tiles(
+        manifest, tiles, bundle_->range_tile_count);
     if (!manifest_bytes_) {
         fail("report_artifact_manifest_update_failed");
         return true;
@@ -192,7 +202,11 @@ ReportArtifactStoreService::current_bytes() const {
             return bundle_->overview;
         case Phase::SubmitRangeTile:
         case Phase::WaitRangeTile:
-            return bundle_->range_tile;
+            if (const ReportRangeTilePayload *tile =
+                    bundle_->range_tile(range_tile_index_)) {
+                return tile->bytes;
+            }
+            return {};
         case Phase::SubmitManifest:
         case Phase::WaitManifest:
             return bundle_->key.kind == ReportArtifactKind::RangeTile
@@ -219,8 +233,12 @@ bool ReportArtifactStoreService::current_path(
                 bundle_->key, path, path_size);
         case Phase::SubmitRangeTile:
         case Phase::WaitRangeTile:
-            return report_artifact_tile_path(
-                bundle_->key, path, path_size);
+            if (const ReportRangeTilePayload *tile =
+                    bundle_->range_tile(range_tile_index_)) {
+                return report_artifact_tile_path(
+                    tile->key, path, path_size);
+            }
+            return false;
         case Phase::SubmitManifest:
         case Phase::WaitManifest:
             return report_artifact_manifest_path(
@@ -302,9 +320,19 @@ bool ReportArtifactStoreService::finish_current() {
             status_.state = ReportArtifactStoreState::PublishingOverview;
             break;
         case Phase::WaitOverview:
-        case Phase::WaitRangeTile:
             phase_ = Phase::SubmitManifest;
             status_.state = ReportArtifactStoreState::PublishingManifest;
+            break;
+        case Phase::WaitRangeTile:
+            range_tile_index_++;
+            if (range_tile_index_ < bundle_->range_tile_count) {
+                phase_ = Phase::SubmitRangeTile;
+                status_.state =
+                    ReportArtifactStoreState::PublishingRangeTile;
+            } else {
+                phase_ = Phase::SubmitManifest;
+                status_.state = ReportArtifactStoreState::PublishingManifest;
+            }
             break;
         case Phase::WaitManifest:
             status_.manifest_modified = completion.modified;
@@ -394,6 +422,7 @@ void ReportArtifactStoreService::clear_operation() {
     write_ticket_ = {};
     bundle_.reset();
     manifest_bytes_.reset();
+    range_tile_index_ = 0;
     generation_ = 0;
     lane_ = StorageAtomicWriteLane::Maintenance;
 }

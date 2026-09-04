@@ -13,6 +13,7 @@ struct ReportPlanRequest {
     ReportArtifactKey artifact;
     uint32_t signal_mask = 0;
     uint8_t event_mask = 0;
+    uint8_t range_tile_count = 1;
 
     bool valid() const;
 };

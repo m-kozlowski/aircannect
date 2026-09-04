@@ -52,7 +52,8 @@ public:
         size_t &count) const;
 
     bool availability(const ReportArtifactKey &request,
-                      ReportArtifactAvailability &out) const;
+                      ReportArtifactAvailability &out,
+                      uint8_t range_tile_count = 1) const;
 
 private:
     ReportArtifactIndex() = default;

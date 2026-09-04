@@ -45,7 +45,8 @@ private:
                        SleepDayId sleep_day,
                        ReportArtifactKind kind,
                        int64_t range_start_ms = 0,
-                       int64_t range_end_ms = 0);
+                       int64_t range_end_ms = 0,
+                       uint8_t range_tile_count = 1);
     void queue_payload_response(
         AsyncWebServerRequest *request,
         const ReportArtifactPayloadDescriptor &payload,

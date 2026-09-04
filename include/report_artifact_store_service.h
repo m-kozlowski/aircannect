@@ -90,6 +90,7 @@ private:
     OperationTicket write_ticket_;
     OperationTicket read_ticket_;
     StoragePreparedRead prepared_;
+    size_t range_tile_index_ = 0;
     uint32_t generation_ = 0;
     StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;
     Phase phase_ = Phase::Idle;

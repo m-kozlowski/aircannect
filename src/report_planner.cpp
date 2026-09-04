@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 
+#include "board_report.h"
 #include "checked_size.h"
 #include "large_scratch_array.h"
 #include "report_records.h"
@@ -48,16 +49,42 @@ bool add_count(size_t &total, size_t amount) {
     return CheckedSize::add_to(total, amount);
 }
 
-NightCatalogTimeRange requested_window(const ReportArtifactKey &artifact,
+bool requested_range(const ReportPlanRequest &request,
+                     NightCatalogTimeRange &range) {
+    range = {};
+    if (!request.artifact.valid() ||
+        !report_artifact_batch_count_valid(
+            request.artifact.kind, request.range_tile_count)) {
+        return false;
+    }
+
+    if (request.artifact.kind != ReportArtifactKind::RangeTile) {
+        return true;
+    }
+
+    const int64_t extra_tiles = request.range_tile_count - 1;
+    if (extra_tiles >
+        (INT64_MAX - request.artifact.range_end_ms) /
+            REPORT_RANGE_TILE_MS) {
+        return false;
+    }
+
+    range.start_ms = request.artifact.range_start_ms;
+    range.end_ms = request.artifact.range_end_ms +
+        extra_tiles * REPORT_RANGE_TILE_MS;
+    return range.valid();
+}
+
+NightCatalogTimeRange requested_window(const ReportPlanRequest &request,
                                        const NightCatalogTimeRange &session) {
-    if (artifact.kind != ReportArtifactKind::RangeTile) return session;
-    return night_catalog_intersection(
-        session, {artifact.range_start_ms, artifact.range_end_ms});
+    NightCatalogTimeRange range;
+    if (!requested_range(request, range) || !range.valid()) return session;
+    return night_catalog_intersection(session, range);
 }
 
 size_t requested_session_count(const NightCatalog &catalog,
                                const NightCatalogRecord &night,
-                               const ReportArtifactKey &artifact) {
+                               const ReportPlanRequest &request) {
     size_t catalog_session_count = 0;
     const NightCatalogTimeRange *sessions =
         catalog.sessions(night, catalog_session_count);
@@ -65,7 +92,7 @@ size_t requested_session_count(const NightCatalog &catalog,
 
     size_t count = 0;
     for (size_t i = 0; i < catalog_session_count; ++i) {
-        if (requested_window(artifact, sessions[i]).valid()) ++count;
+        if (requested_window(request, sessions[i]).valid()) ++count;
     }
     return count;
 }
@@ -421,7 +448,7 @@ bool select_sources(const ReportPlanRequest &request,
          catalog_session_index < catalog_session_count;
          ++catalog_session_index) {
         const NightCatalogTimeRange window =
-            requested_window(request.artifact, sessions[catalog_session_index]);
+            requested_window(request, sessions[catalog_session_index]);
         if (!window.valid()) continue;
         if (catalog_session_index > UINT16_MAX) return false;
 
@@ -795,13 +822,12 @@ bool count_event_operations(const ReportPlanRequest &request,
     for (size_t catalog_session = 0;
          catalog_session < catalog_session_count;
          ++catalog_session) {
-        if (!requested_window(request.artifact,
-                              sessions[catalog_session]).valid()) {
+        if (!requested_window(request, sessions[catalog_session]).valid()) {
             continue;
         }
 
         const NightCatalogTimeRange filter =
-            requested_window(request.artifact, sessions[catalog_session]);
+            requested_window(request, sessions[catalog_session]);
         const uint8_t fallback_mask = request.event_mask &
             ~edf_captured_events(request,
                                  catalog,
@@ -1077,7 +1103,7 @@ bool append_event_operations(const ReportPlanRequest &request,
          catalog_session < catalog_session_count;
          ++catalog_session) {
         const NightCatalogTimeRange filter =
-            requested_window(request.artifact, sessions[catalog_session]);
+            requested_window(request, sessions[catalog_session]);
         if (!filter.valid()) continue;
         const uint8_t fallback_mask = request.event_mask &
             ~edf_captured_events(request,
@@ -1302,7 +1328,7 @@ bool fill_sessions(const ReportPlanRequest &request,
          catalog_session < catalog_session_count;
          ++catalog_session) {
         const NightCatalogTimeRange window =
-            requested_window(request.artifact, sessions[catalog_session]);
+            requested_window(request, sessions[catalog_session]);
         if (!window.valid()) continue;
 
         if (plan_session >= plan_session_count) return false;
@@ -1419,7 +1445,8 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
 }  // namespace
 
 bool ReportPlanRequest::valid() const {
-    return artifact.valid() &&
+    NightCatalogTimeRange ignored;
+    return artifact.valid() && requested_range(*this, ignored) &&
            (signal_mask & ~report_signal_mask_all()) == 0 &&
            (event_mask & ~REPORT_EVENT_ALL) == 0;
 }
@@ -1444,7 +1471,7 @@ ReportPlanResult ReportPlanner::build(
     }
 
     const size_t session_count =
-        requested_session_count(*catalog, *night, request.artifact);
+        requested_session_count(*catalog, *night, request);
     if (session_count == SIZE_MAX || session_count > UINT16_MAX) {
         result.status = ReportPlanStatus::InvalidCatalog;
         return result;

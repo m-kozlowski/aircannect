@@ -199,21 +199,30 @@ ReportRequestEnqueueResult ReportEngine::request(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild) {
+    bool force_rebuild,
+    uint8_t range_tile_count) {
     const ReportArtifactKey canonical = build_key(artifact);
-    if (!canonical.valid() || generation == 0) return {};
+    if (!canonical.valid() || generation == 0 ||
+        !report_artifact_batch_count_valid(
+            canonical.kind, range_tile_count)) {
+        return {};
+    }
     if (catalog_ && !artifact_current(canonical)) return {};
 
     if (phase_ != ActivePhase::Idle &&
         same_build(active_request_.artifact, canonical)) {
         const bool rebuild_upgrade = active_request_.artifact == canonical &&
             force_rebuild && !active_request_.force_rebuild;
-        if (!rebuild_upgrade && active_request_.artifact == canonical &&
+        const bool batch_upgrade = active_request_.artifact == canonical &&
+            range_tile_count > active_request_.range_tile_count;
+        if (!rebuild_upgrade && !batch_upgrade &&
+            active_request_.artifact == canonical &&
             report_request_priority_higher(
                 priority, active_request_.priority)) {
             active_request_.priority = priority;
         }
-        if (!rebuild_upgrade && active_request_.artifact == canonical) {
+        if (!rebuild_upgrade && !batch_upgrade &&
+            active_request_.artifact == canonical) {
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     active_request_.ticket};
         }
@@ -221,7 +230,11 @@ ReportRequestEnqueueResult ReportEngine::request(
     }
 
     const ReportRequestEnqueueResult queued =
-        queue_.enqueue(canonical, priority, generation, force_rebuild);
+        queue_.enqueue(canonical,
+                       priority,
+                       generation,
+                       force_rebuild,
+                       range_tile_count);
     const bool accepted =
         queued.status != ReportRequestEnqueueStatus::Full &&
         queued.status != ReportRequestEnqueueStatus::Invalid;
@@ -235,7 +248,8 @@ ReportRequestEnqueueResult ReportEngine::request(
         active_request_.artifact,
         active_request_.priority,
         active_request_.ticket.generation,
-        active_request_.force_rebuild);
+        active_request_.force_rebuild,
+        active_request_.range_tile_count);
     if (restored.status != ReportRequestEnqueueStatus::Full &&
         restored.status != ReportRequestEnqueueStatus::Invalid) {
         cancel_active_work();
@@ -426,6 +440,8 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
     active_request_ = request;
     active_availability_ = {};
     active_availability_.request = request.artifact;
+    active_availability_.requested_range_tile_count =
+        request.range_tile_count;
 
     if (request.force_rebuild) {
         return start_build(request.artifact, now_ms);
@@ -434,7 +450,8 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
     const OperationAdmission admitted = lookup_.start(
         request.artifact,
         request.ticket.generation,
-        lookup_lane(request.priority));
+        lookup_lane(request.priority),
+        request.range_tile_count);
     if (admitted != OperationAdmission::Accepted) {
         complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::Ready,
@@ -470,6 +487,8 @@ bool ReportEngine::finish_lookup(uint32_t now_ms) {
             lookup_.reset();
             active_availability_ = {};
             active_availability_.request = active_request_.artifact;
+            active_availability_.requested_range_tile_count =
+                active_request_.range_tile_count;
             build_tile_after_pair_ =
                 active_request_.artifact.kind ==
                 ReportArtifactKind::RangeTile;
@@ -547,9 +566,17 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
 
     build_request_ = active_request_;
     build_request_.artifact = artifact;
+    build_request_.range_tile_count = artifact.kind ==
+            ReportArtifactKind::RangeTile
+        ? active_request_.range_tile_count
+        : 1;
 
     ReportPlanRequest plan_request;
     plan_request.artifact = artifact;
+    plan_request.range_tile_count = artifact.kind ==
+            ReportArtifactKind::RangeTile
+        ? active_request_.range_tile_count
+        : 1;
     plan_request.signal_mask = report_signal_mask_all();
     plan_request.event_mask = REPORT_EVENT_ALL;
 
@@ -570,6 +597,16 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     if (active_plan_->fallback_acquisition_allowed() &&
         (active_plan_->acquirable_signal_mask() != 0 ||
          active_plan_->missing_event_mask() != 0)) {
+        if (active_request_.priority !=
+                ReportRequestPriority::Foreground &&
+            active_request_.range_tile_count > 1) {
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_range_source_incomplete");
+            return true;
+        }
+
         if (active_request_.priority != ReportRequestPriority::Foreground &&
             !spool_availability_complete_) {
             complete_active(OperationOutcome::cancelled(),

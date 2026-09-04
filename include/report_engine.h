@@ -85,7 +85,8 @@ public:
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
         uint32_t generation,
-        bool force_rebuild = false);
+        bool force_rebuild = false,
+        uint8_t range_tile_count = 1);
     size_t cancel_background();
     void clear();
 

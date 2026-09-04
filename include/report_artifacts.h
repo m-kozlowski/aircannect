@@ -7,6 +7,7 @@
 #include "large_byte_buffer.h"
 #include "night_catalog.h"
 #include "report_artifact_key.h"
+#include "report_range_tile.h"
 
 namespace aircannect {
 
@@ -123,34 +124,47 @@ struct ReportArtifactDescriptor {
     bool path(char *out, size_t out_size) const;
 };
 
-struct ReportArtifactBundle {
+struct ReportRangeTilePayload {
     ReportArtifactKey key;
-    std::shared_ptr<const LargeByteBuffer> result;
-    std::shared_ptr<const LargeByteBuffer> overview;
-    std::shared_ptr<const LargeByteBuffer> range_tile;
-    std::shared_ptr<const LargeByteBuffer> manifest;
-    uint32_t result_crc32 = 0;
-    uint32_t overview_crc32 = 0;
-    uint32_t range_tile_crc32 = 0;
-    uint32_t overview_prefix_crc32 = 0;
-    uint32_t range_tile_prefix_crc32 = 0;
+    std::shared_ptr<const LargeByteBuffer> bytes;
+    uint32_t crc32 = 0;
+    uint32_t prefix_crc32 = 0;
 
     bool valid() const;
 };
 
+struct ReportArtifactBundle {
+    ReportArtifactKey key;
+    std::shared_ptr<const LargeByteBuffer> result;
+    std::shared_ptr<const LargeByteBuffer> overview;
+    std::shared_ptr<const LargeByteBuffer> manifest;
+    ReportRangeTilePayload range_tiles[REPORT_RANGE_TILE_BATCH_MAX];
+    size_t range_tile_count = 0;
+    uint32_t result_crc32 = 0;
+    uint32_t overview_crc32 = 0;
+    uint32_t overview_prefix_crc32 = 0;
+
+    bool valid() const;
+    const ReportRangeTilePayload *range_tile(size_t index) const;
+};
+
 struct ReportArtifactAvailability {
     ReportArtifactKey request;
+    uint8_t requested_range_tile_count = 1;
     ReportArtifactDescriptor result;
     ReportArtifactDescriptor overview;
-    ReportArtifactDescriptor range_tile;
+    ReportArtifactDescriptor range_tiles[REPORT_RANGE_TILE_BATCH_MAX];
+    size_t range_tile_count = 0;
 
     bool pair_ready() const;
     bool requested_ready() const;
+    const ReportArtifactDescriptor *range_tile(size_t index) const;
     bool descriptor(const ReportArtifactKey &key,
                     ReportArtifactDescriptor &out) const;
     bool load(const ReportArtifactManifestView &manifest,
               const ReportArtifactKey &requested,
-              uint64_t manifest_modified);
+              uint64_t manifest_modified,
+              uint8_t requested_range_tile_count = 1);
     bool merge(const ReportArtifactBundle &bundle,
                uint64_t manifest_modified);
 };
@@ -185,6 +199,10 @@ public:
     static std::shared_ptr<const LargeByteBuffer> add_tile(
         const ReportArtifactManifestView &manifest,
         const ReportRangeTileArtifact &tile);
+    static std::shared_ptr<const LargeByteBuffer> add_tiles(
+        const ReportArtifactManifestView &manifest,
+        const ReportRangeTileArtifact *tiles,
+        size_t tile_count);
     static bool decode(const uint8_t *bytes,
                        size_t length,
                        ReportArtifactManifestView &view);

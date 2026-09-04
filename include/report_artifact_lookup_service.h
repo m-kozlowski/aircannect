@@ -41,7 +41,8 @@ public:
     void begin(StorageReadPort &read_port);
     OperationAdmission start(const ReportArtifactKey &request,
                              uint32_t generation,
-                             StorageReadLane lane);
+                             StorageReadLane lane,
+                             uint8_t range_tile_count = 1);
     bool poll();
     void cancel();
     void reset();
@@ -63,6 +64,7 @@ private:
     OperationTicket ticket_;
     StoragePreparedRead prepared_;
     uint64_t manifest_modified_ = 0;
+    uint8_t range_tile_count_ = 1;
     StorageReadLane lane_ = StorageReadLane::Report;
     ReportArtifactLookupStatus status_;
     ReportArtifactAvailability availability_;

@@ -183,6 +183,23 @@ bool parse_positive_int64(AsyncWebServerRequest *request,
     return value > 0;
 }
 
+bool parse_range_tile_count(AsyncWebServerRequest *request,
+                            bool range_requested,
+                            uint8_t &count) {
+    count = 1;
+    if (!request || !request->hasArg("tiles")) return true;
+    if (!range_requested) return false;
+
+    int64_t parsed = 0;
+    if (!parse_positive_int64(request, "tiles", parsed) ||
+        parsed > static_cast<int64_t>(REPORT_RANGE_TILE_BATCH_MAX)) {
+        return false;
+    }
+
+    count = static_cast<uint8_t>(parsed);
+    return true;
+}
+
 bool format_artifact_etag(const ReportArtifactDescriptor &artifact,
                           char *out,
                           size_t out_size) {
@@ -677,7 +694,11 @@ void ReportHttpController::publish_completion() {
         snprintf(number,
                  sizeof(number),
                  "%lld",
-                 static_cast<long long>(artifact.range_end_ms));
+                 static_cast<long long>(
+                     artifact.range_end_ms +
+                     static_cast<int64_t>(
+                         completion.request.range_tile_count - 1) *
+                         REPORT_RANGE_TILE_MS));
         completion_json_ += ",\"to\":";
         completion_json_ += number;
     }
@@ -911,6 +932,7 @@ void ReportHttpController::send_plot(
     int64_t range_end_ms = 0;
     const bool range_requested =
         request->hasArg("from") || request->hasArg("to");
+    uint8_t range_tile_count = 1;
     if (range_requested) {
         if (!parse_positive_int64(request, "from", range_start_ms) ||
             !parse_positive_int64(request, "to", range_end_ms)) {
@@ -919,10 +941,20 @@ void ReportHttpController::send_plot(
         }
         kind = ReportArtifactKind::RangeTile;
     }
+    if (!parse_range_tile_count(
+            request, range_requested, range_tile_count)) {
+        send_json_error(request, 400, "bad_tile_count");
+        return;
+    }
 
     if (!request->hasArg("part")) {
         send_artifact(
-            request, sleep_day, kind, range_start_ms, range_end_ms);
+            request,
+            sleep_day,
+            kind,
+            range_start_ms,
+            range_end_ms,
+            range_tile_count);
         return;
     }
 
@@ -980,7 +1012,9 @@ void ReportHttpController::send_plot(
         const OperationAdmission admitted = report_task_->request_artifact(
             query.artifact,
             ReportRequestPriority::Foreground,
-            next_generation());
+            next_generation(),
+            false,
+            range_tile_count);
         if (admitted == OperationAdmission::Accepted) {
             send_preparing(request);
         } else {
@@ -1049,7 +1083,8 @@ void ReportHttpController::send_artifact(
     SleepDayId sleep_day,
     ReportArtifactKind kind,
     int64_t range_start_ms,
-    int64_t range_end_ms) {
+    int64_t range_end_ms,
+    uint8_t range_tile_count) {
     const ReportArtifactQuery query = report_task_->query_artifact(
         sleep_day, kind, range_start_ms, range_end_ms);
     if (query.state == ReportArtifactQueryState::Unavailable) {
@@ -1087,7 +1122,9 @@ void ReportHttpController::send_artifact(
         const OperationAdmission admitted = report_task_->request_artifact(
             query.artifact,
             ReportRequestPriority::Foreground,
-            next_generation());
+            next_generation(),
+            false,
+            range_tile_count);
         if (admitted == OperationAdmission::Accepted) {
             send_preparing(request);
         } else {

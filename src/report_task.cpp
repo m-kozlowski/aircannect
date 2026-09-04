@@ -79,6 +79,7 @@ struct ReportTaskCommand {
     ReportArtifactPayloadDescriptor payload;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
     bool force_rebuild = false;
+    uint8_t range_tile_count = 1;
     uint32_t generation = 0;
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
@@ -211,6 +212,9 @@ struct ReportTask::Runtime {
                 same_artifact_identity(queued.artifact, command.artifact)) {
                 command.force_rebuild =
                     command.force_rebuild || queued.force_rebuild;
+                command.range_tile_count = std::max(
+                    command.range_tile_count,
+                    queued.range_tile_count);
                 if (report_request_priority_higher(
                         queued.priority, command.priority)) {
                     command.priority = queued.priority;
@@ -850,14 +854,30 @@ struct ReportTask::Runtime {
         }
 
         if (bundle->key.kind == ReportArtifactKind::RangeTile) {
-            ReportArtifactDescriptor tile;
-            tile.key = bundle->key;
-            tile.size = bundle->range_tile->size();
-            tile.crc32 = bundle->range_tile_crc32;
-            tile.prefix_crc32 = bundle->range_tile_prefix_crc32;
-            return cache_payload_result(
-                ReportArtifactPayloadDescriptor::whole(tile),
-                bundle->range_tile);
+            bool cached_any = false;
+            for (size_t i = 0; i < bundle->range_tile_count; ++i) {
+                const ReportRangeTilePayload *payload =
+                    bundle->range_tile(i);
+                if (!payload) return PayloadCacheInsertResult::Rejected;
+
+                ReportArtifactDescriptor tile;
+                tile.key = payload->key;
+                tile.size = payload->bytes->size();
+                tile.crc32 = payload->crc32;
+                tile.prefix_crc32 = payload->prefix_crc32;
+
+                const PayloadCacheInsertResult inserted =
+                    cache_payload_result(
+                        ReportArtifactPayloadDescriptor::whole(tile),
+                        payload->bytes);
+                if (inserted == PayloadCacheInsertResult::Retry) {
+                    return inserted;
+                }
+                cached_any = cached_any ||
+                    inserted == PayloadCacheInsertResult::Cached;
+            }
+            return cached_any ? PayloadCacheInsertResult::Cached
+                              : PayloadCacheInsertResult::Rejected;
         }
         return PayloadCacheInsertResult::Rejected;
     }
@@ -1142,6 +1162,76 @@ struct ReportTask::Runtime {
             : 0;
     }
 
+    bool missing_range_tile_batch(
+        const NightCatalogRecord &night,
+        ReportArtifactKey &first_missing,
+        uint8_t &missing_count) const {
+        first_missing = {};
+        missing_count = 0;
+        if (!catalog || !artifact_index) return false;
+
+        size_t session_count = 0;
+        const NightCatalogTimeRange *sessions =
+            catalog->sessions(night, session_count);
+        if (!sessions || session_count == 0) return false;
+
+        int64_t first_ms = INT64_MAX;
+        int64_t last_ms = 0;
+        for (size_t i = 0; i < session_count; ++i) {
+            if (!sessions[i].valid()) return false;
+            first_ms = std::min(first_ms, sessions[i].start_ms);
+            last_ms = std::max(last_ms, sessions[i].end_ms);
+        }
+        if (first_ms <= 0 || last_ms <= first_ms) return false;
+
+        int64_t first_tile = first_ms - first_ms % REPORT_RANGE_TILE_MS;
+        const int64_t last_tile =
+            (last_ms - 1) - (last_ms - 1) % REPORT_RANGE_TILE_MS;
+        const int64_t maximum_span =
+            static_cast<int64_t>(ReportArtifactManifestCodec::MaxTiles) *
+            REPORT_RANGE_TILE_MS;
+        if (last_tile - first_tile >= maximum_span) {
+            first_tile = last_tile - maximum_span + REPORT_RANGE_TILE_MS;
+        }
+
+        for (int64_t tile_start = last_tile;
+             tile_start >= first_tile;
+             tile_start -= REPORT_RANGE_TILE_MS) {
+            const ReportArtifactKey candidate =
+                ReportArtifactKey::range_tile(
+                    night.sleep_day,
+                    night.source_revision,
+                    tile_start,
+                    tile_start + REPORT_RANGE_TILE_MS);
+            ReportArtifactAvailability available;
+            if (artifact_index->availability(candidate, available)) {
+                continue;
+            }
+
+            first_missing = candidate;
+            missing_count = 1;
+            while (missing_count < REPORT_RANGE_TILE_BATCH_MAX &&
+                   first_missing.range_start_ms > first_tile) {
+                const int64_t preceding_start =
+                    first_missing.range_start_ms - REPORT_RANGE_TILE_MS;
+                const ReportArtifactKey preceding =
+                    ReportArtifactKey::range_tile(
+                        night.sleep_day,
+                        night.source_revision,
+                        preceding_start,
+                        first_missing.range_start_ms);
+                if (artifact_index->availability(preceding, available)) {
+                    break;
+                }
+
+                first_missing = preceding;
+                ++missing_count;
+            }
+            return true;
+        }
+        return false;
+    }
+
     void observe_engine_completion(uint32_t now_ms) {
         const ReportEngineCompletion completion =
             engine.status().last_completion;
@@ -1179,6 +1269,21 @@ struct ReportTask::Runtime {
         }
         if (completion.request.priority !=
                 ReportRequestPriority::Foreground) {
+            if (strcmp(completion.error,
+                       "report_range_source_incomplete") == 0 &&
+                catalog && idle_cursor < idle_catalog_limit()) {
+                const NightCatalogRecord *night = catalog->record(idle_cursor);
+                if (night &&
+                    night->sleep_day ==
+                        completion.request.artifact.sleep_day &&
+                    night->source_revision ==
+                        completion.request.artifact.source_revision) {
+                    idle_cursor++;
+                }
+                unlock();
+                return;
+            }
+
             if (strcmp(completion.error,
                        "report_spool_availability_pending") == 0 &&
                 catalog && idle_cursor < idle_catalog_limit()) {
@@ -1411,6 +1516,31 @@ struct ReportTask::Runtime {
                     if (started == PayloadLoadStartResult::Started) return true;
                     if (started == PayloadLoadStartResult::Busy) return false;
                 }
+            }
+
+            ReportArtifactKey first_missing;
+            uint8_t missing_count = 0;
+            if (missing_range_tile_batch(
+                    *night, first_missing, missing_count)) {
+                if (engine_status.state != ReportEngineState::Idle ||
+                    engine_status.queued != 0) {
+                    return false;
+                }
+
+                const ReportRequestEnqueueResult queued = engine.request(
+                    first_missing,
+                    priority,
+                    idle_generation,
+                    false,
+                    missing_count);
+                if (queued.status == ReportRequestEnqueueStatus::Full) {
+                    return false;
+                }
+                if (queued.status == ReportRequestEnqueueStatus::Invalid) {
+                    idle_cursor++;
+                    command_failures++;
+                }
+                return true;
             }
 
             idle_cursor++;
@@ -1978,9 +2108,12 @@ OperationAdmission ReportTask::request_artifact(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild) {
+    bool force_rebuild,
+    uint8_t range_tile_count) {
     if (!runtime_ || !runtime_->initialized || !artifact.valid() ||
-        generation == 0) {
+        generation == 0 ||
+        !report_artifact_batch_count_valid(
+            artifact.kind, range_tile_count)) {
         return OperationAdmission::Rejected;
     }
 
@@ -1989,6 +2122,7 @@ OperationAdmission ReportTask::request_artifact(
     command.artifact = artifact;
     command.priority = priority;
     command.force_rebuild = force_rebuild;
+    command.range_tile_count = range_tile_count;
     command.generation = generation;
     return runtime_->enqueue(command);
 }
@@ -2373,7 +2507,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 ReportArtifactAvailability available;
                 if (!command.force_rebuild && runtime.artifact_index &&
                     runtime.artifact_index->availability(
-                        command.artifact, available)) {
+                        command.artifact,
+                        available,
+                        command.range_tile_count)) {
                     break;
                 }
 
@@ -2381,7 +2517,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.engine.request(command.artifact,
                                            command.priority,
                                            command.generation,
-                                           command.force_rebuild);
+                                           command.force_rebuild,
+                                           command.range_tile_count);
                 if (queued.status == ReportRequestEnqueueStatus::Full ||
                     queued.status == ReportRequestEnqueueStatus::Invalid) {
                     runtime.command_failures++;

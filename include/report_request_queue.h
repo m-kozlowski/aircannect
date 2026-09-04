@@ -24,6 +24,7 @@ struct ReportArtifactRequest {
     OperationTicket ticket;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
     bool force_rebuild = false;
+    uint8_t range_tile_count = 1;
     uint32_t ready_at_ms = 0;
     uint8_t attempts = 0;
 };
@@ -59,7 +60,8 @@ public:
     ReportRequestEnqueueResult enqueue(const ReportArtifactKey &artifact,
                                        ReportRequestPriority priority,
                                        uint32_t generation,
-                                       bool force_rebuild = false);
+                                       bool force_rebuild = false,
+                                       uint8_t range_tile_count = 1);
     ReportRequestSelection take_next(uint32_t now_ms,
                                      ReportArtifactRequest &request);
     OperationOutcome retry(ReportArtifactRequest request,

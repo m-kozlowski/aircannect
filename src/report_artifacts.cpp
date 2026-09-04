@@ -1,10 +1,12 @@
 #include "report_artifacts.h"
 
+#include <algorithm>
 #include <stdio.h>
 #include <string.h>
 
 #include "checked_size.h"
 #include "crc32.h"
+#include "large_scratch_array.h"
 #include "little_endian.h"
 #include "report_range_tile.h"
 
@@ -307,11 +309,37 @@ bool ReportArtifactManifestView::tile(
 bool ReportArtifactBundle::valid() const {
     if (!key.valid()) return false;
     if (key.kind == ReportArtifactKind::RangeTile) {
-        return range_tile && range_tile->size() > 0 &&
-               range_tile->size() <= UINT32_MAX;
+        if (range_tile_count == 0 ||
+            range_tile_count > REPORT_RANGE_TILE_BATCH_MAX ||
+            range_tiles[0].key != key) {
+            return false;
+        }
+        for (size_t i = 0; i < range_tile_count; ++i) {
+            if (!range_tiles[i].valid() ||
+                range_tiles[i].key.sleep_day != key.sleep_day ||
+                range_tiles[i].key.source_revision != key.source_revision ||
+                (i > 0 && range_tiles[i].key.range_start_ms !=
+                              range_tiles[i - 1].key.range_end_ms)) {
+                return false;
+            }
+        }
+        return true;
     }
-    return key_is_result(key) && result && result->size() > 0 && overview &&
-           overview->size() > 0 && manifest && manifest->size() > 0;
+    return range_tile_count == 0 && key_is_result(key) && result &&
+           result->size() > 0 && overview && overview->size() > 0 &&
+           manifest && manifest->size() > 0;
+}
+
+bool ReportRangeTilePayload::valid() const {
+    return key.kind == ReportArtifactKind::RangeTile && key.valid() && bytes &&
+           bytes->size() > 0 && bytes->size() <= UINT32_MAX;
+}
+
+const ReportRangeTilePayload *ReportArtifactBundle::range_tile(
+    size_t index) const {
+    return index < range_tile_count && range_tiles[index].valid()
+        ? &range_tiles[index]
+        : nullptr;
 }
 
 bool ReportArtifactDescriptor::valid() const {
@@ -345,7 +373,39 @@ bool ReportArtifactAvailability::pair_ready() const {
 bool ReportArtifactAvailability::requested_ready() const {
     if (!request.valid() || !pair_ready()) return false;
     if (request.kind != ReportArtifactKind::RangeTile) return true;
-    return range_tile.valid() && range_tile.key == request;
+
+    if (requested_range_tile_count == 0 ||
+        requested_range_tile_count > REPORT_RANGE_TILE_BATCH_MAX) {
+        return false;
+    }
+
+    for (size_t requested_index = 0;
+         requested_index < requested_range_tile_count;
+         ++requested_index) {
+        const int64_t offset = static_cast<int64_t>(requested_index) *
+            REPORT_RANGE_TILE_MS;
+        const ReportArtifactKey key = ReportArtifactKey::range_tile(
+            request.sleep_day,
+            request.source_revision,
+            request.range_start_ms + offset,
+            request.range_end_ms + offset);
+        bool found = false;
+        for (size_t i = 0; i < range_tile_count; ++i) {
+            if (range_tiles[i].valid() && range_tiles[i].key == key) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+const ReportArtifactDescriptor *ReportArtifactAvailability::range_tile(
+    size_t index) const {
+    return index < range_tile_count && range_tiles[index].valid()
+        ? &range_tiles[index]
+        : nullptr;
 }
 
 bool ReportArtifactAvailability::descriptor(
@@ -366,9 +426,13 @@ bool ReportArtifactAvailability::descriptor(
             out = overview;
             return true;
         case ReportArtifactKind::RangeTile:
-            if (range_tile.key != key || !range_tile.valid()) return false;
-            out = range_tile;
-            return true;
+            for (size_t i = 0; i < range_tile_count; ++i) {
+                if (range_tiles[i].valid() && range_tiles[i].key == key) {
+                    out = range_tiles[i];
+                    return true;
+                }
+            }
+            return false;
     }
     return false;
 }
@@ -376,15 +440,19 @@ bool ReportArtifactAvailability::descriptor(
 bool ReportArtifactAvailability::load(
     const ReportArtifactManifestView &manifest,
     const ReportArtifactKey &requested,
-    uint64_t manifest_modified) {
+    uint64_t manifest_modified,
+    uint8_t requested_tile_count) {
     *this = {};
     if (!requested.valid() || !key_is_result(manifest.key) ||
         manifest.key.sleep_day != requested.sleep_day ||
-        manifest.key.source_revision != requested.source_revision) {
+        manifest.key.source_revision != requested.source_revision ||
+        !report_artifact_batch_count_valid(
+            requested.kind, requested_tile_count)) {
         return false;
     }
 
     request = requested;
+    requested_range_tile_count = requested_tile_count;
     result.key = manifest.key;
     result.size = manifest.result_size;
     result.crc32 = manifest.result_crc32;
@@ -407,17 +475,32 @@ bool ReportArtifactAvailability::load(
             *this = {};
             return false;
         }
-        if (tile.start_ms != requested.range_start_ms ||
-            tile.end_ms != requested.range_end_ms) {
+        if (tile.start_ms < requested.range_start_ms ||
+            tile.end_ms <= requested.range_start_ms) {
             continue;
         }
 
-        range_tile.key = requested;
-        range_tile.size = tile.size;
-        range_tile.crc32 = tile.crc32;
-        range_tile.prefix_crc32 = tile.prefix_crc32;
-        range_tile.manifest_modified = manifest_modified;
-        break;
+        const int64_t offset = tile.start_ms - requested.range_start_ms;
+        if (offset < 0 || offset % REPORT_RANGE_TILE_MS != 0) continue;
+
+        const size_t requested_index = static_cast<size_t>(
+            offset / REPORT_RANGE_TILE_MS);
+        if (requested_index >= requested_tile_count ||
+            tile.end_ms != requested.range_end_ms + offset) {
+            continue;
+        }
+
+        ReportArtifactDescriptor &descriptor =
+            range_tiles[range_tile_count++];
+        descriptor.key = ReportArtifactKey::range_tile(
+            requested.sleep_day,
+            requested.source_revision,
+            tile.start_ms,
+            tile.end_ms);
+        descriptor.size = tile.size;
+        descriptor.crc32 = tile.crc32;
+        descriptor.prefix_crc32 = tile.prefix_crc32;
+        descriptor.manifest_modified = manifest_modified;
     }
     return true;
 }
@@ -444,19 +527,28 @@ bool ReportArtifactAvailability::merge(
         overview.manifest_modified = manifest_modified;
         return pair_ready();
     }
-    if (bundle.key.kind != ReportArtifactKind::RangeTile ||
-        bundle.key != request) {
+    if (bundle.key.kind != ReportArtifactKind::RangeTile) {
         return false;
     }
 
-    range_tile.key = bundle.key;
-    range_tile.size = bundle.range_tile->size();
-    range_tile.crc32 = bundle.range_tile_crc32;
-    range_tile.prefix_crc32 = bundle.range_tile_prefix_crc32;
+    range_tile_count = 0;
+    for (size_t i = 0; i < bundle.range_tile_count; ++i) {
+        const ReportRangeTilePayload *tile = bundle.range_tile(i);
+        if (!tile || range_tile_count >= REPORT_RANGE_TILE_BATCH_MAX) {
+            return false;
+        }
+
+        ReportArtifactDescriptor &descriptor =
+            range_tiles[range_tile_count++];
+        descriptor.key = tile->key;
+        descriptor.size = tile->bytes->size();
+        descriptor.crc32 = tile->crc32;
+        descriptor.prefix_crc32 = tile->prefix_crc32;
+        descriptor.manifest_modified = manifest_modified;
+    }
     result.manifest_modified = manifest_modified;
     overview.manifest_modified = manifest_modified;
-    range_tile.manifest_modified = manifest_modified;
-    return range_tile.valid();
+    return requested_ready();
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
@@ -637,33 +729,64 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
 std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
     const ReportArtifactManifestView &manifest,
     const ReportRangeTileArtifact &tile) {
+    return add_tiles(manifest, &tile, 1);
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tiles(
+    const ReportArtifactManifestView &manifest,
+    const ReportRangeTileArtifact *tiles,
+    size_t tile_count) {
     if (!key_is_result(manifest.key) || manifest.result_size == 0 ||
-        manifest.overview_size == 0 ||
-        !report_range_tile_artifact_valid(tile)) {
+        manifest.overview_size == 0 || tile_count == 0 || !tiles ||
+        tile_count > REPORT_RANGE_TILE_BATCH_MAX ||
+        manifest.tile_count > MaxTiles ||
+        manifest.tile_count > SIZE_MAX - tile_count) {
         return {};
     }
 
-    size_t insertion = manifest.tile_count;
-    bool replacing = false;
+    LargeScratchArray<ReportRangeTileArtifact> merged;
+    if (!merged.allocate(manifest.tile_count + tile_count)) return {};
+
     for (size_t i = 0; i < manifest.tile_count; ++i) {
         ReportRangeTileArtifact existing;
         if (!manifest.tile(i, existing)) return {};
-        if (existing.start_ms == tile.start_ms &&
-            existing.end_ms == tile.end_ms) {
-            insertion = i;
-            replacing = true;
-            break;
-        }
-        if (tile.start_ms < existing.start_ms ||
-            (tile.start_ms == existing.start_ms &&
-             tile.end_ms < existing.end_ms)) {
-            insertion = i;
-            break;
-        }
+        ReportRangeTileArtifact *slot = merged.append();
+        if (!slot) return {};
+        *slot = existing;
     }
 
-    const size_t tile_count = manifest.tile_count + (replacing ? 0 : 1);
-    if (tile_count > MaxTiles) return {};
+    for (size_t i = 0; i < tile_count; ++i) {
+        if (!report_range_tile_artifact_valid(tiles[i])) return {};
+
+        bool replaced = false;
+        for (size_t current = 0; current < merged.size(); ++current) {
+            if (merged.data()[current].start_ms == tiles[i].start_ms &&
+                merged.data()[current].end_ms == tiles[i].end_ms) {
+                merged.data()[current] = tiles[i];
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            ReportRangeTileArtifact *slot = merged.append();
+            if (!slot) return {};
+            *slot = tiles[i];
+        }
+    }
+    if (merged.size() > MaxTiles) return {};
+
+    std::sort(
+        merged.data(),
+        merged.data() + merged.size(),
+        [](const ReportRangeTileArtifact &lhs,
+           const ReportRangeTileArtifact &rhs) {
+            return lhs.start_ms < rhs.start_ms ||
+                (lhs.start_ms == rhs.start_ms &&
+                 lhs.end_ms < rhs.end_ms);
+        });
+    for (size_t i = 1; i < merged.size(); ++i) {
+        if (!tile_follows(merged.data()[i - 1], merged.data()[i])) return {};
+    }
 
     ManifestHeaderFields fields;
     fields.key = manifest.key;
@@ -673,19 +796,12 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
     fields.overview_crc32 = manifest.overview_crc32;
     fields.overview_prefix_crc32 = manifest.overview_prefix_crc32;
 
-    size_t source_index = 0;
     return encode_manifest(
         fields,
-        tile_count,
-        [&manifest, &tile, insertion, replacing, &source_index](
-            size_t output_index,
-            ReportRangeTileArtifact &value) {
-            if (output_index == insertion) {
-                value = tile;
-                if (replacing) ++source_index;
-                return true;
-            }
-            return manifest.tile(source_index++, value);
+        merged.size(),
+        [&merged](size_t output_index, ReportRangeTileArtifact &value) {
+            value = merged.data()[output_index];
+            return true;
         });
 }
 

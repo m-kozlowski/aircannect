@@ -1857,8 +1857,8 @@
         Number.isFinite(to) && to > from;
       if (String(data.night || "") !== night) return false;
       if (range) {
-        return data.kind === "range" && Number(data.from) === from &&
-          Number(data.to) === to;
+        return data.kind === "range" && Number(data.from) <= from &&
+          Number(data.to) >= to;
       }
       return data.kind === "night";
     }
@@ -1991,7 +1991,7 @@
       });
     }
 
-    function reportPlotUrl(nightId, from, to, part, name) {
+    function reportPlotUrl(nightId, from, to, part, name, tileCount) {
       let url = "/api/report/plot?night=" + encodeURIComponent(nightId);
       if (Number.isFinite(from) && Number.isFinite(to)) {
         url += "&from=" + encodeURIComponent(from) +
@@ -1999,6 +1999,9 @@
       }
       if (part) url += "&part=" + encodeURIComponent(part);
       if (name) url += "&name=" + encodeURIComponent(name);
+      if (Number.isInteger(tileCount) && tileCount > 1) {
+        url += "&tiles=" + encodeURIComponent(tileCount);
+      }
       return url;
     }
 
@@ -2546,7 +2549,7 @@
       return {valid: true, index, bytes: buffer};
     }
 
-    async function loadReportRangeTileIndex(tile, context) {
+    async function loadReportRangeTileIndex(tile, context, tileCount) {
       while (context.active() && !tile.index) {
         if (tile.indexPromise) {
           await tile.indexPromise;
@@ -2554,7 +2557,7 @@
         }
 
         const url = reportPlotUrl(context.nightId,
-          tile.from, tile.to, "index");
+          tile.from, tile.to, "index", null, tileCount);
         const promise = pollReportPlotPart(
           url,
           context.active,
@@ -2581,14 +2584,15 @@
       return !!tile.index;
     }
 
-    async function loadReportRangeTileWhole(tile, context) {
+    async function loadReportRangeTileWhole(tile, context, tileCount) {
       while (context.active() && !tile.bytes) {
         if (tile.wholePromise) {
           await tile.wholePromise;
           continue;
         }
 
-        const url = reportPlotUrl(context.nightId, tile.from, tile.to);
+        const url = reportPlotUrl(
+          context.nightId, tile.from, tile.to, null, null, tileCount);
         const promise = pollReportPlotPart(
           url,
           context.active,
@@ -2631,10 +2635,26 @@
         const tile = reportRangeTile(
           context.nightId, context.revision, tileStart);
         tiles.push(tile);
-        jobs.push(() => loadWhole
-          ? loadReportRangeTileWhole(tile, tileContext)
-          : loadReportRangeTileIndex(tile, tileContext));
       }
+
+      const tileReady = (tile) => loadWhole ? !!tile.bytes : !!tile.index;
+      const firstMissing = tiles.findIndex((tile) => !tileReady(tile));
+      if (firstMissing >= 0) {
+        let batchCount = 1;
+        while (batchCount < REPORT_RANGE_TILE_BATCH_MAX &&
+               firstMissing + batchCount < tiles.length &&
+               !tileReady(tiles[firstMissing + batchCount])) {
+          batchCount++;
+        }
+        const first = tiles[firstMissing];
+        await (loadWhole
+          ? loadReportRangeTileWhole(first, tileContext, batchCount)
+          : loadReportRangeTileIndex(first, tileContext, batchCount));
+      }
+
+      tiles.forEach((tile) => jobs.push(() => loadWhole
+        ? loadReportRangeTileWhole(tile, tileContext, 1)
+        : loadReportRangeTileIndex(tile, tileContext, 1)));
       await runReportFetchJobs(jobs, 2);
       return tiles.every((tile) => tile.index) ? tiles : null;
     }
@@ -3435,6 +3455,7 @@
     const REPORT_PLOT_CLIENT_CACHE_MAX = 32;
     const REPORT_PLOT_PREFIX_BYTES = 1600;
     const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
+    const REPORT_RANGE_TILE_BATCH_MAX = 12;
     const REPORT_RANGE_TILE_CACHE_MAX = 32;
     const REPORT_RANGE_TILE_CACHE_MAX_BYTES = 6 * 1024 * 1024;
     const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;

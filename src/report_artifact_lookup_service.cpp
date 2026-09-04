@@ -32,8 +32,11 @@ void ReportArtifactLookupService::begin(StorageReadPort &read_port) {
 OperationAdmission ReportArtifactLookupService::start(
     const ReportArtifactKey &request,
     uint32_t generation,
-    StorageReadLane lane) {
-    if (!read_port_ || !request.valid() || generation == 0) {
+    StorageReadLane lane,
+    uint8_t range_tile_count) {
+    if (!read_port_ || !request.valid() || generation == 0 ||
+        !report_artifact_batch_count_valid(
+            request.kind, range_tile_count)) {
         return OperationAdmission::Rejected;
     }
     if (status_.state != ReportArtifactLookupState::Idle) {
@@ -45,6 +48,7 @@ OperationAdmission ReportArtifactLookupService::start(
     status_.request = request;
     status_.generation = generation;
     lane_ = lane;
+    range_tile_count_ = range_tile_count;
     manifest_modified_ = 0;
     availability_ = {};
     return OperationAdmission::Accepted;
@@ -156,7 +160,10 @@ bool ReportArtifactLookupService::finish_manifest() {
         return true;
     }
     if (!availability_.load(
-            manifest, status_.request, manifest_modified_)) {
+            manifest,
+            status_.request,
+            manifest_modified_,
+            range_tile_count_)) {
         finish(ReportArtifactLookupState::MissingManifest,
                "report_artifact_manifest_invalid");
         return true;
@@ -222,6 +229,7 @@ void ReportArtifactLookupService::reset() {
     ticket_ = {};
     release_prepared();
     manifest_modified_ = 0;
+    range_tile_count_ = 1;
     lane_ = StorageReadLane::Report;
     status_ = {};
     availability_ = {};

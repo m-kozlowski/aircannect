@@ -131,9 +131,14 @@ const ReportRangeTileArtifact *ReportArtifactIndex::tiles(
 
 bool ReportArtifactIndex::availability(
     const ReportArtifactKey &request,
-    ReportArtifactAvailability &out) const {
+    ReportArtifactAvailability &out,
+    uint8_t requested_tile_count) const {
     out = {};
-    if (!request.valid()) return false;
+    if (!request.valid() ||
+        !report_artifact_batch_count_valid(
+            request.kind, requested_tile_count)) {
+        return false;
+    }
 
     const ReportArtifactIndexRecord *found = find(request.sleep_day);
     if (!found || found->source_revision != request.source_revision) {
@@ -141,23 +146,37 @@ bool ReportArtifactIndex::availability(
     }
 
     fill_availability(*found, request, out);
+    out.requested_range_tile_count = requested_tile_count;
     if (request.kind == ReportArtifactKind::RangeTile) {
         size_t tile_count = 0;
         const ReportRangeTileArtifact *indexed_tiles = tiles(*found,
                                                              tile_count);
-        for (size_t i = 0; indexed_tiles && i < tile_count; ++i) {
-            const ReportRangeTileArtifact &tile = indexed_tiles[i];
-            if (tile.start_ms != request.range_start_ms ||
-                tile.end_ms != request.range_end_ms) {
-                continue;
-            }
+        for (size_t requested_index = 0;
+             requested_index < requested_tile_count;
+             ++requested_index) {
+            const int64_t offset =
+                static_cast<int64_t>(requested_index) *
+                REPORT_RANGE_TILE_MS;
+            for (size_t i = 0; indexed_tiles && i < tile_count; ++i) {
+                const ReportRangeTileArtifact &tile = indexed_tiles[i];
+                if (tile.start_ms != request.range_start_ms + offset ||
+                    tile.end_ms != request.range_end_ms + offset) {
+                    continue;
+                }
 
-            out.range_tile.key = request;
-            out.range_tile.size = tile.size;
-            out.range_tile.crc32 = tile.crc32;
-            out.range_tile.prefix_crc32 = tile.prefix_crc32;
-            out.range_tile.manifest_modified = found->manifest_modified;
-            break;
+                ReportArtifactDescriptor &descriptor =
+                    out.range_tiles[out.range_tile_count++];
+                descriptor.key = ReportArtifactKey::range_tile(
+                    request.sleep_day,
+                    request.source_revision,
+                    tile.start_ms,
+                    tile.end_ms);
+                descriptor.size = tile.size;
+                descriptor.crc32 = tile.crc32;
+                descriptor.prefix_crc32 = tile.prefix_crc32;
+                descriptor.manifest_modified = found->manifest_modified;
+                break;
+            }
         }
     }
 
@@ -327,18 +346,9 @@ ReportArtifactIndexBuilder::merge_availability(
     ReportRangeTileArtifact *merged_tiles = nullptr;
     size_t merged_tile_count = existing_tile_count;
     if (availability.request.kind == ReportArtifactKind::RangeTile) {
-        bool replacing = false;
-        for (size_t i = 0; i < existing_tile_count; ++i) {
-            if (existing_tiles[i].start_ms ==
-                    availability.request.range_start_ms &&
-                existing_tiles[i].end_ms ==
-                    availability.request.range_end_ms) {
-                replacing = true;
-                break;
-            }
-        }
-        if (!replacing) ++merged_tile_count;
-        if (merged_tile_count > ReportArtifactManifestCodec::MaxTiles) {
+        if (availability.range_tile_count == 0) return {};
+        if (!CheckedSize::add_to(
+                merged_tile_count, availability.range_tile_count)) {
             return {};
         }
 
@@ -348,32 +358,52 @@ ReportArtifactIndexBuilder::merge_availability(
                                  false));
         if (!merged_tiles) return {};
 
-        const ReportRangeTileArtifact added{
-            availability.request.range_start_ms,
-            availability.request.range_end_ms,
-            availability.range_tile.size,
-            availability.range_tile.crc32,
-            availability.range_tile.prefix_crc32,
-        };
-        size_t source_tile = 0;
-        bool inserted = false;
-        for (size_t output_tile = 0;
-             output_tile < merged_tile_count;
-             ++output_tile) {
-            if (!inserted &&
-                (source_tile >= existing_tile_count ||
-                 added.start_ms <= existing_tiles[source_tile].start_ms)) {
-                merged_tiles[output_tile] = added;
-                if (source_tile < existing_tile_count &&
-                    existing_tiles[source_tile].start_ms == added.start_ms &&
-                    existing_tiles[source_tile].end_ms == added.end_ms) {
-                    ++source_tile;
-                }
-                inserted = true;
-            } else {
-                merged_tiles[output_tile] = existing_tiles[source_tile++];
-            }
+        if (existing_tile_count > 0) {
+            memcpy(merged_tiles,
+                   existing_tiles,
+                   existing_tile_count * sizeof(*existing_tiles));
         }
+
+        for (size_t incoming = 0;
+             incoming < availability.range_tile_count;
+             ++incoming) {
+            const ReportArtifactDescriptor *descriptor =
+                availability.range_tile(incoming);
+            if (!descriptor) {
+                Memory::free(merged_tiles);
+                return {};
+            }
+
+            ReportRangeTileArtifact added{
+                descriptor->key.range_start_ms,
+                descriptor->key.range_end_ms,
+                descriptor->size,
+                descriptor->crc32,
+                descriptor->prefix_crc32,
+            };
+            bool replaced = false;
+            for (size_t i = 0; i < existing_tile_count; ++i) {
+                if (merged_tiles[i].start_ms == added.start_ms &&
+                    merged_tiles[i].end_ms == added.end_ms) {
+                    merged_tiles[i] = added;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) merged_tiles[existing_tile_count++] = added;
+        }
+
+        merged_tile_count = existing_tile_count;
+        if (merged_tile_count > ReportArtifactManifestCodec::MaxTiles) {
+            Memory::free(merged_tiles);
+            return {};
+        }
+        std::sort(merged_tiles,
+                  merged_tiles + merged_tile_count,
+                  [](const ReportRangeTileArtifact &lhs,
+                     const ReportRangeTileArtifact &rhs) {
+                      return lhs.start_ms < rhs.start_ms;
+                  });
     }
 
     ReportArtifactIndexInput input;
