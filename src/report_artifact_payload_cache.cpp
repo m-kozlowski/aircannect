@@ -200,13 +200,6 @@ ReportArtifactPayloadSelection ReportArtifactPayloadCache::select_at(
     }
 
     Entry &entry = entries_[index];
-    if (prefer_deflate && entry.deflate_state == DeflateState::Pending) {
-        entry.last_used = next_use();
-        out.state = ReportArtifactPayloadSelectionState::Pending;
-        out.encoding = ReportArtifactPayloadEncoding::Deflate;
-        return out;
-    }
-
     out.state = ReportArtifactPayloadSelectionState::Ready;
     if (prefer_deflate && entry.deflate_state == DeflateState::Ready &&
         entry.deflated) {

@@ -456,13 +456,15 @@ struct ReportTask::Runtime {
         const bool was_suspended = background_suspended;
         const bool therapy_ended =
             activity.therapy_active && !next.therapy_active;
+        const bool rpc_became_available =
+            !activity.as11_rpc_available && next.as11_rpc_available;
         activity = next;
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
             activity.foreground_report_demand ||
-            activity.ota_install_active || activity.export_work_claimed ||
-            !activity.as11_rpc_available;
+            activity.ota_install_active || activity.export_work_claimed;
         if (therapy_ended) invalidate_spool_availability();
+        if (rpc_became_available) idle_cursor = 0;
         if (!background_suspended || was_suspended) return true;
 
         (void)engine.cancel_background();
@@ -1458,7 +1460,7 @@ struct ReportTask::Runtime {
         if (!publish_state()) command_failures++;
     }
 
-    bool schedule_catalog_work(uint32_t now_ms) {
+    bool schedule_catalog_work(uint32_t now_ms, bool rpc_available) {
         if (!catalog) return false;
         if (idle_cursor >= idle_catalog_limit()) {
             if (!idle_pass_failed) {
@@ -1549,6 +1551,11 @@ struct ReportTask::Runtime {
 
         if ((night->source_flags &
              NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED) != 0) {
+            idle_cursor++;
+            return true;
+        }
+        if (!rpc_available &&
+            (night->source_flags & NIGHT_CATALOG_SOURCE_EDF) == 0) {
             idle_cursor++;
             return true;
         }
@@ -2499,8 +2506,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
         switch (command.kind) {
             case ReportTaskCommandKind::Artifact: {
-                if (runtime.background_suspended &&
-                    command.priority != ReportRequestPriority::Foreground) {
+                if (command.priority != ReportRequestPriority::Foreground &&
+                    (runtime.background_suspended ||
+                     !runtime.activity.as11_rpc_available)) {
                     break;
                 }
 
@@ -2919,8 +2927,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         startup_idle_work_allowed) {
         if (!rpc_background_work_blocked) {
             worked = runtime.start_spool_availability_probe(now_ms) || worked;
-            worked = runtime.schedule_catalog_work(now_ms) || worked;
         }
+        worked = runtime.schedule_catalog_work(
+            now_ms, runtime.activity.as11_rpc_available) || worked;
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }
 

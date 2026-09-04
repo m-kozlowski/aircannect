@@ -545,10 +545,6 @@ void ReportHttpController::poll() {
         ReportArtifactPayloadSelection payload =
             report_task_->select_artifact_payload_if_present(
                 entry.payload, entry.prefer_deflate);
-        if (payload.state ==
-            ReportArtifactPayloadSelectionState::Pending) {
-            continue;
-        }
 
         if (payload.ready() && entry.needs_section_resolution()) {
             const ReportArtifactDescriptor &artifact =

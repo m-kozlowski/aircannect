@@ -26,7 +26,6 @@ enum class ReportArtifactPayloadEncoding : uint8_t {
 
 enum class ReportArtifactPayloadSelectionState : uint8_t {
     Missing,
-    Pending,
     Ready,
 };
 
