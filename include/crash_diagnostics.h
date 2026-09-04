@@ -17,6 +17,7 @@ static constexpr size_t AC_CRASH_TASK_NAME_MAX = 17;
 static constexpr size_t AC_CRASH_ELF_SHA_MAX = 10;
 static constexpr size_t AC_CRASH_FIRMWARE_VERSION_MAX = 48;
 static constexpr size_t AC_CRASH_ERROR_MAX = 40;
+static constexpr size_t AC_CRASH_OCCURRED_AT_MAX = 21;
 
 enum class CrashDumpState : uint8_t {
     Unsupported,
@@ -42,6 +43,7 @@ struct CrashDiagnosticsSnapshot {
     char dump_error[AC_CRASH_ERROR_MAX] = {};
 
     bool summary_available = false;
+    char occurred_at[AC_CRASH_OCCURRED_AT_MAX] = {};
     char task[AC_CRASH_TASK_NAME_MAX] = {};
     char reason[AC_CRASH_REASON_MAX] = {};
     char elf_sha[AC_CRASH_ELF_SHA_MAX] = {};
@@ -67,6 +69,7 @@ struct CrashDiagnosticsSnapshot {
 class CrashDiagnostics {
 public:
     bool begin();
+    void poll();
     void log_previous_crash() const;
 
     bool copy_snapshot(CrashDiagnosticsSnapshot &out) const;
@@ -81,6 +84,7 @@ private:
     StaticSemaphore_t mutex_storage_ = {};
     mutable SemaphoreHandle_t mutex_ = nullptr;
     const void *partition_ = nullptr;
+    uint32_t next_time_capture_ms_ = 0;
     CrashDiagnosticsSnapshot snapshot_;
 };
 

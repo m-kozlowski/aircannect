@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "debug_log.h"
 #include "large_byte_buffer.h"
@@ -36,6 +37,10 @@ static constexpr uint32_t RTC_ARM_FINGERPRINT_VALID = 1u << 0;
 static constexpr uint32_t RTC_ARM_TAIL_VALID = 1u << 1;
 static constexpr uint32_t RTC_WDT_MAGIC = 0x57444343u;
 static constexpr uint16_t RTC_WDT_SCHEMA = 1;
+static constexpr uint32_t RTC_CRASH_TIME_MAGIC = 0x54434341u;
+static constexpr uint16_t RTC_CRASH_TIME_SCHEMA = 1;
+static constexpr time_t VALID_CRASH_TIME_MIN_EPOCH = 1609459200;
+static constexpr uint32_t CRASH_TIME_CAPTURE_INTERVAL_MS = 1000;
 
 struct RtcPanicRecord {
     uint32_t magic;
@@ -69,10 +74,23 @@ struct RtcTaskWatchdogRecord {
     char detail[AC_CRASH_REASON_MAX];
 };
 
+struct RtcCrashTimeRecord {
+    uint32_t magic;
+    uint16_t schema;
+    uint16_t size;
+    uint32_t checksum;
+    uint32_t epoch_s;
+};
+
+// The linker lays these symbols out in reverse declaration order. Keep new
+// extension records before the three original records so their retained
+// addresses stay stable across firmware updates.
+RTC_NOINIT_ATTR RtcCrashTimeRecord rtc_crash_time_record;
 RTC_NOINIT_ATTR RtcPanicRecord rtc_panic_record;
 RTC_NOINIT_ATTR RtcCrashArmRecord rtc_crash_arm_record;
 RTC_NOINIT_ATTR RtcTaskWatchdogRecord rtc_task_watchdog_record;
 DRAM_ATTR volatile bool rtc_task_watchdog_pending;
+DRAM_ATTR volatile uint32_t crash_utc_epoch_s;
 
 struct FlashDumpFingerprint {
     bool valid = false;
@@ -123,7 +141,20 @@ void clear_rtc_panic_record() {
 
     memset(&rtc_task_watchdog_record, 0,
            sizeof(rtc_task_watchdog_record));
+    memset(&rtc_crash_time_record, 0, sizeof(rtc_crash_time_record));
     rtc_task_watchdog_pending = false;
+}
+
+void IRAM_ATTR begin_rtc_crash_time() {
+    rtc_crash_time_record.magic = 0;
+    __asm__ __volatile__("memw" ::: "memory");
+}
+
+void IRAM_ATTR finish_rtc_crash_time() {
+    rtc_crash_time_record.schema = RTC_CRASH_TIME_SCHEMA;
+    rtc_crash_time_record.size = sizeof(rtc_crash_time_record);
+    rtc_crash_time_record.epoch_s = crash_utc_epoch_s;
+    finish_rtc_record(rtc_crash_time_record, RTC_CRASH_TIME_MAGIC);
 }
 
 void IRAM_ATTR copy_rtc_text(char *out, size_t out_size, const char *text) {
@@ -164,6 +195,7 @@ const char *IRAM_ATTR armed_firmware() {
 
 void IRAM_ATTR capture_rtc_task_watchdog() {
     rtc_task_watchdog_pending = true;
+    begin_rtc_crash_time();
 
     rtc_panic_record.magic = 0;
     rtc_panic_record.schema = RTC_PANIC_SCHEMA;
@@ -186,10 +218,13 @@ void IRAM_ATTR capture_rtc_task_watchdog() {
     (void)esp_task_wdt_print_triggered_tasks(
         append_rtc_text, &rtc_task_watchdog_record, nullptr);
     finish_rtc_record(rtc_task_watchdog_record, RTC_WDT_MAGIC);
+    finish_rtc_crash_time();
 }
 
 void IRAM_ATTR capture_rtc_panic(arduino_panic_info_t *info, void *) {
     if (!info) return;
+
+    begin_rtc_crash_time();
 
     rtc_panic_record.magic = 0;
     rtc_panic_record.schema = RTC_PANIC_SCHEMA;
@@ -225,6 +260,7 @@ void IRAM_ATTR capture_rtc_panic(arduino_panic_info_t *info, void *) {
         rtc_task_watchdog_record.magic = 0;
     }
     finish_rtc_record(rtc_panic_record, RTC_PANIC_MAGIC);
+    finish_rtc_crash_time();
 }
 
 void copy_text(char *out, size_t out_size, const char *text) {
@@ -238,6 +274,19 @@ void copy_text(char *out, size_t out_size, const char *text) {
 
 void copy_error(char *out, size_t out_size, esp_err_t error) {
     copy_text(out, out_size, esp_err_to_name(error));
+}
+
+bool format_crash_time(uint32_t epoch_s, char *out, size_t out_size) {
+    if (!out || out_size < AC_CRASH_OCCURRED_AT_MAX ||
+        epoch_s < static_cast<uint32_t>(VALID_CRASH_TIME_MIN_EPOCH)) {
+        return false;
+    }
+
+    const time_t seconds = static_cast<time_t>(epoch_s);
+    struct tm utc = {};
+    if (!gmtime_r(&seconds, &utc)) return false;
+
+    return strftime(out, out_size, "%Y-%m-%dT%H:%M:%SZ", &utc) == 20;
 }
 
 bool crash_reset_reason(esp_reset_reason_t reason) {
@@ -284,6 +333,15 @@ void import_rtc_snapshot(CrashDiagnosticsSnapshot &out) {
     if (out.rtc_task_watchdog &&
         rtc_record_valid(watchdog, RTC_WDT_MAGIC, RTC_WDT_SCHEMA)) {
         copy_text(out.rtc_detail, sizeof(out.rtc_detail), watchdog.detail);
+    }
+
+    const RtcCrashTimeRecord crash_time = rtc_crash_time_record;
+    if (rtc_record_valid(crash_time,
+                         RTC_CRASH_TIME_MAGIC,
+                         RTC_CRASH_TIME_SCHEMA)) {
+        (void)format_crash_time(crash_time.epoch_s,
+                                out.occurred_at,
+                                sizeof(out.occurred_at));
     }
 }
 
@@ -411,7 +469,25 @@ bool CrashDiagnostics::begin() {
     record_dump_relation(snapshot_, previous_arm, fingerprint);
     arm_crash_capture(fingerprint);
     xSemaphoreGive(mutex_);
+    poll();
     return true;
+}
+
+void CrashDiagnostics::poll() {
+    const uint32_t now_ms = millis();
+    if (next_time_capture_ms_ &&
+        static_cast<int32_t>(now_ms - next_time_capture_ms_) < 0) {
+        return;
+    }
+    next_time_capture_ms_ = now_ms + CRASH_TIME_CAPTURE_INTERVAL_MS;
+
+    const time_t now = time(nullptr);
+    if (now < VALID_CRASH_TIME_MIN_EPOCH ||
+        static_cast<uint64_t>(now) > UINT32_MAX) {
+        return;
+    }
+
+    crash_utc_epoch_s = static_cast<uint32_t>(now);
 }
 
 void CrashDiagnostics::refresh_dump_locked() {
@@ -425,13 +501,16 @@ void CrashDiagnostics::refresh_dump_locked() {
     const bool rtc_continues = snapshot_.rtc_backtrace_continues;
     const bool rtc_task_watchdog = snapshot_.rtc_task_watchdog;
     const CrashDumpRelation dump_relation = snapshot_.dump_relation;
+    char occurred_at[sizeof(snapshot_.occurred_at)] = {};
     char rtc_detail[sizeof(snapshot_.rtc_detail)] = {};
+    memcpy(occurred_at, snapshot_.occurred_at, sizeof(occurred_at));
     memcpy(rtc_firmware, snapshot_.rtc_firmware, sizeof(rtc_firmware));
     memcpy(rtc_backtrace, snapshot_.rtc_backtrace, sizeof(rtc_backtrace));
     memcpy(rtc_detail, snapshot_.rtc_detail, sizeof(rtc_detail));
 
     snapshot_ = {};
     snapshot_.dump_relation = dump_relation;
+    memcpy(snapshot_.occurred_at, occurred_at, sizeof(occurred_at));
     snapshot_.rtc_panic_available = rtc_available;
     memcpy(snapshot_.rtc_firmware, rtc_firmware, sizeof(rtc_firmware));
     snapshot_.rtc_core = rtc_core;
@@ -620,8 +699,10 @@ void CrashDiagnostics::log_previous_crash() const {
     if (snapshot.dump_state == CrashDumpState::Available) {
         Log::logf(
             CAT_GENERAL, LOG_WARN,
-            "[CRASH] previous panic dump available task=%s reason=%s "
+            "[CRASH] previous panic dump available occurred=%s task=%s "
+            "reason=%s "
             "pc=0x%08lx bytes=%u elf_sha=%s relation=%s rtc=%s\n",
+            snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
             snapshot.task[0] ? snapshot.task : "--",
             snapshot.reason[0] ? snapshot.reason : "--",
             static_cast<unsigned long>(snapshot.exception_pc),
@@ -641,8 +722,9 @@ void CrashDiagnostics::log_previous_crash() const {
             return;
         }
         Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CRASH] retained panic dump invalid error=%s bytes=%u "
-                  "relation=%s rtc=%s\n",
+                  "[CRASH] retained panic dump invalid occurred=%s error=%s "
+                  "bytes=%u relation=%s rtc=%s\n",
+                  snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
                   snapshot.dump_error[0] ? snapshot.dump_error : "unknown",
                   static_cast<unsigned>(snapshot.dump_stored_size),
                   crash_dump_relation_name(snapshot.dump_relation),
@@ -651,8 +733,10 @@ void CrashDiagnostics::log_previous_crash() const {
 
     if (snapshot.rtc_panic_available) {
         Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CRASH] previous panic breadcrumb available firmware=%s "
+                  "[CRASH] previous panic breadcrumb available occurred=%s "
+                  "firmware=%s "
                   "source=%s core=%d pc=0x%08lx backtrace_depth=%u\n",
+                  snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
                   snapshot.rtc_firmware[0] ? snapshot.rtc_firmware : "--",
                   snapshot.rtc_task_watchdog ? "task_watchdog" : "panic",
                   static_cast<int>(snapshot.rtc_core),

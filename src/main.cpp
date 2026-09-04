@@ -1615,6 +1615,7 @@ void setup() {
 
 void loop() {
     const uint32_t now_ms = millis();
+    crash_diagnostics.poll();
 
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =

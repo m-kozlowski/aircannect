@@ -104,6 +104,8 @@ bool CoreDiagnosticsConsoleCommands::execute(
         out.print(crash_dump_relation_name(snapshot.dump_relation));
         out.print(" rtc=");
         out.print(snapshot.rtc_panic_available ? "available" : "empty");
+        out.print(" occurred=");
+        out.print(snapshot.occurred_at[0] ? snapshot.occurred_at : "--");
         if (snapshot.rtc_panic_available) {
             out.print(" source=");
             out.print(snapshot.rtc_task_watchdog

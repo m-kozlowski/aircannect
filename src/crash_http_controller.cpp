@@ -37,6 +37,7 @@ bool build_status_json(const CrashDiagnosticsSnapshot &snapshot,
                  static_cast<long>(snapshot.dump_stored_size));
     json_add_string(json, "error", snapshot.dump_error);
     json_add_bool(json, "summary_available", snapshot.summary_available);
+    json_add_string(json, "occurred_at", snapshot.occurred_at);
 
     if (snapshot.summary_available) {
         json_add_string(json, "task", snapshot.task);
