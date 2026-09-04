@@ -94,5 +94,8 @@ uint32_t report_signal_bit(ReportSignalId signal);
 uint32_t report_signal_mask_all();
 uint32_t report_signal_required_mask();
 bool report_source_is_sampled(const ReportSourceDef &source);
+int32_t report_series_canonical_value_milli(
+    const ReportSeriesDescriptor &series,
+    int32_t value_milli);
 
 }  // namespace aircannect

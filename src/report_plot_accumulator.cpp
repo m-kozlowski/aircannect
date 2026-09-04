@@ -208,21 +208,6 @@ void finish_metric_histogram(const MetricHistogram &histogram,
         metric_percentile(histogram, config, 95, 100, out.p95_milli);
 }
 
-int32_t scaled_plot_value(const ReportSeriesDescriptor &series,
-                          int32_t value_milli) {
-    const int32_t multiplier =
-        (series.signal == ReportSignalId::Flow &&
-         series.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
-        (series.signal == ReportSignalId::Leak &&
-         series.source == ReportSourceId::Leak0p5Hz)
-            ? 60
-            : 1;
-    const int64_t scaled = static_cast<int64_t>(value_milli) * multiplier;
-    if (scaled > INT32_MAX) return INT32_MAX;
-    if (scaled < INT32_MIN) return INT32_MIN;
-    return static_cast<int32_t>(scaled);
-}
-
 bool event_less(const EventSlot &lhs, const EventSlot &rhs) {
     if (lhs.event.start_ms != rhs.event.start_ms) {
         return lhs.event.start_ms < rhs.event.start_ms;
@@ -587,7 +572,8 @@ bool ReportPlotAccumulator::accept_series(
         return false;
     }
 
-    const int32_t value = scaled_plot_value(series, sample.value_milli);
+    const int32_t value = report_series_canonical_value_milli(
+        series, sample.value_milli);
     EnvelopeCell &cell = state.cells[bucket];
     if (!cell.present) {
         cell.minimum = value;

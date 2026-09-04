@@ -1,0 +1,230 @@
+#pragma once
+
+#include <memory>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "large_byte_buffer.h"
+#include "night_catalog.h"
+#include "report_records.h"
+#include "report_sources.h"
+
+namespace aircannect {
+
+static constexpr const char *REPORT_SIGNAL_STORE_ROOT =
+    "/aircannect/report/v9/nights";
+static constexpr int64_t REPORT_SIGNAL_STORE_BLOCK_MS =
+    15LL * 60LL * 1000LL;
+static constexpr size_t REPORT_SIGNAL_STORE_MAX_BLOCKS = 128;
+static constexpr size_t REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES =
+    REPORT_SIGNAL_STORE_MAX_BLOCKS / 8;
+static constexpr int16_t REPORT_SIGNAL_STORE_MISSING_S16 = INT16_MIN;
+
+enum class ReportSignalStoreEncoding : uint8_t {
+    Signed16 = 1,
+};
+
+enum class ReportSignalStoreUnit : uint8_t {
+    None = 0,
+    LitresPerMinute,
+    CentimetresWater,
+    Seconds,
+    BreathsPerMinute,
+    Ratio,
+    Litres,
+    Percent,
+    BeatsPerMinute,
+};
+
+enum class ReportSignalStoreLevel : uint8_t {
+    Raw = 0,
+    OneSecond,
+    TenSeconds,
+};
+
+enum ReportSignalStoreLodFlag : uint8_t {
+    REPORT_SIGNAL_STORE_LOD_1S = 1u << 0,
+    REPORT_SIGNAL_STORE_LOD_10S = 1u << 1,
+};
+
+struct ReportSignalStoreTrack {
+    SleepDayId sleep_day;
+    SourceRevision source_revision;
+    ReportSignalId signal = ReportSignalId::Invalid;
+    ReportSignalStoreEncoding encoding =
+        ReportSignalStoreEncoding::Signed16;
+    ReportSignalStoreUnit unit = ReportSignalStoreUnit::None;
+    uint8_t lod_mask = 0;
+    uint16_t track_index = 0;
+    uint16_t block_slot_count = 0;
+    uint16_t present_block_count = 0;
+    uint32_t generation = 0;
+    uint32_t sample_interval_ms = 0;
+    uint32_t value_scale_milli = 0;
+    uint32_t grid_phase_ms = 0;
+    int64_t first_block_start_ms = 0;
+    int64_t first_valid_sample_ms = 0;
+    int64_t last_valid_sample_ms = 0;
+    uint64_t valid_sample_count = 0;
+    uint64_t expected_sample_count = 0;
+    uint8_t present_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
+};
+
+struct ReportSignalStoreFileData {
+    ReportSignalStoreTrack track;
+    const int16_t *raw_blocks = nullptr;
+    size_t raw_value_count = 0;
+};
+
+struct ReportSignalStorePlaneRange {
+    size_t offset = 0;
+    size_t length = 0;
+    uint32_t interval_ms = 0;
+    uint32_t cell_count = 0;
+    bool envelope = false;
+};
+
+struct ReportSignalStoreFileView {
+    ReportSignalStoreTrack track;
+    const uint8_t *bytes = nullptr;
+    size_t length = 0;
+    uint32_t data_offset = 0;
+    uint32_t block_stride = 0;
+    uint32_t raw_plane_offset = 0;
+    uint32_t raw_plane_bytes = 0;
+    uint32_t one_second_plane_offset = 0;
+    uint32_t one_second_cell_count = 0;
+    uint32_t ten_second_plane_offset = 0;
+    uint32_t ten_second_cell_count = 0;
+    uint32_t samples_per_block = 0;
+};
+
+class ReportSignalStoreFileCodec {
+public:
+    static constexpr uint16_t Version = 1;
+    static constexpr size_t HeaderBytes = 192;
+
+    static std::shared_ptr<const LargeByteBuffer> encode(
+        const ReportSignalStoreFileData &data);
+    static bool inspect(const uint8_t *bytes,
+                        size_t length,
+                        ReportSignalStoreFileView &view);
+    static bool plane_range(const ReportSignalStoreFileView &view,
+                            int64_t block_start_ms,
+                            ReportSignalStoreLevel level,
+                            ReportSignalStorePlaneRange &range);
+    static bool sample(const ReportSignalStoreFileView &view,
+                       int64_t timestamp_ms,
+                       bool &present,
+                       int32_t &value_milli);
+};
+
+enum ReportSignalStoreNightFlag : uint32_t {
+    REPORT_SIGNAL_STORE_NIGHT_SUMMARY_AVAILABLE = 1u << 0,
+    REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION = 1u << 1,
+};
+
+struct ReportSignalStoreNight {
+    SleepDayId sleep_day;
+    SourceRevision source_revision;
+    int64_t day_start_ms = 0;
+    int64_t day_end_ms = 0;
+    uint64_t closed_therapy_duration_ms = 0;
+    uint32_t generation = 0;
+    uint32_t flags = 0;
+    int32_t timezone_offset_minutes = 0;
+    uint8_t available_event_mask = 0;
+    uint8_t source_flags = 0;
+    uint32_t event_count = 0;
+    const NightCatalogTimeRange *sessions = nullptr;
+    size_t session_count = 0;
+    const ReportSignalStoreTrack *tracks = nullptr;
+    size_t track_count = 0;
+};
+
+struct ReportSignalStoreNightView {
+    ReportSignalStoreNight night;
+    const uint8_t *session_records = nullptr;
+    const uint8_t *track_records = nullptr;
+
+    bool session(size_t index, NightCatalogTimeRange &range) const;
+    bool track(size_t index, ReportSignalStoreTrack &track) const;
+};
+
+class ReportSignalStoreNightCodec {
+public:
+    static constexpr uint16_t Version = 1;
+    static constexpr size_t HeaderBytes = 96;
+    static constexpr size_t SessionBytes = 16;
+    static constexpr size_t TrackBytes = 80;
+
+    static std::shared_ptr<const LargeByteBuffer> encode(
+        const ReportSignalStoreNight &night);
+    static bool decode(const uint8_t *bytes,
+                       size_t length,
+                       ReportSignalStoreNightView &view);
+};
+
+struct ReportSignalStoreEventFileData {
+    SleepDayId sleep_day;
+    SourceRevision source_revision;
+    uint32_t generation = 0;
+    int64_t first_block_start_ms = 0;
+    uint16_t block_slot_count = 0;
+    const ReportEventRecord *events = nullptr;
+    size_t event_count = 0;
+};
+
+struct ReportSignalStoreEventFileView {
+    SleepDayId sleep_day;
+    SourceRevision source_revision;
+    uint32_t generation = 0;
+    int64_t first_block_start_ms = 0;
+    uint16_t block_slot_count = 0;
+    uint32_t event_count = 0;
+    const uint8_t *bytes = nullptr;
+    size_t length = 0;
+    const uint8_t *block_directory = nullptr;
+    const uint8_t *event_records = nullptr;
+    uint8_t present_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
+};
+
+class ReportSignalStoreEventCodec {
+public:
+    static constexpr uint16_t Version = 1;
+    static constexpr size_t HeaderBytes = 96;
+    static constexpr size_t BlockDirectoryBytes = 8;
+    static constexpr size_t EventBytes = 16;
+
+    static std::shared_ptr<const LargeByteBuffer> encode(
+        const ReportSignalStoreEventFileData &data);
+    static bool inspect(const uint8_t *bytes,
+                        size_t length,
+                        ReportSignalStoreEventFileView &view);
+    static bool block(const ReportSignalStoreEventFileView &view,
+                      int64_t block_start_ms,
+                      uint32_t &first_event,
+                      uint32_t &event_count);
+    static bool event(const ReportSignalStoreEventFileView &view,
+                      size_t index,
+                      ReportEventRecord &event);
+};
+
+bool report_signal_store_night_path(SleepDayId sleep_day,
+                                    char *out,
+                                    size_t out_size);
+bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
+                                     char *out,
+                                     size_t out_size);
+bool report_signal_store_events_path(SleepDayId sleep_day,
+                                     char *out,
+                                     size_t out_size);
+
+bool report_signal_store_track_valid(const ReportSignalStoreTrack &track);
+ReportSignalStoreUnit report_signal_store_unit(ReportSignalId signal);
+uint32_t report_signal_store_value_scale_milli(ReportSignalId signal);
+bool report_signal_store_quantize(ReportSignalId signal,
+                                  int32_t value_milli,
+                                  int16_t &encoded);
+
+}  // namespace aircannect

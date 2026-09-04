@@ -1,5 +1,7 @@
 #include "report_sources.h"
 
+#include <limits.h>
+
 namespace aircannect {
 namespace {
 
@@ -195,6 +197,22 @@ uint32_t report_signal_required_mask() {
 bool report_source_is_sampled(const ReportSourceDef &source) {
     return (source.purposes &
             (REPORT_SOURCE_TREND_SERIES | REPORT_SOURCE_HIGH_RES_SERIES)) != 0;
+}
+
+int32_t report_series_canonical_value_milli(
+    const ReportSeriesDescriptor &series,
+    int32_t value_milli) {
+    const int32_t multiplier =
+        (series.signal == ReportSignalId::Flow &&
+         series.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
+        (series.signal == ReportSignalId::Leak &&
+         series.source == ReportSourceId::Leak0p5Hz)
+            ? 60
+            : 1;
+    const int64_t scaled = static_cast<int64_t>(value_milli) * multiplier;
+    if (scaled > INT32_MAX) return INT32_MAX;
+    if (scaled < INT32_MIN) return INT32_MIN;
+    return static_cast<int32_t>(scaled);
 }
 
 }  // namespace aircannect
