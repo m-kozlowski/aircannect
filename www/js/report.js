@@ -2659,6 +2659,44 @@
       return tiles.every((tile) => tile.index) ? tiles : null;
     }
 
+    async function prefetchReportRangeNeighbors(entry, chartKeys, context) {
+      if (!entry || !context.active()) return;
+
+      const bounds = reportRange();
+      const available = validReportRange(bounds) ?
+        reportRangeWindow(bounds.start, bounds.end) : null;
+      if (!available) return;
+
+      const starts = [];
+      for (let distance = 1;
+           distance <= REPORT_RANGE_PREFETCH_TILES_PER_SIDE;
+           distance++) {
+        const before = entry.from - distance * REPORT_RANGE_TILE_MS;
+        const after = entry.to + (distance - 1) * REPORT_RANGE_TILE_MS;
+        if (before >= available.from) starts.push(before);
+        if (after < available.to) starts.push(after);
+      }
+
+      const loadWhole = chartKeys.length >=
+        REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS;
+      const prefetchContext = {...context, active: context.tileActive};
+      for (const from of starts) {
+        if (!context.active()) return;
+
+        const tile = reportRangeTile(
+          context.nightId, context.revision, from);
+        try {
+          if (loadWhole) {
+            await loadReportRangeTileWhole(tile, prefetchContext, 1);
+          } else {
+            await loadReportRangeTileIndex(tile, prefetchContext, 1);
+          }
+        } catch (_) {
+          return;
+        }
+      }
+    }
+
     function decodeReportWholeChart(index, bytes, definition) {
       if (!index || !bytes || !definition) return null;
 
@@ -2823,6 +2861,11 @@
           if (!context.active()) return;
           await runReportFetchJobs(keys.map((chartKey) =>
             () => loadReportRangeChart(entry, chartKey, context)), 2);
+        }
+
+        if (context.active()) {
+          prefetchReportRangeNeighbors(
+            entry, Array.from(entry.loadedCharts), context);
         }
       })().catch((error) => {
         if (error && (error.message === "report_revision_changed" ||
@@ -3459,6 +3502,7 @@
     const REPORT_RANGE_TILE_CACHE_MAX = 32;
     const REPORT_RANGE_TILE_CACHE_MAX_BYTES = 6 * 1024 * 1024;
     const REPORT_RANGE_POINT_ESTIMATE_BYTES = 48;
+    const REPORT_RANGE_PREFETCH_TILES_PER_SIDE = 2;
     const REPORT_RANGE_DIRECT_WHOLE_MIN_CHARTS = 2;
     const REPORT_PLOT_WHOLE_MIN_PARTS = 2;
     const REPORT_PLOT_WHOLE_THRESHOLD_PERCENT = 60;
