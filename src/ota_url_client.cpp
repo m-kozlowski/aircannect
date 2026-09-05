@@ -173,14 +173,17 @@ esp_err_t fetch_event(esp_http_client_event_t *event) {
     if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
         return ESP_OK;
     }
-
-    const int status = esp_http_client_get_status_code(event->client);
-    if (status != 200) return ESP_OK;
+    if (ctx.error->code[0]) return ESP_FAIL;
 
     if (!operation_allowed(ctx.continue_callback, ctx.callback_ctx)) {
         set_error_code(*ctx.error, "url_cancelled");
+        // ON_DATA's return value does not stop perform() in IDF.
+        esp_http_client_close(event->client);
         return ESP_FAIL;
     }
+
+    const int status = esp_http_client_get_status_code(event->client);
+    if (status != 200) return ESP_OK;
 
     if (!ctx.size_checked) {
         const int64_t content_length =
@@ -349,6 +352,10 @@ bool ota_url_fetch(const char *url,
         set_error_code(error, "url_invalid_request");
         return false;
     }
+    if (!operation_allowed(continue_callback, callback_ctx)) {
+        set_error_code(error, "url_cancelled");
+        return false;
+    }
 
     OtaUrlFetchContext context;
     context.buffer = buffer;
@@ -367,6 +374,14 @@ bool ota_url_fetch(const char *url,
     const esp_err_t result = esp_http_client_perform(client);
     const int status = esp_http_client_get_status_code(client);
     error.http_status = status;
+
+    if (!error.code[0] && !operation_allowed(continue_callback, callback_ctx)) {
+        set_error_code(error, "url_cancelled");
+    }
+    if (error.code[0]) {
+        esp_http_client_cleanup(client);
+        return false;
+    }
 
     if (result != ESP_OK) {
         capture_transport_error(client, result, error);

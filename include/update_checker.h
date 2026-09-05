@@ -15,6 +15,8 @@
 
 namespace aircannect {
 
+class ExportTask;
+
 struct OtaUpdateArtifact {
     String url;
     size_t image_size = 0;
@@ -44,7 +46,7 @@ struct OtaUpdateNotification {
 
 class UpdateChecker {
 public:
-    void begin(const AppConfigData &config);
+    void begin(const AppConfigData &config, ExportTask &exports);
     void poll(const NetworkSnapshot &network,
               bool check_allowed,
               bool install_active);
@@ -71,6 +73,7 @@ private:
     bool tls_heap_available(bool log_deferred) const;
     static void task_entry(void *ctx);
     void run_task();
+    void reap_task_locked();
     void finish_task(char *url,
                      uint32_t generation,
                      const OtaReleaseManifest *manifest,
@@ -82,12 +85,13 @@ private:
                      const struct OtaUrlError *transport_error = nullptr);
 
     void clear_release_locked();
-    bool cancelled(uint32_t generation) const;
+    bool cancelled(uint32_t generation);
     static bool continue_callback(void *ctx);
     bool lock(TickType_t timeout = portMAX_DELAY) const;
     void unlock() const;
 
     const AppConfigData *config_ = nullptr;
+    ExportTask *exports_ = nullptr;
     UpdateCheckerStatus status_;
     mutable SemaphoreHandle_t mutex_ = nullptr;
 
@@ -95,6 +99,7 @@ private:
     bool network_online_ = false;
     bool manual_requested_ = false;
     bool cancel_requested_ = false;
+    bool export_preempted_ = false;
     uint32_t network_since_ms_ = 0;
     uint32_t next_check_ms_ = 0;
     uint32_t heap_retry_at_ms_ = 0;
@@ -103,6 +108,7 @@ private:
     uint32_t task_generation_ = 0;
     char *check_url_ = nullptr;
     TaskHandle_t task_ = nullptr;
+    bool task_stack_external_ = false;
     OwnedArtifact available_artifact_;
     std::shared_ptr<const LargeByteBuffer> release_notes_;
 };

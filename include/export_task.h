@@ -93,6 +93,10 @@ public:
     bool request_sleephq_post_therapy();
     bool cancel_post_therapy();
 
+    // Update checks yield to export demand; release only after task cleanup.
+    bool try_begin_update_check();
+    void end_update_check();
+
     // copied status
     bool endpoint_work_claimed() const;
     ExportTaskControlSnapshot control_snapshot() const;
@@ -104,6 +108,12 @@ public:
 #endif
 
 private:
+    enum WorkReservation : uint8_t {
+        ExportDemand = 1,
+        EndpointStep = 2,
+        UpdateCheck = 4,
+    };
+
     enum class CommandKind : uint8_t {
         None,
         SmbSync,
@@ -144,6 +154,7 @@ private:
     static void task_entry(void *context);
     void run();
     ExportStep step_endpoint();
+    bool try_begin_endpoint_step();
 
     // published inputs
     bool lock_inputs(uint32_t timeout_ms = 20) const;
@@ -161,7 +172,7 @@ private:
     bool runtime_blocked(const ActivitySnapshot &activity) const;
 
     // status publication
-    void publish_work_claim();
+    bool publish_work_claim();
     void publish_status();
 
     Runtime *runtime_ = nullptr;
@@ -182,7 +193,7 @@ private:
     bool runtime_blocked_ = true;
     bool next_idle_endpoint_smb_ = true;
     uint32_t next_command_sequence_ = 1;
-    std::atomic<bool> endpoint_work_claimed_{false};
+    std::atomic<uint8_t> work_reservation_{0};
 };
 
 }  // namespace aircannect

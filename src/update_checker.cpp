@@ -1,10 +1,12 @@
 #include "update_checker.h"
 
 #include <cstring>
+#include <freertos/idf_additions.h>
 
 #include "board.h"
 #include "board_net.h"
 #include "debug_log.h"
+#include "export_task.h"
 #include "memory_manager.h"
 #include "ota_url_client.h"
 #include "tls_memory.h"
@@ -26,8 +28,9 @@ static constexpr uint32_t UPDATE_HEAP_RETRY_MS = 10 * 1000;
 
 }  // namespace
 
-void UpdateChecker::begin(const AppConfigData &config) {
+void UpdateChecker::begin(const AppConfigData &config, ExportTask &exports) {
     config_ = &config;
+    exports_ = &exports;
     if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
 
     if (!lock()) return;
@@ -44,6 +47,8 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     const uint32_t now = millis();
 
     if (!lock()) return;
+
+    reap_task_locked();
 
     if (config_dirty_) {
         status_.enabled = config_ && config_->update_url.length() > 0 &&
@@ -124,7 +129,9 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         heap_retry_at_ms_ = 0;
         unlock();
     }
-    start_check();
+    if (exports_->try_begin_update_check()) {
+        if (!start_check()) exports_->end_update_check();
+    }
 }
 
 void UpdateChecker::mark_config_dirty() {
@@ -132,7 +139,10 @@ void UpdateChecker::mark_config_dirty() {
 
     config_dirty_ = true;
     config_generation_++;
-    if (task_) cancel_requested_ = true;
+    if (task_) {
+        cancel_requested_ = true;
+        manual_requested_ = false;
+    }
     unlock();
 }
 
@@ -165,8 +175,10 @@ bool UpdateChecker::request_check(bool install_active) {
 
 void UpdateChecker::request_abort(const char *reason) {
     if (!lock()) return;
-    if (task_ || status_.active) {
+    if ((task_ || status_.active) && check_url_) {
         cancel_requested_ = true;
+        status_.pending = false;
+        manual_requested_ = false;
         status_.error = reason ? reason : "aborted";
     } else if (status_.pending) {
         status_.pending = false;
@@ -268,13 +280,14 @@ bool UpdateChecker::start_check() {
     check_url_ = owned_url;
     task_generation_ = config_generation_;
     cancel_requested_ = false;
-    manual_requested_ = false;
+    export_preempted_ = false;
     status_.pending = false;
     status_.active = true;
     status_.error = "";
 
     BaseType_t result = pdFAIL;
-    if (Memory::psram_available()) {
+    task_stack_external_ = Memory::psram_available();
+    if (task_stack_external_) {
         result = xTaskCreatePinnedToCoreWithCaps(
             task_entry, "ota_check", AC_OTA_URL_TASK_STACK_BYTES, this,
             AC_OTA_UPDATE_CHECK_TASK_PRIORITY, &task_,
@@ -289,6 +302,7 @@ bool UpdateChecker::start_check() {
     if (result != pdPASS) {
         check_url_ = nullptr;
         task_ = nullptr;
+        manual_requested_ = false;
         status_.active = false;
         status_.attempted = true;
         status_.error = "update_task_alloc_failed";
@@ -321,8 +335,24 @@ bool UpdateChecker::tls_heap_available(bool log_deferred) const {
 
 void UpdateChecker::task_entry(void *ctx) {
     UpdateChecker *checker = static_cast<UpdateChecker *>(ctx);
-    if (checker) checker->run_task();
-    vTaskDelete(nullptr);
+    checker->run_task();
+
+    // The main loop reaps this task before allowing an export to start.
+    vTaskSuspend(nullptr);
+}
+
+void UpdateChecker::reap_task_locked() {
+    if (!task_ || eTaskGetState(task_) != eSuspended) return;
+
+    if (task_stack_external_) {
+        vTaskDeleteWithCaps(task_);
+    } else {
+        vTaskDelete(task_);
+    }
+    task_ = nullptr;
+    status_.active = false;
+    cancel_requested_ = false;
+    exports_->end_update_check();
 }
 
 void UpdateChecker::run_task() {
@@ -440,7 +470,7 @@ void UpdateChecker::run_task() {
 
     if (cancelled(generation)) {
         Memory::free(manifest_buffer);
-        finish_task(url, generation, nullptr, false, {}, {}, "aborted",
+        finish_task(url, generation, nullptr, false, artifact, {}, "aborted",
                     false);
         return;
     }
@@ -461,16 +491,19 @@ void UpdateChecker::finish_task(
     bool retry_soon,
     const OtaUrlError *transport_error) {
     bool publish = false;
+    bool deferred = false;
     const uint32_t now = millis();
 
     if (lock()) {
         publish = generation == config_generation_;
         if (check_url_ == url) check_url_ = nullptr;
-        task_ = nullptr;
-        cancel_requested_ = false;
-        status_.active = false;
+        deferred = publish && export_preempted_ && !cancel_requested_;
 
-        if (publish) {
+        if (deferred) {
+            status_.pending = true;
+            status_.error = "";
+        } else if (publish) {
+            manual_requested_ = false;
             status_.attempted = true;
             last_check_ms_ = now;
             next_check_ms_ = now +
@@ -504,6 +537,12 @@ void UpdateChecker::finish_task(
     if (url) Memory::free(url);
     if (artifact.url) Memory::free(artifact.url);
     if (!publish) return;
+
+    if (deferred) {
+        Log::logf(CAT_OTA, LOG_DEBUG,
+                  "firmware update check deferred: export pending\n");
+        return;
+    }
 
     if (manifest && (!error || !*error)) {
         if (update_available) {
@@ -541,9 +580,11 @@ void UpdateChecker::clear_release_locked() {
     status_.release_notes_available = false;
 }
 
-bool UpdateChecker::cancelled(uint32_t generation) const {
+bool UpdateChecker::cancelled(uint32_t generation) {
     if (!lock()) return true;
-    const bool result = cancel_requested_ ||
+
+    if (exports_->endpoint_work_claimed()) export_preempted_ = true;
+    const bool result = cancel_requested_ || export_preempted_ ||
                         generation != config_generation_;
     unlock();
     return result;

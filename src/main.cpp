@@ -1525,7 +1525,7 @@ void setup() {
     firmware_installer.begin();
     firmware_url_source.begin();
     arduino_ota_source.begin(config_service.data());
-    update_checker.begin(config_service.data());
+    update_checker.begin(config_service.data(), export_task);
     if (!config_http_controller.begin(config_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] config HTTP controller failed to start\n");

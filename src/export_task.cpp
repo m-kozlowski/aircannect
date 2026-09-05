@@ -204,7 +204,7 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
                  sizeof(runtime_->inputs.command.day), "%s", day);
     }
 
-    endpoint_work_claimed_.store(true);
+    work_reservation_.fetch_or(ExportDemand);
     unlock_inputs();
     if (kind != CommandKind::SmbScheduledReconcile) {
         runtime_->smb.cancel_scheduled_reconcile();
@@ -344,8 +344,6 @@ void ExportTask::apply_inputs(const PublishedInputs &inputs,
 
     runtime_->smb.set_network_available(network_ready_);
     runtime_->sleephq.set_network_available(network_ready_);
-    runtime_->smb.set_runtime_blocked(runtime_blocked_);
-    runtime_->sleephq.set_runtime_blocked(runtime_blocked_);
 }
 
 bool ExportTask::apply_command(const Command &command) {
@@ -463,13 +461,11 @@ ExportStep ExportTask::step_endpoint() {
     return result;
 }
 
-void ExportTask::publish_work_claim() {
-    if (!runtime_ || !lock_inputs(0)) return;
+bool ExportTask::publish_work_claim() {
+    if (!runtime_ || !lock_inputs(0)) return false;
 
     const bool command_pending =
         runtime_->inputs.command.kind != CommandKind::None;
-    unlock_inputs();
-
     const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
     const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
     const bool active = smb.durable_state_pending ||
@@ -482,7 +478,13 @@ void ExportTask::publish_work_claim() {
     const bool ready_pending =
         (pending || command_pending) && network_ready_ && !runtime_blocked_;
 
-    endpoint_work_claimed_.store(active || ready_pending);
+    if (active || ready_pending) {
+        work_reservation_.fetch_or(ExportDemand);
+    } else {
+        work_reservation_.fetch_and(static_cast<uint8_t>(~ExportDemand));
+    }
+    unlock_inputs();
+    return true;
 }
 
 void ExportTask::publish_status() {
@@ -542,7 +544,28 @@ void ExportTask::publish_status() {
 }
 
 bool ExportTask::endpoint_work_claimed() const {
-    return endpoint_work_claimed_.load();
+    return (work_reservation_.load() & ExportDemand) != 0;
+}
+
+bool ExportTask::try_begin_update_check() {
+    uint8_t idle = 0;
+    return work_reservation_.compare_exchange_strong(idle, UpdateCheck);
+}
+
+void ExportTask::end_update_check() {
+    work_reservation_.fetch_and(static_cast<uint8_t>(~UpdateCheck));
+    wake();
+}
+
+bool ExportTask::try_begin_endpoint_step() {
+    uint8_t current = work_reservation_.load();
+    while ((current & UpdateCheck) == 0) {
+        if (work_reservation_.compare_exchange_weak(
+                current, static_cast<uint8_t>(current | EndpointStep))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 ExportTaskControlSnapshot ExportTask::control_snapshot() const {
@@ -620,8 +643,17 @@ void ExportTask::run() {
         apply_inputs(inputs, now_ms);
         (void)apply_command(inputs.command);
 
+        // Block run startup, but still let engines publish due retries and
+        // process cancellation/configuration while a check is shutting down.
+        const bool admitted = try_begin_endpoint_step();
+        runtime_->smb.set_runtime_blocked(runtime_blocked_ || !admitted);
+        runtime_->sleephq.set_runtime_blocked(runtime_blocked_ || !admitted);
+
         const ExportStep result = step_endpoint();
-        publish_work_claim();
+        const bool claim_published = publish_work_claim();
+        if (admitted && claim_published) {
+            work_reservation_.fetch_and(static_cast<uint8_t>(~EndpointStep));
+        }
         publish_status();
 
         uint32_t delay_ms = AC_EXPORT_TASK_IDLE_TICK_MS;
