@@ -73,7 +73,6 @@ bool AudibleAlertSink::start() {
 
 void AudibleAlertSink::set_enabled(bool enabled) {
     enabled_.store(enabled, std::memory_order_release);
-    if (!enabled && output_) output_->silence();
     if (task_) xTaskNotifyGive(task_);
 }
 
