@@ -145,10 +145,22 @@ bool SleepHqClient::ensure_connected(
     client_.setCACert(SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA);
     client_.setTimeout(SLEEPHQ_HTTP_TIMEOUT_MS);
     client_.setHandshakeTimeout(SLEEPHQ_HANDSHAKE_TIMEOUT_SECONDS);
+    const uint32_t connect_started_ms = millis();
+    errno = 0;
     if (!client_.connect(SLEEPHQ_HOST, SLEEPHQ_PORT,
                          SLEEPHQ_CONNECT_TIMEOUT_MS)) {
+        const int socket_error = errno;
+        char detail[96] = {};
+        const int client_error = client_.lastError(detail, sizeof(detail));
         set_error("connect_failed");
-        Log::logf(CAT_EXPORT, LOG_WARN, "[SLEEPHQ] connect failed\n");
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] connect failed errno=%d/%.32s client=%d "
+                  "elapsed_ms=%u detail=%.95s\n",
+                  socket_error,
+                  socket_error ? strerror(socket_error) : "none",
+                  client_error,
+                  static_cast<unsigned>(millis() - connect_started_ms),
+                  detail);
         return false;
     }
     if (!operation_allows(operation)) {
