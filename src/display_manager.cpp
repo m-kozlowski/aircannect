@@ -197,7 +197,12 @@ bool DisplayManager::begin() {
     return true;
 }
 
-void DisplayManager::publish(const DisplaySnapshot &snapshot) {
+bool DisplayManager::snapshot_due(uint32_t now_ms) const {
+    return available() &&
+           (!snapshot_published_ || now_ms - last_snapshot_ms_ >= 1000);
+}
+
+void DisplayManager::publish(const DisplaySnapshot &snapshot, uint32_t now_ms) {
     if (!device_ || !snapshot_lock_) return;
     if (xSemaphoreTake(snapshot_lock_, 0) != pdTRUE) return;
 
@@ -223,6 +228,8 @@ void DisplayManager::publish(const DisplaySnapshot &snapshot) {
     pending_snapshot_.generation = published_generation_;
     xSemaphoreGive(snapshot_lock_);
 
+    last_snapshot_ms_ = now_ms;
+    snapshot_published_ = true;
     if (task_) xTaskNotifyGive(task_);
 }
 

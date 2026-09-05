@@ -19,7 +19,8 @@ class DisplayManager {
 public:
     void configure(DisplayOrientation orientation, bool auto_rotate);
     bool begin();
-    void publish(const DisplaySnapshot &snapshot);
+    bool snapshot_due(uint32_t now_ms) const;
+    void publish(const DisplaySnapshot &snapshot, uint32_t now_ms);
     void publish_therapy_telemetry(
         const TherapyTelemetrySnapshot &telemetry,
         int therapy_mode);
@@ -72,6 +73,10 @@ private:
     DisplaySnapshot pending_snapshot_;
     uint32_t published_generation_ = 0;
     uint32_t rendered_generation_ = 0;
+
+    // Main-loop presentation cadence, independent of telemetry updates.
+    uint32_t last_snapshot_ms_ = 0;
+    bool snapshot_published_ = false;
 
     DisplayMotionPolicy motion_policy_;
     std::atomic<uint8_t> configured_rotation_{0};

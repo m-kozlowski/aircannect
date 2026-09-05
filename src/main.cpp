@@ -1016,14 +1016,13 @@ static void drain_can_rx_after(const char *section) {
     last_checkpoint_ms = millis();
 }
 
-static void refresh_status_http_snapshot(uint32_t now_ms) {
+static void refresh_status_presentations(uint32_t now_ms) {
     const uint32_t device_revision = as11_device_service.revision();
     const uint32_t config_revision = config_service.revision();
-    if (!status_http_controller.refresh_due(device_revision,
-                                            config_revision,
-                                            now_ms)) {
-        return;
-    }
+    const bool http_due = status_http_controller.refresh_due(
+        device_revision, config_revision, now_ms);
+    const bool display_due = display_manager.snapshot_due(now_ms);
+    if (!http_due && !display_due) return;
 
     const AppConfigData &config = config_service.data();
     SystemStatusSnapshot snapshot = collect_system_status(
@@ -1051,7 +1050,7 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
                 sizeof(snapshot.as11.link_error) - 1);
     }
 
-    if (display_manager.available()) {
+    if (display_due) {
         const int therapy_mode = as11_mode_index_from_value(
             as11_device_service.state().active_therapy_profile());
         const DisplaySnapshot display_snapshot = compose_display_snapshot(
@@ -1061,11 +1060,14 @@ static void refresh_status_http_snapshot(uint32_t now_ms) {
             export_coordinator.status_snapshot(),
             therapy_mode,
             report_task.display_summary_snapshot());
-        display_manager.publish(display_snapshot);
+        display_manager.publish(display_snapshot, now_ms);
     }
 
-    (void)status_http_controller.publish_snapshot(
-        snapshot, config.hostname.c_str(), device_revision, config_revision);
+    if (http_due) {
+        (void)status_http_controller.publish_snapshot(
+            snapshot, config.hostname.c_str(), device_revision,
+            config_revision);
+    }
 }
 
 void setup() {
@@ -1450,7 +1452,7 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] status HTTP controller failed to start\n");
     }
-    refresh_status_http_snapshot(millis());
+    refresh_status_presentations(millis());
 
     if (!live_http_controller.begin(stream_broker, live_chart_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
@@ -1696,7 +1698,7 @@ void loop() {
     drain_can_rx_after("resmed_firmware_repository");
 
     // Web, TCP, and console frontends
-    refresh_status_http_snapshot(now_ms);
+    refresh_status_presentations(now_ms);
     drain_can_rx_after("status_http");
 
     report_http_controller.poll();
