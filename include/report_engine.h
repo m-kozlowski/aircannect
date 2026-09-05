@@ -12,6 +12,7 @@
 #include "report_signal_store_catalog.h"
 #include "report_signal_store_service.h"
 #include "report_spool_availability.h"
+#include "storage_bounded_file_loader.h"
 
 namespace aircannect {
 
@@ -57,7 +58,8 @@ public:
 
     void begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
-               ReportSpoolPort &spool_port);
+               ReportSpoolPort &spool_port,
+               StorageRangeWritePort &range_write_port);
 
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog);
     void publish_store_catalog(
@@ -84,6 +86,7 @@ public:
 private:
     enum class ActivePhase : uint8_t {
         Idle,
+        LoadingMetadata,
         AcquiringFallback,
         WaitingForCatalog,
         Executing,
@@ -91,9 +94,11 @@ private:
     };
 
     bool source_current(const ReportArtifactKey &artifact) const;
-    uint32_t next_store_generation(SleepDayId sleep_day) const;
     bool start_next(uint32_t now_ms);
     bool start_request(ReportArtifactRequest request, uint32_t now_ms);
+    bool finish_metadata_load(uint32_t now_ms);
+    bool start_known_request(const ReportSignalStoreCatalogRecord *stored,
+                             uint32_t now_ms);
     bool start_build(uint32_t now_ms);
     bool finish_fallback_acquisition();
     bool finish_execution(uint32_t now_ms);
@@ -113,6 +118,10 @@ private:
     ReportExecutor executor_;
     ReportSignalStoreBuilder builder_;
     ReportSignalStoreService store_;
+
+    StorageBoundedFileLoader metadata_loader_;
+    std::shared_ptr<const LargeByteBuffer> previous_metadata_;
+
     std::shared_ptr<const NightCatalog> catalog_;
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog_;
     ReportSpoolAvailability spool_availability_;

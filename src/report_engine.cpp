@@ -106,10 +106,13 @@ ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
 
 void ReportEngine::begin(StorageReadPort &read_port,
                          StorageAtomicWritePort &write_port,
-                         ReportSpoolPort &spool_port) {
+                         ReportSpoolPort &spool_port,
+                         StorageRangeWritePort &range_write_port) {
     fallback_acquisition_.begin(read_port, write_port, spool_port);
     executor_.begin(read_port);
-    store_.begin(write_port);
+    store_.begin(read_port, range_write_port, write_port);
+    builder_.begin(store_);
+    metadata_loader_.begin(read_port);
 }
 
 void ReportEngine::publish_catalog(
@@ -264,6 +267,13 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
     if (phase_ == ActivePhase::Idle) return worked;
 
     switch (phase_) {
+        case ActivePhase::LoadingMetadata:
+            worked = metadata_loader_.poll() || worked;
+            if (metadata_loader_.status().terminal()) {
+                worked = finish_metadata_load(now_ms) || worked;
+            }
+            break;
+
         case ActivePhase::AcquiringFallback:
             worked = fallback_acquisition_.poll() || worked;
             if (fallback_acquisition_.status().terminal()) {
@@ -309,6 +319,9 @@ ReportEngineStatus ReportEngine::status() const {
     out.last_completion = last_completion_;
 
     switch (phase_) {
+        case ActivePhase::LoadingMetadata:
+            out.state = ReportEngineState::Executing;
+            break;
         case ActivePhase::AcquiringFallback:
             out.state = ReportEngineState::AcquiringFallback;
             break;
@@ -347,12 +360,6 @@ bool ReportEngine::source_current(const ReportArtifactKey &artifact) const {
     return night && night->source_revision == artifact.source_revision;
 }
 
-uint32_t ReportEngine::next_store_generation(SleepDayId sleep_day) const {
-    const ReportSignalStoreCatalogRecord *record =
-        store_catalog_ ? store_catalog_->find(sleep_day) : nullptr;
-    return record ? increment_generation(record->generation) : 1;
-}
-
 bool ReportEngine::start_next(uint32_t now_ms) {
     ReportArtifactRequest request;
     const ReportRequestSelection selected = queue_.take_next(now_ms, request);
@@ -375,17 +382,90 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
     const ReportSignalStoreCatalogRecord *stored =
         store_catalog_ ? store_catalog_->find(request.artifact.sleep_day)
                        : nullptr;
-    if (!request.force_rebuild && stored &&
-        stored->source_revision == request.artifact.source_revision) {
-        complete_active(OperationOutcome::succeeded(),
+    if (stored) return start_known_request(stored, now_ms);
+
+    char path[AC_STORAGE_PATH_MAX] = {};
+    if (!report_signal_store_night_path(
+            request.artifact.sleep_day, path, sizeof(path)) ||
+        metadata_loader_.start(
+            path, ReportSignalStoreNightCodec::MaxBytes,
+            request.ticket.generation, read_lane(request.priority)) !=
+            OperationAdmission::Accepted) {
+        complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::Ready,
-                        ReportExecutorError::None);
-        last_completion_.store_generation = stored->generation;
+                        ReportExecutorError::None,
+                        "report_store_metadata_read_rejected");
         return true;
     }
 
-    active_store_generation_ = next_store_generation(
-        request.artifact.sleep_day);
+    phase_ = ActivePhase::LoadingMetadata;
+    return true;
+}
+
+bool ReportEngine::finish_metadata_load(uint32_t now_ms) {
+    const StorageBoundedFileLoadStatus load = metadata_loader_.status();
+    if (!load.terminal()) return false;
+
+    if (load.state == StorageBoundedFileLoadState::Ready) {
+        std::shared_ptr<const LargeByteBuffer> metadata =
+            metadata_loader_.take_completed();
+        ReportSignalStoreNightView view;
+        if (!metadata ||
+            !ReportSignalStoreNightCodec::decode(
+                metadata->data(), metadata->size(), view) ||
+            view.night.sleep_day != active_request_.artifact.sleep_day) {
+            if (active_request_.force_rebuild) {
+                return start_known_request(nullptr, now_ms);
+            }
+
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_store_metadata_invalid");
+            return true;
+        }
+
+        ReportSignalStoreCatalogRecord stored;
+        stored.sleep_day = view.night.sleep_day;
+        stored.source_revision = view.night.source_revision;
+        stored.generation = view.night.generation;
+        stored.metadata = std::move(metadata);
+        published_.metadata = stored.metadata;
+        return start_known_request(&stored, now_ms);
+    }
+
+    if (load.state == StorageBoundedFileLoadState::Missing) {
+        metadata_loader_.reset();
+        return start_known_request(nullptr, now_ms);
+    }
+
+    complete_active(
+        load.state == StorageBoundedFileLoadState::Cancelled
+            ? OperationOutcome::cancelled() : OperationOutcome::failed(),
+        ReportPlanStatus::Ready,
+        ReportExecutorError::None,
+        load.error[0] ? load.error : "report_store_metadata_read_failed");
+    return true;
+}
+
+bool ReportEngine::start_known_request(
+    const ReportSignalStoreCatalogRecord *stored,
+    uint32_t now_ms) {
+    if (!active_request_.force_rebuild && stored &&
+        stored->source_revision == active_request_.artifact.source_revision) {
+        const uint32_t generation = stored->generation;
+        complete_active(OperationOutcome::succeeded(),
+                        ReportPlanStatus::Ready,
+                        ReportExecutorError::None);
+        last_completion_.store_generation = generation;
+        return true;
+    }
+
+    active_store_generation_ = stored
+        ? increment_generation(stored->generation) : 1;
+    previous_metadata_ = !active_request_.force_rebuild && stored
+        ? stored->metadata : nullptr;
+    if (previous_metadata_) active_store_generation_ = stored->generation;
     return start_build(now_ms);
 }
 
@@ -409,6 +489,32 @@ bool ReportEngine::start_build(uint32_t now_ms) {
     }
 
     active_plan_ = std::move(planned.plan);
+    if (previous_metadata_) {
+        ReportSignalStoreNightView previous;
+        bool append = ReportSignalStoreNightCodec::decode(
+            previous_metadata_->data(), previous_metadata_->size(), previous);
+        append = append &&
+            previous.night.day_start_ms == active_plan_->night().day_start_ms &&
+            previous.night.day_end_ms == active_plan_->night().day_end_ms &&
+            previous.night.session_count <= active_plan_->session_count();
+
+        for (size_t i = 0; append && i < previous.night.session_count; ++i) {
+            NightCatalogTimeRange old_session;
+            append = previous.session(i, old_session);
+            const auto &current = active_plan_->session(i)->output_window;
+            append = append && old_session.start_ms == current.start_ms &&
+                (old_session.end_ms == current.end_ms ||
+                 (i + 1 == previous.night.session_count &&
+                  old_session.end_ms < current.end_ms));
+        }
+
+        if (!append) {
+            previous_metadata_.reset();
+            active_store_generation_ = increment_generation(
+                active_store_generation_);
+        }
+    }
+
     if (active_plan_->fallback_acquisition_allowed() &&
         (active_plan_->acquirable_signal_mask() != 0 ||
          active_plan_->missing_event_mask() != 0)) {
@@ -444,7 +550,8 @@ bool ReportEngine::start_build(uint32_t now_ms) {
     }
 
     if (!builder_.begin_build(
-            active_request_, *active_plan_, active_store_generation_)) {
+            active_request_, *active_plan_, active_store_generation_,
+            previous_metadata_)) {
         const char *reason = builder_.failure_reason();
         builder_.discard_build();
         complete_active(OperationOutcome::failed(),
@@ -624,6 +731,12 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
 
 void ReportEngine::cancel_active_work() {
     switch (phase_) {
+        case ActivePhase::LoadingMetadata:
+            metadata_loader_.cancel();
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            break;
         case ActivePhase::AcquiringFallback:
             fallback_acquisition_.cancel();
             break;
@@ -664,6 +777,7 @@ void ReportEngine::complete_active(OperationOutcome outcome,
 }
 
 void ReportEngine::reset_active() {
+    metadata_loader_.reset();
     executor_.reset();
     builder_.discard_build();
     store_.reset();
@@ -672,6 +786,7 @@ void ReportEngine::reset_active() {
     active_request_ = {};
     awaited_fallback_identity_ = 0;
     active_store_generation_ = 0;
+    previous_metadata_.reset();
     phase_ = ActivePhase::Idle;
     clear_after_fallback_cancel_ = false;
 }
