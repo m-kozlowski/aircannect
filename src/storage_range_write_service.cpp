@@ -4,15 +4,14 @@
 #include <new>
 #include <stdio.h>
 
-#include "memory_manager.h"
+#include "large_object.h"
 #include "storage_internal.h"
 
 namespace aircannect {
 
 StorageRangeWriteService::~StorageRangeWriteService() {
     if (job_) {
-        job_->~Job();
-        Memory::free(job_);
+        LargeObject::destroy(job_);
     }
 
     if (mutex_) vSemaphoreDelete(mutex_);
@@ -24,8 +23,7 @@ bool StorageRangeWriteService::begin(WakeCallback wake) {
     if (!mutex_) return false;
 
     if (!job_) {
-        void *memory = Memory::alloc_large(sizeof(Job), false);
-        if (memory) job_ = new (memory) Job();
+        job_ = LargeObject::create<Job>();
     }
 
     return job_ != nullptr;

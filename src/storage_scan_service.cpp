@@ -6,6 +6,7 @@
 
 #include <FS.h>
 
+#include "large_object.h"
 #include "memory_manager.h"
 #include "storage_directory.h"
 #include "storage_internal.h"
@@ -49,8 +50,7 @@ struct StorageScanService::Job {
 StorageScanService::~StorageScanService() {
     if (job_) {
         close_directories_locked();
-        job_->~Job();
-        Memory::free(job_);
+        LargeObject::destroy(job_);
     }
     release_maintenance_locked();
     if (lock_) vSemaphoreDelete(lock_);
@@ -67,8 +67,7 @@ bool StorageScanService::begin(
     if (!lock_) return false;
 
     if (!job_) {
-        void *memory = Memory::alloc_large(sizeof(Job), false);
-        if (memory) job_ = new (memory) Job();
+        job_ = LargeObject::create<Job>();
     }
     if (job_) return true;
 

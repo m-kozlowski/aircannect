@@ -12,7 +12,7 @@
 
 #include "debug_log.h"
 #include "hex_util.h"
-#include "memory_manager.h"
+#include "large_object.h"
 #include "storage_directory.h"
 #include "storage_internal.h"
 #include "string_util.h"
@@ -100,8 +100,7 @@ const char *storage_upload_state_name(StorageUploadState state) {
 
 StorageUploadService::~StorageUploadService() {
     if (job_) {
-        job_->~Job();
-        Memory::free(job_);
+        LargeObject::destroy(job_);
     }
     release_maintenance_locked();
     if (lock_) vSemaphoreDelete(lock_);
@@ -124,8 +123,7 @@ bool StorageUploadService::begin(
     if (!lock_ || !status_mutex_) return false;
 
     if (!job_) {
-        void *memory = Memory::alloc_large(sizeof(Job), false);
-        if (memory) job_ = new (memory) Job();
+        job_ = LargeObject::create<Job>();
     }
     if (job_) return true;
 

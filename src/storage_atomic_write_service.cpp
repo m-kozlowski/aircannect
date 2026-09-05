@@ -7,7 +7,7 @@
 
 #include "crc32.h"
 #include "debug_log.h"
-#include "memory_manager.h"
+#include "large_object.h"
 #include "storage_internal.h"
 #include "string_util.h"
 
@@ -95,8 +95,7 @@ bool remove_transaction_artifacts() {
 StorageAtomicWriteService::~StorageAtomicWriteService() {
     if (job_) {
         if (job_->output) job_->output.close();
-        job_->~Job();
-        Memory::free(job_);
+        LargeObject::destroy(job_);
     }
     if (lock_) vSemaphoreDelete(lock_);
 }
@@ -107,8 +106,7 @@ bool StorageAtomicWriteService::begin(WakeCallback wake) {
     if (!lock_) return false;
 
     if (!job_) {
-        void *memory = Memory::alloc_large(sizeof(Job), false);
-        if (memory) job_ = new (memory) Job();
+        job_ = LargeObject::create<Job>();
     }
     if (job_) return true;
 
