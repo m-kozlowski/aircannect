@@ -159,7 +159,7 @@ OperationOutcome ReportRequestQueue::retry(ReportArtifactRequest request,
         request.ready_at_ms = 1;
     }
     slots_[count_++] = request;
-    return OperationOutcome::retry(delay_ms);
+    return OperationOutcome::retry();
 }
 
 size_t ReportRequestQueue::cancel_background() {
