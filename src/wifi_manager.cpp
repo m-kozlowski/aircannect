@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 
+#include <atomic>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_mac.h>
@@ -24,10 +25,10 @@ static constexpr const char *WIFI_PREF_LAST_GOOD = "last_good";
 static constexpr uint16_t WIFI_COEX_SCAN_ACTIVE_MAX_MS = 120;
 static constexpr uint8_t WIFI_COEX_SCAN_HOME_DWELL_MS = 30;
 
-static volatile uint8_t last_disconnect_reason = 0;
-static volatile bool automatic_scan_pending = false;
-static volatile bool automatic_scan_done = false;
-static volatile uint32_t automatic_scan_status = 1;
+static std::atomic<uint8_t> last_disconnect_reason{0};
+static std::atomic<bool> automatic_scan_pending{false};
+static std::atomic<bool> automatic_scan_done{false};
+static std::atomic<uint32_t> automatic_scan_status{1};
 
 void format_bssid(char *out, size_t size, const uint8_t *bssid) {
     if (!out || size == 0) return;
@@ -78,11 +79,13 @@ void format_ap_ssid(const String &hostname, char *out, size_t size) {
 
 void wifi_event_cb(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-        last_disconnect_reason = info.wifi_sta_disconnected.reason;
+        last_disconnect_reason.store(info.wifi_sta_disconnected.reason,
+                                     std::memory_order_relaxed);
     } else if (event == ARDUINO_EVENT_WIFI_SCAN_DONE &&
-               automatic_scan_pending) {
-        automatic_scan_status = info.wifi_scan_done.status;
-        automatic_scan_done = true;
+               automatic_scan_pending.load(std::memory_order_acquire)) {
+        automatic_scan_status.store(info.wifi_scan_done.status,
+                                    std::memory_order_relaxed);
+        automatic_scan_done.store(true, std::memory_order_release);
     }
 }
 
@@ -168,7 +171,8 @@ void WifiManager::poll() {
         management_reachable_ = softap_running_;
         sta_ipv4_online_ = false;
         stats_.disconnects++;
-        last_disconnect_reason_ = last_disconnect_reason;
+        last_disconnect_reason_ =
+            last_disconnect_reason.load(std::memory_order_relaxed);
         stats_.last_disconnect_reason = last_disconnect_reason_;
         Log::logf(CAT_WIFI, LOG_WARN,
                   "STA disconnected reason=%u; reconnecting\n",
@@ -346,7 +350,7 @@ bool WifiManager::start_profile(size_t index, bool keep_softap,
     ap_select_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
     pmf_retry_attempted_ = false;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
+    last_disconnect_reason.store(0, std::memory_order_relaxed);
 
     reset_scan_candidates();
     if (start_automatic_scan()) {
@@ -465,7 +469,7 @@ void WifiManager::stop_wifi() {
     ipv4_deadline_ms_ = 0;
     ap_select_deadline_ms_ = 0;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
+    last_disconnect_reason.store(0, std::memory_order_relaxed);
     mode_state_ = WifiModeState::Off;
 }
 
@@ -1001,7 +1005,7 @@ void WifiManager::handle_connected() {
     softap_retry_deadline_ms_ = 0;
     consecutive_profile_failures_ = 0;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
+    last_disconnect_reason.store(0, std::memory_order_relaxed);
     low_rssi_count_ = 0;
     last_roam_check_ms_ = millis();
     profile_scan_snapshot_valid_ = false;
@@ -1048,7 +1052,7 @@ bool WifiManager::begin_profile_association(
     ipv4_deadline_ms_ = 0;
     pmf_retry_attempted_ = false;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
+    last_disconnect_reason.store(0, std::memory_order_relaxed);
     stats_.connect_attempts++;
 
     if (!candidate) {
@@ -1130,13 +1134,13 @@ bool WifiManager::start_automatic_scan() {
     config.home_chan_dwell_time = WIFI_COEX_SCAN_HOME_DWELL_MS;
     config.coex_background_scan = true;
 
-    automatic_scan_done = false;
-    automatic_scan_status = 1;
-    automatic_scan_pending = true;
+    automatic_scan_done.store(false, std::memory_order_relaxed);
+    automatic_scan_status.store(1, std::memory_order_relaxed);
+    automatic_scan_pending.store(true, std::memory_order_release);
 
     const esp_err_t err = esp_wifi_scan_start(&config, false);
     if (err != ESP_OK) {
-        automatic_scan_pending = false;
+        automatic_scan_pending.store(false, std::memory_order_release);
         Log::logf(CAT_WIFI, LOG_DEBUG,
                   "coexistence scan start failed err=%d\n",
                   static_cast<int>(err));
@@ -1150,11 +1154,13 @@ bool WifiManager::start_automatic_scan() {
 
 bool WifiManager::automatic_scan_finished(bool &success) {
     success = false;
-    if (!automatic_scan_active_ || !automatic_scan_done) return false;
+    if (!automatic_scan_active_) return false;
+    if (!automatic_scan_done.exchange(false, std::memory_order_acq_rel)) {
+        return false;
+    }
 
-    success = automatic_scan_status == 0;
-    automatic_scan_pending = false;
-    automatic_scan_done = false;
+    success = automatic_scan_status.load(std::memory_order_relaxed) == 0;
+    automatic_scan_pending.store(false, std::memory_order_release);
     automatic_scan_active_ = false;
     return true;
 }
@@ -1162,9 +1168,9 @@ bool WifiManager::automatic_scan_finished(bool &success) {
 void WifiManager::cancel_automatic_scan() {
     if (!automatic_scan_active_) return;
 
-    automatic_scan_pending = false;
-    automatic_scan_done = false;
-    automatic_scan_status = 1;
+    automatic_scan_pending.store(false, std::memory_order_release);
+    automatic_scan_done.store(false, std::memory_order_release);
+    automatic_scan_status.store(1, std::memory_order_relaxed);
     esp_wifi_scan_stop();
     esp_wifi_clear_ap_list();
     automatic_scan_active_ = false;
@@ -1489,7 +1495,8 @@ void WifiManager::cleanup_manual_scan() {
 }
 
 void WifiManager::handle_connect_timeout() {
-    last_disconnect_reason_ = last_disconnect_reason;
+    last_disconnect_reason_ =
+        last_disconnect_reason.load(std::memory_order_relaxed);
     stats_.last_disconnect_reason = last_disconnect_reason_;
     if (!pmf_retry_attempted_ && last_disconnect_reason_ == 208) {
         retry_with_pmf_disabled();
@@ -1527,7 +1534,7 @@ void WifiManager::retry_with_pmf_disabled() {
     mode_state_ = WifiModeState::StaPmfRetry;
     connect_deadline_ms_ = millis() + AC_WIFI_PMF_RETRY_TIMEOUT_MS;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
+    last_disconnect_reason.store(0, std::memory_order_relaxed);
     Log::logf(CAT_WIFI, LOG_INFO,
               "reason 208; retrying with PMF disabled\n");
     esp_wifi_disconnect();

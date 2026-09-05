@@ -1,6 +1,7 @@
 #include "time_sync_service.h"
 
 #include <Arduino.h>
+#include <atomic>
 #include <esp_sntp.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -26,10 +27,10 @@ static constexpr uint32_t TIME_SYNC_RESMED_PUSH_INTERVAL_MS =
 static constexpr uint32_t TIME_SYNC_RESMED_PUSH_READBACK_DELAY_MS = 2000;
 static constexpr int32_t RPC_METHOD_NOT_FOUND = -32601;
 
-volatile bool g_ntp_synced = false;
+std::atomic<bool> g_ntp_synced{false};
 
 void ntp_sync_cb(struct timeval *) {
-    g_ntp_synced = true;
+    g_ntp_synced.store(true, std::memory_order_release);
 }
 
 bool sta_online(const WifiManager &wifi_manager) {
@@ -64,7 +65,9 @@ void TimeSyncService::poll() {
     const uint32_t now_ms = millis();
     poll_resmed_push_result(now_ms);
     poll_ntp(now_ms);
-    if (g_ntp_synced && !ntp_synced_) note_ntp_sync(now_ms);
+    if (g_ntp_synced.load(std::memory_order_acquire) && !ntp_synced_) {
+        note_ntp_sync(now_ms);
+    }
     poll_resmed_pull(now_ms);
     poll_resmed_push(now_ms);
 }
@@ -219,7 +222,7 @@ void TimeSyncService::apply_timezone() {
 
 void TimeSyncService::start_ntp() {
     apply_timezone();
-    g_ntp_synced = false;
+    g_ntp_synced.store(false, std::memory_order_release);
     sntp_set_time_sync_notification_cb(ntp_sync_cb);
     if (esp_sntp_enabled()) esp_sntp_stop();
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
@@ -243,7 +246,7 @@ void TimeSyncService::stop_ntp() {
     ntp_synced_ = false;
     ntp_reported_ = false;
     ntp_synced_ms_ = 0;
-    g_ntp_synced = false;
+    g_ntp_synced.store(false, std::memory_order_release);
 }
 
 void TimeSyncService::note_ntp_sync(uint32_t now_ms) {
