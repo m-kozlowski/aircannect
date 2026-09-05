@@ -2325,9 +2325,12 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
         active_sa2_input_ == EdfSa2Input::LocalOximetry
             ? edf_stream_ids_csv_excluding(EdfSeriesId::Sa2)
             : edf_stream_ids_csv();
-    const std::string params = build_stream_params(data_ids, 40, 200);
+    StreamSubscription subscription;
+    subscription.data_ids_csv = data_ids;
+    subscription.sample_ms = 40;
+    subscription.report_ms = 200;
     StreamAcquireResult result =
-        stream_->acquire(params, RpcSource::EdfRecorder);
+        stream_->acquire(subscription, RpcSource::EdfRecorder);
     if (result.status == StreamAcquireStatus::Acquired ||
         result.status == StreamAcquireStatus::AlreadyActive) {
         status_.stream_handle = result.handle;

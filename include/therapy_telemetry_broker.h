@@ -108,7 +108,7 @@ private:
     Subscriber subscribers_[MAX_SUBSCRIBERS];
     TherapyTelemetry telemetry_;
     TherapyTelemetryRuntimeStatus status_;
-    std::string applied_params_;
+    StreamSubscription applied_subscription_;
 
     uint32_t session_id_ = 0;
     uint32_t next_reconcile_ms_ = 0;

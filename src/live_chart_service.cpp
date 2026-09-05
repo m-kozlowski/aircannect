@@ -1,6 +1,5 @@
 #include "live_chart_service.h"
 
-#include "as11_rpc.h"
 #include "board.h"
 #include "memory_manager.h"
 #include "oximetry_hub.h"
@@ -235,10 +234,12 @@ void LiveChartService::attach_stream(uint32_t now_ms) {
     if (static_cast<int32_t>(now_ms - next_attach_ms_) < 0) return;
 
     next_attach_ms_ = now_ms + LIVE_CHART_ATTACH_RETRY_MS;
-    const std::string params =
-        build_stream_params(LIVE_CHART_STREAM_IDS, 40, 200);
+    StreamSubscription subscription;
+    subscription.data_ids_csv = LIVE_CHART_STREAM_IDS;
+    subscription.sample_ms = 40;
+    subscription.report_ms = 200;
     StreamAcquireResult result =
-        stream_->acquire(params, RpcSource::Live);
+        stream_->acquire(subscription, RpcSource::Live);
     if (result.status == StreamAcquireStatus::Acquired ||
         result.status == StreamAcquireStatus::AlreadyActive) {
         status_.handle = result.handle;

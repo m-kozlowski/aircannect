@@ -1,6 +1,5 @@
 #include "therapy_telemetry_broker.h"
 
-#include "as11_rpc.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -252,25 +251,27 @@ void TherapyTelemetryBroker::reconcile_stream(uint32_t now_ms) {
         return;
     }
 
-    const std::string params = build_stream_params(
-        stream_ids(demand.metrics), demand.sample_ms, demand.report_ms);
+    StreamSubscription subscription;
+    subscription.data_ids_csv = stream_ids(demand.metrics);
+    subscription.sample_ms = demand.sample_ms;
+    subscription.report_ms = demand.report_ms;
 
     if (status_.stream_handle != STREAM_CONSUMER_INVALID &&
         !stream_->consumer_active(status_.stream_handle)) {
         status_.stream_handle = STREAM_CONSUMER_INVALID;
         status_.attached = false;
-        applied_params_.clear();
+        applied_subscription_ = {};
     }
 
     StreamAcquireResult result;
     if (status_.stream_handle == STREAM_CONSUMER_INVALID) {
-        result = stream_->acquire(params, RpcSource::Telemetry);
-    } else if (applied_params_ == params) {
+        result = stream_->acquire(subscription, RpcSource::Telemetry);
+    } else if (applied_subscription_ == subscription) {
         status_.attached = true;
         reconcile_needed_ = false;
         return;
     } else {
-        result = stream_->update(status_.stream_handle, params);
+        result = stream_->update(status_.stream_handle, subscription);
     }
 
     if (result.status == StreamAcquireStatus::Acquired ||
@@ -278,7 +279,7 @@ void TherapyTelemetryBroker::reconcile_stream(uint32_t now_ms) {
         status_.stream_handle = result.handle;
         status_.attached = true;
         status_.last_error[0] = 0;
-        applied_params_ = params;
+        applied_subscription_ = subscription;
         last_queue_drops_ = 0;
         reconcile_needed_ = false;
         return;
@@ -302,7 +303,7 @@ void TherapyTelemetryBroker::release_stream() {
 
     status_.stream_handle = STREAM_CONSUMER_INVALID;
     status_.attached = false;
-    applied_params_.clear();
+    applied_subscription_ = {};
     last_queue_drops_ = 0;
     reconcile_needed_ = true;
 }

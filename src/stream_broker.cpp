@@ -107,26 +107,26 @@ void StreamBroker::transport_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     mark_reattach(now_ms);
 }
 
-StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
-                                          RpcSource source) {
+StreamAcquireResult StreamBroker::acquire(
+    const StreamSubscription &subscription,
+    RpcSource source) {
     StreamAcquireResult result;
-    if (params_json.empty()) return result;
-    Subscription requested;
-    if (!parse_subscription(params_json, requested) ||
+    StreamSubscription requested;
+    if (!normalize_subscription(subscription, requested) ||
         requested.data_id_count == 0) {
         return result;
     }
 
-    Subscription desired;
+    StreamSubscription desired;
     if (!build_desired_with_extra(requested, desired)) {
         result.status = StreamAcquireStatus::Incompatible;
         return result;
     }
 
     // A matching consumer may attach while StartStream is pending; the in-flight
-    // command satisfies all consumers that share params_json_.
-    const std::string desired_params = build_subscription_params(desired);
-    if (pending() && desired_params != params_json_) {
+    // command satisfies all consumers that share the typed desired request.
+    const bool desired_matches = desired == desired_subscription_;
+    if (pending() && !desired_matches) {
         result.status = StreamAcquireStatus::Busy;
         return result;
     }
@@ -149,41 +149,41 @@ StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
 
     result.handle = static_cast<StreamConsumerHandle>(slot);
     result.status =
-        desired_params == params_json_ && actual_active_
+        desired_matches && actual_active_
             ? StreamAcquireStatus::AlreadyActive
             : StreamAcquireStatus::Acquired;
     return result;
 }
 
-StreamAcquireResult StreamBroker::update(StreamConsumerHandle handle,
-                                         const std::string &params_json) {
+StreamAcquireResult StreamBroker::update(
+    StreamConsumerHandle handle,
+    const StreamSubscription &subscription) {
     StreamAcquireResult result;
-    if (!consumer_active(handle) || params_json.empty()) return result;
+    if (!consumer_active(handle)) return result;
     if (pending()) {
         result.status = StreamAcquireStatus::Busy;
         return result;
     }
 
-    Subscription requested;
-    if (!parse_subscription(params_json, requested) ||
+    StreamSubscription requested;
+    if (!normalize_subscription(subscription, requested) ||
         requested.data_id_count == 0) {
         return result;
     }
 
-    Subscription desired;
+    StreamSubscription desired;
     if (!build_desired_with_replacement(handle, requested, desired)) {
         result.status = StreamAcquireStatus::Incompatible;
         return result;
     }
 
-    const std::string desired_params = build_subscription_params(desired);
-    if (desired_params == params_json_ && actual_active_) {
+    consumers_[handle].subscription = requested;
+    if (desired == desired_subscription_ && actual_active_) {
         result.handle = handle;
         result.status = StreamAcquireStatus::AlreadyActive;
         return result;
     }
 
-    consumers_[handle].subscription = requested;
     apply_desired_subscription(desired);
     consumers_[handle].queue.clear();
     clear_error();
@@ -197,7 +197,7 @@ void StreamBroker::release(StreamConsumerHandle handle) {
     if (!consumer_active(handle)) return;
     consumers_[handle].queue.clear();
     consumers_[handle] = {};
-    Subscription desired;
+    StreamSubscription desired;
     if (build_desired_subscription(desired)) {
         apply_desired_subscription(desired);
     } else {
@@ -210,24 +210,21 @@ void StreamBroker::release(StreamConsumerHandle handle) {
     }
 }
 
-void StreamBroker::note_external_start(const std::string &params_json,
-                                       uint32_t now_ms) {
-    if (params_json.empty()) return;
-    Subscription requested;
-    if (!parse_subscription(params_json, requested)) return;
+void StreamBroker::note_external_start(
+    const StreamSubscription &subscription,
+    uint32_t now_ms) {
+    if (subscription.data_id_count == 0) return;
     last_owned_activity_ms_ = now_ms;
     external_active_ = true;
-    external_subscription_ = requested;
-    Subscription desired;
+    external_subscription_ = subscription;
+    StreamSubscription desired;
     if (build_desired_subscription(desired)) {
-        const std::string desired_params = build_subscription_params(desired);
-        const std::string external_params = build_subscription_params(requested);
-        params_json_ = desired_params;
+        params_json_ = build_subscription_params(desired);
         desired_subscription_ = desired;
-        actual_active_ = desired_params == external_params;
+        actual_active_ = desired == subscription;
     } else {
-        params_json_ = build_subscription_params(requested);
-        desired_subscription_ = requested;
+        params_json_ = build_subscription_params(subscription);
+        desired_subscription_ = subscription;
         actual_active_ = true;
     }
     if (pending_ == StreamCommandType::Stop) pending_ = StreamCommandType::None;
@@ -242,7 +239,7 @@ void StreamBroker::note_external_stop(uint32_t now_ms,
         mode == ExternalStopMode::CommandRequired;
     external_active_ = false;
     clear_subscription(external_subscription_);
-    Subscription desired;
+    StreamSubscription desired;
     if (build_desired_subscription(desired)) {
         apply_desired_subscription(desired);
         actual_active_ = false;
@@ -267,7 +264,9 @@ void StreamBroker::observe_external_request(RpcPayloadView payload,
 
     external_transport_connected_ = true;
     if (command == StreamCommandType::Start) {
-        note_external_start(params_json, now_ms);
+        StreamSubscription subscription;
+        if (!parse_external_subscription(params_json, subscription)) return;
+        note_external_start(subscription, now_ms);
     } else {
         note_external_stop(now_ms);
     }
@@ -394,7 +393,7 @@ void StreamBroker::mark_command_response(StreamCommandType type,
     clear_error();
     if (type == StreamCommandType::Start) {
         actual_active_ = true;
-        Subscription accepted;
+        StreamSubscription accepted;
         uint32_t stream_id = 0;
         if (parse_start_response(payload, accepted, stream_id)) {
             accepted.sample_ms = desired_subscription_.sample_ms;
@@ -671,8 +670,9 @@ void StreamBroker::clear_external_requests() {
     for (auto &request : external_requests_) request = {};
 }
 
-bool StreamBroker::parse_subscription(const std::string &params_json,
-                                      Subscription &subscription) {
+bool StreamBroker::parse_external_subscription(
+    const std::string &params_json,
+    StreamSubscription &subscription) {
     clear_subscription(subscription);
     JsonCursor json(params_json);
     if (!json.consume('{')) return false;
@@ -735,12 +735,29 @@ bool StreamBroker::parse_subscription(const std::string &params_json,
 }
 
 std::string StreamBroker::build_subscription_params(
-    const Subscription &subscription) {
+    const StreamSubscription &subscription) {
     return build_stream_params(subscription.data_ids_csv, subscription.sample_ms,
                                subscription.report_ms);
 }
 
-bool StreamBroker::add_data_id(Subscription &subscription,
+bool StreamBroker::normalize_subscription(const StreamSubscription &input,
+                                          StreamSubscription &subscription) {
+    clear_subscription(subscription);
+    if (!data_id_csv_merge(subscription.data_ids_csv,
+                           subscription.data_id_count,
+                           input.data_ids_csv.c_str(),
+                           STREAM_DATA_ID_LIMITS)) {
+        return false;
+    }
+
+    subscription.sample_ms = input.sample_ms;
+    subscription.report_ms = input.report_ms;
+    normalize_stream_intervals(subscription.sample_ms,
+                               subscription.report_ms);
+    return true;
+}
+
+bool StreamBroker::add_data_id(StreamSubscription &subscription,
                                const std::string &data_id) {
     if (data_id.empty()) return true;
     return data_id_csv_add(subscription.data_ids_csv,
@@ -750,17 +767,17 @@ bool StreamBroker::add_data_id(Subscription &subscription,
                            STREAM_DATA_ID_LIMITS);
 }
 
-bool StreamBroker::merge_data_ids(Subscription &subscription,
-                                  const Subscription &input) {
+bool StreamBroker::merge_data_ids(StreamSubscription &subscription,
+                                  const StreamSubscription &input) {
     return data_id_csv_merge(subscription.data_ids_csv,
                              subscription.data_id_count,
                              input.data_ids_csv.c_str(),
                              STREAM_DATA_ID_LIMITS);
 }
 
-bool StreamBroker::merge_subscription(Subscription &subscription,
+bool StreamBroker::merge_subscription(StreamSubscription &subscription,
                                       bool &have_interval,
-                                      const Subscription &input) {
+                                      const StreamSubscription &input) {
     if (input.data_id_count == 0) return true;
 
     if (!have_interval) {
@@ -779,7 +796,7 @@ bool StreamBroker::merge_subscription(Subscription &subscription,
 }
 
 bool StreamBroker::parse_start_response(RpcPayloadView payload,
-                                        Subscription &accepted,
+                                        StreamSubscription &accepted,
                                         uint32_t &stream_id) {
     clear_subscription(accepted);
     stream_id = 0;
@@ -901,7 +918,7 @@ bool StreamBroker::parse_start_response(RpcPayloadView payload,
 }
 
 bool StreamBroker::build_desired_subscription(
-    Subscription &subscription) const {
+    StreamSubscription &subscription) const {
     clear_subscription(subscription);
     bool have_interval = false;
 
@@ -922,8 +939,8 @@ bool StreamBroker::build_desired_subscription(
 }
 
 bool StreamBroker::build_desired_with_extra(
-    const Subscription &extra,
-    Subscription &subscription) const {
+    const StreamSubscription &extra,
+    StreamSubscription &subscription) const {
     clear_subscription(subscription);
     bool have_interval = false;
 
@@ -946,8 +963,8 @@ bool StreamBroker::build_desired_with_extra(
 
 bool StreamBroker::build_desired_with_replacement(
     StreamConsumerHandle handle,
-    const Subscription &replacement,
-    Subscription &subscription) const {
+    const StreamSubscription &replacement,
+    StreamSubscription &subscription) const {
     clear_subscription(subscription);
     bool have_interval = false;
 
@@ -973,16 +990,15 @@ bool StreamBroker::build_desired_with_replacement(
 }
 
 void StreamBroker::apply_desired_subscription(
-    const Subscription &subscription) {
-    const std::string new_params = build_subscription_params(subscription);
+    const StreamSubscription &subscription) {
+    if (subscription == desired_subscription_) return;
+
     desired_subscription_ = subscription;
-    if (params_json_ != new_params) {
-        params_json_ = new_params;
-        actual_active_ = false;
-    }
+    params_json_ = build_subscription_params(subscription);
+    actual_active_ = false;
 }
 
-void StreamBroker::clear_subscription(Subscription &subscription) {
+void StreamBroker::clear_subscription(StreamSubscription &subscription) {
     subscription.sample_ms = 0;
     subscription.report_ms = 0;
     subscription.data_id_count = 0;

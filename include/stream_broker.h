@@ -36,6 +36,19 @@ struct StreamAcquireResult {
     StreamConsumerHandle handle = STREAM_CONSUMER_INVALID;
 };
 
+struct StreamSubscription {
+    uint32_t sample_ms = 0;
+    uint32_t report_ms = 0;
+    size_t data_id_count = 0;
+    std::string data_ids_csv;
+
+    bool operator==(const StreamSubscription &other) const {
+        return sample_ms == other.sample_ms &&
+               report_ms == other.report_ms &&
+               data_ids_csv == other.data_ids_csv;
+    }
+};
+
 struct StreamCommand {
     StreamCommandType type = StreamCommandType::None;
     std::string params_json;
@@ -59,10 +72,10 @@ public:
     void poll(RpcRequestPort &rpc, uint32_t now_ms);
     void transport_reset(RpcRequestPort &rpc, uint32_t now_ms);
 
-    StreamAcquireResult acquire(const std::string &params_json,
+    StreamAcquireResult acquire(const StreamSubscription &subscription,
                                 RpcSource source = RpcSource::Internal);
     StreamAcquireResult update(StreamConsumerHandle handle,
-                               const std::string &params_json);
+                               const StreamSubscription &subscription);
     void release(StreamConsumerHandle handle);
 
     void observe_external_request(RpcPayloadView payload,
@@ -156,17 +169,10 @@ private:
         CommandRequired,
     };
 
-    struct Subscription {
-        uint32_t sample_ms = 0;
-        uint32_t report_ms = 0;
-        size_t data_id_count = 0;
-        std::string data_ids_csv;
-    };
-
     struct Consumer {
         bool active = false;
         RpcSource source = RpcSource::Internal;
-        Subscription subscription;
+        StreamSubscription subscription;
         FixedQueue<StreamFrameRef, AC_STREAM_CONSUMER_QUEUE_DEPTH> queue;
         uint32_t queue_drops = 0;
     };
@@ -188,7 +194,7 @@ private:
     uint32_t next_request_generation();
     void release_command_ticket(RpcRequestPort &rpc);
 
-    void note_external_start(const std::string &params_json,
+    void note_external_start(const StreamSubscription &subscription,
                              uint32_t now_ms);
     void note_external_stop(
         uint32_t now_ms,
@@ -201,37 +207,39 @@ private:
                                               uint32_t now_ms);
     void clear_external_requests();
 
-    static bool parse_subscription(const std::string &params_json,
-                                   Subscription &subscription);
+    static bool parse_external_subscription(const std::string &params_json,
+                                            StreamSubscription &subscription);
     static std::string build_subscription_params(
-        const Subscription &subscription);
-    static bool add_data_id(Subscription &subscription,
+        const StreamSubscription &subscription);
+    static bool normalize_subscription(const StreamSubscription &input,
+                                       StreamSubscription &subscription);
+    static bool add_data_id(StreamSubscription &subscription,
                             const std::string &data_id);
-    static bool merge_data_ids(Subscription &subscription,
-                               const Subscription &input);
-    static bool merge_subscription(Subscription &subscription,
+    static bool merge_data_ids(StreamSubscription &subscription,
+                               const StreamSubscription &input);
+    static bool merge_subscription(StreamSubscription &subscription,
                                    bool &have_interval,
-                                   const Subscription &input);
+                                   const StreamSubscription &input);
     static bool parse_start_response(RpcPayloadView payload,
-                                     Subscription &accepted,
+                                     StreamSubscription &accepted,
                                      uint32_t &stream_id);
 
-    bool build_desired_subscription(Subscription &subscription) const;
-    bool build_desired_with_extra(const Subscription &extra,
-                                  Subscription &subscription) const;
+    bool build_desired_subscription(StreamSubscription &subscription) const;
+    bool build_desired_with_extra(const StreamSubscription &extra,
+                                  StreamSubscription &subscription) const;
     bool build_desired_with_replacement(StreamConsumerHandle handle,
-                                        const Subscription &replacement,
-                                        Subscription &subscription) const;
-    void apply_desired_subscription(const Subscription &subscription);
-    static void clear_subscription(Subscription &subscription);
+                                        const StreamSubscription &replacement,
+                                        StreamSubscription &subscription) const;
+    void apply_desired_subscription(const StreamSubscription &subscription);
+    static void clear_subscription(StreamSubscription &subscription);
 
     StreamFramePool frame_pool_;
     Consumer consumers_[AC_STREAM_CONSUMERS_MAX];
     ExternalRequest external_requests_[ExternalRequestMax];
 
-    Subscription external_subscription_;
-    Subscription desired_subscription_;
-    Subscription accepted_subscription_;
+    StreamSubscription external_subscription_;
+    StreamSubscription desired_subscription_;
+    StreamSubscription accepted_subscription_;
 
     std::string params_json_;
     std::string last_start_time_;
