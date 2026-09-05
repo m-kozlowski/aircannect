@@ -1,6 +1,7 @@
 #include "report_signal_store.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -54,19 +55,7 @@ const char *encoding_suffix(ReportSignalStoreEncoding encoding) {
 }  // namespace
 
 bool ReportSignalStoreFilePayload::valid() const {
-    ReportSignalStoreFileView view;
-    return bytes && report_signal_store_track_valid(track) &&
-           ReportSignalStoreFileCodec::inspect(
-               bytes->data(), bytes->size(), view) &&
-           view.track.signal == track.signal &&
-           view.track.sample_interval_ms == track.sample_interval_ms &&
-           view.track.grid_phase_ms == track.grid_phase_ms &&
-           view.track.track_index == track.track_index;
-}
-
-bool ReportSignalStoreFilePayload::path(char *out, size_t out_size) const {
-    return valid() &&
-           report_signal_store_signal_path(track, out, out_size);
+    return report_signal_store_track_valid(track);
 }
 
 ReportSignalStoreBundle::~ReportSignalStoreBundle() {
@@ -97,10 +86,6 @@ bool ReportSignalStoreBundle::allocate_signals(size_t count) {
     }
     signal_count_ = count;
     return true;
-}
-
-void ReportSignalStoreBundle::release_signal_bytes(size_t index) {
-    if (index < signal_count_) signals_[index].bytes.reset();
 }
 
 void ReportSignalStoreBundle::release_events() {
@@ -140,6 +125,12 @@ bool ReportSignalStoreBundle::valid() const {
             indexed.sample_interval_ms !=
                 signals_[i].track.sample_interval_ms ||
             indexed.grid_phase_ms != signals_[i].track.grid_phase_ms ||
+            indexed.sleep_day != signals_[i].track.sleep_day ||
+            indexed.source_revision != signals_[i].track.source_revision ||
+            indexed.generation != signals_[i].track.generation ||
+            indexed.value_scale != signals_[i].track.value_scale ||
+            indexed.value_offset != signals_[i].track.value_offset ||
+            indexed.missing_value != signals_[i].track.missing_value ||
             indexed.track_index != signals_[i].track.track_index) {
             return false;
         }
@@ -153,12 +144,15 @@ bool report_signal_store_track_valid(
         !signal_valid(track.signal) || track.generation == 0 ||
         track.encoding != ReportSignalStoreEncoding::Signed16 ||
         track.unit != report_signal_store_unit(track.signal) ||
-        track.value_scale_milli !=
-            report_signal_store_value_scale_milli(track.signal) ||
-        track.sample_interval_ms == 0 ||
+        !isfinite(track.value_scale) || track.value_scale == 0.0f ||
+        !isfinite(track.value_offset) ||
+        track.sample_interval_ms < 40 ||
         (REPORT_SIGNAL_STORE_BLOCK_MS % track.sample_interval_ms) != 0 ||
         track.grid_phase_ms >= track.sample_interval_ms ||
         track.first_block_start_ms <= 0 ||
+        track.first_block_start_ms > INT64_MAX -
+            static_cast<int64_t>(REPORT_SIGNAL_STORE_MAX_BLOCKS) *
+                REPORT_SIGNAL_STORE_BLOCK_MS ||
         (track.first_block_start_ms % REPORT_SIGNAL_STORE_BLOCK_MS) != 0 ||
         track.block_slot_count == 0 ||
         track.block_slot_count > REPORT_SIGNAL_STORE_MAX_BLOCKS ||
@@ -185,6 +179,13 @@ bool report_signal_store_track_valid(
     for (size_t i = 0; i < track.block_slot_count; ++i) {
         if (bitmap_bit(track.present_blocks, i)) ++present;
     }
+
+    for (size_t i = track.block_slot_count;
+         i < REPORT_SIGNAL_STORE_MAX_BLOCKS;
+         ++i) {
+        if (bitmap_bit(track.present_blocks, i)) return false;
+    }
+
     return present == track.present_block_count;
 }
 
@@ -203,12 +204,21 @@ bool report_signal_store_night_path(SleepDayId sleep_day,
 }
 
 bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
+                                     ReportSignalStoreLevel level,
                                      char *out,
                                      size_t out_size) {
     char day[9] = {};
     char cadence[24] = {};
     const char *name = report_signal_store_name(track.signal);
     const char *suffix = encoding_suffix(track.encoding);
+    const char *plane = nullptr;
+    switch (level) {
+        case ReportSignalStoreLevel::Raw: plane = "raw"; break;
+        case ReportSignalStoreLevel::OneSecond: plane = "1s.minmax"; break;
+        case ReportSignalStoreLevel::TenSeconds: plane = "10s.minmax"; break;
+        default: return false;
+    }
+
     if (!out || !name || !name[0] || !suffix ||
         !track.sleep_day.format_yyyymmdd(day, sizeof(day)) ||
         !format_cadence(track.sample_interval_ms,
@@ -220,22 +230,24 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
     const int written = track.track_index == 0
         ? snprintf(out,
                    out_size,
-                   "%s/%s/g%08x/signals/%s.%s.%s",
+                   "%s/%s/g%08x/signals/%s.%s.%s.%s",
                    REPORT_SIGNAL_STORE_ROOT,
                    day,
                    track.generation,
                    name,
                    cadence,
+                   plane,
                    suffix)
         : snprintf(out,
                    out_size,
-                   "%s/%s/g%08x/signals/%s.%s.%u.%s",
+                   "%s/%s/g%08x/signals/%s.%s.%u.%s.%s",
                    REPORT_SIGNAL_STORE_ROOT,
                    day,
                    track.generation,
                    name,
                    cadence,
                    track.track_index,
+                   plane,
                    suffix);
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
@@ -271,10 +283,9 @@ ReportSignalStoreUnit report_signal_store_unit(ReportSignalId signal) {
             return ReportSignalStoreUnit::Seconds;
         case ReportSignalId::RespiratoryRate:
             return ReportSignalStoreUnit::BreathsPerMinute;
-        case ReportSignalId::IeRatio:
-            return ReportSignalStoreUnit::Ratio;
         case ReportSignalId::TidalVolume:
             return ReportSignalStoreUnit::Litres;
+        case ReportSignalId::IeRatio:
         case ReportSignalId::SpO2:
             return ReportSignalStoreUnit::Percent;
         case ReportSignalId::Pulse:
@@ -286,54 +297,6 @@ ReportSignalStoreUnit report_signal_store_unit(ReportSignalId signal) {
             return ReportSignalStoreUnit::None;
     }
     return ReportSignalStoreUnit::None;
-}
-
-uint32_t report_signal_store_value_scale_milli(ReportSignalId signal) {
-    switch (signal) {
-        case ReportSignalId::Flow:
-        case ReportSignalId::InspiratoryPressure:
-        case ReportSignalId::ExpiratoryPressure:
-        case ReportSignalId::Leak:
-        case ReportSignalId::MinuteVentilation:
-        case ReportSignalId::MaskPressure:
-        case ReportSignalId::RespiratoryRate:
-        case ReportSignalId::SpO2:
-        case ReportSignalId::Pulse:
-            return 10;
-        case ReportSignalId::InspiratoryDuration:
-        case ReportSignalId::IeRatio:
-        case ReportSignalId::FlowLimitation:
-        case ReportSignalId::Snore:
-        case ReportSignalId::TidalVolume:
-            return 1;
-        case ReportSignalId::Invalid:
-        case ReportSignalId::Count:
-            return 0;
-    }
-    return 0;
-}
-
-bool report_signal_store_quantize(ReportSignalId signal,
-                                  int32_t value_milli,
-                                  int16_t &encoded) {
-    const uint32_t scale = report_signal_store_value_scale_milli(signal);
-    if (!signal_valid(signal) || scale == 0) return false;
-
-    int64_t quantized = 0;
-    if (value_milli >= 0) {
-        quantized =
-            (static_cast<int64_t>(value_milli) + scale / 2) / scale;
-    } else {
-        quantized = -((-static_cast<int64_t>(value_milli) + scale / 2) /
-                      scale);
-    }
-    if (quantized <= REPORT_SIGNAL_STORE_MISSING_S16 ||
-        quantized > INT16_MAX) {
-        return false;
-    }
-
-    encoded = static_cast<int16_t>(quantized);
-    return true;
 }
 
 }  // namespace aircannect

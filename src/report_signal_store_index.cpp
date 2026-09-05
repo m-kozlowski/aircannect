@@ -119,7 +119,16 @@ void encode_track(uint8_t *out, const ReportSignalStoreTrack &track) {
     put_le16(out + 6, track.block_slot_count);
     put_le16(out + 8, track.present_block_count);
     put_le32(out + 12, track.sample_interval_ms);
-    put_le32(out + 16, track.value_scale_milli);
+
+    uint32_t scale_bits = 0;
+    uint32_t offset_bits = 0;
+    static_assert(sizeof(float) == sizeof(uint32_t), "float must be 32 bits");
+    memcpy(&scale_bits, &track.value_scale, sizeof(scale_bits));
+    memcpy(&offset_bits, &track.value_offset, sizeof(offset_bits));
+    put_le32(out + 16, scale_bits);
+    put_le32(out + 80, offset_bits);
+    put_le16(out + 84, static_cast<uint16_t>(track.missing_value));
+
     put_le32(out + 20, track.grid_phase_ms);
     put_i64(out + 24, track.first_block_start_ms);
     put_i64(out + 32, track.first_valid_sample_ms);
@@ -146,7 +155,13 @@ bool decode_track(const uint8_t *in,
     track.block_slot_count = get_le16(in + 6);
     track.present_block_count = get_le16(in + 8);
     track.sample_interval_ms = get_le32(in + 12);
-    track.value_scale_milli = get_le32(in + 16);
+
+    const uint32_t scale_bits = get_le32(in + 16);
+    const uint32_t offset_bits = get_le32(in + 80);
+    memcpy(&track.value_scale, &scale_bits, sizeof(scale_bits));
+    memcpy(&track.value_offset, &offset_bits, sizeof(offset_bits));
+    track.missing_value = static_cast<int16_t>(get_le16(in + 84));
+
     track.grid_phase_ms = get_le32(in + 20);
     track.first_block_start_ms = get_i64(in + 24);
     track.first_valid_sample_ms = get_i64(in + 32);

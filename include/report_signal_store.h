@@ -63,7 +63,9 @@ struct ReportSignalStoreTrack {
     uint16_t present_block_count = 0;
     uint32_t generation = 0;
     uint32_t sample_interval_ms = 0;
-    uint32_t value_scale_milli = 0;
+    float value_scale = 0.001f;
+    float value_offset = 0.0f;
+    int16_t missing_value = REPORT_SIGNAL_STORE_MISSING_S16;
     uint32_t grid_phase_ms = 0;
     int64_t first_block_start_ms = 0;
     int64_t first_valid_sample_ms = 0;
@@ -73,18 +75,10 @@ struct ReportSignalStoreTrack {
     uint8_t present_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
 };
 
-struct ReportSignalStoreFileData {
-    ReportSignalStoreTrack track;
-    const int16_t *const *raw_block_slots = nullptr;
-    size_t raw_block_slot_count = 0;
-};
-
 struct ReportSignalStoreFilePayload {
     ReportSignalStoreTrack track;
-    std::shared_ptr<const LargeByteBuffer> bytes;
 
     bool valid() const;
-    bool path(char *out, size_t out_size) const;
 };
 
 class ReportSignalStoreBundle {
@@ -108,7 +102,6 @@ public:
 
 private:
     bool allocate_signals(size_t count);
-    void release_signal_bytes(size_t index);
     void release_events();
 
     ReportSignalStoreFilePayload *signals_ = nullptr;
@@ -128,30 +121,37 @@ struct ReportSignalStorePlaneRange {
 
 struct ReportSignalStoreFileView {
     ReportSignalStoreTrack track;
+    ReportSignalStoreLevel level = ReportSignalStoreLevel::Raw;
     const uint8_t *bytes = nullptr;
     size_t length = 0;
-    uint32_t raw_plane_offset = 0;
-    uint32_t raw_plane_bytes = 0;
-    uint32_t one_second_plane_offset = 0;
-    uint32_t one_second_plane_bytes = 0;
-    uint32_t one_second_cell_count = 0;
-    uint32_t ten_second_plane_offset = 0;
-    uint32_t ten_second_plane_bytes = 0;
-    uint32_t ten_second_cell_count = 0;
+    uint32_t plane_block_bytes = 0;
+    uint32_t plane_interval_ms = 0;
+    uint32_t plane_cell_count = 0;
     uint32_t samples_per_block = 0;
 };
 
 class ReportSignalStoreFileCodec {
 public:
-    static constexpr uint16_t Version = 1;
+    static constexpr uint16_t Version = 2;
     static constexpr size_t HeaderBytes = 192;
+    static constexpr size_t MaxBlockBytes = 45000;
 
-    static std::shared_ptr<const LargeByteBuffer> encode(
-        const ReportSignalStoreFileData &data);
+    // One file per level; slot is the bitmap slot, not the packed ordinal.
+    static std::shared_ptr<const LargeByteBuffer> encode_header(
+        const ReportSignalStoreTrack &track,
+        ReportSignalStoreLevel level);
+    static std::shared_ptr<const LargeByteBuffer> encode_block(
+        const ReportSignalStoreTrack &track,
+        ReportSignalStoreLevel level,
+        size_t slot,
+        const int16_t *raw);
+
     static bool inspect(const uint8_t *bytes,
                         size_t length,
                         ReportSignalStoreFileView &view);
+
     static bool file_size(const ReportSignalStoreTrack &track,
+                          ReportSignalStoreLevel level,
                           size_t &size);
     static bool plane_range(const ReportSignalStoreFileView &view,
                             int64_t block_start_ms,
@@ -162,10 +162,15 @@ public:
                             size_t block_count,
                             ReportSignalStoreLevel level,
                             ReportSignalStorePlaneRange &range);
+
     static bool sample(const ReportSignalStoreFileView &view,
                        int64_t timestamp_ms,
                        bool &present,
                        int32_t &value_milli);
+    static bool sample_raw(const ReportSignalStoreFileView &view,
+                           int64_t timestamp_ms,
+                           bool &present,
+                           int16_t &raw);
 };
 
 enum ReportSignalStoreNightFlag : uint32_t {
@@ -209,10 +214,10 @@ struct ReportSignalStoreNightView {
 
 class ReportSignalStoreNightCodec {
 public:
-    static constexpr uint16_t Version = 1;
+    static constexpr uint16_t Version = 2;
     static constexpr size_t HeaderBytes = 224;
     static constexpr size_t SessionBytes = 16;
-    static constexpr size_t TrackBytes = 80;
+    static constexpr size_t TrackBytes = 88;
 
     static std::shared_ptr<const LargeByteBuffer> encode(
         const ReportSignalStoreNight &night);
@@ -273,6 +278,7 @@ bool report_signal_store_night_path(SleepDayId sleep_day,
                                     char *out,
                                     size_t out_size);
 bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
+                                     ReportSignalStoreLevel level,
                                      char *out,
                                      size_t out_size);
 bool report_signal_store_events_path(SleepDayId sleep_day,
@@ -282,9 +288,5 @@ bool report_signal_store_events_path(SleepDayId sleep_day,
 
 bool report_signal_store_track_valid(const ReportSignalStoreTrack &track);
 ReportSignalStoreUnit report_signal_store_unit(ReportSignalId signal);
-uint32_t report_signal_store_value_scale_milli(ReportSignalId signal);
-bool report_signal_store_quantize(ReportSignalId signal,
-                                  int32_t value_milli,
-                                  int16_t &encoded);
 
 }  // namespace aircannect
