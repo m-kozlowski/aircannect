@@ -229,7 +229,7 @@ private:
     uint32_t request_generation_ = 0;
     uint32_t request_session_id_ = 0;
     uint32_t request_wait_generation_ = 0;
-    ReportArtifactKey request_wait_artifact_;
+    uint32_t request_completed_ = 0;
 };
 
 class StorageConsoleCommands final : public ConsoleCommandGroup {

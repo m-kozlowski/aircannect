@@ -47,6 +47,7 @@ constexpr const char *LEGACY_CACHE_NAMES[] = {
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
+    Rebuild,
     CacheArtifact,
     RefreshCatalog,
 };
@@ -94,6 +95,8 @@ struct ReportTaskCommand {
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
     NightCatalogRefreshTarget catalog_target;
+    SleepDayId first_day;
+    SleepDayId last_day;
 };
 
 struct PendingCatalogRefresh {
@@ -215,6 +218,17 @@ struct ReportTask::Runtime {
     OperationAdmission enqueue(ReportTaskCommand command) {
         if (!lock()) return OperationAdmission::Busy;
 
+        if (command.kind == ReportTaskCommandKind::Rebuild &&
+            rebuild.active) {
+            unlock();
+            return OperationAdmission::Busy;
+        }
+        if (command.kind == ReportTaskCommandKind::Rebuild &&
+            (!published || !published->catalog)) {
+            unlock();
+            return OperationAdmission::Rejected;
+        }
+
         for (size_t i = 0; i < command_count; ++i) {
             ReportTaskCommand &queued = commands[i];
             if (command.kind == ReportTaskCommandKind::Artifact &&
@@ -257,6 +271,14 @@ struct ReportTask::Runtime {
             command_drops++;
             unlock();
             return OperationAdmission::Busy;
+        }
+
+        if (command.kind == ReportTaskCommandKind::Rebuild) {
+            rebuild = {};
+            rebuild.generation = command.generation;
+            rebuild.active = true;
+            rebuild.first_day = command.first_day;
+            rebuild.last_day = command.last_day;
         }
 
         commands[command_count++] = command;
@@ -1532,6 +1554,66 @@ struct ReportTask::Runtime {
         return false;
     }
 
+    bool advance_rebuild() {
+        if (!rebuild_catalog || !lock()) return false;
+        if (!rebuild.active || rebuild_ticket.valid()) {
+            unlock();
+            return false;
+        }
+
+        while (rebuild_cursor < rebuild_catalog->size()) {
+            const NightCatalogRecord *night =
+                rebuild_catalog->record(rebuild_cursor);
+            if (night->sleep_day < rebuild.first_day ||
+                rebuild.last_day < night->sleep_day) {
+                ++rebuild_cursor;
+                continue;
+            }
+
+            // Keep the requested days fixed, but use the latest source revision.
+            const NightCatalogRecord *current = catalog
+                ? catalog->find(night->sleep_day) : nullptr;
+            const ReportArtifactKey key = ReportArtifactKey::result(
+                night->sleep_day,
+                current ? current->source_revision : night->source_revision);
+            const ReportRequestEnqueueResult queued = engine.request(
+                key, ReportRequestPriority::Foreground,
+                rebuild.generation, true);
+            if (queued.status == ReportRequestEnqueueStatus::Full) {
+                unlock();
+                return false;
+            }
+
+            ++rebuild_cursor;
+            if (queued.status == ReportRequestEnqueueStatus::Invalid) {
+                ++rebuild.completed;
+                ++rebuild.failed;
+                rebuild.last_completion = {};
+                rebuild.last_completion.request.artifact = key;
+                copy_cstr(rebuild.last_completion.error,
+                          sizeof(rebuild.last_completion.error),
+                          "report_request_rejected");
+                unlock();
+                return true;
+            }
+
+            rebuild_ticket = queued.ticket;
+            unlock();
+#ifdef ARDUINO
+            char day[9] = {};
+            key.sleep_day.format_yyyymmdd(day, sizeof(day));
+            Log::logf(CAT_REPORT, LOG_INFO, "rebuild started night=%s", day);
+#endif
+            (void)preempt_background_for_foreground();
+            return true;
+        }
+
+        rebuild.active = false;
+        rebuild_catalog.reset();
+        unlock();
+        return true;
+    }
+
     void observe_engine_completion(uint32_t now_ms) {
         const ReportEngineCompletion completion =
             engine.status().last_completion;
@@ -1544,7 +1626,18 @@ struct ReportTask::Runtime {
         if (!lock(20)) return;
 
         observed_engine_completion = completion.request.ticket;
-        if (completion.request.force_rebuild) {
+        const bool range_completion = rebuild.active &&
+            completion.request.ticket == rebuild_ticket;
+        if (range_completion) {
+            rebuild.last_completion = completion;
+            ++rebuild.completed;
+            if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded) {
+                ++rebuild.failed;
+            }
+            rebuild_ticket = {};
+        }
+        if (completion.request.force_rebuild || range_completion) {
 #ifdef ARDUINO
             char day[9] = {};
             completion.request.artifact.sleep_day.format_yyyymmdd(
@@ -2268,7 +2361,8 @@ struct ReportTask::Runtime {
             store_purpose == CatalogStorePurpose::Save ||
             static_cast<bool>(pending_catalog_save);
         next.background_active =
-            queued > 0 || catalog_commit_pending ||
+            queued > 0 || static_cast<bool>(rebuild_catalog) ||
+            catalog_commit_pending ||
             static_cast<bool>(pending_built_bundle) ||
             spool_availability_probe.status().active() ||
             next.payload_load.active() || payload_deflater.active() ||
@@ -2297,6 +2391,10 @@ struct ReportTask::Runtime {
     StorageDeletePort *delete_port = nullptr;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
+    ReportRebuildStatus rebuild;
+    std::shared_ptr<const NightCatalog> rebuild_catalog;
+    size_t rebuild_cursor = 0;
+    OperationTicket rebuild_ticket;
     size_t command_count = 0;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
@@ -2492,6 +2590,28 @@ OperationAdmission ReportTask::request_artifact(
     command.range_tile_count = range_tile_count;
     command.generation = generation;
     return runtime_->enqueue(command);
+}
+
+OperationAdmission ReportTask::request_rebuild(
+    SleepDayId first_day, SleepDayId last_day, uint32_t generation) {
+    if (!runtime_ || !runtime_->initialized || generation == 0 ||
+        !first_day.valid() || !last_day.valid() || last_day < first_day) {
+        return OperationAdmission::Rejected;
+    }
+
+    ReportTaskCommand command;
+    command.kind = ReportTaskCommandKind::Rebuild;
+    command.first_day = first_day;
+    command.last_day = last_day;
+    command.generation = generation;
+    return runtime_->enqueue(command);
+}
+
+ReportRebuildStatus ReportTask::rebuild_status() const {
+    if (!runtime_ || !runtime_->lock()) return {};
+    const ReportRebuildStatus result = runtime_->rebuild;
+    runtime_->unlock();
+    return result;
 }
 
 OperationAdmission ReportTask::request_payload_cache(
@@ -2876,6 +2996,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.pop(command, cache_load_available)) {
         worked = true;
         switch (command.kind) {
+            case ReportTaskCommandKind::Rebuild:
+                runtime.rebuild_catalog = runtime.catalog;
+                runtime.rebuild_cursor = 0;
+                break;
+
             case ReportTaskCommandKind::Artifact: {
                 if (command.priority != ReportRequestPriority::Foreground &&
                     (runtime.background_suspended ||
@@ -3380,6 +3505,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.finish_built_bundle_cache() || worked;
     runtime.observe_engine_completion(now_ms);
+    worked = runtime.advance_rebuild() || worked;
 
     runtime.publish_status();
     return worked;

@@ -249,24 +249,27 @@ bool ReportConsoleCommands::execute(const String &command,
         return true;
     }
     if (rest == "rebuild") {
-        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD [YYYYMMDD]");
         return true;
     }
     if (!rest.startsWith("rebuild ")) {
         print_unknown_command(
             out, "REPORT",
             "report, report status, report list [latest|YYYYMMDD], "
-            "report rebuild latest|YYYYMMDD");
+            "report rebuild latest|YYYYMMDD [YYYYMMDD]");
         return true;
     }
 
     const String args = rest.substring(strlen("rebuild "));
     int position = 0;
     String selector;
+    String end;
     String extra;
-    if (!parse_console_arg(args, position, selector) ||
-        parse_console_arg(args, position, extra)) {
-        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
+    const bool has_selector = parse_console_arg(args, position, selector);
+    const bool has_end = parse_console_arg(args, position, end);
+    if (!has_selector || parse_console_arg(args, position, extra) ||
+        (selector == "latest" && has_end)) {
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD [YYYYMMDD]");
         return true;
     }
 
@@ -274,14 +277,22 @@ bool ReportConsoleCommands::execute(const String &command,
         report_catalog(report_, out);
     if (!catalog) return true;
 
-    bool valid_selector = false;
-    const NightCatalogRecord *night = select_report_night(
-        *catalog, selector, valid_selector);
-    if (!valid_selector) {
-        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD");
+    SleepDayId first_day;
+    SleepDayId last_day;
+    if (selector == "latest" && catalog->size()) {
+        first_day = catalog->record(0)->sleep_day;
+    } else if (selector != "latest" &&
+               !parse_report_sleep_day(selector, first_day)) {
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD [YYYYMMDD]");
         return true;
     }
-    if (!night) {
+    last_day = first_day;
+    if (has_end && (!parse_report_sleep_day(end, last_day) ||
+                    last_day < first_day)) {
+        out.println("[REPORT] usage: report rebuild latest|YYYYMMDD [YYYYMMDD]");
+        return true;
+    }
+    if (!has_end && !catalog->find(first_day)) {
         out.println("[REPORT] night not found");
         return true;
     }
@@ -289,22 +300,24 @@ bool ReportConsoleCommands::execute(const String &command,
     ++request_generation_;
     if (!request_generation_) ++request_generation_;
 
-    const OperationAdmission admitted = report_.request_artifact(
-        ReportArtifactKey::result(night->sleep_day, night->source_revision),
-        ReportRequestPriority::Foreground,
-        request_generation_,
-        true);
+    const OperationAdmission admitted = report_.request_rebuild(
+        first_day, last_day, request_generation_);
     if (admitted == OperationAdmission::Accepted) {
         request_session_id_ = session.id;
         request_wait_generation_ = request_generation_;
-        request_wait_artifact_ = ReportArtifactKey::result(
-            night->sleep_day, night->source_revision);
+        request_completed_ = 0;
 
         out.print("[REPORT] rebuild requested");
-        print_report_sleep_day(out, night->sleep_day);
+        print_report_sleep_day(out, first_day);
+        if (last_day != first_day) {
+            char end_day[9] = {};
+            last_day.format_yyyymmdd(end_day, sizeof(end_day));
+            out.print("..");
+            out.print(end_day);
+        }
         out.println();
     } else if (admitted == OperationAdmission::Busy) {
-        out.println("[REPORT] request queue busy");
+        out.println("[REPORT] rebuild or request queue busy");
     } else {
         out.println("[REPORT] request rejected");
     }
@@ -316,33 +329,43 @@ void ReportConsoleCommands::poll_pending(
     ConsoleCommandSession &session) {
     if (!request_session_id_ || session.id != request_session_id_) return;
 
-    const ReportEngineCompletion completion =
-        report_.last_artifact_completion();
-    if (!completion.valid() ||
-        completion.request.ticket.generation != request_wait_generation_ ||
-        completion.request.artifact != request_wait_artifact_) {
+    const ReportRebuildStatus status = report_.rebuild_status();
+    if (!status.generation) return;
+    if (status.generation != request_wait_generation_) {
+        out.println("[REPORT] rebuild result superseded");
+        cancel_pending(session);
         return;
     }
 
-    if (completion.outcome.disposition ==
-        OperationDisposition::Succeeded) {
-        out.print("[REPORT] rebuild complete");
-    } else {
-        out.print("[REPORT] rebuild failed");
+    if (status.completed != request_completed_) {
+        const ReportEngineCompletion &completion = status.last_completion;
+        const bool success = completion.outcome.disposition ==
+            OperationDisposition::Succeeded;
+        out.print(success ? "[REPORT] rebuild complete" :
+                            "[REPORT] rebuild failed");
+        print_report_sleep_day(out, completion.request.artifact.sleep_day);
+        if (!success) {
+            out.print(" error=");
+            out.print(completion.error[0] ? completion.error :
+                                           "report_build_failed");
+        }
+        out.println();
+        request_completed_ = status.completed;
     }
-    print_report_sleep_day(out, request_wait_artifact_.sleep_day);
-    if (completion.outcome.disposition !=
-        OperationDisposition::Succeeded) {
-        out.print(" error=");
-        out.print(completion.error[0]
-                      ? completion.error
-                      : "report_build_failed");
+
+    if (status.active) return;
+    if (status.first_day != status.last_day) {
+        out.print("[REPORT] rebuild range finished completed=");
+        out.print(static_cast<unsigned long>(status.completed));
+        out.print(" failed=");
+        out.println(static_cast<unsigned long>(status.failed));
+    } else if (!status.completed) {
+        out.println("[REPORT] night not found");
     }
-    out.println();
 
     request_session_id_ = 0;
     request_wait_generation_ = 0;
-    request_wait_artifact_ = {};
+    request_completed_ = 0;
 }
 
 bool ReportConsoleCommands::pending_output(
@@ -357,7 +380,7 @@ void ReportConsoleCommands::cancel_pending(
 
     request_session_id_ = 0;
     request_wait_generation_ = 0;
-    request_wait_artifact_ = {};
+    request_completed_ = 0;
 }
 
 void ReportConsoleCommands::stop(ConsoleCommandSession &session) {

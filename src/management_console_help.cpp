@@ -152,7 +152,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  report status             show report task status");
         out.println("  report list [latest|YYYYMMDD]    list report nights or one night");
         out.println("  report rebuild latest            rebuild latest result");
-        out.println("  report rebuild YYYYMMDD          rebuild result by sleep day");
+        out.println("  report rebuild YYYYMMDD [YYYYMMDD]");
+        out.println("                            rebuild one night or an inclusive range");
         return;
     }
 

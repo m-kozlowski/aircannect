@@ -192,6 +192,16 @@ struct ReportArtifactFailureStatus {
     bool valid() const { return error[0] != '\0'; }
 };
 
+struct ReportRebuildStatus {
+    uint32_t generation = 0;
+    bool active = false;
+    SleepDayId first_day;
+    SleepDayId last_day;
+    uint32_t completed = 0;
+    uint32_t failed = 0;
+    ReportEngineCompletion last_completion;
+};
+
 // Owns report state and runs it on one low-priority task. Public methods only
 // enqueue commands or read immutable snapshots; they never execute report work
 // on the caller's task.
@@ -215,6 +225,10 @@ public:
         uint32_t generation,
         bool force_rebuild = false,
         uint8_t range_tile_count = 1);
+    OperationAdmission request_rebuild(SleepDayId first_day,
+                                       SleepDayId last_day,
+                                       uint32_t generation);
+    ReportRebuildStatus rebuild_status() const;
     OperationAdmission request_payload_cache(
         const ReportArtifactPayloadDescriptor &payload,
         uint32_t generation,
