@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <WiFiClientSecure.h>
+#include <esp_http_client.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -137,35 +137,18 @@ private:
                        void *body_ctx = nullptr,
                        const BackgroundOperationControl *operation = nullptr);
 
-    bool ensure_connected(const BackgroundOperationControl *operation);
+    bool open_request(const char *method, const char *path,
+                      const char *content_type, bool authorize,
+                      uint64_t content_length,
+                      const BackgroundOperationControl *operation,
+                      bool close_after = false);
+    static esp_err_t http_event(esp_http_client_event_t *event);
     bool tls_heap_available();
-    void configure_socket_options();
     bool operation_allows(const BackgroundOperationControl *operation);
     bool write_all(const char *data, size_t len,
                    const BackgroundOperationControl *operation);
     bool write_bytes(const uint8_t *data, size_t len,
                      const BackgroundOperationControl *operation);
-    bool write_authorization_header(
-        const BackgroundOperationControl *operation);
-    bool read_line(char *out, size_t out_size,
-                   const BackgroundOperationControl *operation);
-    bool read_header_line(char *out, size_t out_size, bool &truncated,
-                          const BackgroundOperationControl *operation);
-    bool read_exact(uint8_t *out, size_t len,
-                    const BackgroundOperationControl *operation);
-    bool read_response_body(size_t content_length,
-                            bool has_content_length,
-                            bool chunked,
-                            SleepHqHttpResponse &out,
-                            SleepHqResponseBodyCallback body_callback,
-                            void *body_ctx,
-                            bool buffer_body,
-                            const BackgroundOperationControl *operation);
-    bool read_chunked_body(SleepHqHttpResponse &out,
-                           SleepHqResponseBodyCallback body_callback,
-                           void *body_ctx,
-                           bool buffer_body,
-                           const BackgroundOperationControl *operation);
     bool consume_body(SleepHqHttpResponse &out, const uint8_t *data,
                       size_t len, SleepHqResponseBodyCallback body_callback,
                       void *body_ctx, bool buffer_body);
@@ -194,7 +177,9 @@ private:
     void set_error(const char *error);
 
     SleepHqConfig config_;
-    WiFiClientSecure client_;
+    esp_http_client_handle_t client_ = nullptr;
+    size_t header_capacity_ = 0;
+    const BackgroundOperationControl *operation_ = nullptr;
     LargeTextBuffer access_token_;
     char last_error_[AC_SLEEPHQ_ERROR_MAX] = {};
 };

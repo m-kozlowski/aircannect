@@ -1,15 +1,13 @@
 #include "sleephq_client.h"
 
 #include <ArduinoJson.h>
-#include <errno.h>
+#include <algorithm>
 #include <ctype.h>
+#include <errno.h>
 #include <esp_rom_md5.h>
-#include <netinet/tcp.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 
 #include "debug_log.h"
 #include "hex_util.h"
@@ -22,9 +20,8 @@ namespace aircannect {
 namespace {
 
 static constexpr const char *SLEEPHQ_HOST = "sleephq.com";
-static constexpr uint16_t SLEEPHQ_PORT = 443;
-static constexpr uint32_t SLEEPHQ_CONNECT_TIMEOUT_MS = 5000;
-static constexpr unsigned long SLEEPHQ_HANDSHAKE_TIMEOUT_SECONDS = 10;
+static constexpr uint32_t SLEEPHQ_CONNECT_TIMEOUT_MS = 10000;
+static constexpr uint32_t SLEEPHQ_READ_WAIT_MS = 500;
 static constexpr uint32_t SLEEPHQ_HTTP_TIMEOUT_MS = 15000;
 static constexpr size_t SLEEPHQ_READ_CHUNK = 384;
 static constexpr size_t SLEEPHQ_WRITE_CHUNK = 4096;
@@ -51,26 +48,6 @@ static const char *SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA =
     "9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8\n"
     "p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
     "-----END CERTIFICATE-----\n";
-
-bool header_value_has_token(const char *value, const char *token) {
-    if (!value || !token) return false;
-    const size_t token_len = strlen(token);
-    for (const char *p = value; *p; ++p) {
-        if (strncasecmp(p, token, token_len) == 0) return true;
-    }
-    return false;
-}
-
-void trim_ascii(char *text) {
-    if (!text) return;
-    char *start = text;
-    while (*start && isspace(static_cast<unsigned char>(*start))) start++;
-    if (start != text) memmove(text, start, strlen(start) + 1);
-    size_t len = strlen(text);
-    while (len && isspace(static_cast<unsigned char>(text[len - 1]))) {
-        text[--len] = 0;
-    }
-}
 
 const char *json_string_or_empty(JsonVariantConst value) {
     return value.is<const char *>() ? value.as<const char *>() : "";
@@ -99,9 +76,12 @@ bool SleepHqClient::configured() const {
 }
 
 void SleepHqClient::disconnect() {
-    if (client_.connected()) {
-        client_.stop();
+    operation_ = nullptr;
+    if (client_) {
+        esp_http_client_cleanup(client_);
+        client_ = nullptr;
     }
+    header_capacity_ = 0;
 }
 
 bool SleepHqClient::tls_heap_available() {
@@ -131,65 +111,149 @@ bool SleepHqClient::operation_allows(
     return false;
 }
 
-bool SleepHqClient::ensure_connected(
-    const BackgroundOperationControl *operation) {
-    if (!operation_allows(operation)) return false;
-    if (client_.connected()) return true;
-    if (!configured()) {
-        set_error("not_configured");
-        return false;
-    }
-    if (!tls_heap_available()) return false;
+esp_err_t SleepHqClient::http_event(esp_http_client_event_t *event) {
+    auto *self = static_cast<SleepHqClient *>(event->user_data);
+    if (!self || !self->operation_) return ESP_OK;
 
-    client_.stop();
-    client_.setCACert(SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA);
-    client_.setTimeout(SLEEPHQ_HTTP_TIMEOUT_MS);
-    client_.setHandshakeTimeout(SLEEPHQ_HANDSHAKE_TIMEOUT_SECONDS);
-    const uint32_t connect_started_ms = millis();
-    errno = 0;
-    if (!client_.connect(SLEEPHQ_HOST, SLEEPHQ_PORT,
-                         SLEEPHQ_CONNECT_TIMEOUT_MS)) {
-        const int socket_error = errno;
-        char detail[96] = {};
-        const int client_error = client_.lastError(detail, sizeof(detail));
-        set_error("connect_failed");
-        Log::logf(CAT_EXPORT, LOG_WARN,
-                  "[SLEEPHQ] connect failed errno=%d/%.32s client=%d "
-                  "elapsed_ms=%u detail=%.95s\n",
-                  socket_error,
-                  socket_error ? strerror(socket_error) : "none",
-                  client_error,
-                  static_cast<unsigned>(millis() - connect_started_ms),
-                  detail);
-        return false;
+    if (event->event_id == HTTP_EVENT_ON_CONNECTED ||
+        event->event_id == HTTP_EVENT_ON_HEADER ||
+        event->event_id == HTTP_EVENT_ON_DATA) {
+        if (!self->operation_allows(self->operation_)) {
+            // IDF ignores callback errors during synchronous reads.
+            esp_http_client_close(event->client);
+            return ESP_FAIL;
+        }
     }
+
+    return ESP_OK;
+}
+
+bool SleepHqClient::open_request(
+    const char *method,
+    const char *path,
+    const char *content_type,
+    bool authorize,
+    uint64_t content_length,
+    const BackgroundOperationControl *operation,
+    bool close_after) {
     if (!operation_allows(operation)) {
         disconnect();
         return false;
     }
+    if (content_length > INT_MAX) {
+        set_error("request_too_large");
+        return false;
+    }
+    if (!configured()) {
+        set_error("not_configured");
+        return false;
+    }
 
-    configure_socket_options();
+    char url[192];
+    const int length = snprintf(url, sizeof(url), "https://%s%s",
+                                SLEEPHQ_HOST, path ? path : "/");
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(url)) {
+        set_error("request_url_too_long");
+        return false;
+    }
+
+    // IDF must fit each complete header in its transmit buffer.
+    const size_t header_capacity = std::max<size_t>(
+        512, authorize ? access_token_.length() + 32 : 0);
+    if (client_ && header_capacity > header_capacity_) disconnect();
+
+    if (!client_) {
+        if (!tls_heap_available()) return false;
+
+        esp_http_client_config_t config = {};
+        config.url = url;
+        config.cert_pem = SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA;
+        config.user_agent = "AirCANnect";
+        config.timeout_ms = SLEEPHQ_CONNECT_TIMEOUT_MS;
+        config.buffer_size = 512;
+        config.buffer_size_tx = header_capacity;
+        config.disable_auto_redirect = true;
+        config.max_authorization_retries = -1;
+        config.event_handler = http_event;
+        config.user_data = this;
+        client_ = esp_http_client_init(&config);
+        if (!client_) {
+            set_error("http_client_alloc_failed");
+            return false;
+        }
+        header_capacity_ = header_capacity;
+    }
+
+    operation_ = operation;
+    LargeTextBuffer authorization;
+    if (authorize && access_token_.length()) {
+        if (!authorization.append("Bearer ") ||
+            !authorization.append(access_token_.c_str(), access_token_.length())) {
+            set_error("request_header_alloc_failed");
+            disconnect();
+            return false;
+        }
+    }
+
+    const esp_http_client_method_t http_method =
+        method && strcmp(method, "POST") == 0 ? HTTP_METHOD_POST
+                                             : HTTP_METHOD_GET;
+
+    const esp_err_t auth_header = authorization.length()
+        ? esp_http_client_set_header(client_, "Authorization",
+                                     authorization.c_str())
+        : esp_http_client_delete_header(client_, "Authorization");
+
+    const bool prepared =
+        esp_http_client_set_url(client_, url) == ESP_OK &&
+        esp_http_client_set_method(client_, http_method) == ESP_OK &&
+        esp_http_client_set_timeout_ms(client_, SLEEPHQ_CONNECT_TIMEOUT_MS) == ESP_OK &&
+        esp_http_client_set_header(client_, "Accept",
+            "application/vnd.api+json, application/json") == ESP_OK &&
+        esp_http_client_set_header(client_, "Accept-Encoding", "identity") == ESP_OK &&
+        esp_http_client_set_header(client_, "Connection",
+            close_after ? "close" : "keep-alive") == ESP_OK &&
+        esp_http_client_set_header(client_, "Content-Type",
+            content_type ? content_type : "application/json") == ESP_OK &&
+        (auth_header == ESP_OK ||
+         (!authorization.length() && auth_header == ESP_ERR_NOT_FOUND));
+
+    if (!prepared) {
+        set_error("request_header_failed");
+        disconnect();
+        return false;
+    }
+
+    const uint32_t connect_started_ms = millis();
+    const esp_err_t opened =
+        esp_http_client_open(client_, static_cast<int>(content_length));
+    if (!operation_allows(operation) || opened != ESP_OK || last_error_[0]) {
+        if (!last_error_[0]) {
+            const int socket_error = esp_http_client_get_errno(client_);
+            int tls_error = 0;
+            int tls_flags = 0;
+            const esp_err_t tls_result =
+                esp_http_client_get_and_clear_last_tls_error(
+                    client_, &tls_error, &tls_flags);
+            set_error("connect_failed");
+            Log::logf(CAT_EXPORT, LOG_WARN,
+                      "[SLEEPHQ] connect failed esp=%s(0x%x) "
+                      "errno=%d/%.32s tls=%s(0x%x) code=%d "
+                      "verify=0x%x elapsed_ms=%u\n",
+                      esp_err_to_name(opened), static_cast<unsigned>(opened),
+                      socket_error,
+                      socket_error ? strerror(socket_error) : "none",
+                      esp_err_to_name(tls_result),
+                      static_cast<unsigned>(tls_result), tls_error,
+                      static_cast<unsigned>(tls_flags),
+                      static_cast<unsigned>(millis() - connect_started_ms));
+        }
+        disconnect();
+        return false;
+    }
+
+    esp_http_client_set_timeout_ms(client_, SLEEPHQ_HTTP_TIMEOUT_MS);
     return true;
-}
-
-void SleepHqClient::configure_socket_options() {
-    const int fd = client_.fd();
-    if (fd < 0) return;
-
-    const timeval tv = {SLEEPHQ_HTTP_TIMEOUT_MS / 1000, 0};
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
-        Log::logf(CAT_EXPORT, LOG_WARN,
-                  "[SLEEPHQ] setsockopt(SO_SNDTIMEO) errno=%d\n", errno);
-    }
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-        Log::logf(CAT_EXPORT, LOG_WARN,
-                  "[SLEEPHQ] setsockopt(SO_RCVTIMEO) errno=%d\n", errno);
-    }
-    const int one = 1;
-    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
-        Log::logf(CAT_EXPORT, LOG_WARN,
-                  "[SLEEPHQ] setsockopt(TCP_NODELAY) errno=%d\n", errno);
-    }
 }
 
 bool SleepHqClient::write_all(
@@ -200,142 +264,27 @@ bool SleepHqClient::write_all(
                        operation);
 }
 
-bool SleepHqClient::write_authorization_header(
-    const BackgroundOperationControl *operation) {
-    static constexpr char PREFIX[] = "Authorization: Bearer ";
-    static constexpr char CRLF[] = "\r\n";
-    return write_all(PREFIX, sizeof(PREFIX) - 1, operation) &&
-           write_all(access_token_.c_str(), access_token_.length(),
-                     operation) &&
-           write_all(CRLF, sizeof(CRLF) - 1, operation);
-}
-
 bool SleepHqClient::write_bytes(
     const uint8_t *data,
     size_t len,
     const BackgroundOperationControl *operation) {
-    if (!data && len) return false;
     size_t offset = 0;
-    const uint32_t started_ms = millis();
     while (offset < len) {
         if (!operation_allows(operation)) return false;
 
-        const size_t chunk = len - offset > SLEEPHQ_WRITE_CHUNK
-                                 ? SLEEPHQ_WRITE_CHUNK
-                                 : len - offset;
-        const size_t written = client_.write(
-            data + offset, chunk);
-        if (written > 0) {
-            offset += written;
-            continue;
-        }
-        if (!client_.connected() ||
-            static_cast<uint32_t>(millis() - started_ms) >=
-                SLEEPHQ_HTTP_TIMEOUT_MS) {
-            set_error("write_timeout");
-            return false;
-        }
-        vTaskDelay(1);
-    }
-    return true;
-}
-
-bool SleepHqClient::read_line(
-    char *out,
-    size_t out_size,
-    const BackgroundOperationControl *operation) {
-    if (!out || out_size == 0) return false;
-    size_t len = 0;
-    const uint32_t started_ms = millis();
-    while (true) {
+        const size_t chunk = std::min(len - offset, SLEEPHQ_WRITE_CHUNK);
+        const int written = esp_http_client_write(
+            client_, reinterpret_cast<const char *>(data + offset), chunk);
         if (!operation_allows(operation)) return false;
-
-        if (client_.available()) {
-            const int c = client_.read();
-            if (c < 0) continue;
-            if (c == '\r') continue;
-            if (c == '\n') {
-                out[len] = 0;
-                return true;
-            }
-            if (len + 1 >= out_size) {
-                set_error("header_line_too_long");
-                return false;
-            }
-            out[len++] = static_cast<char>(c);
-            continue;
-        }
-        if (!client_.connected() ||
-            static_cast<uint32_t>(millis() - started_ms) >=
-                SLEEPHQ_HTTP_TIMEOUT_MS) {
-            set_error("read_timeout");
+        if (written <= 0) {
+            // A failed IDF write may already have sent part of this chunk.
+            set_error("write_failed");
             return false;
         }
-        vTaskDelay(1);
+
+        offset += static_cast<size_t>(written);
     }
-}
 
-bool SleepHqClient::read_header_line(char *out,
-                                     size_t out_size,
-                                     bool &truncated,
-                                     const BackgroundOperationControl *operation) {
-    if (!out || out_size == 0) return false;
-    size_t len = 0;
-    truncated = false;
-    const uint32_t started_ms = millis();
-    while (true) {
-        if (!operation_allows(operation)) return false;
-
-        if (client_.available()) {
-            const int c = client_.read();
-            if (c < 0) continue;
-            if (c == '\r') continue;
-            if (c == '\n') {
-                out[len] = 0;
-                return true;
-            }
-            if (len + 1 < out_size) {
-                out[len++] = static_cast<char>(c);
-            } else {
-                truncated = true;
-            }
-            continue;
-        }
-        if (!client_.connected() ||
-            static_cast<uint32_t>(millis() - started_ms) >=
-                SLEEPHQ_HTTP_TIMEOUT_MS) {
-            set_error("read_timeout");
-            return false;
-        }
-        vTaskDelay(1);
-    }
-}
-
-bool SleepHqClient::read_exact(
-    uint8_t *out,
-    size_t len,
-    const BackgroundOperationControl *operation) {
-    if (!out && len) return false;
-    size_t offset = 0;
-    const uint32_t started_ms = millis();
-    while (offset < len) {
-        if (!operation_allows(operation)) return false;
-
-        if (client_.available()) {
-            const int read_now = client_.read(out + offset, len - offset);
-            if (read_now > 0) {
-                offset += static_cast<size_t>(read_now);
-                continue;
-            }
-        }
-        if (!client_.connected() ||
-            static_cast<uint32_t>(millis() - started_ms) >=
-                SLEEPHQ_HTTP_TIMEOUT_MS) {
-            set_error("read_timeout");
-            return false;
-        }
-        vTaskDelay(1);
-    }
     return true;
 }
 
@@ -347,103 +296,6 @@ bool SleepHqClient::append_body(SleepHqHttpResponse &out,
         return false;
     }
     return out.body.append(data, len);
-}
-
-bool SleepHqClient::read_response_body(size_t content_length,
-                                       bool has_content_length,
-                                       bool chunked,
-                                       SleepHqHttpResponse &out,
-                                       SleepHqResponseBodyCallback body_callback,
-                                       void *body_ctx,
-                                       bool buffer_body,
-                                       const BackgroundOperationControl *operation) {
-    out.body.clear();
-    if (buffer_body &&
-        !out.body.reserve(SLEEPHQ_RESPONSE_BODY_INITIAL_RESERVE)) {
-        set_error("response_alloc_failed");
-        return false;
-    }
-    if (chunked) {
-        return read_chunked_body(out, body_callback, body_ctx, buffer_body,
-                                 operation);
-    }
-
-    uint8_t buf[SLEEPHQ_READ_CHUNK];
-    if (has_content_length) {
-        if (buffer_body && content_length > AC_SLEEPHQ_HTTP_RESPONSE_MAX) {
-            set_error("response_too_large");
-            return false;
-        }
-        size_t remaining = content_length;
-        while (remaining > 0) {
-            const size_t n = remaining > sizeof(buf) ? sizeof(buf) : remaining;
-            if (!read_exact(buf, n, operation)) return false;
-            if (!consume_body(out, buf, n, body_callback, body_ctx,
-                              buffer_body)) {
-                return false;
-            }
-            remaining -= n;
-        }
-        return true;
-    }
-
-    const uint32_t started_ms = millis();
-    while (client_.connected() || client_.available()) {
-        if (!operation_allows(operation)) return false;
-
-        if (client_.available()) {
-            const int n = client_.read(buf, sizeof(buf));
-            if (n > 0 && !consume_body(out, buf, static_cast<size_t>(n),
-                                      body_callback, body_ctx,
-                                      buffer_body)) {
-                return false;
-            }
-            continue;
-        }
-        if (static_cast<uint32_t>(millis() - started_ms) >=
-            SLEEPHQ_HTTP_TIMEOUT_MS) {
-            break;
-        }
-        vTaskDelay(1);
-    }
-    return true;
-}
-
-bool SleepHqClient::read_chunked_body(
-    SleepHqHttpResponse &out,
-    SleepHqResponseBodyCallback body_callback,
-    void *body_ctx,
-    bool buffer_body,
-    const BackgroundOperationControl *operation) {
-    uint8_t buf[SLEEPHQ_READ_CHUNK];
-    char line[48];
-    while (true) {
-        if (!read_line(line, sizeof(line), operation)) return false;
-        char *end = nullptr;
-        const unsigned long chunk_len = strtoul(line, &end, 16);
-        if (end == line) {
-            set_error("bad_chunk_header");
-            return false;
-        }
-        if (chunk_len == 0) {
-            do {
-                if (!read_line(line, sizeof(line), operation)) return false;
-            } while (line[0] != 0);
-            return true;
-        }
-        size_t remaining = static_cast<size_t>(chunk_len);
-        while (remaining > 0) {
-            const size_t n = remaining > sizeof(buf) ? sizeof(buf) : remaining;
-            if (!read_exact(buf, n, operation)) return false;
-            if (!consume_body(out, buf, n, body_callback, body_ctx,
-                              buffer_body)) {
-                return false;
-            }
-            remaining -= n;
-        }
-        uint8_t crlf[2];
-        if (!read_exact(crlf, sizeof(crlf), operation)) return false;
-    }
 }
 
 bool SleepHqClient::consume_body(
@@ -475,53 +327,13 @@ bool SleepHqClient::raw_request(const char *method,
     out.body.clear();
     set_error("");
 
-    if (!ensure_connected(operation)) return false;
-
     const size_t body_len = body ? strlen(body) : 0;
-    char request_head[384];
-    int len = snprintf(
-        request_head, sizeof(request_head),
-        "%s %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: AirCANnect\r\n"
-        "Accept: application/vnd.api+json, application/json\r\n"
-        "Connection: keep-alive\r\n",
-        method ? method : "GET",
-        path ? path : "/",
-        SLEEPHQ_HOST);
-    if (len <= 0 || len >= static_cast<int>(sizeof(request_head))) {
-        set_error("request_header_too_long");
+    if (!open_request(method, path, content_type, authorize, body_len,
+                      operation)) {
         return false;
     }
-    if (!write_all(request_head, static_cast<size_t>(len), operation)) {
-        disconnect();
-        return false;
-    }
-    if (authorize && access_token_.length()) {
-        if (!write_authorization_header(operation)) {
-            disconnect();
-            return false;
-        }
-    }
-    if (body_len) {
-        char content_header[128];
-        len = snprintf(content_header, sizeof(content_header),
-                       "Content-Type: %s\r\n"
-                       "Content-Length: %u\r\n",
-                       content_type ? content_type : "application/json",
-                       static_cast<unsigned>(body_len));
-        if (len <= 0 || len >= static_cast<int>(sizeof(content_header))) {
-            set_error("request_header_too_long");
-            return false;
-        }
-        if (!write_all(content_header, static_cast<size_t>(len), operation)) {
-            disconnect();
-            return false;
-        }
-    }
-    static constexpr char HEADER_END[] = "\r\n";
-    if (!write_all(HEADER_END, sizeof(HEADER_END) - 1, operation) ||
-        (body_len && !write_all(body, body_len, operation))) {
+
+    if (body_len && !write_all(body, body_len, operation)) {
         disconnect();
         return false;
     }
@@ -533,63 +345,97 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out,
                                   SleepHqResponseBodyCallback body_callback,
                                   void *body_ctx,
                                   const BackgroundOperationControl *operation) {
-    char line[256];
-    if (!read_line(line, sizeof(line), operation)) {
-        disconnect();
-        return false;
-    }
-    if (strncmp(line, "HTTP/", 5) != 0) {
-        set_error("bad_status_line");
-        disconnect();
-        return false;
-    }
-    out.status = atoi(line + 9);
-    out.unauthorized = out.status == 401;
-
-    bool has_content_length = false;
-    bool chunked = false;
-    bool connection_close = false;
-    size_t content_length = 0;
+    esp_http_client_set_timeout_ms(client_, SLEEPHQ_READ_WAIT_MS);
+    uint32_t progress_ms = millis();
+    int64_t content_length = -1;
     while (true) {
-        bool truncated = false;
-        if (!read_header_line(line, sizeof(line), truncated, operation)) {
+        if (!operation_allows(operation)) {
             disconnect();
             return false;
         }
-        if (line[0] == 0) break;
-        if (truncated) continue;
-        char *colon = strchr(line, ':');
-        if (!colon) continue;
-        *colon = 0;
-        char *value = colon + 1;
-        trim_ascii(line);
-        trim_ascii(value);
-        if (strcasecmp(line, "Content-Length") == 0) {
-            content_length = static_cast<size_t>(strtoul(value, nullptr, 10));
-            has_content_length = true;
-        } else if (strcasecmp(line, "Transfer-Encoding") == 0) {
-            chunked = header_value_has_token(value, "chunked");
-        } else if (strcasecmp(line, "Connection") == 0) {
-            connection_close = header_value_has_token(value, "close");
+
+        content_length = esp_http_client_fetch_headers(client_);
+        if (!operation_allows(operation) || last_error_[0]) {
+            disconnect();
+            return false;
         }
+        if (content_length >= 0) break;
+        if (content_length != -ESP_ERR_HTTP_EAGAIN ||
+            static_cast<uint32_t>(millis() - progress_ms) >=
+                SLEEPHQ_HTTP_TIMEOUT_MS) {
+            set_error("response_header_failed");
+            disconnect();
+            return false;
+        }
+
+        vTaskDelay(1);
     }
 
+    out.status = esp_http_client_get_status_code(client_);
+    out.unauthorized = out.status == 401;
     const bool successful_status = out.status >= 200 && out.status < 300;
-    const bool stream_body = body_callback && successful_status;
     const bool buffer_body = body_callback == nullptr;
-    const bool ok = read_response_body(
-        content_length, has_content_length, chunked, out,
-        stream_body ? body_callback : nullptr,
-        stream_body ? body_ctx : nullptr,
-        buffer_body, operation);
-    if (connection_close || !ok) disconnect();
-    if (!ok) return false;
+    const bool body_too_large =
+        static_cast<uint64_t>(content_length) > AC_SLEEPHQ_HTTP_RESPONSE_MAX;
 
-    if (out.status < 200 || out.status >= 300) {
+    if (buffer_body &&
+        (body_too_large ||
+         !out.body.reserve(SLEEPHQ_RESPONSE_BODY_INITIAL_RESERVE))) {
+        set_error(body_too_large ? "response_too_large"
+                                 : "response_alloc_failed");
+        disconnect();
+        return false;
+    }
+
+    progress_ms = millis();
+    uint8_t buf[SLEEPHQ_READ_CHUNK];
+    while (true) {
+        if (!operation_allows(operation)) {
+            disconnect();
+            return false;
+        }
+
+        // Drain bytes cached while fetching headers even if IDF reports
+        // the message complete already.
+        const int count = esp_http_client_read(
+            client_, reinterpret_cast<char *>(buf), sizeof(buf));
+        if (!operation_allows(operation) || last_error_[0]) {
+            disconnect();
+            return false;
+        }
+        if (count > 0) {
+            if (!consume_body(out, buf, static_cast<size_t>(count),
+                              successful_status ? body_callback : nullptr,
+                              body_ctx, buffer_body)) {
+                disconnect();
+                return false;
+            }
+
+            progress_ms = millis();
+            continue;
+        }
+        if (count == 0 && esp_http_client_is_complete_data_received(client_)) {
+            break;
+        }
+        if ((count < 0 && count != -ESP_ERR_HTTP_EAGAIN) ||
+            static_cast<uint32_t>(millis() - progress_ms) >=
+                SLEEPHQ_HTTP_TIMEOUT_MS) {
+            set_error("response_incomplete");
+            disconnect();
+            return false;
+        }
+
+        vTaskDelay(1);
+    }
+
+    operation_ = nullptr;
+    if (!successful_status) {
         snprintf(last_error_, sizeof(last_error_), "http_%d", out.status);
         disconnect();
         return false;
     }
+    if (!esp_http_client_is_persistent_connection(client_)) disconnect();
+
     return true;
 }
 
@@ -844,7 +690,10 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         set_error("bad_upload_request");
         return false;
     }
-    if (!ensure_connected(request.operation)) return false;
+    if (request.size > INT_MAX) {
+        set_error("request_too_large");
+        return false;
+    }
 
     char api_path[64];
     snprintf(api_path, sizeof(api_path), "/api/v1/imports/%lu/files",
@@ -891,41 +740,15 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         32ULL +
         static_cast<uint64_t>(tail_len);
 
-    char request_head[384];
-    int len = snprintf(request_head, sizeof(request_head),
-                       "POST %s HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "User-Agent: AirCANnect\r\n"
-                       "Accept: application/vnd.api+json, application/json\r\n",
-                       api_path,
-                       SLEEPHQ_HOST);
-    if (len <= 0 || static_cast<size_t>(len) >= sizeof(request_head)) {
-        set_error("request_header_too_long");
-        return false;
-    }
-    if (!write_all(request_head, static_cast<size_t>(len),
-                   request.operation) ||
-        !write_authorization_header(request.operation)) {
-        disconnect();
-        return false;
-    }
-    char request_tail[192];
-    len = snprintf(request_tail, sizeof(request_tail),
-                   "Content-Type: multipart/form-data; boundary=%s\r\n"
-                   "Content-Length: %llu\r\n"
-                   "Connection: close\r\n\r\n",
-                   boundary,
-                   static_cast<unsigned long long>(content_length));
-    if (len <= 0 || static_cast<size_t>(len) >= sizeof(request_tail)) {
-        set_error("request_header_too_long");
-        return false;
-    }
-    if (!write_all(request_tail, static_cast<size_t>(len),
-                   request.operation)) {
-        disconnect();
+    char content_type[96];
+    snprintf(content_type, sizeof(content_type),
+             "multipart/form-data; boundary=%s", boundary);
+    if (!open_request("POST", api_path, content_type, true, content_length,
+                      request.operation, true)) {
         return false;
     }
 
+    int len = 0;
     char part[384];
     len = snprintf(part, sizeof(part),
                    "--%s\r\n"
@@ -1016,7 +839,10 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         taskYIELD();
     }
     Memory::free(buffer);
-    if (!ok) return false;
+    if (!ok) {
+        disconnect();
+        return false;
+    }
 
     if (hash_precomputed) {
         copy_cstr(out.content_hash, sizeof(out.content_hash),
