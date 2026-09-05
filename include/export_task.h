@@ -72,7 +72,7 @@ public:
                StoragePathPort &path_port);
 
     // immutable runtime inputs
-    void publish_config(const ExportEndpointConfig &config);
+    bool publish_config(const ExportEndpointConfig &config);
     void publish_activity(const ActivitySnapshot &activity);
     void publish_network(const NetworkSnapshot &network);
     void defer_smb_until(uint32_t until_ms);

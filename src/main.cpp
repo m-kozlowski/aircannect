@@ -255,7 +255,7 @@ static NetworkSnapshot runtime_network;
 static bool runtime_activity_published = false;
 static bool ota_storage_upload_active_published = false;
 static bool runtime_network_published = false;
-static uint32_t export_config_due_ms = 0;
+static bool export_config_pending = true;
 static bool local_poweroff_requested = false;
 static bool local_poweroff_attempted = false;
 static bool local_poweroff_backlight_was_on = false;
@@ -622,16 +622,13 @@ static void poll_storage_upload_publication() {
     }
 }
 
-static void publish_export_config(uint32_t now_ms) {
-    if (export_config_due_ms != 0 &&
-        static_cast<int32_t>(now_ms - export_config_due_ms) < 0) {
-        return;
-    }
+static void publish_export_config() {
+    if (!export_config_pending) return;
 
-    export_task.publish_config(
-        make_export_endpoint_config(config_service.data()));
-    export_config_due_ms = now_ms + 1000;
-    if (export_config_due_ms == 0) export_config_due_ms = 1;
+    if (export_task.publish_config(
+            make_export_endpoint_config(config_service.data()))) {
+        export_config_pending = false;
+    }
 }
 
 static void sync_network_services() {
@@ -859,7 +856,7 @@ static void apply_config_runtime_effects(void *,
     }
     if (dirty & (AC_CONFIG_DIRTY_SMB_SYNC |
                  AC_CONFIG_DIRTY_SLEEPHQ_SYNC)) {
-        export_config_due_ms = 0;
+        export_config_pending = true;
     }
     if (dirty & (AC_CONFIG_DIRTY_HTTP_AUTH |
                  AC_CONFIG_DIRTY_AUTH_WHITELIST)) {
@@ -1688,7 +1685,7 @@ void loop() {
                              therapy_active,
                              as11_rpc_available);
 
-    publish_export_config(now_ms);
+    publish_export_config();
 
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx_after("export_coordinator");

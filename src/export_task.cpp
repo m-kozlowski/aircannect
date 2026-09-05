@@ -101,9 +101,8 @@ void ExportTask::unlock_inputs() const {
     if (input_lock_) xSemaphoreGive(input_lock_);
 }
 
-void ExportTask::publish_config(const ExportEndpointConfig &config) {
-    if (!runtime_) return;
-    if (!lock_inputs()) return;
+bool ExportTask::publish_config(const ExportEndpointConfig &config) {
+    if (!runtime_ || !lock_inputs()) return false;
 
     const bool changed =
         !export_endpoint_config_equal(runtime_->inputs.config, config);
@@ -117,6 +116,7 @@ void ExportTask::publish_config(const ExportEndpointConfig &config) {
 
     unlock_inputs();
     if (changed) wake();
+    return true;
 }
 
 void ExportTask::publish_activity(const ActivitySnapshot &activity) {
