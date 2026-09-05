@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "little_endian.h"
+#include "report_build_checkpoint.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -323,6 +324,9 @@ ReportSignalStoreService::current_bytes() const {
         case Phase::SubmitMetadata:
         case Phase::WaitMetadata:
             return bundle_->metadata;
+        case Phase::SubmitCheckpoint:
+        case Phase::WaitCheckpoint:
+            return bundle_->checkpoint;
         default:
             return {};
     }
@@ -345,6 +349,11 @@ bool ReportSignalStoreService::current_path(
         case Phase::WaitMetadata:
             return report_signal_store_night_path(
                 bundle_->sleep_day, path, path_size);
+        case Phase::SubmitCheckpoint:
+        case Phase::WaitCheckpoint:
+            return report_build_checkpoint_path(
+                bundle_->sleep_day, bundle_->generation,
+                bundle_->checkpoint_slot, path, path_size);
         default:
             return false;
     }
@@ -379,6 +388,9 @@ bool ReportSignalStoreService::submit_current() {
         case Phase::SubmitMetadata:
             phase_ = Phase::WaitMetadata;
             break;
+        case Phase::SubmitCheckpoint:
+            phase_ = Phase::WaitCheckpoint;
+            break;
         default:
             fail("report_signal_store_publish_phase_invalid");
             break;
@@ -408,8 +420,13 @@ bool ReportSignalStoreService::finish_current() {
     switch (phase_) {
         case Phase::WaitEvents:
             bundle_->release_events();
-            phase_ = Phase::SubmitMetadata;
+            phase_ = bundle_->checkpoint ? Phase::SubmitCheckpoint
+                                         : Phase::SubmitMetadata;
             status_.state = ReportSignalStoreState::PublishingMetadata;
+            break;
+        case Phase::WaitCheckpoint:
+            bundle_->checkpoint.reset();
+            phase_ = Phase::SubmitMetadata;
             break;
         case Phase::WaitMetadata:
             published_metadata_ = bundle_->metadata;
@@ -442,9 +459,11 @@ bool ReportSignalStoreService::poll() {
         case Phase::WaitBlock:
             return finish_range();
         case Phase::SubmitEvents:
+        case Phase::SubmitCheckpoint:
         case Phase::SubmitMetadata:
             return submit_current();
         case Phase::WaitEvents:
+        case Phase::WaitCheckpoint:
         case Phase::WaitMetadata:
             return finish_current();
         case Phase::Idle:

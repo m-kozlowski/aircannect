@@ -94,7 +94,8 @@ void ReportSignalStoreBundle::release_events() {
 
 bool ReportSignalStoreBundle::valid() const {
     if (!sleep_day.valid() || !source_revision.valid() || generation == 0 ||
-        !metadata || !events || (signal_count_ > 0 && !signals_)) {
+        !metadata || !events || (signal_count_ > 0 && !signals_) ||
+        static_cast<bool>(checkpoint) != (checkpoint_slot != 0)) {
         return false;
     }
 
@@ -104,7 +105,8 @@ bool ReportSignalStoreBundle::valid() const {
         night.night.sleep_day != sleep_day ||
         night.night.source_revision != source_revision ||
         night.night.generation != generation ||
-        night.night.track_count != signal_count_) {
+        night.night.track_count != signal_count_ ||
+        night.night.checkpoint_slot != checkpoint_slot) {
         return false;
     }
 

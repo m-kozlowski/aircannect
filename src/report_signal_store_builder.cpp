@@ -8,8 +8,11 @@
 #include <utility>
 
 #include "large_object.h"
+#include "large_scratch_array.h"
 #include "memory_manager.h"
 #include "report_night_summary.h"
+#include "report_build_checkpoint.h"
+#include "report_planner.h"
 
 namespace aircannect {
 namespace {
@@ -58,6 +61,10 @@ uint8_t lod_mask(uint32_t interval_ms) {
 
 struct TrackWork {
     ReportSignalStoreTrack track;
+    ReportBuildTrackState closed;
+    ReportBuildTrackState previous_full;
+    ReportMetricAccumulator *tail_metrics = nullptr;
+    bool source_present = false;
     int16_t *raw_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS] = {};
     uint8_t *sessions_seen = nullptr;
     uint8_t written_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
@@ -81,6 +88,32 @@ float fallback_scale(ReportSignalId signal) {
     }
 }
 
+ReportSignalStoreTrack track_format(const ReportSeriesDescriptor &series,
+                                    const EdfSignalScale *scale,
+                                    int64_t timestamp_ms) {
+    ReportSignalStoreTrack track;
+    const float multiplier =
+        report_series_canonical_value_milli(series, 1000) / 1000.0f;
+    track.signal = series.signal;
+    track.sample_interval_ms = series.sample_interval_ms;
+    track.grid_phase_ms = grid_phase(timestamp_ms, series.sample_interval_ms);
+    track.value_scale = scale ? scale->scale * multiplier
+                              : fallback_scale(series.signal);
+    track.value_offset = scale ? scale->offset * multiplier : 0.0f;
+    track.missing_value = scale && scale->digital_min == INT16_MIN
+        ? INT16_MAX : INT16_MIN;
+    return track;
+}
+
+bool same_track_format(const ReportSignalStoreTrack &a,
+                       const ReportSignalStoreTrack &b) {
+    return a.signal == b.signal &&
+        a.sample_interval_ms == b.sample_interval_ms &&
+        a.grid_phase_ms == b.grid_phase_ms &&
+        a.value_scale == b.value_scale && a.value_offset == b.value_offset &&
+        a.missing_value == b.missing_value;
+}
+
 void destroy_bundle(ReportSignalStoreBundle *bundle) {
     if (!bundle) return;
     bundle->~ReportSignalStoreBundle();
@@ -102,6 +135,10 @@ struct ReportSignalStoreBuilder::Runtime {
     uint16_t block_slot_count = 0;
     uint32_t store_generation = 0;
     ReportMetricAccumulator metrics;
+    ReportMetricAccumulator closed_metrics;
+    int64_t closed_before_ms = 0;
+    uint8_t checkpoint_slot = 1;
+    std::shared_ptr<const LargeByteBuffer> previous_checkpoint;
     bool active = false;
     std::shared_ptr<ReportSignalStoreBundle> completed;
     EdfSignalScale scales[static_cast<size_t>(ReportSignalId::Count)];
@@ -123,6 +160,7 @@ struct ReportSignalStoreBuilder::Runtime {
     void clear_work() {
         for (size_t i = 0; i < track_count; ++i) {
             release_track_blocks(tracks[i]);
+            LargeObject::destroy(tracks[i].tail_metrics);
         }
         for (size_t i = 0; i < track_capacity; ++i) {
             tracks[i].~TrackWork();
@@ -138,6 +176,10 @@ struct ReportSignalStoreBuilder::Runtime {
         event_capacity = 0;
 
         metrics.clear();
+        closed_metrics.clear();
+        closed_before_ms = 0;
+        checkpoint_slot = 1;
+        previous_checkpoint.reset();
 
         request = {};
         plan = nullptr;
@@ -165,6 +207,58 @@ struct ReportSignalStoreBuilder::Runtime {
         event_capacity = next;
         return true;
     }
+
+    bool prepare_tail(TrackWork &work) {
+        if (work.tail_metrics) return true;
+        work.tail_metrics = LargeObject::create<ReportMetricAccumulator>();
+        return work.tail_metrics &&
+            work.tail_metrics->begin(report_signal_bit(work.track.signal));
+    }
+
+    void update_expected_coverage() {
+        for (size_t i = 0; i < track_count; ++i) {
+            TrackWork &work = tracks[i];
+            memset(work.sessions_seen, 0, plan->session_count());
+            uint64_t expected = 0;
+            bool matched = false;
+
+            for (size_t op = 0; op < plan->operation_count(); ++op) {
+                const ReportReadOperation &operation = *plan->operation(op);
+                const auto *file = plan->source_file(operation);
+                const auto *section = plan->fallback_section(operation);
+                const bool edf = operation.kind == ReportReadOperationKind::Numeric;
+                if ((!edf || !file) &&
+                    (operation.kind != ReportReadOperationKind::FallbackSeries ||
+                     !section)) continue;
+
+                size_t count = 0;
+                const auto *mappings = plan->mappings(operation, count);
+                for (size_t m = 0; m < count; ++m) {
+                    const auto &mapping = mappings[m];
+                    const auto &series = mapping.series;
+                    if (series.signal != work.track.signal ||
+                        series.sample_interval_ms != work.track.sample_interval_ms) {
+                        continue;
+                    }
+
+                    const auto format = track_format(
+                        series, edf ? &mapping.layout.scale : nullptr,
+                        edf ? file->record_start_ms : section->coverage.start_ms);
+
+                    if (!same_track_format(work.track, format) ||
+                        work.sessions_seen[operation.session_index]) continue;
+
+                    work.sessions_seen[operation.session_index] = 1;
+                    matched = true;
+                    expected += expected_samples(
+                        plan->session(operation.session_index)->output_window,
+                        series.sample_interval_ms, format.grid_phase_ms);
+                }
+            }
+            if (matched) work.track.expected_sample_count = expected;
+            work.source_present = matched;
+        }
+    }
 };
 
 ReportSignalStoreBuilder::ReportSignalStoreBuilder() :
@@ -183,7 +277,8 @@ bool ReportSignalStoreBuilder::begin_build(
     const ReportArtifactRequest &request,
     const ReportReadPlan &plan,
     uint32_t store_generation,
-    std::shared_ptr<const LargeByteBuffer> previous) {
+    std::shared_ptr<const LargeByteBuffer> previous,
+    std::shared_ptr<const LargeByteBuffer> checkpoint_bytes) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_signal_store_runtime_unavailable";
@@ -228,6 +323,24 @@ bool ReportSignalStoreBuilder::begin_build(
         failure_reason_ = "report_signal_store_previous_invalid";
         return false;
     }
+
+    ReportBuildCheckpointView checkpoint;
+    if (checkpoint_bytes &&
+        (!ReportBuildCheckpointCodec::decode(
+             checkpoint_bytes->data(), checkpoint_bytes->size(), checkpoint) ||
+         checkpoint.track_count != previous_night.night.track_count)) {
+        failure_reason_ = "report_signal_store_checkpoint_invalid";
+        return false;
+    }
+
+    runtime_->checkpoint_slot = previous_night.night.checkpoint_slot == 1
+        ? 2 : 1;
+    runtime_->previous_checkpoint = checkpoint_bytes;
+    for (size_t i = 0; i < plan.session_count(); ++i) {
+        runtime_->closed_before_ms = std::max(
+            runtime_->closed_before_ms,
+            align_block_start(plan.session(i)->output_window.end_ms));
+    }
     const size_t capacity = previous_night.night.track_count;
     if (capacity > 0) {
         if (capacity > SIZE_MAX / sizeof(TrackWork)) {
@@ -253,10 +366,22 @@ bool ReportSignalStoreBuilder::begin_build(
         memcpy(work.written_blocks, work.track.present_blocks,
                sizeof(work.written_blocks));
         work.file_exists = true;
-        work.recount_samples = true;
+        work.recount_samples = !checkpoint_bytes;
         work.append_slot = static_cast<int>(
             (align_block_start(work.track.last_valid_sample_ms) - first_block) /
             REPORT_SIGNAL_STORE_BLOCK_MS);
+        if (checkpoint_bytes) {
+            work.previous_full.valid_sample_count = work.track.valid_sample_count;
+            work.previous_full.first_valid_sample_ms = work.track.first_valid_sample_ms;
+            work.previous_full.last_valid_sample_ms = work.track.last_valid_sample_ms;
+            checkpoint.track(i, work.closed);
+            work.track.valid_sample_count = work.closed.valid_sample_count;
+            work.track.first_valid_sample_ms = work.closed.first_valid_sample_ms;
+            work.track.last_valid_sample_ms = work.closed.last_valid_sample_ms;
+            // A lagging source can still extend before another source's tail.
+            // The planner's per-source cursor controls which samples arrive.
+            work.append_slot = 0;
+        }
         work.track.source_revision = plan.night().source_revision;
 
         work.sessions_seen = static_cast<uint8_t *>(Memory::calloc_large(
@@ -273,10 +398,29 @@ bool ReportSignalStoreBuilder::begin_build(
     runtime_->first_block_start_ms = first_block;
     runtime_->block_slot_count = static_cast<uint16_t>(slot_count);
     runtime_->store_generation = store_generation;
-    if (!runtime_->metrics.begin(plan)) {
+    if (!runtime_->metrics.begin(plan) ||
+        !runtime_->closed_metrics.begin(plan) ||
+        (checkpoint_bytes &&
+         (!runtime_->closed_metrics.restore(
+              checkpoint.metrics, checkpoint.metrics_size) ||
+          !runtime_->closed_metrics.merge(runtime_->metrics)))) {
         failure_reason_ = "report_signal_store_metrics_allocation_failed";
         runtime_->clear_work();
         return false;
+    }
+
+    if (checkpoint_bytes) {
+        ReportSignalStoreEventFileView old_events;
+        if (!ReportSignalStoreEventCodec::inspect(
+                checkpoint.events, checkpoint.events_size, old_events) ||
+            !runtime_->reserve_events(old_events.event_count)) {
+            failure_reason_ = "report_signal_store_checkpoint_events_invalid";
+            return false;
+        }
+        for (size_t i = 0; i < old_events.event_count; ++i) {
+            ReportSignalStoreEventCodec::event(
+                old_events, i, runtime_->events[runtime_->event_count++]);
+        }
     }
     runtime_->active = true;
     return true;
@@ -317,28 +461,20 @@ bool ReportSignalStoreBuilder::accept_series(
         return false;
     }
 
-    const uint32_t phase = grid_phase(
-        sample.timestamp_ms, series.sample_interval_ms);
     const size_t signal_index = static_cast<size_t>(series.signal);
-    const float multiplier =
-        report_series_canonical_value_milli(series, 1000) / 1000.0f;
     const bool original = sample.raw_valid && runtime_->configured[signal_index];
-    const float scale = original
-        ? runtime_->scales[signal_index].scale * multiplier
-        : fallback_scale(series.signal);
-    const float offset = original
-        ? runtime_->scales[signal_index].offset * multiplier : 0.0f;
-    const int16_t missing = original &&
-        runtime_->scales[signal_index].digital_min == INT16_MIN
-        ? INT16_MAX : INT16_MIN;
+    const auto format = track_format(
+        series, original ? &runtime_->scales[signal_index] : nullptr,
+        sample.timestamp_ms);
+    const uint32_t phase = format.grid_phase_ms;
+    const float scale = format.value_scale;
+    const float offset = format.value_offset;
+    const int16_t missing = format.missing_value;
 
     TrackWork *work = nullptr;
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         ReportSignalStoreTrack &track = runtime_->tracks[i].track;
-        if (track.signal == series.signal &&
-            track.sample_interval_ms == series.sample_interval_ms &&
-            track.grid_phase_ms == phase && track.value_scale == scale &&
-            track.value_offset == offset && track.missing_value == missing) {
+        if (same_track_format(track, format)) {
             work = &runtime_->tracks[i];
             break;
         }
@@ -486,7 +622,20 @@ bool ReportSignalStoreBuilder::accept_series(
         work->raw_blocks[slot][sample_index] = encoded;
         work->newest_slot = static_cast<int>(slot);
     }
-    runtime_->metrics.accept(series.signal, canonical_value);
+    if (sample.timestamp_ms < runtime_->closed_before_ms) {
+        runtime_->closed_metrics.accept(series.signal, canonical_value);
+        if (work->closed.valid_sample_count == 0) {
+            work->closed.first_valid_sample_ms = sample.timestamp_ms;
+        }
+        work->closed.last_valid_sample_ms = sample.timestamp_ms;
+        ++work->closed.valid_sample_count;
+    } else {
+        if (!runtime_->prepare_tail(*work)) {
+            failure_reason_ = "report_signal_store_tail_allocation_failed";
+            return false;
+        }
+        work->tail_metrics->accept(series.signal, canonical_value);
+    }
 
     ReportSignalStoreTrack &track = work->track;
     if (track.valid_sample_count == 0) {
@@ -665,6 +814,45 @@ bool ReportSignalStoreBuilder::finish_build() {
     bundle->sleep_day = runtime_->plan->night().sleep_day;
     bundle->source_revision = runtime_->plan->night().source_revision;
     bundle->generation = runtime_->store_generation;
+    bundle->checkpoint_slot = runtime_->checkpoint_slot;
+
+    runtime_->update_expected_coverage();
+
+    ReportBuildCheckpointView previous_checkpoint;
+    if (runtime_->previous_checkpoint) {
+        ReportBuildCheckpointCodec::decode(
+            runtime_->previous_checkpoint->data(),
+            runtime_->previous_checkpoint->size(), previous_checkpoint);
+    }
+
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        TrackWork &work = runtime_->tracks[i];
+        if (!work.source_present && i < previous_checkpoint.track_count) {
+            if (!runtime_->prepare_tail(work) ||
+                (work.closed.tail_metrics_size && !work.tail_metrics->restore(
+                    work.closed.tail_metrics, work.closed.tail_metrics_size))) {
+                failure_reason_ = "report_signal_store_retained_tail_invalid";
+                return false;
+            }
+
+            work.track.valid_sample_count = work.previous_full.valid_sample_count;
+            work.track.first_valid_sample_ms = work.previous_full.first_valid_sample_ms;
+            work.track.last_valid_sample_ms = work.previous_full.last_valid_sample_ms;
+            if (runtime_->closed_before_ms > previous_checkpoint.closed_before_ms) {
+                if (!runtime_->closed_metrics.merge(*work.tail_metrics)) {
+                    failure_reason_ = "report_signal_store_metrics_merge_failed";
+                    return false;
+                }
+                work.closed = work.previous_full;
+                work.tail_metrics->clear();
+            }
+        }
+
+        if (work.tail_metrics && !runtime_->metrics.merge(*work.tail_metrics)) {
+            failure_reason_ = "report_signal_store_metrics_merge_failed";
+            return false;
+        }
+    }
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         TrackWork &work = runtime_->tracks[i];
@@ -717,6 +905,7 @@ bool ReportSignalStoreBuilder::finish_build() {
         runtime_->plan->requested_event_mask() &
         ~runtime_->plan->missing_event_mask();
     night.source_flags = runtime_->plan->night().source_flags;
+    night.checkpoint_slot = bundle->checkpoint_slot;
     night.event_count = static_cast<uint32_t>(runtime_->event_count);
     night.requested_signal_mask = runtime_->plan->requested_signal_mask();
     night.missing_required_signal_mask =
@@ -734,6 +923,10 @@ bool ReportSignalStoreBuilder::finish_build() {
         night.metrics.duration_minutes = minutes > UINT32_MAX
             ? UINT32_MAX
             : static_cast<uint32_t>(minutes);
+    }
+    if (!runtime_->metrics.merge(runtime_->closed_metrics)) {
+        failure_reason_ = "report_signal_store_metrics_merge_failed";
+        return false;
     }
     report_night_complete_metrics(
         night.metrics,
@@ -778,7 +971,53 @@ bool ReportSignalStoreBuilder::finish_build() {
     bundle->metadata = ReportSignalStoreNightCodec::encode(night);
     Memory::free(tracks);
     Memory::free(sessions);
-    if (!bundle->metadata || !bundle->valid()) {
+
+    const auto progress = ReportPlanner::capture_progress(
+        *runtime_->plan, runtime_->closed_before_ms,
+        previous_checkpoint.progress, previous_checkpoint.progress_size);
+    const auto metrics = runtime_->closed_metrics.snapshot();
+    LargeScratchArray<ReportBuildTrackState> closed_tracks;
+    LargeScratchArray<std::shared_ptr<const LargeByteBuffer>> tail_snapshots;
+    if (!progress || !metrics ||
+        !closed_tracks.allocate(runtime_->track_count) ||
+        !tail_snapshots.allocate(runtime_->track_count)) {
+        failure_reason_ = "report_signal_store_checkpoint_allocation_failed";
+        return false;
+    }
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        const TrackWork &work = runtime_->tracks[i];
+        auto &closed = *closed_tracks.append();
+        closed = work.closed;
+        closed.tail_metrics = nullptr;
+        closed.tail_metrics_size = 0;
+        if (work.tail_metrics) {
+            auto &snapshot = *tail_snapshots.append();
+            snapshot = work.tail_metrics->snapshot();
+            if (!snapshot) {
+                failure_reason_ = "report_signal_store_tail_snapshot_failed";
+                return false;
+            }
+            closed.tail_metrics = snapshot->data();
+            closed.tail_metrics_size = snapshot->size();
+        }
+    }
+
+    ReportBuildCheckpoint checkpoint;
+    checkpoint.sleep_day = bundle->sleep_day;
+    checkpoint.source_revision = bundle->source_revision;
+    checkpoint.generation = bundle->generation;
+    checkpoint.closed_before_ms = runtime_->closed_before_ms;
+    checkpoint.tracks = closed_tracks.data();
+    checkpoint.track_count = closed_tracks.size();
+    checkpoint.progress = progress->data();
+    checkpoint.progress_size = progress->size();
+    checkpoint.metrics = metrics->data();
+    checkpoint.metrics_size = metrics->size();
+    checkpoint.events = bundle->events->data();
+    checkpoint.events_size = bundle->events->size();
+    bundle->checkpoint = ReportBuildCheckpointCodec::encode(checkpoint);
+
+    if (!bundle->metadata || !bundle->checkpoint || !bundle->valid()) {
         failure_reason_ = "report_signal_store_metadata_encode_failed";
         return false;
     }

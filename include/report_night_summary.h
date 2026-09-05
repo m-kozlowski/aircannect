@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,6 +10,8 @@
 #include "report_sources.h"
 
 namespace aircannect {
+
+class LargeByteBuffer;
 
 static constexpr uint8_t REPORT_NIGHT_METRIC_LEAK_MEAN_INDEX = 20;
 static constexpr uint32_t REPORT_NIGHT_METRIC_LEAK_MEAN =
@@ -85,9 +88,15 @@ public:
     ReportMetricAccumulator &operator=(
         const ReportMetricAccumulator &) = delete;
 
+    bool begin(uint32_t signal_mask);
     bool begin(const ReportReadPlan &plan);
     void accept(ReportSignalId signal, int32_t value_milli);
     ReportCalculatedMetrics finish() const;
+
+    std::shared_ptr<const LargeByteBuffer> snapshot() const;
+    bool restore(const uint8_t *data, size_t length);
+    bool merge(const ReportMetricAccumulator &other);
+
     void clear();
 
 private:

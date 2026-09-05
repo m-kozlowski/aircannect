@@ -24,7 +24,8 @@ public:
     bool begin_build(const ReportArtifactRequest &request,
                      const ReportReadPlan &plan,
                      uint32_t store_generation,
-                     std::shared_ptr<const LargeByteBuffer> previous = {});
+                     std::shared_ptr<const LargeByteBuffer> previous = {},
+                     std::shared_ptr<const LargeByteBuffer> checkpoint = {});
     bool configure_series(const ReportSeriesDescriptor &series,
                           const EdfSignalScale &scale) override;
     bool ready() override;

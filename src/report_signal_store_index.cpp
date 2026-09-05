@@ -60,7 +60,7 @@ bool night_header_valid(const ReportSignalStoreNight &night) {
            (night.flags & ~KNOWN_NIGHT_FLAGS) == 0 &&
            (night.available_event_mask & ~REPORT_EVENT_ALL) == 0 &&
            night.session_count <= UINT16_MAX &&
-           night.track_count <= UINT16_MAX;
+           night.track_count <= UINT16_MAX && night.checkpoint_slot <= 2;
 }
 
 bool night_data_valid(const ReportSignalStoreNight &night) {
@@ -281,6 +281,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
     put_le16(bytes + 66, static_cast<uint16_t>(night.track_count));
     bytes[68] = night.available_event_mask;
     bytes[69] = night.source_flags;
+    bytes[70] = night.checkpoint_slot;
     put_le32(bytes + 72, night.event_count);
     put_le32(bytes + 80, night.requested_signal_mask);
     put_le32(bytes + 84, night.missing_required_signal_mask);
@@ -369,6 +370,8 @@ bool ReportSignalStoreNightCodec::decode(
     night.track_count = get_le16(bytes + 66);
     night.available_event_mask = bytes[68];
     night.source_flags = bytes[69];
+    night.checkpoint_slot = bytes[70];
+    if (night.checkpoint_slot > 2) return false;
     night.event_count = get_le32(bytes + 72);
     night.requested_signal_mask = get_le32(bytes + 80);
     night.missing_required_signal_mask = get_le32(bytes + 84);

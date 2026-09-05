@@ -87,6 +87,7 @@ private:
     enum class ActivePhase : uint8_t {
         Idle,
         LoadingMetadata,
+        LoadingCheckpoint,
         AcquiringFallback,
         WaitingForCatalog,
         Executing,
@@ -100,6 +101,8 @@ private:
     bool start_known_request(const ReportSignalStoreCatalogRecord *stored,
                              uint32_t now_ms);
     bool start_build(uint32_t now_ms);
+    bool finish_checkpoint_load(uint32_t now_ms);
+    bool start_execution(uint32_t now_ms);
     bool finish_fallback_acquisition();
     bool finish_execution(uint32_t now_ms);
     bool finish_publication();
@@ -121,6 +124,7 @@ private:
 
     StorageBoundedFileLoader metadata_loader_;
     std::shared_ptr<const LargeByteBuffer> previous_metadata_;
+    std::shared_ptr<const LargeByteBuffer> previous_checkpoint_;
 
     std::shared_ptr<const NightCatalog> catalog_;
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog_;

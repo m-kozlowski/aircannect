@@ -85,6 +85,8 @@ private:
         WaitBlock,
         SubmitEvents,
         WaitEvents,
+        SubmitCheckpoint,
+        WaitCheckpoint,
         SubmitMetadata,
         WaitMetadata,
         Ready,

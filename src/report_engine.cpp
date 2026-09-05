@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "report_sources.h"
+#include "report_build_checkpoint.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -274,6 +275,13 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             }
             break;
 
+        case ActivePhase::LoadingCheckpoint:
+            worked = metadata_loader_.poll() || worked;
+            if (metadata_loader_.status().terminal()) {
+                worked = finish_checkpoint_load(now_ms) || worked;
+            }
+            break;
+
         case ActivePhase::AcquiringFallback:
             worked = fallback_acquisition_.poll() || worked;
             if (fallback_acquisition_.status().terminal()) {
@@ -320,6 +328,7 @@ ReportEngineStatus ReportEngine::status() const {
 
     switch (phase_) {
         case ActivePhase::LoadingMetadata:
+        case ActivePhase::LoadingCheckpoint:
             out.state = ReportEngineState::Executing;
             break;
         case ActivePhase::AcquiringFallback:
@@ -549,9 +558,109 @@ bool ReportEngine::start_build(uint32_t now_ms) {
         return true;
     }
 
+    if (previous_metadata_) {
+        ReportSignalStoreNightView previous;
+        ReportSignalStoreNightCodec::decode(
+            previous_metadata_->data(), previous_metadata_->size(), previous);
+
+        if (previous.night.checkpoint_slot) {
+            char path[AC_STORAGE_PATH_MAX] = {};
+            metadata_loader_.reset();
+
+            if (!report_build_checkpoint_path(
+                    previous.night.sleep_day, previous.night.generation,
+                    previous.night.checkpoint_slot, path, sizeof(path)) ||
+                metadata_loader_.start(
+                    path, ReportBuildCheckpointCodec::MaxBytes,
+                    active_request_.ticket.generation,
+                    read_lane(active_request_.priority)) !=
+                    OperationAdmission::Accepted) {
+                complete_active(OperationOutcome::failed(),
+                                ReportPlanStatus::Ready,
+                                ReportExecutorError::None,
+                                "report_checkpoint_read_rejected");
+                return true;
+            }
+
+            phase_ = ActivePhase::LoadingCheckpoint;
+            return true;
+        }
+    }
+
+    return start_execution(now_ms);
+}
+
+bool ReportEngine::finish_checkpoint_load(uint32_t now_ms) {
+    const auto load = metadata_loader_.status();
+    if (load.state != StorageBoundedFileLoadState::Ready) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None,
+                        load.error[0] ? load.error : "report_checkpoint_missing");
+        return true;
+    }
+
+    previous_checkpoint_ = metadata_loader_.take_completed();
+    return start_execution(now_ms);
+}
+
+bool ReportEngine::start_execution(uint32_t now_ms) {
+    std::shared_ptr<const ReportReadPlan> execution_plan = active_plan_;
+    if (previous_checkpoint_) {
+        ReportBuildCheckpointView checkpoint;
+        ReportSignalStoreNightView previous;
+        const bool valid = ReportBuildCheckpointCodec::decode(
+            previous_checkpoint_->data(), previous_checkpoint_->size(),
+            checkpoint) && previous_metadata_ &&
+            ReportSignalStoreNightCodec::decode(
+                previous_metadata_->data(), previous_metadata_->size(),
+                previous) &&
+            checkpoint.sleep_day == previous.night.sleep_day &&
+            checkpoint.generation == previous.night.generation &&
+            checkpoint.source_revision == previous.night.source_revision;
+
+        if (!valid) {
+            complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_checkpoint_invalid");
+            return true;
+        }
+
+        ReportPlanResult resumed = ReportPlanner::resume(
+            active_plan_, checkpoint.progress, checkpoint.progress_size);
+
+        if (resumed.status == ReportPlanStatus::InvalidCatalog) {
+            // Source layout or historical coverage changed, not a tail append.
+            const uint32_t missing = active_plan_->missing_required_signal_mask() |
+                active_plan_->missing_optional_signal_mask();
+            for (size_t i = 0; i < previous.night.track_count; ++i) {
+                ReportSignalStoreTrack track;
+                previous.track(i, track);
+                if (track.valid_sample_count &&
+                    (missing & report_signal_bit(track.signal))) {
+                    complete_active(OperationOutcome::failed(), resumed.status,
+                                    ReportExecutorError::None,
+                                    "report_source_changed_incomplete");
+                    return true;
+                }
+            }
+
+            previous_metadata_.reset();
+            previous_checkpoint_.reset();
+            active_store_generation_ = increment_generation(
+                active_store_generation_);
+        } else if (!resumed.ready()) {
+            complete_active(OperationOutcome::failed(), resumed.status,
+                            ReportExecutorError::None,
+                            "report_checkpoint_resume_failed");
+            return true;
+        } else {
+            execution_plan = std::move(resumed.plan);
+        }
+    }
+
     if (!builder_.begin_build(
             active_request_, *active_plan_, active_store_generation_,
-            previous_metadata_)) {
+            previous_metadata_, previous_checkpoint_)) {
         const char *reason = builder_.failure_reason();
         builder_.discard_build();
         complete_active(OperationOutcome::failed(),
@@ -562,7 +671,7 @@ bool ReportEngine::start_build(uint32_t now_ms) {
     }
 
     const OperationAdmission admitted = executor_.start(
-        active_plan_, builder_, active_request_.ticket.generation);
+        execution_plan, builder_, active_request_.ticket.generation);
     if (admitted != OperationAdmission::Accepted) {
         const ReportExecutorError error = executor_.status().error;
         builder_.discard_build();
@@ -732,6 +841,7 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
 void ReportEngine::cancel_active_work() {
     switch (phase_) {
         case ActivePhase::LoadingMetadata:
+        case ActivePhase::LoadingCheckpoint:
             metadata_loader_.cancel();
             complete_active(OperationOutcome::cancelled(),
                             ReportPlanStatus::Ready,
@@ -787,6 +897,7 @@ void ReportEngine::reset_active() {
     awaited_fallback_identity_ = 0;
     active_store_generation_ = 0;
     previous_metadata_.reset();
+    previous_checkpoint_.reset();
     phase_ = ActivePhase::Idle;
     clear_after_fallback_cancel_ = false;
 }

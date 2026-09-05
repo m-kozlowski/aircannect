@@ -1,12 +1,15 @@
 #include "report_planner.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
+#include <new>
 
 #include "board_report.h"
 #include "checked_size.h"
 #include "large_scratch_array.h"
 #include "report_records.h"
+#include "report_source_progress.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -44,6 +47,74 @@ struct PendingOperation {
     ReportReadMapping mapping;
     bool has_mapping = false;
 };
+
+bool same_float(float lhs, float rhs) {
+    uint32_t lhs_bits = 0;
+    uint32_t rhs_bits = 0;
+    static_assert(sizeof(lhs_bits) == sizeof(lhs), "float must be 32-bit");
+    memcpy(&lhs_bits, &lhs, sizeof(lhs_bits));
+    memcpy(&rhs_bits, &rhs, sizeof(rhs_bits));
+    return lhs_bits == rhs_bits;
+}
+
+bool same_scale(const EdfSignalScale &lhs, const EdfSignalScale &rhs) {
+    return lhs.digital_min == rhs.digital_min &&
+           lhs.digital_max == rhs.digital_max &&
+           same_float(lhs.physical_min, rhs.physical_min) &&
+           same_float(lhs.physical_max, rhs.physical_max) &&
+           same_float(lhs.scale, rhs.scale) &&
+           same_float(lhs.offset, rhs.offset);
+}
+
+bool same_path(const ReportSourceProgressEntry &lhs,
+               const ReportSourceProgressEntry &rhs) {
+    return lhs.path_length == rhs.path_length && lhs.path && rhs.path &&
+           memcmp(lhs.path, rhs.path, lhs.path_length) == 0;
+}
+
+bool same_progress_base(const ReportSourceProgressEntry &lhs,
+                        const ReportSourceProgressEntry &rhs) {
+    return lhs.storage == rhs.storage && same_path(lhs, rhs) &&
+           lhs.series.signal == rhs.series.signal &&
+           lhs.series.source == rhs.series.source &&
+           lhs.series.sample_interval_ms == rhs.series.sample_interval_ms &&
+           lhs.series.primary == rhs.series.primary &&
+           lhs.session_start_ms == rhs.session_start_ms &&
+           lhs.mapping_start_ms == rhs.mapping_start_ms;
+}
+
+bool same_progress_layout(const ReportSourceProgressEntry &lhs,
+                          const ReportSourceProgressEntry &rhs) {
+    if (lhs.storage == ReportSourceProgressStorage::Fallback) {
+        return lhs.fallback_payload_schema == rhs.fallback_payload_schema &&
+               lhs.fallback_coverage_start_ms ==
+                   rhs.fallback_coverage_start_ms;
+    }
+
+    return lhs.file_start_ms == rhs.file_start_ms &&
+           lhs.file_header_size == rhs.file_header_size &&
+           lhs.file_record_size == rhs.file_record_size &&
+           lhs.file_record_duration_ms == rhs.file_record_duration_ms &&
+           lhs.samples_per_record == rhs.samples_per_record &&
+           lhs.byte_offset_in_record == rhs.byte_offset_in_record &&
+           same_scale(lhs.scale, rhs.scale);
+}
+
+bool same_progress_key(const ReportSourceProgressEntry &lhs,
+                       const ReportSourceProgressEntry &rhs) {
+    return same_progress_base(lhs, rhs) &&
+           same_progress_layout(lhs, rhs);
+}
+
+bool compatible_source(const ReportSourceProgressEntry &old_entry,
+                       const ReportSourceProgressEntry &current) {
+    if (!same_progress_base(old_entry, current) ||
+        !same_progress_layout(old_entry, current) ||
+        current.full_end_ms < old_entry.full_end_ms) {
+        return false;
+    }
+    return true;
+}
 
 bool add_count(size_t &total, size_t amount) {
     return CheckedSize::add_to(total, amount);
@@ -108,6 +179,84 @@ bool file_data_valid(const NightCatalogSourceFile &file) {
     const uint64_t complete_bytes =
         static_cast<uint64_t>(file.complete_records) * file.record_size;
     return complete_bytes <= file.data_size;
+}
+
+bool make_progress_entry(const ReportReadPlan &plan,
+                         const ReportReadOperation &operation,
+                         const ReportReadMapping &mapping,
+                         ReportSourceProgressEntry &out) {
+    if (operation.kind != ReportReadOperationKind::Numeric &&
+        operation.kind != ReportReadOperationKind::FallbackSeries) {
+        return false;
+    }
+
+    const ReportReadSession *session = plan.session(operation.session_index);
+    const char *path = plan.source_path(operation);
+    if (!session || !path || !mapping.output_window.valid()) return false;
+
+    const size_t path_length = strlen(path);
+    if (path_length == 0 || path_length > UINT16_MAX) return false;
+
+    out = {};
+    out.path = path;
+    out.path_length = static_cast<uint16_t>(path_length);
+    out.series = mapping.series;
+    out.session_start_ms = session->output_window.start_ms;
+    out.mapping_start_ms = mapping.output_window.start_ms;
+    out.full_end_ms = mapping.output_window.end_ms;
+    out.cursor_ms = out.mapping_start_ms;
+
+    if (operation.kind == ReportReadOperationKind::Numeric) {
+        const NightCatalogSourceFile *file = plan.source_file(operation);
+        if (!file || !file_data_valid(*file)) return false;
+
+        out.storage = ReportSourceProgressStorage::Edf;
+        out.scale = mapping.layout.scale;
+        out.samples_per_record = mapping.layout.samples_per_record;
+        out.byte_offset_in_record = mapping.layout.byte_offset_in_record;
+        out.file_start_ms = file->record_start_ms;
+        out.file_header_size = file->header_size;
+        out.file_record_size = file->record_size;
+        out.file_record_duration_ms = file->record_duration_ms;
+        return true;
+    }
+
+    const NightCatalogFallbackFile *file = plan.fallback_file(operation);
+    const NightCatalogFallbackSection *section =
+        plan.fallback_section(operation);
+    if (!file || !section || section->kind != ReportFallbackSectionKind::Series ||
+        section->data_size == 0 || section->record_count == 0 ||
+        section->sample_interval_ms == 0) {
+        return false;
+    }
+
+    out.storage = ReportSourceProgressStorage::Fallback;
+    out.fallback_payload_schema = section->payload_schema;
+    out.fallback_coverage_start_ms = section->coverage.start_ms;
+    return true;
+}
+
+bool progress_cursor(const ReportSourceProgressEntry &entry,
+                     int64_t closed_before_ms,
+                     int64_t &out) {
+    if (entry.full_end_ms <= entry.mapping_start_ms) return false;
+    out = std::min(entry.full_end_ms,
+                   std::max(entry.mapping_start_ms, closed_before_ms));
+    return true;
+}
+
+bool processed_progress_overlap(
+    const ReportSourceProgressEntry &old_entry,
+    const ReportSourceProgressEntry &current) {
+    if (old_entry.series.signal != current.series.signal ||
+        old_entry.cursor_ms <= old_entry.mapping_start_ms) {
+        return false;
+    }
+
+    const int64_t processed_end =
+        std::min(old_entry.cursor_ms, old_entry.full_end_ms);
+    return old_entry.mapping_start_ms < current.full_end_ms &&
+           current.mapping_start_ms < processed_end;
 }
 
 uint32_t coverage_mask(const NightCatalogSourceCoverage &coverage,
@@ -521,6 +670,38 @@ bool operation_span(const NightCatalogSourceFile &file,
 
     offset = file.data_offset + relative;
     length = static_cast<uint32_t>(bytes);
+    return true;
+}
+
+bool fallback_record_window(const NightCatalogFallbackSection &section,
+                            const NightCatalogTimeRange &window,
+                            uint32_t &first_record,
+                            uint32_t &end_record) {
+    first_record = 0;
+    end_record = 0;
+    if (section.sample_interval_ms == 0 || section.record_count == 0 ||
+        !window.valid() || !section.coverage.valid() ||
+        window.start_ms < section.coverage.start_ms ||
+        window.end_ms > section.coverage.end_ms) {
+        return false;
+    }
+
+    const uint64_t start_delta = static_cast<uint64_t>(
+        window.start_ms - section.coverage.start_ms);
+    const uint64_t end_delta = static_cast<uint64_t>(
+        window.end_ms - section.coverage.start_ms);
+    const uint64_t interval = section.sample_interval_ms;
+    const uint64_t first_sample =
+        (start_delta + interval - 1u) / interval;
+    const uint64_t end_sample = (end_delta + interval - 1u) / interval;
+    const uint32_t bounded_first = static_cast<uint32_t>(
+        std::min<uint64_t>(section.record_count, first_sample));
+    const uint32_t bounded_end = static_cast<uint32_t>(
+        std::min<uint64_t>(section.record_count, end_sample));
+    if (bounded_end <= bounded_first) return false;
+
+    first_record = bounded_first;
+    end_record = bounded_end;
     return true;
 }
 
@@ -974,20 +1155,14 @@ bool append_fallback_series_operations(
                                        section.coverage);
         if (!mapping.output_window.valid()) continue;
 
-        const uint64_t start_delta = static_cast<uint64_t>(
-            mapping.output_window.start_ms - section.coverage.start_ms);
-        const uint64_t end_delta = static_cast<uint64_t>(
-            mapping.output_window.end_ms - section.coverage.start_ms);
-        const uint64_t interval = section.sample_interval_ms;
-        const uint64_t first_sample =
-            (start_delta + interval - 1u) / interval;
-        const uint64_t end_sample =
-            (end_delta + interval - 1u) / interval;
-        const uint32_t bounded_first = static_cast<uint32_t>(
-            std::min<uint64_t>(section.record_count, first_sample));
-        const uint32_t bounded_end = static_cast<uint32_t>(
-            std::min<uint64_t>(section.record_count, end_sample));
-        if (bounded_end <= bounded_first) continue;
+        uint32_t bounded_first = 0;
+        uint32_t bounded_end = 0;
+        if (!fallback_record_window(section,
+                                    mapping.output_window,
+                                    bounded_first,
+                                    bounded_end)) {
+            continue;
+        }
 
         if (i > UINT16_MAX || section.data_size == 0 ||
             section.data_size > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
@@ -1391,6 +1566,220 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
            mapping_index == plan_mapping_count;
 }
 
+bool find_progress_entry(const ReportSourceProgressReader &reader,
+                         const ReportSourceProgressEntry &needle,
+                         size_t &index,
+                         ReportSourceProgressEntry &out) {
+    for (size_t i = 0; i < reader.count(); ++i) {
+        ReportSourceProgressEntry candidate;
+        if (!reader.entry(i, candidate)) return false;
+        if (same_progress_key(candidate, needle)) {
+            index = i;
+            out = candidate;
+            return true;
+        }
+    }
+    index = SIZE_MAX;
+    return true;
+}
+
+bool collect_current_progress_entries(
+    const ReportReadPlan &plan,
+    LargeScratchArray<ReportSourceProgressEntry> &entries) {
+    if (!entries.allocate(plan.mapping_count())) return false;
+
+    for (size_t operation_index = 0;
+         operation_index < plan.operation_count();
+         ++operation_index) {
+        const ReportReadOperation *operation = plan.operation(operation_index);
+        if (!operation ||
+            (operation->kind != ReportReadOperationKind::Numeric &&
+             operation->kind != ReportReadOperationKind::FallbackSeries)) {
+            continue;
+        }
+
+        size_t mapping_count = 0;
+        const ReportReadMapping *mappings =
+            plan.mappings(*operation, mapping_count);
+        if (!mappings || mapping_count == 0) return false;
+        for (size_t mapping_index = 0;
+             mapping_index < mapping_count;
+             ++mapping_index) {
+            ReportSourceProgressEntry current;
+            if (!make_progress_entry(plan,
+                                     *operation,
+                                     mappings[mapping_index],
+                                     current)) {
+                return false;
+            }
+
+            bool duplicate = false;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                const ReportSourceProgressEntry &known = entries.data()[i];
+                if (same_progress_key(known, current)) {
+                    duplicate = true;
+                    break;
+                }
+                if (same_progress_base(known, current)) return false;
+            }
+            if (!duplicate && !entries.append()) return false;
+            if (!duplicate) entries.data()[entries.size() - 1] = current;
+        }
+    }
+    return true;
+}
+
+bool append_resumed_numeric(
+    const ReportReadPlan &plan,
+    const ReportReadOperation &operation,
+    const ReportSourceProgressReader &reader,
+    LargeScratchArray<PendingOperation> &pending) {
+    const NightCatalogSourceFile *file = plan.source_file(operation);
+    if (!file || !file_data_valid(*file)) return false;
+
+    size_t mapping_count = 0;
+    const ReportReadMapping *mappings =
+        plan.mappings(operation, mapping_count);
+    if (!mappings || mapping_count == 0 ||
+        mapping_count > static_cast<size_t>(ReportSignalId::Count)) {
+        return false;
+    }
+    if (operation.first_record > file->complete_records ||
+        operation.record_count >
+            file->complete_records - operation.first_record) {
+        return false;
+    }
+    const uint32_t operation_end =
+        operation.first_record + operation.record_count;
+
+    LargeScratchArray<ReportReadMapping> remaining;
+    if (!remaining.allocate(mapping_count)) return false;
+    uint32_t first_record = UINT32_MAX;
+    uint32_t end_record = 0;
+    for (size_t i = 0; i < mapping_count; ++i) {
+        ReportReadMapping mapping = mappings[i];
+        ReportSourceProgressEntry current;
+        if (!make_progress_entry(plan, operation, mapping, current)) {
+            return false;
+        }
+
+        size_t progress_index = SIZE_MAX;
+        ReportSourceProgressEntry previous;
+        if (!find_progress_entry(reader,
+                                  current,
+                                  progress_index,
+                                  previous)) {
+            return false;
+        }
+        if (progress_index != SIZE_MAX) {
+            if (!compatible_source(previous, current)) return false;
+            mapping.output_window.start_ms = std::max(
+                mapping.output_window.start_ms, previous.cursor_ms);
+            if (mapping.output_window.start_ms >=
+                mapping.output_window.end_ms) {
+                continue;
+            }
+        }
+
+        uint32_t mapping_first = 0;
+        uint32_t mapping_end = 0;
+        if (!record_window(*file,
+                           mapping.output_window,
+                           mapping_first,
+                           mapping_end)) {
+            continue;
+        }
+        mapping_first = std::max(mapping_first, operation.first_record);
+        mapping_end = std::min(mapping_end, operation_end);
+        if (mapping_end <= mapping_first) continue;
+        if (mapping_first < first_record) first_record = mapping_first;
+        if (mapping_end > end_record) end_record = mapping_end;
+        ReportReadMapping *remaining_mapping = remaining.append();
+        if (!remaining_mapping) return false;
+        *remaining_mapping = mapping;
+    }
+    if (remaining.size() == 0 || first_record == UINT32_MAX ||
+        end_record <= first_record) {
+        return true;
+    }
+
+    ReportReadOperation resumed = operation;
+    resumed.first_record = first_record;
+    resumed.record_count = end_record - first_record;
+    if (!operation_span(*file,
+                        resumed.first_record,
+                        resumed.record_count,
+                        resumed.offset,
+                        resumed.length)) {
+        return false;
+    }
+    for (size_t i = 0; i < remaining.size(); ++i) {
+        PendingOperation *entry = pending.append();
+        if (!entry) return false;
+        entry->operation = resumed;
+        entry->mapping = remaining.data()[i];
+        entry->has_mapping = true;
+    }
+    return true;
+}
+
+bool append_resumed_fallback_series(
+    const ReportReadPlan &plan,
+    const ReportReadOperation &operation,
+    const ReportSourceProgressReader &reader,
+    LargeScratchArray<PendingOperation> &pending) {
+    size_t mapping_count = 0;
+    const ReportReadMapping *mappings =
+        plan.mappings(operation, mapping_count);
+    const NightCatalogFallbackSection *section =
+        plan.fallback_section(operation);
+    if (!mappings || mapping_count != 1 || !section ||
+        section->kind != ReportFallbackSectionKind::Series ||
+        section->data_size == 0) {
+        return false;
+    }
+
+    ReportReadMapping mapping = mappings[0];
+    ReportSourceProgressEntry current;
+    if (!make_progress_entry(plan, operation, mapping, current)) return false;
+
+    size_t progress_index = SIZE_MAX;
+    ReportSourceProgressEntry previous;
+    if (!find_progress_entry(reader,
+                             current,
+                             progress_index,
+                             previous)) {
+        return false;
+    }
+    if (progress_index != SIZE_MAX) {
+        if (!compatible_source(previous, current)) return false;
+        mapping.output_window.start_ms = std::max(
+            mapping.output_window.start_ms, previous.cursor_ms);
+        if (mapping.output_window.start_ms >= mapping.output_window.end_ms) {
+            return true;
+        }
+    }
+
+    uint32_t first_record = 0;
+    uint32_t end_record = 0;
+    if (!fallback_record_window(*section,
+                                mapping.output_window,
+                                first_record,
+                                end_record)) {
+        return true;
+    }
+
+    ReportReadOperation resumed = operation;
+    resumed.first_record = first_record;
+    resumed.record_count = end_record - first_record;
+    PendingOperation *entry = pending.append();
+    if (!entry) return false;
+    entry->operation = resumed;
+    entry->mapping = mapping;
+    entry->has_mapping = true;
+    return true;
+}
+
 }  // namespace
 
 bool ReportPlanRequest::valid() const {
@@ -1526,6 +1915,253 @@ ReportPlanResult ReportPlanner::build(
 
     result.status = ReportPlanStatus::Ready;
     result.plan = std::move(plan);
+    return result;
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportPlanner::capture_progress(
+    const ReportReadPlan &full,
+    int64_t closed_before_ms,
+    const uint8_t *previous,
+    size_t previous_length) {
+    ReportSourceProgressReader previous_reader;
+    if (previous_length > 0 &&
+        (!previous || !previous_reader.open(previous, previous_length))) {
+        return {};
+    }
+
+    LargeScratchArray<ReportSourceProgressEntry> current;
+    if (!collect_current_progress_entries(full, current)) return {};
+
+    size_t capacity = 0;
+    if (!CheckedSize::add(previous_reader.count(), current.size(), capacity)) {
+        return {};
+    }
+    LargeScratchArray<ReportSourceProgressEntry> merged;
+    if (!merged.allocate(capacity)) return {};
+
+    const size_t old_count = previous_reader.count();
+    for (size_t i = 0; i < old_count; ++i) {
+        ReportSourceProgressEntry retained;
+        if (!previous_reader.entry(i, retained)) return {};
+
+        int64_t promoted_cursor = 0;
+        if (!progress_cursor(retained,
+                             closed_before_ms,
+                             promoted_cursor)) {
+            return {};
+        }
+        retained.cursor_ms = std::max(retained.cursor_ms, promoted_cursor);
+        ReportSourceProgressEntry *slot = merged.append();
+        if (!slot) return {};
+        *slot = retained;
+    }
+
+    for (size_t i = 0; i < current.size(); ++i) {
+        ReportSourceProgressEntry next = current.data()[i];
+        if (!progress_cursor(next, closed_before_ms, next.cursor_ms)) {
+            return {};
+        }
+
+        size_t matched_index = SIZE_MAX;
+        ReportSourceProgressEntry matched;
+        for (size_t j = 0; j < merged.size(); ++j) {
+            if (same_progress_key(merged.data()[j], next)) {
+                matched_index = j;
+                matched = merged.data()[j];
+                break;
+            }
+        }
+        if (matched_index != SIZE_MAX) {
+            if (matched_index < old_count) {
+                if (!compatible_source(matched, next)) return {};
+                next.cursor_ms = std::max(next.cursor_ms,
+                                          matched.cursor_ms);
+                merged.data()[matched_index] = next;
+            }
+            continue;
+        }
+
+        ReportSourceProgressEntry *slot = merged.append();
+        if (!slot) return {};
+        *slot = next;
+    }
+
+    return encode_report_source_progress(merged.data(), merged.size());
+}
+
+ReportPlanResult ReportPlanner::resume(
+    std::shared_ptr<const ReportReadPlan> full,
+    const uint8_t *progress,
+    size_t length) {
+    ReportPlanResult result;
+    if (!full) {
+        result.status = ReportPlanStatus::InvalidRequest;
+        return result;
+    }
+
+    ReportSourceProgressReader reader;
+    if (length > 0 && (!progress || !reader.open(progress, length))) {
+        result.status = ReportPlanStatus::InvalidRequest;
+        return result;
+    }
+
+    LargeScratchArray<ReportSourceProgressEntry> current;
+    if (!collect_current_progress_entries(*full, current)) {
+        result.status = ReportPlanStatus::InvalidCatalog;
+        return result;
+    }
+
+    for (size_t i = 0; i < reader.count(); ++i) {
+        ReportSourceProgressEntry old_entry;
+        if (!reader.entry(i, old_entry)) {
+            result.status = ReportPlanStatus::InvalidRequest;
+            return result;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            ReportSourceProgressEntry earlier;
+            if (!reader.entry(j, earlier)) {
+                result.status = ReportPlanStatus::InvalidRequest;
+                return result;
+            }
+            if (same_progress_key(earlier, old_entry)) {
+                result.status = ReportPlanStatus::InvalidRequest;
+                return result;
+            }
+        }
+
+        bool has_base_match = false;
+        for (size_t j = 0; j < current.size(); ++j) {
+            const ReportSourceProgressEntry &candidate = current.data()[j];
+            if (same_progress_base(old_entry, candidate)) {
+                has_base_match = true;
+                if (!compatible_source(old_entry, candidate)) {
+                    result.status = ReportPlanStatus::InvalidCatalog;
+                    return result;
+                }
+            }
+        }
+        if (has_base_match) continue;
+
+        for (size_t j = 0; j < current.size(); ++j) {
+            if (processed_progress_overlap(old_entry, current.data()[j])) {
+                result.status = ReportPlanStatus::InvalidCatalog;
+                return result;
+            }
+
+            // A saved per-track tail cannot be split between a missing
+            // source and another source still providing that signal.
+            if (old_entry.cursor_ms < old_entry.full_end_ms &&
+                old_entry.series.signal == current.data()[j].series.signal) {
+                result.status = ReportPlanStatus::InvalidRequest;
+                return result;
+            }
+        }
+    }
+
+    size_t pending_capacity = 0;
+    if (!CheckedSize::add(full->mapping_count(),
+                          full->operation_count(),
+                          pending_capacity)) {
+        result.status = ReportPlanStatus::AllocationFailed;
+        return result;
+    }
+    LargeScratchArray<PendingOperation> pending;
+    if (!pending.allocate(pending_capacity)) {
+        result.status = ReportPlanStatus::AllocationFailed;
+        return result;
+    }
+
+    for (size_t operation_index = 0;
+         operation_index < full->operation_count();
+         ++operation_index) {
+        const ReportReadOperation *operation = full->operation(operation_index);
+        if (!operation) {
+            result.status = ReportPlanStatus::InvalidCatalog;
+            return result;
+        }
+
+        if (operation->kind == ReportReadOperationKind::Numeric) {
+            if (!append_resumed_numeric(*full,
+                                        *operation,
+                                        reader,
+                                        pending)) {
+                result.status = ReportPlanStatus::InvalidCatalog;
+                return result;
+            }
+        } else if (operation->kind == ReportReadOperationKind::FallbackSeries) {
+            if (!append_resumed_fallback_series(*full,
+                                                *operation,
+                                                reader,
+                                                pending)) {
+                result.status = ReportPlanStatus::InvalidCatalog;
+                return result;
+            }
+        } else if (operation->kind == ReportReadOperationKind::ScoredEvents ||
+                   operation->kind == ReportReadOperationKind::CsrEvents ||
+                   operation->kind == ReportReadOperationKind::FallbackEvents) {
+            if (operation->mapping_count != 0) {
+                result.status = ReportPlanStatus::InvalidCatalog;
+                return result;
+            }
+            PendingOperation *entry = pending.append();
+            if (!entry) {
+                result.status = ReportPlanStatus::AllocationFailed;
+                return result;
+            }
+            entry->operation = *operation;
+            entry->has_mapping = false;
+        } else {
+            result.status = ReportPlanStatus::InvalidCatalog;
+            return result;
+        }
+    }
+
+    size_t operation_count = 0;
+    size_t mapping_count = 0;
+    count_final_entries(pending, operation_count, mapping_count);
+
+    std::shared_ptr<ReportReadPlan> resumed_plan(
+        new (std::nothrow) ReportReadPlan());
+    if (!resumed_plan || !resumed_plan->allocate(full->session_count(),
+                                                 operation_count,
+                                                 mapping_count)) {
+        result.status = ReportPlanStatus::AllocationFailed;
+        return result;
+    }
+
+    resumed_plan->catalog_ = full->catalog_;
+    resumed_plan->night_ = full->night_;
+    resumed_plan->key_ = full->key_;
+    resumed_plan->requested_signal_mask_ = full->requested_signal_mask_;
+    resumed_plan->missing_required_signal_mask_ =
+        full->missing_required_signal_mask_;
+    resumed_plan->missing_optional_signal_mask_ =
+        full->missing_optional_signal_mask_;
+    resumed_plan->unavailable_signal_mask_ = full->unavailable_signal_mask_;
+    resumed_plan->acquirable_signal_mask_ = full->acquirable_signal_mask_;
+    resumed_plan->fallback_acquisition_allowed_ =
+        full->fallback_acquisition_allowed_;
+    resumed_plan->requested_event_mask_ = full->requested_event_mask_;
+    resumed_plan->missing_event_mask_ = full->missing_event_mask_;
+    for (size_t i = 0; i < full->session_count(); ++i) {
+        const ReportReadSession *session = full->session(i);
+        if (!session) {
+            result.status = ReportPlanStatus::InvalidCatalog;
+            return result;
+        }
+        resumed_plan->sessions_[i] = *session;
+    }
+
+    if (!fill_operations(pending,
+                         resumed_plan->operations_,
+                         resumed_plan->operation_count_,
+                         resumed_plan->mappings_,
+                         resumed_plan->mapping_count_)) {
+        result.status = ReportPlanStatus::InvalidCatalog;
+        return result;
+    }
+    result.status = ReportPlanStatus::Ready;
+    result.plan = std::move(resumed_plan);
     return result;
 }
 

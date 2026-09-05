@@ -95,6 +95,8 @@ public:
     uint32_t generation = 0;
     std::shared_ptr<const LargeByteBuffer> metadata;
     std::shared_ptr<const LargeByteBuffer> events;
+    std::shared_ptr<const LargeByteBuffer> checkpoint;
+    uint8_t checkpoint_slot = 0;
 
     size_t signal_count() const { return signal_count_; }
     const ReportSignalStoreFilePayload *signal(size_t index) const;
@@ -189,6 +191,7 @@ struct ReportSignalStoreNight {
     int32_t timezone_offset_minutes = 0;
     uint8_t available_event_mask = 0;
     uint8_t source_flags = 0;
+    uint8_t checkpoint_slot = 0;
     uint32_t event_count = 0;
     uint32_t requested_signal_mask = 0;
     uint32_t missing_required_signal_mask = 0;

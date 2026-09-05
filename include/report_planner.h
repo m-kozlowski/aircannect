@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdint.h>
 
+#include "large_byte_buffer.h"
 #include "report_read_plan.h"
 
 namespace aircannect {
@@ -40,6 +41,17 @@ public:
     static ReportPlanResult build(
         const ReportPlanRequest &request,
         std::shared_ptr<const NightCatalog> catalog);
+
+    static std::shared_ptr<const LargeByteBuffer> capture_progress(
+        const ReportReadPlan &full,
+        int64_t closed_before_ms,
+        const uint8_t *previous = nullptr,
+        size_t previous_length = 0);
+
+    static ReportPlanResult resume(
+        std::shared_ptr<const ReportReadPlan> full,
+        const uint8_t *progress,
+        size_t length);
 };
 
 }  // namespace aircannect
