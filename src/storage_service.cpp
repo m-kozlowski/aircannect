@@ -1152,7 +1152,7 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     if (!valid_path(job.path) ||
         header_size < AC_EDF_HEADER_SIGNAL_HEADER_OFFSET ||
         header_size > SIZE_MAX / 2 ||
-        job.record_size == 0 || !Storage::exists(job.path)) {
+        job.record_size == 0) {
         return false;
     }
 
@@ -1202,7 +1202,8 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     state.resumed = true;
     copy_cstr(state.path, sizeof(state.path), job.path);
     state.open = true;
-    if (plan.patch_header_record_count && !patch_record_count(state)) {
+    if ((plan.patch_header_record_count && !patch_record_count(state)) ||
+        !state.file.seek(state.file.size())) {
         state.file.close();
         state.open = false;
         state.record_count = 0;
@@ -1211,7 +1212,6 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
         state.path[0] = 0;
         return false;
     }
-    state.file.seek(state.file.size());
     return true;
 }
 
@@ -1342,8 +1342,26 @@ bool process_open(JobSlot &job) {
         return true;
     }
 
-    (void)Storage::remove(job.path);
-    state.file = Storage::open(job.path, "w+");
+    // A failed resume must never replace an existing EDF. Creation below is
+    // nontruncating, so a false-negative exists() result preserves its bytes.
+    if (Storage::exists(job.path)) {
+        return fail("resume_failed");
+    }
+
+    // Create without truncation, then reopen in r+ so later header patches
+    // seek normally instead of inheriting append-mode write semantics.
+    File created = Storage::open(job.path, "a");
+    if (!created) {
+        log_worker_failure(LOG_WARN, "open_failed", job.path);
+        return fail("open_failed");
+    }
+    const size_t existing_size = created.size();
+    created.close();
+    if (existing_size != 0) {
+        return fail("resume_failed");
+    }
+
+    state.file = Storage::open(job.path, "r+");
     if (!state.file) {
         log_worker_failure(LOG_WARN, "open_failed", job.path);
         return fail("open_failed");
