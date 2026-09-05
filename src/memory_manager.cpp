@@ -98,7 +98,8 @@ MemoryDetailStatus detail_status() {
 
 bool psram_available() {
 #ifdef ARDUINO
-    return status().psram_available;
+    ensure_begin();
+    return psram_detected;
 #else
     return false;
 #endif
