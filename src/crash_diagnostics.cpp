@@ -17,6 +17,7 @@
 #include <time.h>
 
 #include "debug_log.h"
+#include "crash_diagnostics_log.h"
 #include "large_byte_buffer.h"
 #include "version.h"
 
@@ -697,25 +698,16 @@ void CrashDiagnostics::log_previous_crash() const {
     if (!copy_snapshot(snapshot)) return;
 
     if (snapshot.dump_state == CrashDumpState::Available) {
-        const bool task_watchdog = snapshot.rtc_task_watchdog ||
-            strstr(snapshot.reason, "Task watchdog") != nullptr;
-        const char *reason = task_watchdog
-                                 ? "task_watchdog"
-                                 : (snapshot.reason[0]
-                                        ? snapshot.reason
-                                        : "panic");
-
+        const CrashDiagnosticsDetail::AvailableDumpCorrelation correlation =
+            CrashDiagnosticsDetail::correlate_available_dump(snapshot);
         Log::logf(
             CAT_GENERAL, LOG_WARN,
             "[CRASH] panic occurred=%s task=%s reason=%.48s pc=0x%08lx\n",
-            snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
+            correlation.occurred_at,
             snapshot.task[0] ? snapshot.task : "--",
-            reason,
+            correlation.reason,
             static_cast<unsigned long>(snapshot.exception_pc));
-        if (!snapshot.rtc_panic_available ||
-            snapshot.dump_relation == CrashDumpRelation::Current) {
-            return;
-        }
+        if (!correlation.emit_breadcrumb) return;
     }
 
     if (snapshot.dump_state == CrashDumpState::Invalid) {
@@ -723,9 +715,14 @@ void CrashDiagnostics::log_previous_crash() const {
             !crash_reset_reason(esp_reset_reason())) {
             return;
         }
+        const char *occurred_at = snapshot.dump_relation ==
+                                          CrashDumpRelation::Current &&
+                                      snapshot.occurred_at[0]
+                                  ? snapshot.occurred_at
+                                  : "--";
         Log::logf(CAT_GENERAL, LOG_WARN,
                   "[CRASH] invalid dump occurred=%s error=%s bytes=%u\n",
-                  snapshot.occurred_at[0] ? snapshot.occurred_at : "--",
+                  occurred_at,
                   snapshot.dump_error[0] ? snapshot.dump_error : "unknown",
                   static_cast<unsigned>(snapshot.dump_stored_size));
     }
