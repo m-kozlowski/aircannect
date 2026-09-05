@@ -54,6 +54,17 @@ bool operation_allowed(OtaUrlContinueCallback callback, void *ctx) {
     return !callback || callback(ctx);
 }
 
+esp_err_t abort_response(esp_http_client_event_t *event,
+                         OtaUrlError &error,
+                         const char *code) {
+    if (!error.code[0]) set_error_code(error, code);
+
+    // IDF ignores the ON_DATA callback's return value. Close the transport,
+    // but keep the client alive until perform() unwinds and cleanup runs.
+    esp_http_client_close(event->client);
+    return ESP_FAIL;
+}
+
 esp_http_client_handle_t create_client(const char *url,
                                        esp_http_client_method_t method,
                                        http_event_handle_cb event_handler,
@@ -126,13 +137,13 @@ esp_err_t stream_event(esp_http_client_event_t *event) {
     if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
         return ESP_OK;
     }
+    if (ctx.error->code[0]) return ESP_FAIL;
 
     const int status = esp_http_client_get_status_code(event->client);
     if (status != 200) return ESP_OK;
 
     if (!operation_allowed(ctx.continue_callback, ctx.callback_ctx)) {
-        set_error_code(*ctx.error, "url_cancelled");
-        return ESP_FAIL;
+        return abort_response(event, *ctx.error, "url_cancelled");
     }
 
     if (!ctx.size_checked) {
@@ -140,8 +151,7 @@ esp_err_t stream_event(esp_http_client_event_t *event) {
             esp_http_client_get_content_length(event->client);
         if (content_length > 0 &&
             static_cast<uint64_t>(content_length) != ctx.expected_size) {
-            set_error_code(*ctx.error, "url_size_changed");
-            return ESP_FAIL;
+            return abort_response(event, *ctx.error, "url_size_changed");
         }
         ctx.size_checked = true;
     }
@@ -149,16 +159,12 @@ esp_err_t stream_event(esp_http_client_event_t *event) {
     const size_t len = static_cast<size_t>(event->data_len);
     if (ctx.offset > ctx.expected_size ||
         len > ctx.expected_size - ctx.offset) {
-        set_error_code(*ctx.error, "url_response_too_large");
-        return ESP_FAIL;
+        return abort_response(event, *ctx.error, "url_response_too_large");
     }
     if (!ctx.write_callback ||
         !ctx.write_callback(ctx.callback_ctx, ctx.offset,
                             static_cast<const uint8_t *>(event->data), len)) {
-        if (!ctx.error->code[0]) {
-            set_error_code(*ctx.error, "url_ota_write_failed");
-        }
-        return ESP_FAIL;
+        return abort_response(event, *ctx.error, "url_ota_write_failed");
     }
 
     ctx.offset += len;
@@ -176,10 +182,7 @@ esp_err_t fetch_event(esp_http_client_event_t *event) {
     if (ctx.error->code[0]) return ESP_FAIL;
 
     if (!operation_allowed(ctx.continue_callback, ctx.callback_ctx)) {
-        set_error_code(*ctx.error, "url_cancelled");
-        // ON_DATA's return value does not stop perform() in IDF.
-        esp_http_client_close(event->client);
-        return ESP_FAIL;
+        return abort_response(event, *ctx.error, "url_cancelled");
     }
 
     const int status = esp_http_client_get_status_code(event->client);
@@ -189,12 +192,11 @@ esp_err_t fetch_event(esp_http_client_event_t *event) {
         const int64_t content_length =
             esp_http_client_get_content_length(event->client);
         if (content_length <= 0) {
-            set_error_code(*ctx.error, "url_content_length_missing");
-            return ESP_FAIL;
+            return abort_response(event, *ctx.error,
+                                  "url_content_length_missing");
         }
         if (static_cast<uint64_t>(content_length) > ctx.capacity) {
-            set_error_code(*ctx.error, "url_response_too_large");
-            return ESP_FAIL;
+            return abort_response(event, *ctx.error, "url_response_too_large");
         }
 
         ctx.expected_size = static_cast<size_t>(content_length);
@@ -203,8 +205,7 @@ esp_err_t fetch_event(esp_http_client_event_t *event) {
 
     const size_t len = static_cast<size_t>(event->data_len);
     if (ctx.offset > ctx.capacity || len > ctx.capacity - ctx.offset) {
-        set_error_code(*ctx.error, "url_response_too_large");
-        return ESP_FAIL;
+        return abort_response(event, *ctx.error, "url_response_too_large");
     }
 
     memcpy(ctx.buffer + ctx.offset, event->data, len);
@@ -300,6 +301,10 @@ bool ota_url_stream(const char *url,
         set_error_code(error, "url_invalid_request");
         return false;
     }
+    if (!operation_allowed(continue_callback, callback_ctx)) {
+        set_error_code(error, "url_cancelled");
+        return false;
+    }
 
     OtaUrlStreamContext context;
     context.expected_size = expected_size;
@@ -318,6 +323,14 @@ bool ota_url_stream(const char *url,
     const esp_err_t result = esp_http_client_perform(client);
     const int status = esp_http_client_get_status_code(client);
     error.http_status = status;
+
+    if (!error.code[0] && !operation_allowed(continue_callback, callback_ctx)) {
+        set_error_code(error, "url_cancelled");
+    }
+    if (error.code[0]) {
+        esp_http_client_cleanup(client);
+        return false;
+    }
 
     if (result != ESP_OK) {
         capture_transport_error(client, result, error);
