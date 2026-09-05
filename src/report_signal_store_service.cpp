@@ -190,7 +190,7 @@ bool ReportSignalStoreService::merge_read() {
         if (position % sizeof(int16_t) == 0) {
             read_low_byte_ = bytes[i];
         } else if (raw_[position / sizeof(int16_t)] ==
-                   REPORT_SIGNAL_STORE_MISSING_S16) {
+                   track_.missing_value) {
             const uint8_t cell[] = {read_low_byte_, bytes[i]};
             raw_[position / sizeof(int16_t)] =
                 static_cast<int16_t>(LittleEndian::get_le16(cell));
