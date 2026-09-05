@@ -732,7 +732,7 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
         const bool finished = builder_.finish_build();
         std::shared_ptr<ReportSignalStoreBundle> bundle =
             finished ? builder_.take_completed() : nullptr;
-        if (!finished || !bundle || !bundle->valid()) {
+        if (!finished || !bundle) {
             const char *reason = builder_.failure_reason();
             builder_.discard_build();
             complete_active(OperationOutcome::failed(),

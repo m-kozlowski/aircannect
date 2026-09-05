@@ -14,10 +14,6 @@ namespace {
 
 static constexpr size_t REPORT_INTERNAL_FALLBACK_MAX = 4096;
 
-void *alloc_report_buffer(size_t size) {
-    return Memory::alloc_large(size, size <= REPORT_INTERNAL_FALLBACK_MAX);
-}
-
 void log_report_alloc_failure(size_t capacity, size_t current) {
 #ifdef ARDUINO
     Log::logf(CAT_REPORT,
@@ -59,13 +55,12 @@ void ReportSpoolBuffer::move_from(ReportSpoolBuffer &other) {
 
 bool ReportSpoolBuffer::reserve(size_t capacity) {
     if (capacity <= capacity_) return true;
-    uint8_t *next = static_cast<uint8_t *>(alloc_report_buffer(capacity));
+    uint8_t *next = static_cast<uint8_t *>(Memory::realloc_large(
+        data_, capacity, capacity <= REPORT_INTERNAL_FALLBACK_MAX));
     if (!next) {
         log_report_alloc_failure(capacity, capacity_);
         return false;
     }
-    if (data_ && size_) memcpy(next, data_, size_);
-    Memory::free(data_);
     data_ = next;
     capacity_ = capacity;
     return true;
