@@ -39,7 +39,8 @@ constexpr const char *REPORT_BLOCK_COUNT_HEADER = "X-Report-Block-Count";
 constexpr const char *REPORT_PRESENT_BLOCKS_HEADER =
     "X-Report-Present-Blocks";
 constexpr const char *REPORT_INTERVAL_HEADER = "X-Report-Interval-Ms";
-constexpr const char *REPORT_SCALE_HEADER = "X-Report-Value-Scale-Milli";
+constexpr const char *REPORT_SCALE_HEADER = "X-Report-Value-Scale";
+constexpr const char *REPORT_OFFSET_HEADER = "X-Report-Value-Offset";
 constexpr const char *REPORT_PHASE_HEADER = "X-Report-Grid-Phase-Ms";
 constexpr const char *REPORT_ENVELOPE_HEADER = "X-Report-Envelope";
 
@@ -221,7 +222,8 @@ void add_signal_headers(AsyncWebServerResponse *response,
                         size_t block_count,
                         const char *present_blocks,
                         uint32_t interval_ms,
-                        uint32_t value_scale_milli,
+                        float value_scale,
+                        float value_offset,
                         uint32_t grid_phase_ms,
                         bool envelope) {
     if (!response) return;
@@ -245,9 +247,10 @@ void add_signal_headers(AsyncWebServerResponse *response,
     snprintf(number, sizeof(number), "%lu",
              static_cast<unsigned long>(interval_ms));
     response->addHeader(REPORT_INTERVAL_HEADER, number);
-    snprintf(number, sizeof(number), "%lu",
-             static_cast<unsigned long>(value_scale_milli));
+    snprintf(number, sizeof(number), "%.9g", static_cast<double>(value_scale));
     response->addHeader(REPORT_SCALE_HEADER, number);
+    snprintf(number, sizeof(number), "%.9g", static_cast<double>(value_offset));
+    response->addHeader(REPORT_OFFSET_HEADER, number);
     snprintf(number, sizeof(number), "%lu",
              static_cast<unsigned long>(grid_phase_ms));
     response->addHeader(REPORT_PHASE_HEADER, number);
@@ -518,7 +521,8 @@ struct ReportHttpController::PendingResponses {
         uint32_t generation = 0;
         uint16_t track_index = 0;
         uint32_t interval_ms = 0;
-        uint32_t value_scale_milli = 0;
+        float value_scale = 0;
+        float value_offset = 0;
         uint32_t grid_phase_ms = 0;
         int64_t first_block_start_ms = 0;
         size_t block_count = 0;
@@ -682,7 +686,8 @@ void ReportHttpController::poll() {
                                ready.block_count,
                                ready.present_blocks,
                                ready.interval_ms,
-                               ready.value_scale_milli,
+                               ready.value_scale,
+                               ready.value_offset,
                                ready.grid_phase_ms,
                                ready.envelope);
         }
@@ -963,7 +968,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         pending.generation = query.track.generation;
         pending.track_index = query.track.track_index;
         pending.interval_ms = query.range.interval_ms;
-        pending.value_scale_milli = query.track.value_scale_milli;
+        pending.value_scale = query.track.value_scale;
+        pending.value_offset = query.track.value_offset;
         pending.grid_phase_ms = query.track.grid_phase_ms;
         pending.first_block_start_ms = query.first_block_start_ms;
         pending.block_count = query.block_count;
@@ -1003,7 +1009,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
                                pending.block_count,
                                pending.present_blocks,
                                pending.interval_ms,
-                               pending.value_scale_milli,
+                               pending.value_scale,
+                               pending.value_offset,
                                pending.grid_phase_ms,
                                pending.envelope);
             request->send(response);
@@ -1012,6 +1019,9 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 
         command.path = query.path;
         command.expected_size = query.file_size;
+        // Appends may grow the file after this metadata snapshot was taken.
+        // The selected closed range stays at the same offset and length.
+        command.verification = StorageStreamVerification::None;
         command.source_offset = query.range.offset;
         command.source_length = query.range.length;
     } else {

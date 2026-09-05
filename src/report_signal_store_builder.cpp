@@ -1,6 +1,7 @@
 #include "report_signal_store_builder.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits.h>
 #include <new>
 #include <string.h>
@@ -59,17 +60,25 @@ struct TrackWork {
     ReportSignalStoreTrack track;
     int16_t *raw_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS] = {};
     uint8_t *sessions_seen = nullptr;
+    uint8_t written_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
+    int newest_slot = -1;
+    int append_slot = 0;
+    bool file_exists = false;
+    bool recount_samples = false;
+    int64_t last_accepted_ms = -1;
 };
 
-bool track_less(const TrackWork &lhs, const TrackWork &rhs) {
-    if (lhs.track.signal != rhs.track.signal) {
-        return static_cast<uint8_t>(lhs.track.signal) <
-               static_cast<uint8_t>(rhs.track.signal);
+float fallback_scale(ReportSignalId signal) {
+    switch (signal) {
+        case ReportSignalId::Flow:
+        case ReportSignalId::Leak: return 0.1f;
+        case ReportSignalId::IeRatio: return 1.0f;
+        case ReportSignalId::TidalVolume:
+        case ReportSignalId::FlowLimitation:
+        case ReportSignalId::InspiratoryDuration:
+        case ReportSignalId::Snore: return 0.001f;
+        default: return 0.01f;
     }
-    if (lhs.track.sample_interval_ms != rhs.track.sample_interval_ms) {
-        return lhs.track.sample_interval_ms < rhs.track.sample_interval_ms;
-    }
-    return lhs.track.grid_phase_ms < rhs.track.grid_phase_ms;
 }
 
 void destroy_bundle(ReportSignalStoreBundle *bundle) {
@@ -95,6 +104,10 @@ struct ReportSignalStoreBuilder::Runtime {
     ReportMetricAccumulator metrics;
     bool active = false;
     std::shared_ptr<ReportSignalStoreBundle> completed;
+    EdfSignalScale scales[static_cast<size_t>(ReportSignalId::Count)];
+    bool configured[static_cast<size_t>(ReportSignalId::Count)] = {};
+    size_t writing_track = SIZE_MAX;
+    size_t writing_slot = 0;
 
     void release_track_blocks(TrackWork &track) {
         for (size_t slot = 0;
@@ -132,6 +145,8 @@ struct ReportSignalStoreBuilder::Runtime {
         block_slot_count = 0;
         store_generation = 0;
         active = false;
+        memset(configured, 0, sizeof(configured));
+        writing_track = SIZE_MAX;
     }
 
     bool reserve_events(size_t required) {
@@ -160,10 +175,15 @@ ReportSignalStoreBuilder::~ReportSignalStoreBuilder() {
     LargeObject::destroy(runtime_);
 }
 
+void ReportSignalStoreBuilder::begin(ReportSignalStoreService &store) {
+    store_ = &store;
+}
+
 bool ReportSignalStoreBuilder::begin_build(
     const ReportArtifactRequest &request,
     const ReportReadPlan &plan,
-    uint32_t store_generation) {
+    uint32_t store_generation,
+    std::shared_ptr<const LargeByteBuffer> previous) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_signal_store_runtime_unavailable";
@@ -202,22 +222,50 @@ bool ReportSignalStoreBuilder::begin_build(
         }
     }
 
-    if (plan.mapping_count() > 0) {
-        if (plan.mapping_count() > SIZE_MAX / sizeof(TrackWork)) {
+    ReportSignalStoreNightView previous_night;
+    if (previous && !ReportSignalStoreNightCodec::decode(
+            previous->data(), previous->size(), previous_night)) {
+        failure_reason_ = "report_signal_store_previous_invalid";
+        return false;
+    }
+    const size_t capacity = previous_night.night.track_count;
+    if (capacity > 0) {
+        if (capacity > SIZE_MAX / sizeof(TrackWork)) {
             failure_reason_ = "report_signal_store_track_count_invalid";
             return false;
         }
 
         runtime_->tracks = static_cast<TrackWork *>(Memory::alloc_large(
-            plan.mapping_count() * sizeof(TrackWork), false));
+            capacity * sizeof(TrackWork), false));
         if (!runtime_->tracks) {
             failure_reason_ = "report_signal_store_track_allocation_failed";
             return false;
         }
-        for (size_t i = 0; i < plan.mapping_count(); ++i) {
+        for (size_t i = 0; i < capacity; ++i) {
             new (&runtime_->tracks[i]) TrackWork();
         }
-        runtime_->track_capacity = plan.mapping_count();
+        runtime_->track_capacity = capacity;
+    }
+
+    for (size_t i = 0; i < previous_night.night.track_count; ++i) {
+        TrackWork &work = runtime_->tracks[runtime_->track_count++];
+        previous_night.track(i, work.track);
+        memcpy(work.written_blocks, work.track.present_blocks,
+               sizeof(work.written_blocks));
+        work.file_exists = true;
+        work.recount_samples = true;
+        work.append_slot = static_cast<int>(
+            (align_block_start(work.track.last_valid_sample_ms) - first_block) /
+            REPORT_SIGNAL_STORE_BLOCK_MS);
+        work.track.source_revision = plan.night().source_revision;
+
+        work.sessions_seen = static_cast<uint8_t *>(Memory::calloc_large(
+            plan.session_count(), sizeof(uint8_t), false));
+
+        if (!work.sessions_seen) {
+            failure_reason_ = "report_signal_store_session_map_failed";
+            return false;
+        }
     }
 
     runtime_->request = request;
@@ -234,6 +282,22 @@ bool ReportSignalStoreBuilder::begin_build(
     return true;
 }
 
+bool ReportSignalStoreBuilder::configure_series(
+    const ReportSeriesDescriptor &series, const EdfSignalScale &scale) {
+    const size_t index = static_cast<size_t>(series.signal);
+    if (!runtime_ || index >= static_cast<size_t>(ReportSignalId::Count)) {
+        return false;
+    }
+    if (scale.digital_min == INT16_MIN && scale.digital_max == INT16_MAX) {
+        failure_reason_ = "report_signal_store_no_missing_value";
+        return false;
+    }
+
+    runtime_->scales[index] = scale;
+    runtime_->configured[index] = true;
+    return true;
+}
+
 bool ReportSignalStoreBuilder::accept_series(
     uint16_t session_index,
     const ReportSeriesDescriptor &series,
@@ -245,7 +309,7 @@ bool ReportSignalStoreBuilder::accept_series(
 
     const ReportReadSession *session = runtime_->plan->session(session_index);
     const uint32_t signal_bit = report_signal_bit(series.signal);
-    if (!session || signal_bit == 0 || series.sample_interval_ms == 0 ||
+    if (!session || signal_bit == 0 || series.sample_interval_ms < 40 ||
         (REPORT_SIGNAL_STORE_BLOCK_MS % series.sample_interval_ms) != 0 ||
         sample.timestamp_ms < session->output_window.start_ms ||
         sample.timestamp_ms >= session->output_window.end_ms) {
@@ -255,12 +319,26 @@ bool ReportSignalStoreBuilder::accept_series(
 
     const uint32_t phase = grid_phase(
         sample.timestamp_ms, series.sample_interval_ms);
+    const size_t signal_index = static_cast<size_t>(series.signal);
+    const float multiplier =
+        report_series_canonical_value_milli(series, 1000) / 1000.0f;
+    const bool original = sample.raw_valid && runtime_->configured[signal_index];
+    const float scale = original
+        ? runtime_->scales[signal_index].scale * multiplier
+        : fallback_scale(series.signal);
+    const float offset = original
+        ? runtime_->scales[signal_index].offset * multiplier : 0.0f;
+    const int16_t missing = original &&
+        runtime_->scales[signal_index].digital_min == INT16_MIN
+        ? INT16_MAX : INT16_MIN;
+
     TrackWork *work = nullptr;
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         ReportSignalStoreTrack &track = runtime_->tracks[i].track;
         if (track.signal == series.signal &&
             track.sample_interval_ms == series.sample_interval_ms &&
-            track.grid_phase_ms == phase) {
+            track.grid_phase_ms == phase && track.value_scale == scale &&
+            track.value_offset == offset && track.missing_value == missing) {
             work = &runtime_->tracks[i];
             break;
         }
@@ -268,8 +346,24 @@ bool ReportSignalStoreBuilder::accept_series(
 
     if (!work) {
         if (runtime_->track_count >= runtime_->track_capacity) {
-            failure_reason_ = "report_signal_store_track_capacity_exceeded";
-            return false;
+            const size_t next = std::max<size_t>(8, runtime_->track_capacity * 2);
+            if (next > UINT16_MAX || next > SIZE_MAX / sizeof(TrackWork)) {
+                failure_reason_ = "report_signal_store_track_capacity_exceeded";
+                return false;
+            }
+
+            void *storage = Memory::realloc_large(
+                runtime_->tracks, next * sizeof(TrackWork), false);
+            if (!storage) {
+                failure_reason_ = "report_signal_store_track_allocation_failed";
+                return false;
+            }
+
+            runtime_->tracks = static_cast<TrackWork *>(storage);
+            for (size_t i = runtime_->track_capacity; i < next; ++i) {
+                new (&runtime_->tracks[i]) TrackWork();
+            }
+            runtime_->track_capacity = next;
         }
 
         work = &runtime_->tracks[runtime_->track_count++];
@@ -282,17 +376,36 @@ bool ReportSignalStoreBuilder::accept_series(
         work->track.block_slot_count = runtime_->block_slot_count;
         work->track.generation = runtime_->store_generation;
         work->track.sample_interval_ms = series.sample_interval_ms;
-        work->track.value_scale_milli =
-            report_signal_store_value_scale_milli(series.signal);
+        work->track.value_scale = scale;
+        work->track.value_offset = offset;
+        work->track.missing_value = missing;
         work->track.grid_phase_ms = phase;
         work->track.first_block_start_ms =
             runtime_->first_block_start_ms;
+        for (size_t i = 0; i + 1 < runtime_->track_count; ++i) {
+            const auto &other = runtime_->tracks[i].track;
+            if (other.signal == series.signal &&
+                other.sample_interval_ms == series.sample_interval_ms) {
+                work->track.track_index = std::max<uint16_t>(
+                    work->track.track_index, other.track_index + 1);
+            }
+        }
+
         work->sessions_seen = static_cast<uint8_t *>(Memory::calloc_large(
             runtime_->plan->session_count(), sizeof(uint8_t), false));
+
         if (!work->sessions_seen) {
             failure_reason_ = "report_signal_store_session_map_failed";
             return false;
         }
+    }
+
+    if (work->recount_samples) {
+        work->track.valid_sample_count = 0;
+        work->track.expected_sample_count = 0;
+        work->track.first_valid_sample_ms = 0;
+        work->track.last_valid_sample_ms = 0;
+        work->recount_samples = false;
     }
 
     const int64_t block_start = align_block_start(sample.timestamp_ms);
@@ -305,6 +418,13 @@ bool ReportSignalStoreBuilder::accept_series(
         return false;
     }
     const size_t slot = static_cast<size_t>(slot_value);
+
+    if (sample.timestamp_ms == work->last_accepted_ms) return true;
+    if (sample.timestamp_ms < work->last_accepted_ms) {
+        failure_reason_ = "report_signal_store_nonchronological_source";
+        return false;
+    }
+    work->last_accepted_ms = sample.timestamp_ms;
 
     const uint32_t samples_per_block = static_cast<uint32_t>(
         REPORT_SIGNAL_STORE_BLOCK_MS / series.sample_interval_ms);
@@ -325,39 +445,47 @@ bool ReportSignalStoreBuilder::accept_series(
 
     const int32_t canonical_value = report_series_canonical_value_milli(
         series, sample.value_milli);
-    int16_t encoded = 0;
-    if (!report_signal_store_quantize(
-            series.signal,
-            canonical_value,
-            encoded)) {
+
+    const long quantized = sample.raw_valid ? sample.raw
+        : lround((canonical_value / 1000.0 - offset) / scale);
+    if (quantized < INT16_MIN || quantized > INT16_MAX || quantized == missing) {
         failure_reason_ = "report_signal_store_value_invalid";
         return false;
     }
+    const int16_t encoded = static_cast<int16_t>(quantized);
 
-    if (!work->raw_blocks[slot]) {
+    const bool write_sample = slot_value >= work->append_slot;
+    if (write_sample && !work->raw_blocks[slot]) {
         work->raw_blocks[slot] = static_cast<int16_t *>(Memory::alloc_large(
             static_cast<size_t>(samples_per_block) * sizeof(int16_t), false));
+
         if (!work->raw_blocks[slot]) {
             failure_reason_ = "report_signal_store_block_allocation_failed";
             return false;
         }
         std::fill_n(work->raw_blocks[slot],
                     samples_per_block,
-                    REPORT_SIGNAL_STORE_MISSING_S16);
-        work->track.present_blocks[slot / 8] |=
-            static_cast<uint8_t>(1u << (slot % 8));
-        ++work->track.present_block_count;
+                    missing);
+
+        if (!(work->track.present_blocks[slot / 8] & (1u << (slot % 8)))) {
+            for (size_t later = slot + 1;
+                 later < runtime_->block_slot_count;
+                 ++later) {
+                if (work->written_blocks[later / 8] & (1u << (later % 8))) {
+                    failure_reason_ = "report_signal_store_rebuild_required";
+                    return false;
+                }
+            }
+            work->track.present_blocks[slot / 8] |=
+                static_cast<uint8_t>(1u << (slot % 8));
+            ++work->track.present_block_count;
+        }
     }
 
-    int16_t &target = work->raw_blocks[slot][sample_index];
-    if (target != REPORT_SIGNAL_STORE_MISSING_S16) {
-        if (target != encoded) {
-            failure_reason_ = "report_signal_store_sample_conflict";
-            return false;
-        }
-        return true;
+    if (write_sample) {
+        work->raw_blocks[slot][sample_index] = encoded;
+        work->newest_slot = static_cast<int>(slot);
     }
-    target = encoded;
     runtime_->metrics.accept(series.signal, canonical_value);
 
     ReportSignalStoreTrack &track = work->track;
@@ -384,6 +512,71 @@ bool ReportSignalStoreBuilder::accept_series(
     }
     return true;
 }
+
+bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
+    if (!runtime_ || failure_reason_) return false;
+    if (!store_) {
+        failure_reason_ = "report_signal_store_writer_unavailable";
+        return false;
+    }
+
+    if (runtime_->writing_track != SIZE_MAX) {
+        store_->poll();
+        if (!store_->status().terminal()) return false;
+        if (store_->status().state != ReportSignalStoreState::Ready) {
+            // The service retains the error until the engine resets it.
+            failure_reason_ = store_->status().error;
+            return false;
+        }
+
+        TrackWork &work = runtime_->tracks[runtime_->writing_track];
+        const size_t slot = runtime_->writing_slot;
+        Memory::free(work.raw_blocks[slot]);
+        work.raw_blocks[slot] = nullptr;
+        work.written_blocks[slot / 8] |=
+            static_cast<uint8_t>(1u << (slot % 8));
+        work.file_exists = true;
+        runtime_->writing_track = SIZE_MAX;
+        store_->reset();
+    }
+
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        TrackWork &work = runtime_->tracks[i];
+        for (size_t slot = 0; slot < runtime_->block_slot_count; ++slot) {
+            if (!work.raw_blocks[slot] ||
+                (!include_partial &&
+                 static_cast<int>(slot) >= work.newest_slot)) {
+                continue;
+            }
+
+            const bool existing_block =
+                (work.written_blocks[slot / 8] & (1u << (slot % 8))) != 0;
+            const auto lane =
+                runtime_->request.priority == ReportRequestPriority::Foreground
+                ? StorageAtomicWriteLane::Foreground
+                : StorageAtomicWriteLane::Maintenance;
+
+            const auto admitted = store_->start_block(
+                work.track, slot, work.raw_blocks[slot], existing_block,
+                work.file_exists, runtime_->request.ticket.generation, lane);
+
+            if (admitted == OperationAdmission::Busy) return false;
+            if (admitted != OperationAdmission::Accepted) {
+                failure_reason_ = "report_signal_store_block_write_rejected";
+                return false;
+            }
+
+            runtime_->writing_track = i;
+            runtime_->writing_slot = slot;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ReportSignalStoreBuilder::ready() { return flush_blocks(false); }
+
+bool ReportSignalStoreBuilder::end_operation() { return flush_blocks(true); }
 
 bool ReportSignalStoreBuilder::accept_event(
     uint16_t session_index,
@@ -421,27 +614,7 @@ bool ReportSignalStoreBuilder::finish_build() {
         return false;
     }
 
-    if (runtime_->track_count > 1) {
-        std::sort(runtime_->tracks,
-                  runtime_->tracks + runtime_->track_count,
-                  track_less);
-    }
-    uint16_t track_index = 0;
-    for (size_t i = 0; i < runtime_->track_count; ++i) {
-        if (i == 0 ||
-            runtime_->tracks[i].track.signal !=
-                runtime_->tracks[i - 1].track.signal ||
-            runtime_->tracks[i].track.sample_interval_ms !=
-                runtime_->tracks[i - 1].track.sample_interval_ms) {
-            track_index = 0;
-        } else if (track_index == UINT16_MAX) {
-            failure_reason_ = "report_signal_store_track_index_overflow";
-            return false;
-        } else {
-            ++track_index;
-        }
-        runtime_->tracks[i].track.track_index = track_index;
-    }
+    if (!end_operation()) return false;
 
     if (runtime_->event_count > 1) {
         std::sort(runtime_->events,
@@ -495,18 +668,8 @@ bool ReportSignalStoreBuilder::finish_build() {
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         TrackWork &work = runtime_->tracks[i];
-        ReportSignalStoreFileData data;
-        data.track = work.track;
-        data.raw_block_slots = work.raw_blocks;
-        data.raw_block_slot_count = runtime_->block_slot_count;
-
         ReportSignalStoreFilePayload &payload = bundle->signals_[i];
         payload.track = work.track;
-        payload.bytes = ReportSignalStoreFileCodec::encode(data);
-        if (!payload.bytes) {
-            failure_reason_ = "report_signal_store_file_encode_failed";
-            return false;
-        }
         runtime_->release_track_blocks(work);
     }
 
@@ -628,6 +791,7 @@ bool ReportSignalStoreBuilder::finish_build() {
 
 void ReportSignalStoreBuilder::discard_build() {
     if (!runtime_) return;
+    if (store_) store_->cancel();
     runtime_->clear_work();
     runtime_->completed.reset();
 }

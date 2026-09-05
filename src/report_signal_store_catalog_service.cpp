@@ -8,11 +8,6 @@
 #include "string_util.h"
 
 namespace aircannect {
-namespace {
-
-constexpr size_t MAXIMUM_METADATA_BYTES = 64 * 1024;
-
-}  // namespace
 
 struct ReportSignalStoreCatalogLoadService::Runtime {
     std::shared_ptr<const NightCatalog> source;
@@ -76,7 +71,7 @@ bool ReportSignalStoreCatalogLoadService::start_current() {
 
     const OperationAdmission admitted = loader_.start(
         path,
-        MAXIMUM_METADATA_BYTES,
+        ReportSignalStoreNightCodec::MaxBytes,
         status_.generation,
         StorageReadLane::Maintenance);
     if (admitted == OperationAdmission::Busy) return false;

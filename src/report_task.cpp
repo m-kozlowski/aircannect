@@ -496,6 +496,11 @@ struct ReportTask::Runtime {
             return false;
         }
 
+        const ReportEngineStatus work = engine.status();
+        if (work.state != ReportEngineState::Idle || work.queued != 0) {
+            return false;
+        }
+
         const OperationAdmission admitted = store_catalog_loader.start(
             catalog, store_catalog_load_generation);
         if (admitted == OperationAdmission::Busy) return false;
@@ -1098,7 +1103,8 @@ ReportTask::~ReportTask() {
 bool ReportTask::begin(StorageReadPort &read_port,
                        StorageAtomicWritePort &write_port,
                        StorageScanPort &scan_port,
-                       ReportSpoolPort &spool_port) {
+                       ReportSpoolPort &spool_port,
+                       StorageRangeWritePort &range_write_port) {
     if (runtime_) return runtime_->initialized;
 
 #ifdef ARDUINO
@@ -1124,7 +1130,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
-    runtime_->engine.begin(read_port, write_port, spool_port);
+    runtime_->engine.begin(read_port, write_port, spool_port, range_write_port);
     runtime_->store_catalog = ReportSignalStoreCatalogBuilder::build(
         nullptr, 0);
     runtime_->engine.publish_store_catalog(runtime_->store_catalog);
@@ -1416,9 +1422,9 @@ ReportSignalRangeQuery ReportTask::query_signal(
             block_count,
             level,
             out.range) ||
-        !ReportSignalStoreFileCodec::file_size(out.track, file_size) ||
+        !ReportSignalStoreFileCodec::file_size(out.track, level, file_size) ||
         !report_signal_store_signal_path(
-            out.track, out.path, sizeof(out.path))) {
+            out.track, level, out.path, sizeof(out.path))) {
         out.state = ReportStoreQueryState::InvalidRange;
         return out;
     }
@@ -1578,11 +1584,21 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
+    const ReportEngineStatus engine_work = runtime.engine.status();
+    if (runtime.store_catalog_loader.status().active() &&
+        (engine_work.state != ReportEngineState::Idle || engine_work.queued != 0)) {
+        // Foreground discovery reads only its night. Resume the inventory later,
+        // so a late full-catalog snapshot cannot overwrite its publication.
+        runtime.store_catalog_loader.cancel();
+        runtime.store_catalog_loader.reset();
+        runtime.store_catalog_load_pending = true;
+    }
+
     if (runtime.store_catalog_loader.status().active()) {
         worked = runtime.store_catalog_loader.poll() || worked;
     }
     worked = runtime.observe_store_catalog_load(now_ms) || worked;
-    if (!local_blocked && !runtime.catalog_load_pending &&
+    if (!runtime.activity.ota_install_active && !runtime.catalog_load_pending &&
         runtime.store_purpose != CatalogStorePurpose::Load) {
         worked = runtime.start_store_catalog_load(now_ms) || worked;
     }

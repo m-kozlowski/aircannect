@@ -203,7 +203,8 @@ public:
     bool begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
                StorageScanPort &scan_port,
-               ReportSpoolPort &spool_port);
+               ReportSpoolPort &spool_port,
+               StorageRangeWritePort &range_write_port);
 
     OperationAdmission request_night(
         SleepDayId sleep_day,

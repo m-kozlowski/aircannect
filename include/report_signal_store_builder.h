@@ -5,11 +5,12 @@
 #include "report_executor.h"
 #include "report_request_queue.h"
 #include "report_signal_store.h"
+#include "report_signal_store_service.h"
 
 namespace aircannect {
 
 // Materializes the source-neutral executor stream. EDF and fallback decoding
-// remain owned by ReportExecutor; this builder only sees canonical samples.
+// remain owned by ReportExecutor; storage owns all file I/O.
 class ReportSignalStoreBuilder final : public ReportExecutionSink {
 public:
     ReportSignalStoreBuilder();
@@ -19,9 +20,15 @@ public:
     ReportSignalStoreBuilder &operator=(
         const ReportSignalStoreBuilder &) = delete;
 
+    void begin(ReportSignalStoreService &store);
     bool begin_build(const ReportArtifactRequest &request,
                      const ReportReadPlan &plan,
-                     uint32_t store_generation);
+                     uint32_t store_generation,
+                     std::shared_ptr<const LargeByteBuffer> previous = {});
+    bool configure_series(const ReportSeriesDescriptor &series,
+                          const EdfSignalScale &scale) override;
+    bool ready() override;
+    bool end_operation() override;
     bool accept_series(uint16_t session_index,
                        const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;
@@ -31,11 +38,13 @@ public:
     void discard_build();
 
     std::shared_ptr<ReportSignalStoreBundle> take_completed();
-    const char *failure_reason() const { return failure_reason_; }
+    const char *failure_reason() const override { return failure_reason_; }
 
 private:
     struct Runtime;
+    bool flush_blocks(bool include_partial);
     Runtime *runtime_ = nullptr;
+    ReportSignalStoreService *store_ = nullptr;
     const char *failure_reason_ = nullptr;
 };
 

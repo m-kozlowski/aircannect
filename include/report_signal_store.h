@@ -214,6 +214,7 @@ struct ReportSignalStoreNightView {
 
 class ReportSignalStoreNightCodec {
 public:
+    static constexpr size_t MaxBytes = 64 * 1024;
     static constexpr uint16_t Version = 2;
     static constexpr size_t HeaderBytes = 224;
     static constexpr size_t SessionBytes = 16;
