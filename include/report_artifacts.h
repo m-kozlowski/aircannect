@@ -22,6 +22,9 @@ enum ReportResultArtifactFlag : uint16_t {
 static constexpr uint8_t REPORT_RESULT_METRIC_LEAK_MEAN_INDEX = 20;
 static constexpr uint32_t REPORT_RESULT_METRIC_LEAK_MEAN =
     1u << REPORT_RESULT_METRIC_LEAK_MEAN_INDEX;
+static constexpr uint32_t REPORT_RESULT_METRIC_IPAP_MEAN = 1u << 21;
+static constexpr uint32_t REPORT_RESULT_METRIC_IPAP_50 = 1u << 22;
+static constexpr uint32_t REPORT_RESULT_METRIC_IPAP_95 = 1u << 23;
 static_assert(static_cast<uint8_t>(NightCatalogMetric::Count) <=
                   REPORT_RESULT_METRIC_LEAK_MEAN_INDEX,
               "catalog and derived result metrics must not overlap");
@@ -51,6 +54,9 @@ struct ReportArtifactMetrics {
     int32_t spo2_median_milli = 0;
     uint32_t spo2_threshold_minutes = 0;
     uint32_t csr_minutes = 0;
+    int32_t ipap_mean_milli = 0;
+    int32_t ipap_50_milli = 0;
+    int32_t ipap_95_milli = 0;
 };
 
 struct ReportArtifactEventCounts {
@@ -173,8 +179,9 @@ class ReportResultArtifactCodec {
 public:
     static constexpr uint16_t LegacyVersion = 1;
     static constexpr size_t LegacyHeaderBytes = 160;
-    static constexpr uint16_t Version = 2;
-    static constexpr size_t HeaderBytes = 216;
+    static constexpr size_t V2HeaderBytes = 216;
+    static constexpr uint16_t Version = 3;
+    static constexpr size_t HeaderBytes = 228;
     static constexpr size_t SessionBytes = 16;
 
     static std::shared_ptr<const LargeByteBuffer> encode(

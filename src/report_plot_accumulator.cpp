@@ -22,6 +22,7 @@ constexpr size_t METRIC_HISTOGRAM_BINS = 2048;
 
 enum class MetricHistogramId : uint8_t {
     Pressure,
+    Ipap,
     Leak,
     MinuteVentilation,
     RespiratoryRate,
@@ -41,6 +42,7 @@ struct MetricHistogramConfig {
 
 constexpr MetricHistogramConfig METRIC_HISTOGRAM_CONFIGS[] = {
     {ReportSignalId::MaskPressure, 0, 40000},
+    {ReportSignalId::InspiratoryPressure, 0, 40000},
     {ReportSignalId::Leak, 0, 120000},
     {ReportSignalId::MinuteVentilation, 0, 30000},
     {ReportSignalId::RespiratoryRate, 0, 90000},
@@ -738,6 +740,12 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
         METRIC_HISTOGRAM_CONFIGS[
             static_cast<size_t>(MetricHistogramId::Pressure)],
         summary.pressure);
+    finish_metric_histogram(
+        runtime_->metric_histograms[
+            static_cast<size_t>(MetricHistogramId::Ipap)],
+        METRIC_HISTOGRAM_CONFIGS[
+            static_cast<size_t>(MetricHistogramId::Ipap)],
+        summary.ipap);
     finish_metric_histogram(
         runtime_->metric_histograms[
             static_cast<size_t>(MetricHistogramId::Leak)],

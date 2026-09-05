@@ -1744,7 +1744,7 @@
       AirCANnect.ui.text("reportRdi", displayable && Number.isFinite(Number(reportResult.rdi)) ?
         Number(reportResult.rdi).toFixed(1) : "--");
       AirCANnect.ui.text("reportPressure", displayable ? reportMetricValues(
-        reportResult, ["mask_pressure_50", "mask_pressure_95"], 1) : "--");
+        reportResult, ["average_pressure", "ipap_50", "ipap_95"], 1) : "--");
       AirCANnect.ui.text("reportLeak", displayable ? reportMetricValues(
         reportResult, ["average_leak", "leak_50", "leak_95"], 1) : "--");
 
@@ -2949,11 +2949,11 @@
 
       const version = dv.getUint16(4, true);
       const legacy = version === 1;
-      const headerBytes = legacy ? 160 : 216;
-      const bodyCrcOffset = legacy ? 148 : 204;
-      const headerCrcOffset = legacy ? 152 : 208;
+      const headerBytes = legacy ? 160 : (version === 2 ? 216 : 228);
+      const bodyCrcOffset = legacy ? 148 : (version === 2 ? 204 : 216);
+      const headerCrcOffset = legacy ? 152 : (version === 2 ? 208 : 220);
       const eventsOffset = legacy ? 124 : 180;
-      if ((!legacy && version !== 2) ||
+      if ((!legacy && version !== 2 && version !== 3) ||
           dv.getUint16(6, true) !== headerBytes ||
           dv.byteLength < headerBytes) {
         return invalid;
@@ -3015,6 +3015,7 @@
       const metricOffsets = legacy ?
         [92, 96, 100, 104, 108, 112, 116, 120] :
         Array.from({length: 20}, (_, index) => 100 + index * 4).concat(96);
+      if (version === 3) metricOffsets.push(204, 208, 212);
       const metrics = metricOffsets.map((offset, index) => {
         if (!legacy && (index === 8 || index === 18 || index === 19)) {
           return dv.getUint32(offset, true);
@@ -3111,15 +3112,15 @@
         "csr_minutes",
         "average_leak",
       ]);
+      if (version === 3) {
+        metricFields.push("average_pressure", "ipap_50", "ipap_95");
+      }
       metricFields.forEach((field, index) => {
         if (!field || !(metricValid & (1 << index))) return;
         result[field] = metrics[index];
         result[field + "_source"] = reportMetricSource(
           metricValid, metricStr, metricSummary, index);
       });
-      if (result.mask_pressure_50 !== undefined) {
-        result.average_pressure = result.mask_pressure_50;
-      }
       if (result.ahi !== undefined && result.arousal_index !== undefined) {
         result.rdi = result.ahi + result.arousal_index;
       }

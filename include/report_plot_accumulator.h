@@ -20,6 +20,7 @@ struct ReportPlotAccumulatorSummary {
     ReportArtifactEventCounts events;
     uint32_t prefix_crc32 = 0;
     ReportMetricStatistics pressure;
+    ReportMetricStatistics ipap;
     ReportMetricStatistics leak;
     ReportMetricStatistics minute_ventilation;
     ReportMetricStatistics respiratory_rate;

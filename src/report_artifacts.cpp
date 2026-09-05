@@ -27,8 +27,10 @@ constexpr uint32_t MANIFEST_MAGIC = 0x364d4341u;  // "ACM6"
 
 constexpr size_t RESULT_V1_BODY_CRC_OFFSET = 148;
 constexpr size_t RESULT_V1_HEADER_CRC_OFFSET = 152;
-constexpr size_t RESULT_BODY_CRC_OFFSET = 204;
-constexpr size_t RESULT_HEADER_CRC_OFFSET = 208;
+constexpr size_t RESULT_V2_BODY_CRC_OFFSET = 204;
+constexpr size_t RESULT_V2_HEADER_CRC_OFFSET = 208;
+constexpr size_t RESULT_BODY_CRC_OFFSET = 216;
+constexpr size_t RESULT_HEADER_CRC_OFFSET = 220;
 constexpr size_t MANIFEST_BODY_CRC_OFFSET = 60;
 constexpr size_t MANIFEST_HEADER_CRC_OFFSET = 64;
 
@@ -595,6 +597,9 @@ std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
     bytes[82] = data.source_flags;
     encode_metrics(bytes + 84, data.metrics);
     encode_events(bytes + 180, data.events);
+    put_i32(bytes + 204, data.metrics.ipap_mean_milli);
+    put_i32(bytes + 208, data.metrics.ipap_50_milli);
+    put_i32(bytes + 212, data.metrics.ipap_95_milli);
 
     uint8_t *body = bytes + HeaderBytes;
     for (size_t i = 0; i < data.session_count; ++i) {
@@ -622,13 +627,17 @@ bool ReportResultArtifactCodec::decode(
 
     const uint16_t version = get_le16(bytes + 4);
     const bool legacy = version == LegacyVersion;
-    const size_t header_bytes = legacy ? LegacyHeaderBytes : HeaderBytes;
+    const bool v2 = version == 2;
+    const size_t header_bytes = legacy ? LegacyHeaderBytes :
+        (v2 ? V2HeaderBytes : HeaderBytes);
     const size_t body_crc_offset = legacy
-        ? RESULT_V1_BODY_CRC_OFFSET : RESULT_BODY_CRC_OFFSET;
+        ? RESULT_V1_BODY_CRC_OFFSET :
+        (v2 ? RESULT_V2_BODY_CRC_OFFSET : RESULT_BODY_CRC_OFFSET);
     const size_t header_crc_offset = legacy
-        ? RESULT_V1_HEADER_CRC_OFFSET : RESULT_HEADER_CRC_OFFSET;
+        ? RESULT_V1_HEADER_CRC_OFFSET :
+        (v2 ? RESULT_V2_HEADER_CRC_OFFSET : RESULT_HEADER_CRC_OFFSET);
     const size_t events_offset = legacy ? 124 : 180;
-    if ((!legacy && version != Version) ||
+    if ((!legacy && !v2 && version != Version) ||
         get_le16(bytes + 6) != header_bytes || length < header_bytes ||
         crc32_ieee(bytes, header_crc_offset) !=
             get_le32(bytes + header_crc_offset)) {
@@ -670,6 +679,11 @@ bool ReportResultArtifactCodec::decode(
     data.source_flags = bytes[82];
     if (legacy) decode_metrics_v1(bytes + 84, data.metrics);
     else decode_metrics(bytes + 84, data.metrics);
+    if (version == Version) {
+        data.metrics.ipap_mean_milli = get_i32(bytes + 204);
+        data.metrics.ipap_50_milli = get_i32(bytes + 208);
+        data.metrics.ipap_95_milli = get_i32(bytes + 212);
+    }
     decode_events(bytes + events_offset, data.events);
     view.session_bytes = bytes + header_bytes;
 

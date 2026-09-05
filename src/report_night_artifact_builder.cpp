@@ -192,6 +192,14 @@ void complete_metrics(ReportResultArtifactData &result,
         }
     }
 
+    if (plot.ipap.valid) {
+        metrics.ipap_mean_milli = plot.ipap.mean_milli;
+        metrics.ipap_50_milli = plot.ipap.p50_milli;
+        metrics.ipap_95_milli = plot.ipap.p95_milli;
+        metrics.valid_mask |= REPORT_RESULT_METRIC_IPAP_MEAN |
+            REPORT_RESULT_METRIC_IPAP_50 | REPORT_RESULT_METRIC_IPAP_95;
+    }
+
     if (plot.leak.valid) {
         metrics.leak_mean_milli = plot.leak.mean_milli;
         metrics.valid_mask |= REPORT_RESULT_METRIC_LEAK_MEAN;
