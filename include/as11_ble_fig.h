@@ -46,6 +46,13 @@ public:
     As11BleFigDecodeState take(As11BleFigPacket &packet);
     void reset();
 
+#ifndef ARDUINO
+    // Native tests use this to reproduce payload allocation failure.
+    void set_test_payload_allocation_failure(bool failed) {
+        test_payload_allocation_failure_ = failed;
+    }
+#endif
+
 private:
     bool compact_for(size_t incoming);
     size_t find_sync() const;
@@ -53,6 +60,9 @@ private:
     std::unique_ptr<LargeByteBuffer> buffer_;
     size_t begin_ = 0;
     size_t end_ = 0;
+#ifndef ARDUINO
+    bool test_payload_allocation_failure_ = false;
+#endif
 };
 
 }  // namespace aircannect

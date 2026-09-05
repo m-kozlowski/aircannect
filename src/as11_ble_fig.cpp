@@ -137,9 +137,15 @@ As11BleFigDecodeState As11BleFigCodec::take(As11BleFigPacket &packet) {
 
     packet.vcid = get_le16(header);
     if (payload_length != 0) {
+#ifndef ARDUINO
+        if (test_payload_allocation_failure_) {
+            return As11BleFigDecodeState::BufferUnavailable;
+        }
+#endif
         packet.payload = LargeByteBuffer::copy_and_freeze(payload,
                                                           payload_length);
         if (!packet.payload) {
+            // Keep begin_ at this packet so the next drain can retry ownership.
             return As11BleFigDecodeState::BufferUnavailable;
         }
     }

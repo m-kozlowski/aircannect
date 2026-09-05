@@ -1358,16 +1358,17 @@ bool As11BleRpcLink::write_fig(uint16_t vcid,
 
 void As11BleRpcLink::drain_notifications(bool publish_application) {
     RpcPayloadRef notification;
-    while (notifications_.pop(notification)) {
-        if (!fig_.feed(notification->data(), notification->size())) {
-            publish_error("fig_buffer_unavailable");
-            continue;
-        }
-
+    while (true) {
         while (true) {
             As11BleFigPacket packet;
             const As11BleFigDecodeState state = fig_.take(packet);
             if (state == As11BleFigDecodeState::NeedMore) break;
+            if (state == As11BleFigDecodeState::BufferUnavailable) {
+                // Keep the FIG cursor and queued notifications for the next
+                // worker pass instead of retrying allocation in this loop.
+                publish_error(as11_ble_fig_decode_state_name(state));
+                return;
+            }
             if (state != As11BleFigDecodeState::Packet) {
 #if AC_BLE_ENABLED
                 portENTER_CRITICAL(&mux_);
@@ -1378,6 +1379,12 @@ void As11BleRpcLink::drain_notifications(bool publish_application) {
                 continue;
             }
             if (publish_application) publish_packet(packet);
+        }
+
+        if (!notifications_.pop(notification)) return;
+        if (!fig_.feed(notification->data(), notification->size())) {
+            publish_error("fig_buffer_unavailable");
+            continue;
         }
     }
 }
