@@ -1,5 +1,6 @@
 #include "report_signal_store_catalog.h"
 
+#include <algorithm>
 #include <new>
 #include <utility>
 
@@ -9,18 +10,14 @@
 namespace aircannect {
 namespace {
 
-bool input_identity(const ReportSignalStoreCatalogInput &input,
-                    ReportSignalStoreNightView &view) {
-    view = {};
-    return input.metadata &&
-           ReportSignalStoreNightCodec::decode(
-               input.metadata->data(), input.metadata->size(), view);
-}
-
 bool fill_record(ReportSignalStoreCatalogRecord &record,
                  const ReportSignalStoreCatalogInput &input) {
     ReportSignalStoreNightView view;
-    if (!input_identity(input, view)) return false;
+    if (!input.metadata ||
+        !ReportSignalStoreNightCodec::decode(
+            input.metadata->data(), input.metadata->size(), view)) {
+        return false;
+    }
 
     record.sleep_day = view.night.sleep_day;
     record.source_revision = view.night.source_revision;
@@ -93,42 +90,27 @@ ReportSignalStoreCatalogBuilder::build(
     size_t input_count) {
     if (input_count > 0 && !inputs) return {};
 
-    for (size_t i = 0; i < input_count; ++i) {
-        ReportSignalStoreNightView view;
-        if (!input_identity(inputs[i], view)) return {};
-
-        for (size_t n = 0; n < i; ++n) {
-            ReportSignalStoreNightView other;
-            if (!input_identity(inputs[n], other) ||
-                other.night.sleep_day == view.night.sleep_day) {
-                return {};
-            }
-        }
-    }
-
     std::shared_ptr<ReportSignalStoreCatalog> catalog(
         new (std::nothrow) ReportSignalStoreCatalog());
     if (!catalog || !catalog->allocate(input_count)) return {};
 
-    SleepDayId previous;
-    for (size_t output = 0; output < input_count; ++output) {
-        size_t selected = input_count;
-        ReportSignalStoreNightView selected_view;
-        for (size_t candidate = 0; candidate < input_count; ++candidate) {
-            ReportSignalStoreNightView view;
-            if (!input_identity(inputs[candidate], view)) return {};
-            if (output > 0 && !(view.night.sleep_day < previous)) continue;
-            if (selected == input_count ||
-                selected_view.night.sleep_day < view.night.sleep_day) {
-                selected = candidate;
-                selected_view = view;
-            }
-        }
-        if (selected == input_count ||
-            !fill_record(catalog->records_[output], inputs[selected])) {
+    for (size_t i = 0; i < input_count; ++i) {
+        if (!fill_record(catalog->records_[i], inputs[i])) return {};
+    }
+
+    if (input_count > 1) {
+        std::sort(catalog->records_, catalog->records_ + input_count,
+                  [](const ReportSignalStoreCatalogRecord &left,
+                     const ReportSignalStoreCatalogRecord &right) {
+                      return right.sleep_day < left.sleep_day;
+                  });
+    }
+
+    for (size_t i = 1; i < input_count; ++i) {
+        if (catalog->records_[i - 1].sleep_day ==
+            catalog->records_[i].sleep_day) {
             return {};
         }
-        previous = catalog->records_[output].sleep_day;
     }
     return catalog;
 }
@@ -137,11 +119,11 @@ std::shared_ptr<const ReportSignalStoreCatalog>
 ReportSignalStoreCatalogBuilder::upsert(
     const ReportSignalStoreCatalog &source,
     const ReportSignalStoreCatalogInput &input) {
-    ReportSignalStoreNightView input_view;
-    if (!input_identity(input, input_view)) return {};
+    ReportSignalStoreCatalogRecord input_record;
+    if (!fill_record(input_record, input)) return {};
 
     const ReportSignalStoreCatalogRecord *replaced =
-        source.find(input_view.night.sleep_day);
+        source.find(input_record.sleep_day);
     const size_t count = source.record_count_ + (replaced ? 0 : 1);
     std::shared_ptr<ReportSignalStoreCatalog> catalog(
         new (std::nothrow) ReportSignalStoreCatalog());
@@ -159,9 +141,9 @@ ReportSignalStoreCatalogBuilder::upsert(
         const bool use_input = !inserted &&
             (source_index >= source.record_count_ ||
              source.records_[source_index].sleep_day <
-                 input_view.night.sleep_day);
+                 input_record.sleep_day);
         if (use_input) {
-            if (!fill_record(catalog->records_[output], input)) return {};
+            catalog->records_[output] = std::move(input_record);
             inserted = true;
         } else {
             if (source_index >= source.record_count_) return {};
@@ -176,11 +158,12 @@ std::shared_ptr<const ReportSignalStoreCatalog>
 ReportSignalStoreCatalogBuilder::reconcile(
     const ReportSignalStoreCatalog &source,
     const NightCatalog &night_catalog) {
+    // Stale metadata retains generation history, but ready() checks revision.
     size_t count = 0;
     for (size_t i = 0; i < source.record_count_; ++i) {
         const ReportSignalStoreCatalogRecord &record = source.records_[i];
         const NightCatalogRecord *night = night_catalog.find(record.sleep_day);
-        if (night && night->source_revision == record.source_revision) ++count;
+        if (night) ++count;
     }
 
     std::shared_ptr<ReportSignalStoreCatalog> catalog(
@@ -191,9 +174,8 @@ ReportSignalStoreCatalogBuilder::reconcile(
     for (size_t i = 0; i < source.record_count_; ++i) {
         const ReportSignalStoreCatalogRecord &record = source.records_[i];
         const NightCatalogRecord *night = night_catalog.find(record.sleep_day);
-        if (!night || night->source_revision != record.source_revision) {
-            continue;
-        }
+        if (!night) continue;
+
         catalog->records_[output++] = record;
     }
     return output == count ? catalog : nullptr;

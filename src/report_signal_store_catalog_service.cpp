@@ -105,8 +105,8 @@ bool ReportSignalStoreCatalogLoadService::finish_current() {
         if (night && metadata &&
             ReportSignalStoreNightCodec::decode(
                 metadata->data(), metadata->size(), view) &&
-            view.night.sleep_day == night->sleep_day &&
-            view.night.source_revision == night->source_revision) {
+            view.night.sleep_day == night->sleep_day) {
+            // Keep the prior generation available when sources have advanced.
             ReportSignalStoreCatalogInput *input =
                 runtime_->inputs->append();
             if (!input) {
