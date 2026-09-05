@@ -14,6 +14,7 @@
 #include "storage_export_plan.h"
 #include "storage_service.h"
 #include "string_util.h"
+#include "tls_memory.h"
 
 namespace aircannect {
 namespace {
@@ -34,6 +35,7 @@ static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     60UL * 60UL * 1000UL,
     6UL * 60UL * 60UL * 1000UL,
 };
+static constexpr uint32_t SLEEPHQ_HEAP_RETRY_MS = 10 * 1000;
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
 static constexpr size_t SLEEPHQ_INFLIGHT_MAX_BYTES = 512 * 1024;
 static constexpr size_t SLEEPHQ_INFLIGHT_READ_STEP_BYTES = 512;
@@ -972,17 +974,25 @@ void SleepHqSyncEngine::fail_locked(const char *error) {
 
     copy_cstr(status_.last_error, sizeof(status_.last_error),
               error && *error ? error : "failed");
-    status_.last_failure_epoch = storage_export_current_epoch_seconds_or_zero();
+    const bool waiting_for_heap =
+        strcmp(status_.last_error, "tls_heap_guard") == 0;
+    if (!waiting_for_heap) {
+        status_.last_failure_epoch =
+            storage_export_current_epoch_seconds_or_zero();
+        status_.files_failed++;
+    }
+
     status_.state = SleepHqSyncState::Error;
     status_.pending = false;
     status_.updated_ms = nonzero_millis(millis());
-    status_.files_failed++;
     char retry_datalog_day[9] = {};
     copy_cstr(retry_datalog_day, sizeof(retry_datalog_day),
               current_datalog_day_filter_);
     const bool retryable =
         status_.configured && sleep_hq_error_retryable(status_.last_error);
-    if (retryable) {
+    if (retryable && waiting_for_heap) {
+        retry_due_ms_ = status_.updated_ms + SLEEPHQ_HEAP_RETRY_MS;
+    } else if (retryable) {
         const bool preserve_attempt =
             sleep_hq_error_preserves_retry_attempt(status_.last_error);
         const size_t backoff_count =
@@ -1002,8 +1012,9 @@ void SleepHqSyncEngine::fail_locked(const char *error) {
         retry_due_ms_ ? static_cast<uint32_t>(retry_due_ms_ -
                                               status_.updated_ms) : 0;
     Log::logf(CAT_EXPORT, LOG_WARN,
-              "[SLEEPHQ] failed phase=%s error=%s current=%s seen=%u uploaded=%u "
+              "[SLEEPHQ] %s phase=%s error=%s current=%s seen=%u uploaded=%u "
               "skipped=%u bytes=%llu retry_ms=%lu attempt=%u\n",
+              waiting_for_heap ? "deferred" : "failed",
               work_phase_name(phase_),
               status_.last_error,
               current_file_.state().path[0]
@@ -1029,6 +1040,13 @@ void SleepHqSyncEngine::queue_retry_locked(uint32_t now_ms) {
         static_cast<int32_t>(now_ms - retry_due_ms_) < 0) {
         return;
     }
+
+    if (strcmp(status_.last_error, "tls_heap_guard") == 0 &&
+        !TlsMemory::admission().available) {
+        retry_due_ms_ = now_ms + SLEEPHQ_HEAP_RETRY_MS;
+        return;
+    }
+
     status_.pending = true;
     status_.state = SleepHqSyncState::Pending;
     if (!status_.pending_reason[0]) {
@@ -1599,12 +1617,6 @@ bool SleepHqSyncEngine::parse_inflight_line_locked(char *line) {
 }
 
 void SleepHqSyncEngine::complete_inflight_load_locked() {
-    status_.files_uploaded = staged_count_;
-    status_.bytes_uploaded = 0;
-    for (size_t i = 0; i < staged_count_; ++i) {
-        status_.bytes_uploaded += staged_[i].size;
-    }
-
     Log::logf(CAT_EXPORT, LOG_INFO,
               "[SLEEPHQ] resuming import=%lu phase=%s files=%u\n",
               static_cast<unsigned long>(status_.import_id),

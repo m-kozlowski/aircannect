@@ -49,10 +49,12 @@ struct SleepHqSyncStatus {
     uint32_t team_id = 0;
     uint32_t import_id = 0;
     char import_status[AC_SLEEPHQ_STATUS_MAX] = {};
+    // Current run only; journal entries count as skipped when encountered.
     uint32_t files_seen = 0;
     uint32_t files_uploaded = 0;
     uint32_t files_skipped = 0;
     uint32_t files_failed = 0;
+    // File bytes sent in this run; attaching an existing hash sends no bytes.
     uint64_t bytes_uploaded = 0;
     uint64_t last_check_epoch = 0;
     uint64_t last_sync_epoch = 0;
