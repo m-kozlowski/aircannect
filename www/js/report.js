@@ -403,6 +403,17 @@
 
     function activateSignalStoreNight(nightId, revision, generation, store) {
       cancelReportRangeRequest();
+
+      const nightPrefix = String(nightId) + ":";
+      const generationPrefix = nightPrefix + generation + ":";
+      reportSignalBlockCache.forEach((entry, key) => {
+        if (key.startsWith(nightPrefix) &&
+            (!key.startsWith(generationPrefix) ||
+             (!entry.closed && entry.revision !== String(revision)))) {
+          reportSignalBlockCache.delete(key);
+        }
+      });
+
       reportSeries = {};
       reportEvents = [];
       reportBaseSeries = {};
@@ -1836,12 +1847,12 @@
       reportRangeAbortController = null;
     }
 
-    function cancelReportRequests() {
+    function cancelReportRequests(preserveRange = false) {
       cancelReportLoadRequest();
       cancelReportRangeRequest();
       reportLoadToken++;
       reportRangeToken++;
-      reportRangeActiveKey = "";
+      if (!preserveRange) reportRangeActiveKey = "";
     }
 
     function reportCompletionMatches(data, url) {
@@ -1933,13 +1944,8 @@
     }
 
     function reportRangeWindow(lo, hi) {
-      if (!(hi > lo)) return null;
-
-      const from = Math.floor(lo / SIGNAL_STORE_BLOCK_MS) *
-        SIGNAL_STORE_BLOCK_MS;
-      const to = Math.ceil(hi / SIGNAL_STORE_BLOCK_MS) *
-        SIGNAL_STORE_BLOCK_MS;
-      return to > from ? {from, to} : null;
+      return Number.isFinite(lo) && Number.isFinite(hi) && hi > lo
+        ? {from: lo, to: hi} : null;
     }
 
     function signalStoreMagic(bytes, expected) {
@@ -1974,7 +1980,7 @@
       const view = new DataView(buffer);
       if (buffer.byteLength < SIGNAL_STORE_NIGHT_HEADER_BYTES ||
           !signalStoreMagic(bytes, "ACRNIG01") ||
-          view.getUint16(8, true) !== 1 ||
+          view.getUint16(8, true) !== 2 ||
           view.getUint16(10, true) !== SIGNAL_STORE_NIGHT_HEADER_BYTES ||
           view.getUint32(12, true) !== buffer.byteLength) {
         return invalid;
@@ -2048,7 +2054,9 @@
           blockSlots,
           presentCount: view.getUint16(offset + 8, true),
           interval,
-          scale: view.getUint32(offset + 16, true),
+          scale: view.getFloat32(offset + 16, true),
+          offset: view.getFloat32(offset + 80, true),
+          missingValue: view.getInt16(offset + 84, true),
           phase,
           firstBlock,
           firstValid: Number(view.getBigInt64(offset + 32, true)),
@@ -2057,7 +2065,9 @@
           expectedSamples: view.getBigUint64(offset + 56, true),
           presentBlocks,
         };
-        if (!track.scale || track.presentCount > track.blockSlots) {
+        if (!Number.isFinite(track.scale) || !track.scale ||
+            !Number.isFinite(track.offset) ||
+            track.presentCount > track.blockSlots) {
           return invalid;
         }
         tracks.push(track);
@@ -2186,8 +2196,10 @@
             }};
           }
           if (response.status === 200) {
-            const decoded = decodeSignalStoreNight(
-              await response.arrayBuffer());
+            const buffer = await response.arrayBuffer();
+            if (signal.aborted || token !== reportLoadToken) return null;
+
+            const decoded = decodeSignalStoreNight(buffer);
             if (!decoded.valid) throw new Error("invalid report metadata");
 
             const revision = reportArtifactRevision(response);
@@ -2269,14 +2281,23 @@
         candidates[candidates.length - 1];
     }
 
-    function signalStoreCacheKey(track, level, blockStart) {
-      return [reportCurrentNightId, reportCurrentGeneration,
-        track.metadataIndex, level.name, blockStart].join(":");
+    function signalStoreCacheKey(track, level, blockStart, context) {
+      return [context.nightId, context.generation, track.signal,
+        track.interval, track.trackIndex, level.name, blockStart].join(":");
     }
 
-    function signalStoreTouchBlock(key) {
+    function signalStoreTouchBlock(key, track, context) {
       const entry = reportSignalBlockCache.get(key);
       if (!entry) return null;
+
+      if ((!entry.closed && entry.revision !== context.revision) ||
+          entry.scale !== track.scale || entry.offset !== track.offset ||
+          entry.missingValue !== track.missingValue ||
+          entry.phase !== track.phase) {
+        reportSignalBlockCache.delete(key);
+        return null;
+      }
+
       reportSignalBlockCache.delete(key);
       reportSignalBlockCache.set(key, entry);
       return entry;
@@ -2285,13 +2306,13 @@
     function trimSignalStoreBlockCache() {
       let bytes = 0;
       reportSignalBlockCache.forEach((entry) => {
-        bytes += entry.estimatedBytes;
+        bytes += entry.buffer.byteLength;
       });
       while (reportSignalBlockCache.size > SIGNAL_STORE_BLOCK_CACHE_MAX ||
              bytes > SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES) {
         const key = reportSignalBlockCache.keys().next().value;
         if (key === undefined) break;
-        bytes -= reportSignalBlockCache.get(key).estimatedBytes;
+        bytes -= reportSignalBlockCache.get(key).buffer.byteLength;
         reportSignalBlockCache.delete(key);
       }
     }
@@ -2305,29 +2326,36 @@
     }
 
     function decodeSignalStoreBlock(buffer, byteOffset, track, level,
-                                    blockStart, blockBytes) {
+                                    blockStart, blockBytes, lo, hi) {
       const view = new DataView(buffer, byteOffset, blockBytes);
       const points = [];
       const cells = SIGNAL_STORE_BLOCK_MS / level.interval;
-      let haveValue = false;
-      for (let i = 0; i < cells; i++) {
+      const firstSample = level.name === "raw"
+        ? signalStoreFirstSample(track, blockStart) : blockStart;
+      const firstCell = Math.max(0, level.name === "raw"
+        ? Math.ceil((lo - firstSample) / level.interval)
+        : Math.ceil((lo - firstSample) / level.interval) - 1);
+      const endCell = Math.min(cells,
+        Math.floor((hi - firstSample) / level.interval) + 1);
+      // A leading missing cell must break the line from the preceding block.
+      let haveValue = true;
+
+      for (let i = firstCell; i < endCell; i++) {
         const offset = level.name === "raw" ? i * 2 : i * 4;
-        const t = level.name === "raw"
-          ? signalStoreFirstSample(track, blockStart) + i * level.interval
-          : blockStart + i * level.interval;
+        const t = firstSample + i * level.interval;
         const minimum = view.getInt16(offset, true);
         const maximum = level.name === "raw"
           ? minimum : view.getInt16(offset + 2, true);
-        if (minimum === SIGNAL_STORE_MISSING ||
-            maximum === SIGNAL_STORE_MISSING ||
+        if (minimum === track.missingValue ||
+            maximum === track.missingValue ||
             t >= blockStart + SIGNAL_STORE_BLOCK_MS) {
           if (haveValue) points.push({gap: true, t});
           haveValue = false;
           continue;
         }
 
-        const min = minimum * track.scale / 1000;
-        const max = maximum * track.scale / 1000;
+        const min = minimum * track.scale + track.offset;
+        const max = maximum * track.scale + track.offset;
         if (level.name === "raw") {
           points.push({t, value: min});
         } else {
@@ -2351,7 +2379,7 @@
         encodeURIComponent(context.nightId) + "&part=signal&track=" +
         track.metadataIndex + "&from=" + from + "&to=" + to +
         "&level=" + encodeURIComponent(level.name);
-      return pollReportFetch({
+      const loaded = await pollReportFetch({
         active: context.active,
         waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
@@ -2384,13 +2412,16 @@
           if ((revision && revision !== context.revision) ||
               generation !== context.generation ||
               responseTrack !== track.trackIndex ||
-              present.length !== blockCount || interval !== level.interval ||
+              present.length !== blockCount || /[^01]/.test(present) ||
+              interval !== level.interval ||
               envelope !== (level.name !== "raw")) {
             throw new Error("report signal identity mismatch");
           }
 
           const buffer = response.status === 204
             ? new ArrayBuffer(0) : await response.arrayBuffer();
+          if (!context.active()) return null;
+
           const blockBytes = SIGNAL_STORE_BLOCK_MS / level.interval *
             (envelope ? 4 : 2);
           const presentCount = Array.from(present)
@@ -2399,41 +2430,51 @@
             throw new Error("invalid report signal payload");
           }
 
-          let packedOffset = 0;
           for (let i = 0; i < blockCount; i++) {
             const blockStart = from + i * SIGNAL_STORE_BLOCK_MS;
-            const key = signalStoreCacheKey(track, level, blockStart);
-            let points = [];
-            if (present[i] === "1") {
-              points = decodeSignalStoreBlock(
-                buffer, packedOffset, track, level, blockStart, blockBytes);
-              packedOffset += blockBytes;
+            const slot = (blockStart - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
+            if ((present[i] === "1") !== signalStoreBlockPresent(track, slot)) {
+              throw new Error("report signal coverage mismatch");
             }
+          }
+
+          let packedOffset = 0;
+          for (let i = 0; i < blockCount; i++) {
+            if (present[i] !== "1") continue;
+
+            const blockStart = from + i * SIGNAL_STORE_BLOCK_MS;
+            const key = signalStoreCacheKey(track, level, blockStart, context);
             reportSignalBlockCache.set(key, {
-              points,
-              present: present[i] === "1",
-              estimatedBytes: blockBytes + points.length * 40,
+              buffer: buffer.slice(packedOffset, packedOffset + blockBytes),
+              revision: context.revision,
+              closed: blockStart + SIGNAL_STORE_BLOCK_MS <= track.lastValid,
+              scale: track.scale,
+              offset: track.offset,
+              missingValue: track.missingValue,
+              phase: track.phase,
             });
+            packedOffset += blockBytes;
           }
           trimSignalStoreBlockCache();
           return {done: true, value: true};
         },
       });
+      if (!loaded && context.active()) {
+        throw new Error("report signal not ready");
+      }
+      return loaded;
     }
 
     async function ensureSignalStoreTrackBlocks(track, level, from, to,
                                                 context) {
+      if (!context.active()) return;
+
       const missing = [];
       for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
         const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
-        const key = signalStoreCacheKey(track, level, block);
-        if (!signalStoreBlockPresent(track, slot)) {
-          if (!reportSignalBlockCache.has(key)) {
-            reportSignalBlockCache.set(key, {
-              points: [], present: false, estimatedBytes: 1,
-            });
-          }
-        } else if (!signalStoreTouchBlock(key)) {
+        const key = signalStoreCacheKey(track, level, block, context);
+        if (signalStoreBlockPresent(track, slot) &&
+            !signalStoreTouchBlock(key, track, context)) {
           missing.push(block);
         }
       }
@@ -2449,7 +2490,7 @@
       });
       await runReportFetchJobs(runs.map((run) => () =>
         fetchSignalStoreBlocks(
-          track, level, run.from, run.to, context)), 2);
+          track, level, run.from, run.to, context)), 1);
     }
 
     function appendSignalStorePoints(target, source, blockStart) {
@@ -2471,19 +2512,13 @@
       });
     }
 
-    async function loadSignalStoreTrack(track, lo, hi, context, prefetch) {
+    async function loadSignalStoreTrack(track, lo, hi, context) {
       const trackEnd = track.firstBlock +
         track.blockSlots * SIGNAL_STORE_BLOCK_MS;
-      let from = Math.max(track.firstBlock,
+      const from = Math.max(track.firstBlock,
         Math.floor(lo / SIGNAL_STORE_BLOCK_MS) * SIGNAL_STORE_BLOCK_MS);
-      let to = Math.min(trackEnd,
+      const to = Math.min(trackEnd,
         Math.ceil(hi / SIGNAL_STORE_BLOCK_MS) * SIGNAL_STORE_BLOCK_MS);
-      if (prefetch) {
-        from = Math.max(track.firstBlock,
-          from - SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS);
-        to = Math.min(trackEnd,
-          to + SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS);
-      }
       if (!(to > from)) return [];
 
       const level = signalStoreLevel(track, hi - lo);
@@ -2492,12 +2527,31 @@
 
       const points = [];
       for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
-        const entry = signalStoreTouchBlock(
-          signalStoreCacheKey(track, level, block));
-        appendSignalStorePoints(points, entry ? entry.points : [], block);
+        const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
+        const present = signalStoreBlockPresent(track, slot);
+        const entry = present ? signalStoreTouchBlock(
+          signalStoreCacheKey(track, level, block, context), track, context) : null;
+
+        if (present && !entry) throw new Error("report signal block unavailable");
+
+        const visible = entry ? decodeSignalStoreBlock(
+          entry.buffer, 0, track, level, block, entry.buffer.byteLength, lo, hi) : [];
+
+        appendSignalStorePoints(points, visible, Math.max(block, lo));
       }
-      return points.filter((point) => point.gap ||
-        reportPointOverlapsRange(point, {start: lo, end: hi}));
+
+      if (context.prefetchJobs) {
+        const margin = SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS;
+        const ranges = [
+          {from: Math.max(track.firstBlock, from - margin), to: from},
+          {from: to, to: Math.min(trackEnd, to + margin)},
+        ];
+        ranges.filter((range) => range.to > range.from).forEach((range) => {
+          context.prefetchJobs.push(() => ensureSignalStoreTrackBlocks(
+            track, level, range.from, range.to, context));
+        });
+      }
+      return points;
     }
 
     function mergeSignalStoreTracks(series) {
@@ -2552,7 +2606,10 @@
     }
 
     async function loadSignalStoreEvents(context) {
-      const key = [context.nightId, context.generation, "events"].join(":");
+      if (!context.active()) return [];
+
+      const key = [context.nightId, context.generation,
+        context.revision, "events"].join(":");
       const cached = lruGet(reportEventClientCache, key);
       if (cached) return cached;
 
@@ -2582,26 +2639,26 @@
             await response.arrayBuffer(), context)};
         },
       });
-      if (events && context.active()) {
-        lruSet(reportEventClientCache, key, events,
-          SIGNAL_STORE_EVENT_CACHE_MAX);
-      }
-      return events || [];
+      if (!context.active()) return [];
+      if (!events) throw new Error("report events not ready");
+
+      lruSet(reportEventClientCache, key, events,
+        SIGNAL_STORE_EVENT_CACHE_MAX);
+      return events;
     }
 
-    async function fetchSignalStoreChart(definition, lo, hi, context,
-                                         prefetch) {
+    async function fetchSignalStoreChart(definition, lo, hi, context) {
       if (definition.type === "events") {
         return {events: await loadSignalStoreEvents(context), series: {}};
       }
 
       const decoded = {events: [], series: {}};
       for (const series of definition.series || [definition]) {
-        const tracks = reportSignalTracks(series.key);
+        const tracks = reportSignalTracks(series.key, context.store);
         const values = [];
         for (const track of tracks) {
           values.push(await loadSignalStoreTrack(
-            track, lo, hi, context, prefetch));
+            track, lo, hi, context));
           if (!context.active()) return null;
         }
         if (tracks.length) {
@@ -2643,12 +2700,15 @@
         nightId: reportCurrentNightId,
         revision: reportCurrentRevision,
         generation: reportCurrentGeneration,
+        store: reportSignalStore,
         signal,
-        active: () => token === reportLoadToken &&
-          reportCurrentGeneration === reportResult.generation,
+        active: () => !signal.aborted && token === reportLoadToken &&
+          context.nightId === reportCurrentNightId &&
+          context.generation === reportCurrentGeneration &&
+          context.revision === reportCurrentRevision,
       };
       const promise = fetchSignalStoreChart(
-        definition, range.start, range.end, context, false)
+        definition, range.start, range.end, context)
         .then((decoded) => {
           if (!decoded || !context.active()) return false;
           publishSignalStoreBaseChart(key, decoded);
@@ -2697,6 +2757,10 @@
           ensureSignalStoreRangeLoaded(
             reportZoom.start, reportZoom.end, [key]);
         }
+      } catch (error) {
+        if (token === reportLoadToken && !controller.signal.aborted) {
+          AirCANnect.ui.message("reportMsg", error.message, false, true);
+        }
       } finally {
         if (ownsController && reportLoadAbortController === controller) {
           reportLoadAbortController = null;
@@ -2738,7 +2802,7 @@
     }
 
     function startSignalStoreRangeWorker(entry) {
-      if (!entry || entry.promise) return;
+      if (!entry || entry.promise || !entry.requestedCharts.size) return;
       const controller = reportRangeAbortController || new AbortController();
       reportRangeAbortController = controller;
       const token = ++reportRangeToken;
@@ -2746,10 +2810,15 @@
         nightId: reportCurrentNightId,
         revision: reportCurrentRevision,
         generation: reportCurrentGeneration,
+        store: reportSignalStore,
+        prefetchJobs: [],
         signal: controller.signal,
         active: () => !controller.signal.aborted &&
           token === reportRangeToken &&
-          entry.key === reportRangeActiveKey,
+          entry.key === reportRangeActiveKey &&
+          context.nightId === reportCurrentNightId &&
+          context.generation === reportCurrentGeneration &&
+          context.revision === reportCurrentRevision,
       };
       const promise = (async () => {
         while (context.active()) {
@@ -2762,7 +2831,7 @@
             const definition = reportChartDefinition(key);
             if (!definition) return;
             const decoded = await fetchSignalStoreChart(
-              definition, entry.from, entry.to, context, true);
+              definition, entry.from, entry.to, context);
             if (!decoded || !context.active()) return;
 
             if (definition.type === "events") {
@@ -2775,7 +2844,18 @@
             if (!updateRenderedReportChart(key)) renderReportCharts();
           }), 2);
         }
-      })().finally(() => {
+
+        // All requested charts are published before adjacent blocks compete for I/O.
+        if (context.active()) {
+          void runReportFetchJobs(context.prefetchJobs, 1).catch((error) => {
+            if (context.active()) console.warn("Report prefetch failed", error);
+          });
+        }
+      })().catch((error) => {
+        if (context.active()) {
+          AirCANnect.ui.message("reportMsg", error.message, false, true);
+        }
+      }).finally(() => {
         const restart = context.active() && entry.requestedCharts.size > 0;
         if (entry.promise === promise) entry.promise = null;
         if (restart) startSignalStoreRangeWorker(entry);
@@ -2817,7 +2897,7 @@
       startSignalStoreRangeWorker(entry);
     }
 
-    async function loadSelectedReportNight() {
+    async function loadSelectedReportNight(preserveView = false) {
       cancelReportLoadRequest();
       const night = selectedReportNight();
       if (!night) {
@@ -2829,9 +2909,16 @@
       const controller = new AbortController();
       reportLoadAbortController = controller;
       const nightId = reportNightLoadKey(night);
+      const keepView = preserveView && nightId === reportCurrentNightId &&
+        !!reportResult;
+      const savedZoom = keepView ? reportZoom : null;
+      const savedHiddenSessions = keepView ? [...reportHiddenSessions] : [];
       const token = ++reportLoadToken;
-      resetReportData();
-      renderReportSummary();
+      if (!keepView) {
+        resetReportData();
+        renderReportSummary();
+      }
+
       AirCANnect.ui.message("reportMsg", "Loading report...", true, true);
       try {
         const res = await pollSignalStoreNight(
@@ -2846,18 +2933,33 @@
           renderReportSummary();
           return;
         }
-        reportResult = res.result;
-        if (reportResult.state !== "ready" &&
-            reportResult.state !== "partial") {
+        if (res.result.state !== "ready" && res.result.state !== "partial") {
           AirCANnect.ui.message(
-            "reportMsg", reportResult.error || "Report incomplete", false, true);
+            "reportMsg", res.result.error || "Report incomplete", false, true);
           renderReportSummary();
           return;
         }
 
-        const loaded = await loadSignalStoreBase(
-          token, nightId, controller.signal);
-        if (!loaded || token !== reportLoadToken) return;
+        const changed = !keepView ||
+          res.result.source_revision !== reportCurrentRevision ||
+          res.result.generation !== reportCurrentGeneration;
+        if (changed) {
+          if (keepView) resetReportData();
+          reportResult = res.result;
+          reportZoom = savedZoom;
+          savedHiddenSessions.forEach((key) => reportHiddenSessions.add(key));
+
+          const loaded = await loadSignalStoreBase(
+            token, nightId, controller.signal);
+          if (!loaded || token !== reportLoadToken) return;
+        } else {
+          reportBaseChartPromises.clear();
+          if (reportRangeView) reportRangeView.promise = null;
+
+          await runReportFetchJobs(signalStoreExpandedChartKeys().map((key) =>
+            () => ensureSignalStoreChartLoaded(key)), 2);
+          if (token !== reportLoadToken) return;
+        }
 
         renderReportSummary();
         AirCANnect.ui.message("reportMsg",
@@ -2918,14 +3020,16 @@
       }
     }
 
-    function invalidateReportNightCache(nightId) {
+    function invalidateReportNightCache(nightId, rebuild = true) {
       for (const key of reportResultClientCache.keys()) {
         if (reportCacheUrlNight(key) === nightId) {
           reportResultClientCache.delete(key);
         }
       }
       for (const key of reportSignalBlockCache.keys()) {
-        if (key.startsWith(nightId + ":")) reportSignalBlockCache.delete(key);
+        if (rebuild && key.startsWith(nightId + ":")) {
+          reportSignalBlockCache.delete(key);
+        }
       }
       for (const key of reportEventClientCache.keys()) {
         if (key.startsWith(nightId + ":")) reportEventClientCache.delete(key);
@@ -2949,13 +3053,14 @@
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
       reportHandledCompletionKey = completionKey;
-      if (!data.success || !data.forced || !data.night) return;
+      if (!data.success || data.kind !== "night" || !data.night) return;
 
       const nightId = String(data.night);
       const reload = nightId === reportCurrentNightId &&
         AirCANnect.pages.isActive("report");
-      invalidateReportNightCache(nightId);
-      if (reload) loadSelectedReportNight();
+      invalidateReportNightCache(nightId, !!data.forced);
+      if (nightId === reportCurrentNightId) cancelReportRequests(!data.forced);
+      if (reload) loadSelectedReportNight(true);
     }
 
     AirCANnect.events.subscribe("report", handleReportCompletion);
@@ -3021,11 +3126,10 @@
     const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
     const SIGNAL_STORE_NIGHT_HEADER_BYTES = 224;
     const SIGNAL_STORE_SESSION_BYTES = 16;
-    const SIGNAL_STORE_TRACK_BYTES = 80;
+    const SIGNAL_STORE_TRACK_BYTES = 88;
     const SIGNAL_STORE_EVENT_HEADER_BYTES = 96;
     const SIGNAL_STORE_BITMAP_BYTES = 16;
     const SIGNAL_STORE_MAX_BLOCKS = 128;
-    const SIGNAL_STORE_MISSING = -32768;
     const SIGNAL_STORE_BLOCK_CACHE_MAX = 512;
     const SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES = 8 * 1024 * 1024;
     const SIGNAL_STORE_EVENT_CACHE_MAX = 8;
