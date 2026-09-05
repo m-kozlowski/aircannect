@@ -26,6 +26,9 @@ constexpr uint16_t report_event_code_value(ReportEventCode code) {
 struct ReportSeriesSample {
     int64_t timestamp_ms = 0;
     int32_t value_milli = 0;
+    // Original EDF digital value; absent for legacy milli-value payloads.
+    int16_t raw = 0;
+    bool raw_valid = false;
 };
 
 struct ReportEventRecord {

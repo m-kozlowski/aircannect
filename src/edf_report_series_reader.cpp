@@ -114,6 +114,8 @@ EdfReportSeriesStatus edf_report_decode_series_record(
                                                digital)) {
                 ReportSeriesSample sample;
                 sample.timestamp_ms = sample_ms;
+                sample.raw = digital;
+                sample.raw_valid = true;
                 sample.value_milli = physical_to_milli(
                     edf_scale_digital_sample(decoder.signal_scale, digital));
 

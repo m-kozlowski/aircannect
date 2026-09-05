@@ -38,7 +38,8 @@ bool fallback_kind(ReportReadOperationKind kind) {
 bool ReportExecutorStatus::active() const {
     return state == ReportExecutorState::SubmitRead ||
            state == ReportExecutorState::WaitRead ||
-           state == ReportExecutorState::DecodeRecords;
+           state == ReportExecutorState::DecodeRecords ||
+           state == ReportExecutorState::FinishingOperation;
 }
 
 bool ReportExecutorStatus::terminal() const {
@@ -107,14 +108,31 @@ bool ReportExecutor::poll(size_t record_budget) {
             progressed = true;
             continue;
         }
+        if (state_ == ReportExecutorState::FinishingOperation) {
+            if (!poll_operation_end()) break;
+            progressed = true;
+            continue;
+        }
+
         if (state_ != ReportExecutorState::DecodeRecords ||
             record_budget == 0) {
             break;
         }
 
+        if (!sink_->ready()) {
+            if (sink_->failure_reason()) {
+                finish(ReportExecutorState::Failed,
+                       ReportExecutorError::SinkRejected);
+                progressed = true;
+            }
+            break;
+        }
+
+        const bool fallback = fallback_kind(
+            plan_->operation(operation_index_)->kind);
         if (!decode_record()) break;
         progressed = true;
-        --record_budget;
+        record_budget = fallback ? 0 : record_budget - 1;
     }
     return progressed;
 }
@@ -363,7 +381,8 @@ bool ReportExecutor::poll_read() {
     }
     if (!prepare_operation()) {
         finish(ReportExecutorState::Failed,
-               ReportExecutorError::InvalidPlan);
+               sink_rejected_ ? ReportExecutorError::SinkRejected
+                              : ReportExecutorError::InvalidPlan);
         return true;
     }
 
@@ -377,6 +396,7 @@ bool ReportExecutor::prepare_operation() {
 
     record_index_ = 0;
     decoder_count_ = 0;
+    fallback_loaded_ = false;
     if (fallback_kind(operation->kind)) return true;
 
     const NightCatalogSourceFile *file = operation
@@ -400,6 +420,12 @@ bool ReportExecutor::prepare_operation() {
                     file->record_size,
                     file->complete_records,
                     decoders_[i]) != EdfReportSeriesStatus::Ok) {
+                return false;
+            }
+
+            if (!sink_->configure_series(mappings[i].series,
+                                         decoders_[i].signal_scale)) {
+                sink_rejected_ = true;
                 return false;
             }
         }
@@ -522,30 +548,38 @@ bool ReportExecutor::decode_fallback_operation() {
     const NightCatalogFallbackSection *section = operation
         ? plan_->fallback_section(*operation)
         : nullptr;
-    if (!operation || !file || !section || record_index_ != 0 ||
+    if (!operation || !file || !section ||
+        record_index_ >= operation->record_count ||
         operation->length > record_capacity_) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
         return false;
     }
 
-    const PreparedByteRead read = read_port_->read_prepared(
-        prepared_, 0, record_buffer_, operation->length);
-    if (read.state == PreparedByteReadState::Retry) return false;
-    if (read.state != PreparedByteReadState::Data ||
-        read.bytes != operation->length) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::StorageShortRead);
-        return false;
-    }
-    if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::DecodeFailed);
-        return false;
+    if (!fallback_loaded_) {
+        const PreparedByteRead read = read_port_->read_prepared(
+            prepared_, 0, record_buffer_, operation->length);
+
+        if (read.state == PreparedByteReadState::Retry) return false;
+        if (read.state != PreparedByteReadState::Data ||
+            read.bytes != operation->length) {
+            finish(ReportExecutorState::Failed,
+                   ReportExecutorError::StorageShortRead);
+            return false;
+        }
+        if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
+            finish(ReportExecutorState::Failed,
+                   ReportExecutorError::DecodeFailed);
+            return false;
+        }
+        fallback_loaded_ = true;
     }
 
     const uint8_t *data = record_buffer_;
-    const size_t data_size = read.bytes;
+    const size_t data_size = operation->length;
+    const uint32_t batch_count = std::min<uint32_t>(
+        32, operation->record_count - record_index_);
+
     sink_rejected_ = false;
     callback_operation_ = operation;
     if (operation->kind == ReportReadOperationKind::FallbackSeries) {
@@ -565,8 +599,8 @@ bool ReportExecutor::decode_fallback_operation() {
             data,
             data_size,
             section->record_count,
-            operation->first_record,
-            operation->record_count,
+            operation->first_record + record_index_,
+            batch_count,
             emit_series,
             this);
         if (!decoded) {
@@ -577,7 +611,9 @@ bool ReportExecutor::decode_fallback_operation() {
             return false;
         }
     } else {
-        for (size_t i = 0; i < section->record_count; ++i) {
+        for (uint32_t i = record_index_;
+             i < record_index_ + batch_count;
+             ++i) {
             ReportEventRecord event;
             if (!report_read_event_record(data, data_size, i,
                                           event) ||
@@ -605,8 +641,8 @@ bool ReportExecutor::decode_fallback_operation() {
 
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
-    record_index_ = operation->record_count;
-    finish_operation();
+    record_index_ += batch_count;
+    if (record_index_ == operation->record_count) finish_operation();
     return true;
 }
 
@@ -617,6 +653,17 @@ void ReportExecutor::finish_operation() {
     }
 
     release_prepared();
+    state_ = ReportExecutorState::FinishingOperation;
+}
+
+bool ReportExecutor::poll_operation_end() {
+    if (!sink_->end_operation()) {
+        if (!sink_->failure_reason()) return false;
+
+        finish(ReportExecutorState::Failed, ReportExecutorError::SinkRejected);
+        return true;
+    }
+
     ++operation_index_;
     record_index_ = 0;
     decoder_count_ = 0;
@@ -626,6 +673,7 @@ void ReportExecutor::finish_operation() {
     } else {
         state_ = ReportExecutorState::SubmitRead;
     }
+    return true;
 }
 
 void ReportExecutor::finish(ReportExecutorState state,
@@ -651,6 +699,7 @@ void ReportExecutor::release_run_resources() {
     event_next_record_ = 0;
     event_context_valid_ = false;
     sink_rejected_ = false;
+    fallback_loaded_ = false;
 }
 
 void ReportExecutor::release_prepared() {

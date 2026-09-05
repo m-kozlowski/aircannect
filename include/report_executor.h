@@ -20,6 +20,7 @@ enum class ReportExecutorState : uint8_t {
     Complete,
     Failed,
     Cancelled,
+    FinishingOperation,
 };
 
 enum class ReportExecutorError : uint8_t {
@@ -51,11 +52,31 @@ class ReportExecutionSink {
 public:
     virtual ~ReportExecutionSink() = default;
 
+    // Called once per EDF numeric mapping before its operation emits samples.
+    // Scale is in original source units; the sink owns canonical conversion
+    // of both scale and offset. False rejects the operation (not a retry).
+    // Fallback milli-value samples have raw_valid=false and no EDF scale.
+    virtual bool configure_series(const ReportSeriesDescriptor &,
+                                  const EdfSignalScale &) { return true; }
+
+    // Polled before each complete EDF record or fallback batch. False yields
+    // without consuming input. True admits the entire record, all mappings.
+    virtual bool ready() { return true; }
+
     virtual bool accept_series(uint16_t session_index,
                                const ReportSeriesDescriptor &series,
                                const ReportSeriesSample &sample) = 0;
     virtual bool accept_event(uint16_t session_index,
                               const ReportEventRecord &event) = 0;
+
+    // Polled after releasing the operation's prepared read, even if ready()
+    // is false. Flush all active blocks here; false yields, true permits the
+    // next operation/source (or completion). Must tolerate repeated calls.
+    // Cancellation/failure releases executor resources without draining.
+    virtual bool end_operation() { return true; }
+
+    // Non-null distinguishes a failed ready()/end_operation() from a wait.
+    virtual const char *failure_reason() const { return nullptr; }
 };
 
 class ReportExecutor {
@@ -70,6 +91,8 @@ public:
     OperationAdmission start(std::shared_ptr<const ReportReadPlan> plan,
                              ReportExecutionSink &sink,
                              uint32_t generation);
+    // Fallback decoding consumes at most 32 sample/event positions per poll,
+    // regardless of record_budget. A zero budget still polls operation end.
     bool poll(size_t record_budget = 1);
     void cancel();
     void reset();
@@ -87,6 +110,7 @@ private:
     bool decode_record();
     bool decode_fallback_operation();
     void finish_operation();
+    bool poll_operation_end();
     void finish(ReportExecutorState state, ReportExecutorError error);
     void release_run_resources();
     void release_prepared();
@@ -116,6 +140,7 @@ private:
     EdfReportSeriesDecoder *decoders_ = nullptr;
     size_t decoder_capacity_ = 0;
     size_t decoder_count_ = 0;
+    bool fallback_loaded_ = false;
 
     EdfReportEventDecodeContext event_context_;
     uint16_t event_file_index_ = UINT16_MAX;

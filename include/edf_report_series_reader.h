@@ -21,6 +21,7 @@ enum class EdfReportSeriesStatus : uint8_t {
 
 struct EdfReportSeriesDecoder {
     EdfSignalHeader signal_header;
+    // Original EDF units: physical = raw * scale + offset.
     EdfSignalScale signal_scale;
     EdfReportSignalMapping mapping;
     int64_t header_start_ms = 0;
@@ -41,6 +42,8 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
     uint32_t complete_records,
     EdfReportSeriesDecoder &out);
 
+// Emits original digital samples alongside the legacy physical milli-values.
+// Missing-sample filtering and the half-open output window apply to both.
 EdfReportSeriesStatus edf_report_decode_series_record(
     const EdfReportSeriesDecoder &decoder,
     const uint8_t *record,
