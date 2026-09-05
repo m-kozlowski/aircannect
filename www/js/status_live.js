@@ -533,27 +533,6 @@
       setTherapyButtons(data);
     }
 
-    function renderStream(data) {
-      const state = data.error ? "error" :
-        data.pending_start ? "starting" :
-        data.pending_stop ? "stopping" :
-        data.subscribed ? "subscribed" :
-        data.desired ? "requested" : "idle";
-      AirCANnect.ui.text("streamState", state);
-      AirCANnect.ui.text("streamConsumers", data.consumers);
-      AirCANnect.ui.text("streamNotifications", data.notifications || 0);
-      AirCANnect.ui.text("streamFanout", (data.consumers || 0) + " consumers, " +
-        (data.fanout_drops || 0) + " drops");
-      AirCANnect.ui.text("streamFrames", (data.frame_pool_used || 0) + "/" +
-        (data.frame_pool_capacity || 0) + " used, " +
-        (data.parse_errors || 0) + " parse, " +
-        (data.truncated_frames || 0) + " trunc");
-      AirCANnect.ui.text("streamCommands", (data.command_errors || 0) + " errors");
-      AirCANnect.ui.text("streamLast", data.last_age_ms === null ?
-        "--" : Math.round(data.last_age_ms / 1000) + " s ago");
-      AirCANnect.ui.text("streamId", data.stream_id || "--");
-    }
-
     function chartPush(name, values, limit) {
       if (!Array.isArray(values) || !values.length) return;
       const target = liveData[name];
@@ -885,7 +864,6 @@
         renderOximetrySensorManager(oxiSensorData);
       }
     });
-    AirCANnect.events.subscribe("stream", renderStream);
     AirCANnect.events.subscribe("live", renderLive);
     window.addEventListener("resize", () => updateCharts());
     updateCharts();
