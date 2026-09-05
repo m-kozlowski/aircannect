@@ -35,6 +35,19 @@ int16_t decode_sfloat_int_value(uint16_t raw, bool &valid) {
     return static_cast<int16_t>(value + 0.5f);
 }
 
+bool decode_nonin_df19(const uint8_t *packet,
+                       size_t len,
+                       NoninDf19Reading &reading) {
+    if (!packet || len < 10) return false;
+
+    reading.spo2 = packet[7];
+    reading.pulse_bpm =
+        (static_cast<uint16_t>(packet[8]) << 8) | packet[9];
+    reading.valid = reading.spo2 != 127 && reading.spo2 <= 100 &&
+                    reading.pulse_bpm != 511 && reading.pulse_bpm <= 321;
+    return true;
+}
+
 uint8_t crc8_ccitt(const uint8_t *data, size_t len, uint8_t crc) {
     for (size_t i = 0; i < len; ++i) {
         crc ^= data[i];

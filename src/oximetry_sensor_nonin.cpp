@@ -44,23 +44,20 @@ void BleSensorProtocolEngine::nonin_notify(
 void BleSensorProtocolEngine::process_nonin_notification(
     const uint8_t *data,
     size_t len) {
-    if (!data || len < 5) return;
+    NoninDf19Reading reading;
+    if (!decode_nonin_df19(data, len, reading)) return;
 
-    const uint8_t spo2 = data[2];
-    const uint16_t pulse =
-        static_cast<uint16_t>(data[3]) |
-        (static_cast<uint16_t>(data[4]) << 8);
-    const bool valid = spo2 > 0 && spo2 <= 100 &&
-                       pulse > 0 && pulse < 500;
+    // Keep DF19 status handling aligned with the existing source policy.
+    const bool valid = reading.valid;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor Nonin reading %s spo2=%u pulse=%u\n",
               valid ? "valid" : "invalid",
-              static_cast<unsigned>(spo2),
-              static_cast<unsigned>(pulse));
+              static_cast<unsigned>(reading.spo2),
+              static_cast<unsigned>(reading.pulse_bpm));
     emit_sample(
-        valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
-        valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
+        valid ? encode_sfloat_int_value(reading.spo2) : PLX_SFLOAT_NAN,
+        valid ? encode_sfloat_int_value(reading.pulse_bpm) : PLX_SFLOAT_NAN,
         !valid);
 }
 #endif
