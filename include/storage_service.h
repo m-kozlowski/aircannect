@@ -13,6 +13,7 @@
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_path_port.h"
+#include "storage_range_write_port.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
 #include "storage_stream_port.h"
@@ -156,6 +157,9 @@ StoragePathPort &path_port();
 
 // Atomic immutable file publication
 StorageAtomicWritePort &atomic_write_port();
+
+// Non-atomic bounded file range updates
+StorageRangeWritePort &range_write_port();
 
 // Foreground storage browsing and downloads
 StorageBrowserPort &browser_port();

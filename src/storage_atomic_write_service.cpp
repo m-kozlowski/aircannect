@@ -40,27 +40,6 @@ struct TransactionRecord {
 static_assert(sizeof(TransactionRecord) == 204,
               "transaction record layout changed");
 
-bool ensure_parent_directories(const char *path) {
-    if (!storage_user_path_valid(path)) return false;
-
-    char parent[AC_STORAGE_PATH_MAX] = {};
-    copy_cstr(parent, sizeof(parent), path);
-    char *last_slash = strrchr(parent, '/');
-    if (!last_slash) return false;
-    if (last_slash == parent) return true;
-    *last_slash = '\0';
-
-    for (char *cursor = parent + 1; *cursor; ++cursor) {
-        if (*cursor != '/') continue;
-
-        *cursor = '\0';
-        const bool created = Storage::ensure_dir(parent);
-        *cursor = '/';
-        if (!created) return false;
-    }
-    return Storage::ensure_dir(parent);
-}
-
 bool reserved_transaction_path(const char *path) {
     if (!path) return false;
 
@@ -341,7 +320,7 @@ bool StorageAtomicWriteService::open_locked(const char *&error) {
         return false;
     }
 
-    if (!ensure_parent_directories(job_->path) ||
+    if (!Storage::ensure_parent_directories(job_->path) ||
         !Storage::ensure_dir(TRANSACTION_DIR)) {
         error = "parent_create_failed";
         return false;
@@ -469,14 +448,7 @@ bool StorageAtomicWriteService::publish_locked(const char *&error) {
         return false;
     }
 
-    File published = Storage::open(job_->path, "r");
-    if (published && !published.isDirectory()) {
-        const time_t modified = published.getLastWrite();
-        if (modified > 0) {
-            job_->published_modified = static_cast<uint64_t>(modified);
-        }
-    }
-    if (published) published.close();
+    job_->published_modified = Storage::file_modified(job_->path);
 
     if (!Storage::remove(PREVIOUS_FILE_PATH) ||
         !Storage::remove(RECORD_PATH)) {

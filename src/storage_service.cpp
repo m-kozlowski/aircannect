@@ -26,6 +26,7 @@
 #include "storage_internal.h"
 #include "storage_path.h"
 #include "storage_path_service.h"
+#include "storage_range_write_service.h"
 #include "storage_scan_service.h"
 #include "storage_stream_service.h"
 #include "storage_upload_service.h"
@@ -252,6 +253,7 @@ StorageArchiveService archive_service;
 StorageDeleteService delete_service;
 StoragePathService path_service;
 StorageAtomicWriteService atomic_write_service;
+StorageRangeWriteService range_write_service;
 StorageScanService scan_service;
 StorageStreamService stream_service;
 StorageUploadService upload_service;
@@ -273,6 +275,7 @@ static constexpr uint32_t STORAGE_MOUNT_RETRY_MAX_MS = 60000;
 
 enum class ForegroundOperation : uint8_t {
     AtomicWrite,
+    RangeWrite,
     Path,
     Browser,
     Read,
@@ -981,6 +984,7 @@ bool initialize_storage_resources() {
     }
     if (!path_service.begin(wake_service_task)) ready = false;
     if (!atomic_write_service.begin(wake_service_task)) ready = false;
+    if (!range_write_service.begin(wake_service_task)) ready = false;
     if (!upload_service.begin(wake_service_task,
                               atomic_write_service,
                               claim_upload_maintenance,
@@ -1002,6 +1006,7 @@ void set_storage_task_available(bool available) {
     delete_service.set_task_available(available);
     path_service.set_task_available(available);
     atomic_write_service.set_task_available(available);
+    range_write_service.set_task_available(available);
     upload_service.set_task_available(available);
     scan_service.set_task_available(available);
     stream_service.set_task_available(available);
@@ -2070,6 +2075,10 @@ bool process_foreground_step() {
                 worked = atomic_write_service.step(
                     StorageAtomicWriteLane::Foreground);
                 break;
+            case ForegroundOperation::RangeWrite:
+                worked = range_write_service.step(
+                    StorageAtomicWriteLane::Foreground);
+                break;
             case ForegroundOperation::Path:
                 worked = path_service.step();
                 break;
@@ -2171,6 +2180,9 @@ void task_entry(void *) {
                     did_work = true;
                     file_log_burst = 0;
                 } else if (atomic_write_service.step(
+                               StorageAtomicWriteLane::Maintenance)) {
+                    did_work = true;
+                } else if (range_write_service.step(
                                StorageAtomicWriteLane::Maintenance)) {
                     did_work = true;
                 } else if (scan_service.step()) {
@@ -2545,6 +2557,10 @@ StoragePathPort &path_port() {
 
 StorageAtomicWritePort &atomic_write_port() {
     return atomic_write_service;
+}
+
+StorageRangeWritePort &range_write_port() {
+    return range_write_service;
 }
 
 StorageScanPort &scan_port() {
