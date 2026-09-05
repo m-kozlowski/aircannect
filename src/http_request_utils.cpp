@@ -11,6 +11,13 @@
 namespace aircannect {
 namespace {
 
+struct RequestBodyState {
+    char bytes[AC_WEB_MAX_POST_BODY + 1] = {};
+    size_t length = 0;
+    size_t total = 0;
+    bool complete = false;
+};
+
 void discard_request_body(AsyncWebServerRequest *request) {
     if (!request || !request->_tempObject) return;
 
@@ -21,7 +28,14 @@ void discard_request_body(AsyncWebServerRequest *request) {
 std::string take_request_body(AsyncWebServerRequest *request) {
     std::string body;
     if (request && request->_tempObject) {
-        body = static_cast<const char *>(request->_tempObject);
+        const RequestBodyState *state =
+            static_cast<const RequestBodyState *>(request->_tempObject);
+        if (!state->complete || state->length > AC_WEB_MAX_POST_BODY) {
+            discard_request_body(request);
+            return body;
+        }
+
+        body.assign(state->bytes, state->length);
     }
 
     discard_request_body(request);
@@ -35,18 +49,39 @@ void http_request_body_handler(AsyncWebServerRequest *request,
                                size_t length,
                                size_t index,
                                size_t total) {
+    if (!request) return;
+
     if (index == 0) {
         discard_request_body(request);
         if (total > AC_WEB_MAX_POST_BODY) return;
 
-        request->_tempObject = Memory::calloc_large(total + 1, sizeof(char));
+        request->_tempObject = Memory::calloc_large(
+            1, sizeof(RequestBodyState));
+        if (request->_tempObject) {
+            static_cast<RequestBodyState *>(request->_tempObject)->total =
+                total;
+        }
     }
 
-    char *body = static_cast<char *>(request->_tempObject);
-    if (!body || index + length > AC_WEB_MAX_POST_BODY) return;
+    RequestBodyState *state =
+        static_cast<RequestBodyState *>(request->_tempObject);
+    if (!state) return;
 
-    memcpy(body + index, data, length);
-    body[index + length] = 0;
+    const bool declared_length_fits =
+        total == 0 || (index <= total && length <= total - index);
+    if ((state->complete && length > 0) || state->total != total ||
+        index != state->length || index > AC_WEB_MAX_POST_BODY ||
+        length > AC_WEB_MAX_POST_BODY - index || !declared_length_fits ||
+        (length > 0 && (!data || memchr(data, 0, length))) ||
+        (length == 0 && total > 0 && index < total)) {
+        discard_request_body(request);
+        return;
+    }
+
+    if (length > 0) memcpy(state->bytes + index, data, length);
+    state->length = index + length;
+    state->bytes[state->length] = 0;
+    state->complete = total > 0 ? state->length == total : length == 0;
 }
 
 void http_discard_request_body(AsyncWebServerRequest *request) {

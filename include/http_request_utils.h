@@ -10,6 +10,8 @@ class AsyncWebServerRequest;
 
 namespace aircannect {
 
+// Body callbacks use a bounded, contiguous buffer. Invalid or incomplete
+// callback sequences are discarded before a route can parse the body.
 void http_request_body_handler(AsyncWebServerRequest *request,
                                uint8_t *data,
                                size_t length,
