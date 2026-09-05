@@ -6,23 +6,18 @@
 #include <freertos/semphr.h>
 
 #include "http_route_module.h"
-#include "runtime_snapshots.h"
 
 class AsyncWebServerRequest;
 
 namespace aircannect {
 
-class StorageStatusPort;
 class StorageUploadPort;
 
 // Presents the bounded storage upload port over authenticated HTTP.
 class StorageUploadHttpController final : public HttpRouteModule {
 public:
-    bool begin(StorageUploadPort &upload_port,
-               StorageStatusPort &status_port);
+    bool begin(StorageUploadPort &upload_port);
     void register_routes(HttpRouteRegistry &server) override;
-
-    void publish_activity(const ActivitySnapshot &activity);
 
 private:
     // HTTP operations
@@ -42,7 +37,6 @@ private:
     void clear_capability(uint32_t id = 0);
 
     StorageUploadPort *upload_port_ = nullptr;
-    StorageStatusPort *status_port_ = nullptr;
 
     mutable StaticSemaphore_t capability_mutex_storage_ = {};
     mutable SemaphoreHandle_t capability_mutex_ = nullptr;
@@ -50,8 +44,6 @@ private:
     uint32_t capability_upload_id_ = 0;
     uint32_t capability_last_used_ms_ = 0;
     std::atomic<uint32_t> next_generation_{0};
-
-    std::atomic<bool> therapy_active_{false};
 };
 
 }  // namespace aircannect

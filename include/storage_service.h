@@ -9,6 +9,7 @@
 #include "file_log_sink_port.h"
 #include "runtime_snapshots.h"
 #include "storage_archive_port.h"
+#include "storage_admission.h"
 #include "storage_atomic_write_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
@@ -90,6 +91,22 @@ struct StorageWorkloadSnapshot {
     size_t edf_queued = 0;
     uint8_t open_file_count = 0;
 };
+
+constexpr StorageAdmissionResult storage_workload_admission(
+    StorageAdmissionKind kind,
+    const StorageWorkloadSnapshot &workload,
+    bool archive_active,
+    bool delete_active) {
+    if (!workload.valid || !workload.available || workload.busy ||
+        workload.edf_queued > 0 || workload.open_file_count > 0) {
+        return StorageAdmissionResult::Busy;
+    }
+    if (kind == StorageAdmissionKind::PathMutation &&
+        (workload.maintenance_active || archive_active || delete_active)) {
+        return StorageAdmissionResult::Busy;
+    }
+    return StorageAdmissionResult::Accepted;
+}
 
 struct StorageEdfStatusSnapshot {
     bool busy = true;

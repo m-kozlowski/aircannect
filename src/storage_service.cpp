@@ -248,6 +248,7 @@ public:
 ServiceReadPort service_read_port;
 ServiceStatusPort service_status_port;
 std::atomic<MaintenanceOwner> maintenance_owner{MaintenanceOwner::None};
+std::atomic<bool> storage_therapy_active{false};
 StorageBrowserService browser_service;
 StorageArchiveService archive_service;
 StorageDeleteService delete_service;
@@ -2612,6 +2613,8 @@ FileLogSinkPort &file_log_port() {
 
 void publish_activity(const ActivitySnapshot &activity,
                       bool ota_storage_upload_active) {
+    storage_therapy_active.store(activity.therapy_active,
+                                 std::memory_order_release);
     capacity_update_allowed.store(!activity.therapy_active &&
                                   !activity.realtime_stream_active);
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
@@ -2652,6 +2655,36 @@ StorageWorkloadSnapshot workload_snapshot() {
     out.open_file_count = service_state.open_file_count;
     unlock_queue();
     return out;
+}
+
+StorageAdmissionResult storage_request_admission(
+    StorageAdmissionKind kind) {
+    const StorageAdmissionResult availability =
+        storage_request_availability(
+            Storage::mounted(),
+            storage_therapy_active.load(std::memory_order_acquire));
+    if (availability != StorageAdmissionResult::Accepted) {
+        return availability;
+    }
+
+    if (kind == StorageAdmissionKind::Upload) return availability;
+
+    if (kind == StorageAdmissionKind::BrowserRead) {
+        return StorageAdmissionResult::Accepted;
+    }
+
+    if (kind == StorageAdmissionKind::BrowserDownload) {
+        return delete_service.active()
+            ? StorageAdmissionResult::Busy
+            : StorageAdmissionResult::Accepted;
+    }
+
+    const StorageWorkloadSnapshot workload = workload_snapshot();
+    return storage_workload_admission(
+        kind,
+        workload,
+        archive_service.active(),
+        delete_service.active());
 }
 
 StorageEdfStatusSnapshot edf_status_snapshot() {

@@ -40,7 +40,6 @@ class RpcLinkSelector;
 class RpcPassthroughPort;
 class RpcRequestPort;
 class SessionManager;
-class StorageStatusPort;
 class StreamBroker;
 class TherapyTelemetryBroker;
 class TimeSyncService;
@@ -238,8 +237,7 @@ public:
                            StorageReadPort &storage_read,
                            StorageBrowserPort &storage_browser,
                            StoragePathPort &storage_path,
-                           StorageDeletePort &storage_delete,
-                           StorageStatusPort &storage_status);
+                           StorageDeletePort &storage_delete);
 
     bool execute(const String &command,
                  const String &rest,
@@ -299,7 +297,6 @@ private:
     StorageBrowserPort &storage_browser_;
     StoragePathPort &storage_path_;
     StorageDeletePort &storage_delete_;
-    StorageStatusPort &storage_status_;
     LargeScratchArray<CommandSessionState> command_sessions_;
 };
 

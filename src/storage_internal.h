@@ -2,6 +2,7 @@
 
 #include <FS.h>
 
+#include "storage_admission.h"
 #include "storage_manager.h"
 
 namespace aircannect::Storage {

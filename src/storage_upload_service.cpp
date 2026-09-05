@@ -237,6 +237,15 @@ StorageUploadStartResult StorageUploadService::start(
         copy_cstr(result.error, sizeof(result.error), "invalid_request");
         return result;
     }
+    const StorageAdmissionResult admission =
+        StorageService::storage_request_admission(
+            StorageAdmissionKind::Upload);
+    if (admission != StorageAdmissionResult::Accepted) {
+        result.admission = OperationAdmission::Busy;
+        copy_cstr(result.error, sizeof(result.error),
+                  storage_admission_error(admission));
+        return result;
+    }
     if (!ready() || !lock()) {
         result.admission = OperationAdmission::Busy;
         copy_cstr(result.error, sizeof(result.error), "service_busy");

@@ -122,6 +122,13 @@ OperationSubmission StoragePathService::request(
         command.destination.size() >= AC_STORAGE_PATH_MAX) {
         return OperationSubmission::rejected();
     }
+    if (command.operation == StoragePathOperation::Move) {
+        if (StorageService::storage_request_admission(
+                StorageAdmissionKind::PathMutation) !=
+            StorageAdmissionResult::Accepted) {
+            return OperationSubmission::busy();
+        }
+    }
     if (!ready() || !lock()) return OperationSubmission::busy();
     if (job_count_ + completion_count_locked() >= Capacity) {
         unlock();

@@ -398,6 +398,14 @@ bool StorageArchiveService::begin_job_locked(const char *source_path,
         copy_cstr(error_out, error_out_size, "archive_busy");
         return false;
     }
+    const StorageAdmissionResult admission =
+        StorageService::storage_request_admission(
+            StorageAdmissionKind::Maintenance);
+    if (admission != StorageAdmissionResult::Accepted) {
+        copy_cstr(error_out, error_out_size,
+                  storage_admission_error(admission));
+        return false;
+    }
     if (!claim_maintenance_locked()) {
         copy_cstr(error_out, error_out_size, "storage_busy");
         return false;
@@ -577,6 +585,15 @@ bool StorageArchiveService::begin_download(
     download_out.reset();
     size_out = 0;
     copy_cstr(error_out, error_out_size, "");
+
+    const StorageAdmissionResult admission =
+        StorageService::storage_request_admission(
+            StorageAdmissionKind::BrowserDownload);
+    if (admission != StorageAdmissionResult::Accepted) {
+        copy_cstr(error_out, error_out_size,
+                  storage_admission_error(admission));
+        return false;
+    }
 
     std::shared_ptr<StorageArchiveDownload> download(
         new (std::nothrow) StorageArchiveDownload());

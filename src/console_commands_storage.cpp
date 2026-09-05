@@ -298,14 +298,12 @@ StorageConsoleCommands::StorageConsoleCommands(
     StorageReadPort &storage_read,
     StorageBrowserPort &storage_browser,
     StoragePathPort &storage_path,
-    StorageDeletePort &storage_delete,
-    StorageStatusPort &storage_status)
+    StorageDeletePort &storage_delete)
     : config_(config),
       storage_read_(storage_read),
       storage_browser_(storage_browser),
       storage_path_(storage_path),
-      storage_delete_(storage_delete),
-      storage_status_(storage_status) {}
+      storage_delete_(storage_delete) {}
 
 StorageConsoleCommands::CommandSessionState *
 StorageConsoleCommands::command_session(uint32_t session_id, bool create) {
@@ -403,11 +401,6 @@ void StorageConsoleCommands::execute_storage(
         out.println("[STORAGE] operation pending");
         return;
     }
-    if (!storage_status_.mounted()) {
-        out.println("[STORAGE] storage unavailable");
-        return;
-    }
-
     if (command == "ls" && !has_second) {
         const String requested = has_first ? first : String();
         char path[AC_STORAGE_PATH_MAX] = {};
@@ -447,6 +440,16 @@ void StorageConsoleCommands::execute_storage(
             return;
         }
 
+        const StorageAdmissionResult admission =
+            StorageService::storage_request_admission(
+                StorageAdmissionKind::BrowserRead);
+        if (admission != StorageAdmissionResult::Accepted) {
+            out.println(admission == StorageAdmissionResult::Unavailable
+                ? "[STORAGE] storage unavailable"
+                : "[STORAGE] storage busy");
+            return;
+        }
+
         state.storage_generation++;
         if (!state.storage_generation) state.storage_generation++;
 
@@ -477,15 +480,6 @@ void StorageConsoleCommands::execute_storage(
     }
 
     if (command == "rm" || command == "rename") {
-        const StorageWorkloadSnapshot workload =
-            storage_status_.workload_snapshot();
-        if (!workload.valid || !workload.available || workload.busy ||
-            workload.maintenance_active || workload.edf_queued > 0 ||
-            workload.open_file_count > 0) {
-            out.println("[STORAGE] storage busy");
-            return;
-        }
-
         char path[AC_STORAGE_PATH_MAX] = {};
         if (!storage_resolve_user_path(
                 state.cwd, first.c_str(), path, sizeof(path))) {
@@ -545,7 +539,9 @@ void StorageConsoleCommands::execute_storage(
         request.generation = state.storage_generation;
         const OperationSubmission submission = storage_path_.request(request);
         if (!submission.accepted()) {
-            out.println("[STORAGE] rename rejected");
+            out.println(submission.admission == OperationAdmission::Busy
+                ? "[STORAGE] storage busy"
+                : "[STORAGE] rename rejected");
             return;
         }
 

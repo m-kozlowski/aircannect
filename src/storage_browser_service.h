@@ -48,6 +48,7 @@ public:
     void finish_download(StoragePreparedDownload &download) override;
 
 private:
+    bool download_admission(char *error_out, size_t error_out_size) const;
     bool ensure_owners();
     bool ready() const;
     void wake() const;

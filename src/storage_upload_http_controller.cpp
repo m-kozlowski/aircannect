@@ -17,7 +17,6 @@
 #include "json_util.h"
 #include "large_byte_buffer.h"
 #include "storage_path.h"
-#include "storage_service.h"
 #include "storage_upload_port.h"
 
 namespace aircannect {
@@ -146,22 +145,14 @@ String upload_error_json(const char *error, uint64_t committed_bytes = 0) {
 
 }  // namespace
 
-bool StorageUploadHttpController::begin(StorageUploadPort &upload_port,
-                                        StorageStatusPort &status_port) {
+bool StorageUploadHttpController::begin(StorageUploadPort &upload_port) {
     upload_port_ = &upload_port;
-    status_port_ = &status_port;
 
     if (!capability_mutex_) {
         capability_mutex_ = xSemaphoreCreateMutexStatic(
             &capability_mutex_storage_);
     }
     return capability_mutex_ != nullptr;
-}
-
-void StorageUploadHttpController::publish_activity(
-    const ActivitySnapshot &activity) {
-    therapy_active_.store(activity.therapy_active,
-                          std::memory_order_relaxed);
 }
 
 void StorageUploadHttpController::register_routes(HttpRouteRegistry &server) {
@@ -197,22 +188,10 @@ void StorageUploadHttpController::register_routes(HttpRouteRegistry &server) {
 
 void StorageUploadHttpController::send_start(
     AsyncWebServerRequest *request) {
-    if (!upload_port_ || !status_port_) {
+    if (!upload_port_) {
         http_discard_request_body(request);
         request->send(503, "application/json",
                       upload_error_json("upload_unavailable"));
-        return;
-    }
-    if (therapy_active_.load(std::memory_order_relaxed)) {
-        http_discard_request_body(request);
-        request->send(409, "application/json",
-                      upload_error_json("therapy_active"));
-        return;
-    }
-    if (!status_port_->mounted()) {
-        http_discard_request_body(request);
-        request->send(503, "application/json",
-                      upload_error_json("storage_unavailable"));
         return;
     }
 
@@ -266,9 +245,10 @@ void StorageUploadHttpController::send_start(
 
     const StorageUploadStartResult result = upload_port_->start(command);
     if (!result.accepted()) {
-        const int status = result.admission == OperationAdmission::Busy
-            ? 409
-            : 400;
+        const int status = result.error[0] &&
+                strcmp(result.error, "storage_unavailable") == 0
+            ? 503
+            : result.admission == OperationAdmission::Busy ? 409 : 400;
         request->send(status, "application/json",
                       upload_error_json(result.error[0]
                                             ? result.error

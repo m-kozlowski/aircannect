@@ -26,7 +26,6 @@
 #include "storage_path.h"
 #include "storage_path_port.h"
 #include "storage_read_port.h"
-#include "storage_service.h"
 
 namespace aircannect {
 namespace {
@@ -151,7 +150,10 @@ void send_storage_job_start_failed(AsyncWebServerRequest *request,
     snprintf(body, sizeof(body),
              "{\"ok\":false,\"error\":\"%s\"}",
              error && error[0] ? error : fallback);
-    request->send(409, "application/json", body);
+    const int status = error && strcmp(error, "storage_unavailable") == 0
+        ? 503
+        : 409;
+    request->send(status, "application/json", body);
 }
 
 void send_storage_job_queued(AsyncWebServerRequest *request, uint32_t id) {
@@ -216,76 +218,6 @@ struct StorageDownloadRef {
         if (port && download) port->finish_download(*download);
     }
 };
-
-bool therapy_request_idle(AsyncWebServerRequest *request,
-                          bool therapy_active) {
-    if (!therapy_active) return true;
-
-    request->send(409, "application/json",
-                  "{\"ok\":false,\"error\":\"therapy_active\"}");
-    return false;
-}
-
-bool storage_heavy_request_available(AsyncWebServerRequest *request,
-                                     bool therapy_active,
-                                     const StorageStatusPort *status_port) {
-    if (!therapy_request_idle(request, therapy_active)) return false;
-
-    if (!status_port || !status_port->mounted()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_unavailable\"}");
-        return false;
-    }
-
-    const StorageWorkloadSnapshot storage =
-        status_port->workload_snapshot();
-    if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
-        storage.open_file_count > 0) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_busy\"}");
-        return false;
-    }
-    return true;
-}
-
-bool storage_read_request_available(AsyncWebServerRequest *request,
-                                    bool therapy_active,
-                                    const StorageStatusPort *status_port) {
-    if (!therapy_request_idle(request, therapy_active)) return false;
-
-    if (!status_port || !status_port->mounted()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_unavailable\"}");
-        return false;
-    }
-    return true;
-}
-
-bool storage_jobs_available(AsyncWebServerRequest *request,
-                            const StorageArchivePort *archive_port,
-                            const StorageDeletePort *delete_port) {
-    if (archive_port && archive_port->active()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_busy\"}");
-        return false;
-    }
-    if (delete_port && delete_port->active()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_busy\"}");
-        return false;
-    }
-    return true;
-}
-
-bool storage_delete_available(AsyncWebServerRequest *request,
-                              const StorageDeletePort *delete_port) {
-    if (delete_port && delete_port->active()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_busy\"}");
-        return false;
-    }
-    return true;
-}
 
 class StorageJobGate {
 public:
@@ -360,14 +292,12 @@ bool StorageHttpController::begin(StorageReadPort &read_port,
                                   StorageBrowserPort &browser_port,
                                   StoragePathPort &path_port,
                                   StorageArchivePort &archive_port,
-                                  StorageDeletePort &delete_port,
-                                  StorageStatusPort &status_port) {
+                                  StorageDeletePort &delete_port) {
     storage_read_ = &read_port;
     storage_browser_ = &browser_port;
     storage_path_ = &path_port;
     storage_archive_ = &archive_port;
     storage_delete_ = &delete_port;
-    storage_status_ = &status_port;
 
     if (!job_mutex_) {
         job_mutex_ = xSemaphoreCreateMutexStatic(&job_mutex_storage_);
@@ -381,11 +311,6 @@ bool StorageHttpController::begin(StorageReadPort &read_port,
     }
 
     return publish_operation_snapshot_if_needed(true);
-}
-
-void StorageHttpController::publish_activity(const ActivitySnapshot &activity) {
-    therapy_active_.store(activity.therapy_active,
-                          std::memory_order_relaxed);
 }
 
 void StorageHttpController::poll() {
@@ -781,13 +706,6 @@ void StorageHttpController::send_storage_list(AsyncWebServerRequest *request) co
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!storage_read_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-
     const bool refresh = http_bool_arg(request, "refresh", false);
     std::shared_ptr<const StorageDirectorySnapshot> snapshot;
     char error[AC_STORAGE_ERROR_MAX] = {};
@@ -802,10 +720,10 @@ void StorageHttpController::send_storage_list(AsyncWebServerRequest *request) co
         return;
     }
     if (read == StorageListingRead::Error || !snapshot) {
-        const int code = strcmp(error, "not_found") == 0 ||
-                         strcmp(error, "not_directory") == 0
-            ? 404
-            : 503;
+        const int code = strcmp(error, "storage_busy") == 0
+            ? 409
+            : (strcmp(error, "not_found") == 0 ||
+               strcmp(error, "not_directory") == 0 ? 404 : 503);
         char body[128] = {};
         snprintf(body, sizeof(body),
                  "{\"ok\":false,\"error\":\"%s\"}",
@@ -895,16 +813,6 @@ void StorageHttpController::send_storage_download(AsyncWebServerRequest *request
                       "{\"ok\":false,\"error\":\"download_unavailable\"}");
         return;
     }
-    if (!storage_read_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-    if (!storage_delete_available(request, storage_delete_)) {
-        return;
-    }
-
     if (!request->hasArg("id")) {
         if (!request->hasArg("path")) {
             request->send(400, "application/json",
@@ -923,7 +831,8 @@ void StorageHttpController::send_storage_download(AsyncWebServerRequest *request
             storage_browser_->prepare_download(path.c_str(), status);
         if (state == StorageDownloadPrepareState::Busy ||
             state == StorageDownloadPrepareState::Error) {
-            const int code = state == StorageDownloadPrepareState::Busy
+            const int code = state == StorageDownloadPrepareState::Busy ||
+                             strcmp(status.error, "storage_busy") == 0
                 ? 409
                 : (strcmp(status.error, "not_found") == 0 ||
                    strcmp(status.error, "not_file") == 0 ? 404 : 503);
@@ -1062,13 +971,6 @@ void StorageHttpController::send_storage_rename(
 
     StorageJobGate gate(request, job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_) ||
-        !storage_jobs_available(request, storage_archive_, storage_delete_)) {
-        return;
-    }
     if (pending_storage_rename_) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"rename_busy\"}");
@@ -1085,8 +987,12 @@ void StorageHttpController::send_storage_rename(
     command.generation = storage_rename_generation_;
     const OperationSubmission submission = storage_path_->request(command);
     if (!submission.accepted()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"rename_rejected\"}");
+        request->send(
+            submission.admission == OperationAdmission::Busy ? 409 : 400,
+            "application/json",
+            submission.admission == OperationAdmission::Busy
+                ? "{\"ok\":false,\"error\":\"rename_busy\"}"
+                : "{\"ok\":false,\"error\":\"rename_rejected\"}");
         return;
     }
 
@@ -1163,18 +1069,6 @@ void StorageHttpController::send_storage_archive_start(
         if (!parse_storage_selection_request(request, selection)) return;
         StorageJobGate gate(request, job_mutex_);
         if (!gate.locked()) return;
-        if (!storage_heavy_request_available(
-                request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-            return;
-        }
-        if (!storage_jobs_available(request,
-                                    storage_archive_,
-                                    storage_delete_)) {
-            return;
-        }
-
         uint32_t id = 0;
         char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
         if (!storage_archive_->start_selected(selection.base,
@@ -1206,18 +1100,6 @@ void StorageHttpController::send_storage_archive_start(
     }
     StorageJobGate gate(request, job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-    if (!storage_jobs_available(request,
-                                storage_archive_,
-                                storage_delete_)) {
-        return;
-    }
-
     const bool recursive =
         http_bool_arg(request, "recursive", true);
     uint32_t id = 0;
@@ -1288,16 +1170,6 @@ void StorageHttpController::send_storage_archive_download(
                       "{\"ok\":false,\"error\":\"archive_download_busy\"}");
         return;
     }
-    if (!storage_read_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-    if (!storage_delete_available(request, storage_delete_)) {
-        return;
-    }
-
     const uint32_t id = static_cast<uint32_t>(id_arg);
     char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
     std::shared_ptr<ArchiveDownloadRef> ref =
@@ -1372,18 +1244,6 @@ void StorageHttpController::send_storage_delete_start(
     if (!parse_storage_selection_request(request, selection)) return;
     StorageJobGate gate(request, job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-    if (!storage_jobs_available(request,
-                                storage_archive_,
-                                storage_delete_)) {
-        return;
-    }
-
     uint32_t id = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
     if (!storage_delete_->start_selected(selection.base,

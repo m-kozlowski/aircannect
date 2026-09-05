@@ -209,8 +209,7 @@ static StorageConsoleCommands storage_console_commands(
     StorageService::read_port(),
     StorageService::browser_port(),
     StorageService::path_port(),
-    StorageService::delete_port(),
-    StorageService::status_port());
+    StorageService::delete_port());
 static RuntimeConsoleCommands runtime_console_commands(session_manager,
                                                        live_chart_service,
                                                        therapy_telemetry_broker);
@@ -593,8 +592,6 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      ota_storage_upload_active);
     report_task.publish_activity(storage_activity);
     export_task.publish_activity(storage_activity);
-    storage_http_controller.publish_activity(storage_activity);
-    storage_upload_http_controller.publish_activity(storage_activity);
     resmed_firmware_preparer.publish_activity(storage_activity);
     resmed_firmware_repository.publish_activity(storage_activity);
 }
@@ -1374,8 +1371,7 @@ void setup() {
         StorageService::browser_port(),
         StorageService::path_port(),
         StorageService::archive_port(),
-        StorageService::delete_port(),
-        StorageService::status_port());
+        StorageService::delete_port());
     if (!storage_http_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] storage HTTP controller failed to start\n");
@@ -1383,8 +1379,7 @@ void setup() {
 
     const bool storage_upload_http_started =
         storage_upload_http_controller.begin(
-            StorageService::upload_port(),
-            StorageService::status_port());
+            StorageService::upload_port());
     if (!storage_upload_http_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] storage upload HTTP controller failed to start\n");

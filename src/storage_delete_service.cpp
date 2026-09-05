@@ -267,6 +267,15 @@ bool StorageDeleteService::start_selected(const char *base_path,
         }
     }
 
+    const StorageAdmissionResult admission =
+        StorageService::storage_request_admission(
+            StorageAdmissionKind::Maintenance);
+    if (admission != StorageAdmissionResult::Accepted) {
+        copy_cstr(error_out, error_out_size,
+                  storage_admission_error(admission));
+        return false;
+    }
+
     if (!lock(50)) {
         copy_cstr(error_out, error_out_size, "busy");
         return false;

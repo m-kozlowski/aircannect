@@ -1016,12 +1016,32 @@ void StorageBrowserService::wake() const {
     if (wake_) wake_();
 }
 
+bool StorageBrowserService::download_admission(
+    char *error_out,
+    size_t error_out_size) const {
+    const StorageAdmissionResult admission =
+        StorageService::storage_request_admission(
+            StorageAdmissionKind::BrowserDownload);
+    if (admission == StorageAdmissionResult::Accepted) return true;
+
+    copy_cstr(error_out, error_out_size, storage_admission_error(admission));
+    return false;
+}
+
 StorageListingRead StorageBrowserService::listing(
     const char *path,
     bool refresh,
     std::shared_ptr<const StorageDirectorySnapshot> &snapshot_out,
     char *error_out,
     size_t error_out_size) {
+    snapshot_out.reset();
+    const StorageAdmissionResult admission =
+        StorageService::storage_request_admission(
+            StorageAdmissionKind::BrowserRead);
+    if (admission != StorageAdmissionResult::Accepted) {
+        copy_cstr(error_out, error_out_size, storage_admission_error(admission));
+        return StorageListingRead::Error;
+    }
     if (!ready()) {
         copy_cstr(error_out, error_out_size, "service_unavailable");
         return StorageListingRead::Error;
@@ -1040,6 +1060,11 @@ StorageListingRead StorageBrowserService::listing(
 StorageDownloadPrepareState StorageBrowserService::prepare_download(
     const char *path,
     StorageDownloadPrepareStatus &status_out) {
+    status_out = StorageDownloadPrepareStatus();
+    if (!download_admission(status_out.error, sizeof(status_out.error))) {
+        status_out.state = StorageDownloadPrepareState::Error;
+        return status_out.state;
+    }
     if (!ready()) {
         status_out = StorageDownloadPrepareStatus();
         status_out.state = StorageDownloadPrepareState::Error;
@@ -1064,6 +1089,7 @@ bool StorageBrowserService::begin_download(
     uint64_t &size_out,
     char *error_out,
     size_t error_out_size) {
+    if (!download_admission(error_out, error_out_size)) return false;
     if (!ready()) {
         copy_cstr(error_out, error_out_size, "service_unavailable");
         return false;

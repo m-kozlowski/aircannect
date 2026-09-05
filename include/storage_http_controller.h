@@ -10,7 +10,6 @@
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "published_json_snapshot.h"
-#include "runtime_snapshots.h"
 
 class AsyncWebServerRequest;
 
@@ -21,7 +20,6 @@ class StorageBrowserPort;
 class StorageDeletePort;
 class StoragePathPort;
 class StorageReadPort;
-class StorageStatusPort;
 
 // Presents storage-owned browser, archive, delete, and file-log operations.
 class StorageHttpController final : public HttpRouteModule {
@@ -33,12 +31,9 @@ public:
                StorageBrowserPort &browser_port,
                StoragePathPort &path_port,
                StorageArchivePort &archive_port,
-               StorageDeletePort &delete_port,
-               StorageStatusPort &status_port);
+               StorageDeletePort &delete_port);
     void poll();
     void register_routes(HttpRouteRegistry &server) override;
-
-    void publish_activity(const ActivitySnapshot &activity);
 
     const PublishedJsonSnapshot &operation_snapshot() const {
         return operation_snapshot_;
@@ -67,7 +62,6 @@ private:
     StoragePathPort *storage_path_ = nullptr;
     StorageArchivePort *storage_archive_ = nullptr;
     StorageDeletePort *storage_delete_ = nullptr;
-    StorageStatusPort *storage_status_ = nullptr;
 
     struct PendingFileLogTail;
     struct PendingArchiveDownload;
@@ -87,10 +81,9 @@ private:
     bool operation_snapshot_active_ = false;
     bool operation_snapshot_initialized_ = false;
 
-    // Request admission
+    // Request serialization for paused HTTP responses
     mutable StaticSemaphore_t job_mutex_storage_ = {};
     mutable SemaphoreHandle_t job_mutex_ = nullptr;
-    std::atomic<bool> therapy_active_{false};
 };
 
 }  // namespace aircannect
