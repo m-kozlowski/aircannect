@@ -16,6 +16,8 @@
 
 namespace aircannect {
 
+class StorageStatusPort;
+
 enum class ReportTaskState : uint8_t {
     Stopped,
     LoadingCatalog,
@@ -78,6 +80,7 @@ struct ReportTaskControlSnapshot {
     uint32_t durable_catalog_generation = 0;
     bool foreground_active = false;
     bool background_active = false;
+    bool post_therapy_settle_pending = false;
     NightCatalogRefreshState catalog_refresh_state =
         NightCatalogRefreshState::Idle;
     uint32_t catalog_refresh_generation = 0;
@@ -204,7 +207,8 @@ public:
                StorageAtomicWritePort &write_port,
                StorageScanPort &scan_port,
                ReportSpoolPort &spool_port,
-               StorageRangeWritePort &range_write_port);
+               StorageRangeWritePort &range_write_port,
+               StorageStatusPort &status_port);
 
     OperationAdmission request_night(
         SleepDayId sleep_day,
@@ -215,11 +219,13 @@ public:
                                        SleepDayId last_day,
                                        uint32_t generation);
     ReportRebuildStatus rebuild_status() const;
-    OperationAdmission request_catalog_refresh(
-        bool current_offset_valid,
-        int32_t current_offset_minutes,
-        uint32_t generation,
+    OperationAdmission publish_session_ended(
+        uint32_t sessions_ended,
         const NightCatalogRefreshTarget &target = {});
+    OperationAdmission publish_timezone_change(
+        uint32_t revision,
+        bool offset_valid,
+        int32_t offset_minutes);
     void publish_activity(const ActivitySnapshot &activity);
 
     ReportTaskControlSnapshot control_snapshot() const;

@@ -249,21 +249,6 @@ static ConsoleCommandRouter console_router;
 #if AC_STACK_PROFILE_ENABLED
 static StackProfiler stack_profiler;
 #endif
-static constexpr uint32_t AC_REPORT_CATALOG_SESSION_SETTLE_MS = 5000;
-static constexpr uint32_t AC_REPORT_CATALOG_RECONCILE_IDLE_MS =
-    5 * 60 * 1000;
-static uint32_t report_catalog_seen_sessions_ended = 0;
-static bool report_catalog_target_pending = false;
-static NightCatalogRefreshTarget report_catalog_target;
-static uint32_t report_catalog_target_due_ms = 0;
-static uint32_t report_catalog_target_generation = 0;
-static bool report_catalog_reconcile_pending = true;
-static bool report_catalog_reconcile_is_post_therapy = false;
-static uint32_t report_catalog_reconcile_due_ms = 0;
-static uint32_t report_catalog_reconcile_generation = 0;
-static uint32_t report_catalog_post_therapy_generation = 0;
-static uint32_t report_catalog_timezone_revision = 0;
-static uint32_t report_catalog_request_generation = 0;
 static uint32_t rpc_transport_generation_seen = 0;
 static ActivitySnapshot storage_activity;
 static NetworkSnapshot runtime_network;
@@ -887,143 +872,25 @@ static void apply_config_runtime_effects(void *,
     }
 }
 
-static uint32_t next_report_catalog_generation() {
-    const uint32_t published =
-        report_task.control_snapshot().catalog_generation;
-    if (report_catalog_request_generation < published) {
-        report_catalog_request_generation = published;
-    }
-
-    report_catalog_request_generation++;
-    if (report_catalog_request_generation == 0) {
-        report_catalog_request_generation = 1;
-    }
-    return report_catalog_request_generation;
-}
-
-static bool report_catalog_generation_reached(uint32_t completed,
-                                              uint32_t requested) {
-    if (requested == 0) return true;
-    return static_cast<int32_t>(completed - requested) >= 0;
-}
-
-static void poll_report_catalog_refresh(uint32_t now_ms) {
+static void publish_report_catalog_inputs() {
     const uint32_t sessions_ended = edf_recorder_manager.sessions_ended();
-    if (sessions_ended != report_catalog_seen_sessions_ended) {
-        report_catalog_seen_sessions_ended = sessions_ended;
-
-        EdfCatalogRefreshHint hint;
-        report_catalog_target = {};
-        report_catalog_target_pending =
-            edf_recorder_manager.latest_catalog_refresh_hint(hint);
-        if (report_catalog_target_pending) {
-            report_catalog_target.sleep_day = hint.sleep_day;
-            copy_cstr(report_catalog_target.datalog_sleep_day,
-                      sizeof(report_catalog_target.datalog_sleep_day),
-                      hint.datalog_sleep_day);
-            report_catalog_target_due_ms =
-                now_ms + AC_REPORT_CATALOG_SESSION_SETTLE_MS;
-            report_catalog_target_generation = 0;
-        }
-
-        report_catalog_reconcile_pending = true;
-        report_catalog_reconcile_is_post_therapy =
-            !report_catalog_target_pending;
-        report_catalog_reconcile_due_ms = now_ms +
-            (report_catalog_target_pending
-                 ? AC_REPORT_CATALOG_RECONCILE_IDLE_MS
-                 : AC_REPORT_CATALOG_SESSION_SETTLE_MS);
-        report_catalog_reconcile_generation = 0;
-        report_catalog_post_therapy_generation = 0;
+    EdfCatalogRefreshHint hint;
+    NightCatalogRefreshTarget target;
+    if (edf_recorder_manager.latest_catalog_refresh_hint(hint)) {
+        target.sleep_day = hint.sleep_day;
+        copy_cstr(target.datalog_sleep_day,
+                  sizeof(target.datalog_sleep_day),
+                  hint.datalog_sleep_day);
     }
 
-    const uint32_t timezone_revision = time_sync_service.timezone_revision();
-    if (timezone_revision != report_catalog_timezone_revision) {
-        report_catalog_timezone_revision = timezone_revision;
-        report_catalog_reconcile_pending = true;
-        report_catalog_reconcile_due_ms = now_ms;
-        report_catalog_reconcile_generation = 0;
-    }
-
-    const ReportTaskControlSnapshot report_status =
-        report_task.control_snapshot();
-    if (report_catalog_post_therapy_generation != 0 &&
-        report_status.catalog_refresh_generation ==
-            report_catalog_post_therapy_generation &&
-        report_status.catalog_refresh_state ==
-            NightCatalogRefreshState::Error &&
-        !report_status.catalog_refresh_retryable) {
-        report_catalog_post_therapy_generation = 0;
-        report_catalog_reconcile_pending = true;
-        report_catalog_reconcile_is_post_therapy = true;
-        report_catalog_reconcile_due_ms = now_ms;
-        report_catalog_reconcile_generation = 0;
-    }
-
-    const bool target_due = report_catalog_target_pending &&
-        static_cast<int32_t>(now_ms - report_catalog_target_due_ms) >= 0;
-    const bool target_settle_active =
-        report_catalog_post_therapy_generation != 0 &&
-        !report_catalog_generation_reached(
-            report_status.durable_catalog_generation,
-            report_catalog_post_therapy_generation);
-    const bool reconcile_due = !report_catalog_target_pending &&
-        !target_settle_active &&
-        report_catalog_reconcile_pending &&
-        static_cast<int32_t>(now_ms - report_catalog_reconcile_due_ms) >= 0;
-    if (!target_due && !reconcile_due) {
-        return;
-    }
-
-    const StorageWorkloadSnapshot storage =
-        StorageService::workload_snapshot();
-
-    if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
-        storage.open_file_count > 0) {
-        if (target_due) {
-            report_catalog_target_due_ms = now_ms + 1000;
-        } else {
-            report_catalog_reconcile_due_ms = now_ms + 1000;
-        }
-        return;
-    }
+    (void)report_task.publish_session_ended(sessions_ended, target);
 
     const bool offset_valid =
         as11_device_service.state().timezone_offset_valid();
     const int32_t offset_minutes = offset_valid
-        ? as11_device_service.state().timezone_offset_minutes()
-        : 0;
-    uint32_t &generation = target_due
-        ? report_catalog_target_generation
-        : report_catalog_reconcile_generation;
-    if (generation == 0) generation = next_report_catalog_generation();
-
-    const OperationAdmission admitted = report_task.request_catalog_refresh(
-        offset_valid,
-        offset_minutes,
-        generation,
-        target_due ? report_catalog_target : NightCatalogRefreshTarget{});
-    if (admitted == OperationAdmission::Accepted) {
-        if (target_due) {
-            report_catalog_target_pending = false;
-            report_catalog_target = {};
-            report_catalog_target_generation = 0;
-            report_catalog_post_therapy_generation = generation;
-        } else {
-            report_catalog_reconcile_pending = false;
-            report_catalog_reconcile_generation = 0;
-            if (report_catalog_reconcile_is_post_therapy) {
-                report_catalog_post_therapy_generation = generation;
-                report_catalog_reconcile_is_post_therapy = false;
-            }
-        }
-    } else {
-        if (target_due) {
-            report_catalog_target_due_ms = now_ms + 2000;
-        } else {
-            report_catalog_reconcile_due_ms = now_ms + 2000;
-        }
-    }
+        ? as11_device_service.state().timezone_offset_minutes() : 0;
+    (void)report_task.publish_timezone_change(
+        time_sync_service.timezone_revision(), offset_valid, offset_minutes);
 }
 
 static void drain_rpc_events() {
@@ -1495,7 +1362,8 @@ void setup() {
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
                            report_spool_service,
-                           StorageService::range_write_port())) {
+                           StorageService::range_write_port(),
+                           StorageService::status_port())) {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
@@ -1515,9 +1383,6 @@ void setup() {
     }
     time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
-    report_catalog_timezone_revision = time_sync_service.timezone_revision();
-    report_catalog_reconcile_due_ms =
-        millis() + AC_REPORT_CATALOG_RECONCILE_IDLE_MS;
     firmware_installer.begin();
     firmware_url_source.begin();
     arduino_ota_source.begin(config_service.data());
@@ -1713,7 +1578,7 @@ void loop() {
     edf_recorder_manager.poll(now_ms);
     drain_can_rx_after("edf");
 
-    poll_report_catalog_refresh(now_ms);
+    publish_report_catalog_inputs();
     drain_can_rx_after("report_catalog");
 
     // Therapy telemetry and live charts
@@ -1798,14 +1663,9 @@ void loop() {
     // Storage and exports
     ExportReportActivity report_activity;
     report_activity.foreground_active = report_status.foreground_active;
-    report_activity.background_active =
-        report_status.background_active || report_catalog_target_pending;
+    report_activity.background_active = report_status.background_active;
     report_activity.post_therapy_settle_pending =
-        report_catalog_target_pending ||
-        report_catalog_reconcile_is_post_therapy ||
-        !report_catalog_generation_reached(
-            report_status.durable_catalog_generation,
-            report_catalog_post_therapy_generation);
+        report_status.post_therapy_settle_pending;
 
     const bool foreground_report_active = report_status.foreground_active;
     const bool export_work_claimed =

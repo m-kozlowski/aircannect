@@ -10,6 +10,7 @@
 #include "night_catalog_builder.h"
 #include "report_fallback_artifact.h"
 #include "report_spool_availability.h"
+#include "storage_service.h"
 #include "string_util.h"
 
 #ifdef ARDUINO
@@ -28,6 +29,8 @@ namespace aircannect {
 namespace {
 
 constexpr uint32_t CATALOG_STORE_GENERATION = 1;
+constexpr uint32_t CATALOG_SESSION_SETTLE_MS = 5000;
+constexpr uint32_t CATALOG_RECONCILE_IDLE_MS = 5 * 60 * 1000;
 constexpr uint32_t CATALOG_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_RETRY_MAX_MS = 30000;
 constexpr uint32_t MATERIALIZE_RETRY_MS = 10 * 60 * 1000;
@@ -36,7 +39,6 @@ constexpr uint32_t SPOOL_AVAILABILITY_RETRY_MS = 10 * 60 * 1000;
 enum class ReportTaskCommandKind : uint8_t {
     MaterializeNight,
     Rebuild,
-    RefreshCatalog,
 };
 
 struct ReportTaskCommand {
@@ -45,22 +47,27 @@ struct ReportTaskCommand {
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
     bool force_rebuild = false;
     uint32_t generation = 0;
-    bool current_offset_valid = false;
-    int32_t current_offset_minutes = 0;
-    NightCatalogRefreshTarget catalog_target;
     SleepDayId first_day;
     SleepDayId last_day;
 };
 
 struct PendingCatalogRefresh {
     uint32_t generation = 0;
+    uint32_t due_ms = 0;
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
     bool summary_attempted = false;
+    bool post_therapy = false;
     NightCatalogRefreshTarget target;
 
     bool valid() const { return generation != 0; }
     void clear() { *this = {}; }
+};
+
+struct PendingSessionEnded {
+    bool pending = false;
+    bool full_reconcile = false;
+    NightCatalogRefreshTarget target;
 };
 
 struct ReportNightFailureEntry {
@@ -102,6 +109,18 @@ uint32_t monotonic_generation(uint32_t requested, uint32_t current) {
 bool deadline_due(uint32_t now_ms, uint32_t deadline_ms) {
     return deadline_ms == 0 ||
            static_cast<int32_t>(now_ms - deadline_ms) >= 0;
+}
+
+uint32_t earlier_deadline(uint32_t left, uint32_t right) {
+    if (left == 0 || right == 0) return 0;
+    return static_cast<int32_t>(left - right) < 0 ? left : right;
+}
+
+bool same_refresh_target(const NightCatalogRefreshTarget &left,
+                         const NightCatalogRefreshTarget &right) {
+    return left.valid() && right.valid() &&
+           left.sleep_day == right.sleep_day &&
+           strcmp(left.datalog_sleep_day, right.datalog_sleep_day) == 0;
 }
 
 uint32_t deadline_remaining(uint32_t now_ms, uint32_t deadline_ms) {
@@ -175,13 +194,6 @@ struct ReportTask::Runtime {
         for (size_t i = 0; i < command_count; ++i) {
             ReportTaskCommand &queued = commands[i];
             if (queued.kind != command.kind) continue;
-
-            if (command.kind == ReportTaskCommandKind::RefreshCatalog) {
-                queued = command;
-                unlock();
-                wake();
-                return OperationAdmission::Accepted;
-            }
             if (queued.sleep_day == command.sleep_day) {
                 queued.force_rebuild =
                     queued.force_rebuild || command.force_rebuild;
@@ -225,8 +237,7 @@ struct ReportTask::Runtime {
 
         size_t selected = SIZE_MAX;
         for (size_t i = 0; i < command_count; ++i) {
-            if (commands[i].kind == ReportTaskCommandKind::MaterializeNight &&
-                commands[i].priority == ReportRequestPriority::Foreground) {
+            if (commands[i].priority == ReportRequestPriority::Foreground) {
                 selected = i;
                 break;
             }
@@ -249,6 +260,69 @@ struct ReportTask::Runtime {
         activity_pending = true;
         unlock();
         wake();
+    }
+
+    OperationAdmission publish_session_ended(
+        uint32_t sessions_ended,
+        const NightCatalogRefreshTarget &target) {
+        if (sessions_ended == 0) return OperationAdmission::Accepted;
+        if (!lock()) return OperationAdmission::Busy;
+
+        if (last_sessions_ended != 0 &&
+            static_cast<int32_t>(sessions_ended - last_sessions_ended) <= 0) {
+            unlock();
+            return OperationAdmission::Accepted;
+        }
+
+        const bool count_gap =
+            (last_sessions_ended == 0 && sessions_ended != 1) ||
+            (last_sessions_ended != 0 &&
+             sessions_ended != last_sessions_ended + 1);
+        if (pending_session_ended.pending) {
+            pending_session_ended.full_reconcile =
+                pending_session_ended.full_reconcile || count_gap ||
+                !target.valid() ||
+                !same_refresh_target(pending_session_ended.target, target);
+            if (!pending_session_ended.full_reconcile) {
+                pending_session_ended.target = target;
+            }
+        } else {
+            pending_session_ended.pending = true;
+            pending_session_ended.full_reconcile = count_gap ||
+                !target.valid();
+            pending_session_ended.target =
+                pending_session_ended.full_reconcile
+                    ? NightCatalogRefreshTarget{} : target;
+        }
+        last_sessions_ended = sessions_ended;
+        control.background_active = true;
+        control.post_therapy_settle_pending = true;
+        unlock();
+        wake();
+        return OperationAdmission::Accepted;
+    }
+
+    OperationAdmission publish_timezone_change(uint32_t revision,
+                                                bool offset_valid,
+                                                int32_t offset_minutes) {
+        if (!lock()) return OperationAdmission::Busy;
+
+        const bool changed = timezone_seen &&
+            revision != timezone_revision;
+        timezone_seen = true;
+        timezone_revision = revision;
+        timezone_offset_valid = offset_valid;
+        timezone_offset_minutes = offset_minutes;
+        if (!changed) {
+            unlock();
+            return OperationAdmission::Accepted;
+        }
+
+        pending_timezone_change = true;
+        control.background_active = true;
+        unlock();
+        wake();
+        return OperationAdmission::Accepted;
     }
 
     std::shared_ptr<const ReportPublishedState> published_state() const {
@@ -286,6 +360,7 @@ struct ReportTask::Runtime {
                         uint32_t generation) {
         if (!next || generation == 0) return;
 
+        observe_catalog_generation(generation);
         catalog_generation = monotonic_generation(
             generation, catalog_generation);
         catalog = std::move(next);
@@ -457,14 +532,20 @@ struct ReportTask::Runtime {
         if (catalog_refresh.active()) {
             if (!pending_refresh.valid()) {
                 pending_refresh.generation = refresh_generation;
+                pending_refresh.due_ms = 0;
                 pending_refresh.current_offset_valid = refresh_offset_valid;
                 pending_refresh.current_offset_minutes =
                     refresh_offset_minutes;
                 pending_refresh.target = refresh_target;
                 pending_refresh.summary_attempted = true;
+                pending_refresh.post_therapy = refresh_post_therapy;
+            } else {
+                pending_refresh.post_therapy =
+                    pending_refresh.post_therapy || refresh_post_therapy;
             }
             catalog_refresh.cancel();
             refresh_generation = 0;
+            refresh_post_therapy = false;
         }
         if (store_catalog_loader.status().active()) {
             store_catalog_loader.cancel();
@@ -474,6 +555,168 @@ struct ReportTask::Runtime {
         }
         reset_background_pass();
         return true;
+    }
+
+    bool catalog_storage_ready() const {
+        if (!storage_status) return false;
+        const StorageWorkloadSnapshot workload =
+            storage_status->workload_snapshot();
+        return workload.valid && !workload.busy &&
+               workload.edf_queued == 0 && workload.open_file_count == 0;
+    }
+
+    void observe_catalog_generation(uint32_t generation) {
+        if (generation == 0) return;
+
+        if (catalog_request_generation == 0 ||
+            static_cast<int32_t>(generation - catalog_request_generation) > 0) {
+            catalog_request_generation = generation;
+        }
+    }
+
+    uint32_t next_catalog_generation() {
+        observe_catalog_generation(catalog_generation);
+        observe_catalog_generation(durable_catalog_generation);
+        observe_catalog_generation(refresh_generation);
+        observe_catalog_generation(pending_refresh.generation);
+        catalog_request_generation = increment_generation(
+            catalog_request_generation);
+        return catalog_request_generation;
+    }
+
+    void record_durable_catalog_generation(uint32_t generation) {
+        if (generation == 0) return;
+
+        if (durable_catalog_generation == 0 ||
+            static_cast<int32_t>(generation - durable_catalog_generation) > 0) {
+            durable_catalog_generation = generation;
+        }
+        observe_catalog_generation(generation);
+    }
+
+    void schedule_reconcile(uint32_t due_ms,
+                            bool post_therapy,
+                            bool reset_post_therapy_deadline = false) {
+        if (reset_post_therapy_deadline && post_therapy) {
+            reconcile_due_ms = due_ms;
+        } else if (!reconcile_pending ||
+            earlier_deadline(due_ms, reconcile_due_ms) == due_ms) {
+            reconcile_due_ms = due_ms;
+        }
+        reconcile_pending = true;
+        reconcile_post_therapy =
+            reconcile_post_therapy || post_therapy;
+        reconcile_deadline_initialized = true;
+    }
+
+    void schedule_refresh(uint32_t due_ms,
+                          bool offset_valid,
+                          int32_t offset_minutes,
+                          const NightCatalogRefreshTarget &target,
+                          bool post_therapy,
+                          bool reset_post_therapy_deadline = false) {
+        if (pending_refresh.valid()) {
+            const bool same_target = same_refresh_target(
+                pending_refresh.target, target);
+            const bool keep_target = target.valid() && same_target;
+            if (!keep_target) {
+                pending_refresh.target = {};
+                pending_refresh.summary_attempted = false;
+            }
+            pending_refresh.due_ms =
+                reset_post_therapy_deadline && post_therapy
+                    ? due_ms
+                    : earlier_deadline(pending_refresh.due_ms, due_ms);
+            pending_refresh.current_offset_valid = offset_valid;
+            pending_refresh.current_offset_minutes = offset_minutes;
+            pending_refresh.post_therapy =
+                pending_refresh.post_therapy || post_therapy;
+            return;
+        }
+
+        pending_refresh.generation = next_catalog_generation();
+        pending_refresh.due_ms = due_ms;
+        pending_refresh.current_offset_valid = offset_valid;
+        pending_refresh.current_offset_minutes = offset_minutes;
+        pending_refresh.summary_attempted = target.valid() && catalog;
+        pending_refresh.post_therapy = post_therapy;
+        pending_refresh.target = target;
+    }
+
+    bool apply_pending_refresh_inputs(uint32_t now_ms) {
+        PendingSessionEnded session;
+        bool timezone_changed = false;
+        bool offset_valid = false;
+        int32_t offset_minutes = 0;
+        if (!lock()) return false;
+
+        session = pending_session_ended;
+        pending_session_ended = {};
+        timezone_changed = pending_timezone_change;
+        pending_timezone_change = false;
+        offset_valid = timezone_offset_valid;
+        offset_minutes = timezone_offset_minutes;
+        unlock();
+
+        if (!session.pending && !timezone_changed) return false;
+
+        (void)engine.cancel_background();
+        if (session.pending) {
+            if (session.full_reconcile) {
+                schedule_reconcile(
+                    now_ms + CATALOG_SESSION_SETTLE_MS,
+                    true,
+                    true);
+            } else {
+                schedule_refresh(
+                    now_ms + CATALOG_SESSION_SETTLE_MS,
+                    offset_valid,
+                    offset_minutes,
+                    session.target,
+                    true,
+                    true);
+                schedule_reconcile(
+                    now_ms + CATALOG_RECONCILE_IDLE_MS,
+                    false);
+            }
+        }
+        if (timezone_changed) {
+            schedule_reconcile(now_ms,
+                               false);
+        }
+        return true;
+    }
+
+    bool materialize_due_reconcile(uint32_t now_ms) {
+        if (!reconcile_pending ||
+            !deadline_due(now_ms, reconcile_due_ms) ||
+            pending_refresh.valid() || refresh_generation != 0 ||
+            catalog_refresh.active() || catalog_load_pending) {
+            return false;
+        }
+
+        const bool post_therapy = reconcile_post_therapy;
+        if (!lock()) return false;
+        const bool offset_valid = timezone_offset_valid;
+        const int32_t offset_minutes = timezone_offset_minutes;
+        unlock();
+
+        reconcile_pending = false;
+        reconcile_post_therapy = false;
+        schedule_refresh(
+            0,
+            offset_valid,
+            offset_minutes,
+            {},
+            post_therapy);
+        return true;
+    }
+
+    bool post_therapy_settle_pending() const {
+        return pending_session_ended.pending ||
+               (pending_refresh.valid() && pending_refresh.post_therapy) ||
+               (reconcile_pending && reconcile_post_therapy) ||
+               refresh_post_therapy || pending_catalog_save_post_therapy;
     }
 
     bool startup_idle_allowed(uint32_t now_ms) {
@@ -687,9 +930,10 @@ struct ReportTask::Runtime {
             return true;
         }
 
-        accept_catalog(
-            std::move(updated), increment_generation(catalog_generation));
+        const uint32_t generation = increment_generation(catalog_generation);
+        accept_catalog(std::move(updated), generation);
         pending_catalog_save = catalog;
+        pending_catalog_save_generation = catalog_generation;
         catalog_store_retry_at_ms = 0;
         catalog_store_retry_attempt = 0;
         return true;
@@ -965,7 +1209,7 @@ struct ReportTask::Runtime {
             store_catalog_loader.status().active() ||
             catalog_refresh.active() || summary_acquisition.active() ||
             spool_availability_probe.status().active() ||
-            pending_catalog_save != nullptr;
+            pending_catalog_save != nullptr || pending_refresh.valid();
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -990,13 +1234,23 @@ struct ReportTask::Runtime {
                     next.state = ReportTaskState::Queued;
                     break;
                 case ReportEngineState::Idle:
-                    next.state = command_count ? ReportTaskState::Queued
-                                               : ReportTaskState::Idle;
+                    next.state = ReportTaskState::Idle;
                     break;
             }
         }
 
         if (!lock()) return;
+        if (next.state == ReportTaskState::Idle && command_count != 0) {
+            next.state = ReportTaskState::Queued;
+        }
+        const bool pending_inputs = pending_session_ended.pending &&
+            !pending_session_ended.full_reconcile;
+        next.background_active = next.background_active || pending_inputs;
+        if (pending_inputs && next.state == ReportTaskState::Idle) {
+            next.state = ReportTaskState::RefreshingCatalog;
+        }
+        next.post_therapy_settle_pending =
+            post_therapy_settle_pending();
         control = next;
         unlock();
     }
@@ -1023,12 +1277,27 @@ struct ReportTask::Runtime {
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportPublishedState> published;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
+    uint32_t pending_catalog_save_generation = 0;
+    bool pending_catalog_save_post_therapy = false;
+    uint32_t catalog_store_save_generation = 0;
 
     PendingCatalogRefresh pending_refresh;
+    PendingSessionEnded pending_session_ended;
+    bool pending_timezone_change = false;
+    uint32_t last_sessions_ended = 0;
+    bool timezone_seen = false;
+    uint32_t timezone_revision = 0;
+    bool timezone_offset_valid = false;
+    int32_t timezone_offset_minutes = 0;
+    bool reconcile_pending = false;
+    bool reconcile_post_therapy = false;
+    uint32_t reconcile_due_ms = 0;
+    bool reconcile_deadline_initialized = false;
     uint32_t refresh_generation = 0;
     bool refresh_offset_valid = false;
     int32_t refresh_offset_minutes = 0;
     NightCatalogRefreshTarget refresh_target;
+    bool refresh_post_therapy = false;
     uint32_t catalog_refresh_retry_at_ms = 0;
     uint8_t catalog_refresh_retry_attempt = 0;
 
@@ -1038,6 +1307,9 @@ struct ReportTask::Runtime {
     uint8_t catalog_store_retry_attempt = 0;
     uint32_t catalog_generation = 0;
     uint32_t durable_catalog_generation = 0;
+    uint32_t catalog_request_generation = 0;
+
+    StorageStatusPort *storage_status = nullptr;
 
     bool store_catalog_load_pending = false;
     uint32_t store_catalog_load_generation = 0;
@@ -1104,7 +1376,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
                        StorageAtomicWritePort &write_port,
                        StorageScanPort &scan_port,
                        ReportSpoolPort &spool_port,
-                       StorageRangeWritePort &range_write_port) {
+                       StorageRangeWritePort &range_write_port,
+                       StorageStatusPort &status_port) {
     if (runtime_) return runtime_->initialized;
 
 #ifdef ARDUINO
@@ -1114,6 +1387,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_ = new (std::nothrow) Runtime();
 #endif
     if (!runtime_) return false;
+
+    runtime_->storage_status = &status_port;
 
 #ifdef ARDUINO
     runtime_->mutex = xSemaphoreCreateMutex();
@@ -1213,7 +1488,6 @@ OperationAdmission ReportTask::request_night(
     }
 
     ReportTaskCommand command;
-    command.kind = ReportTaskCommandKind::MaterializeNight;
     command.sleep_day = sleep_day;
     command.priority = priority;
     command.force_rebuild = force_rebuild;
@@ -1221,22 +1495,24 @@ OperationAdmission ReportTask::request_night(
     return runtime_->enqueue(command);
 }
 
-OperationAdmission ReportTask::request_catalog_refresh(
-    bool current_offset_valid,
-    int32_t current_offset_minutes,
-    uint32_t generation,
+OperationAdmission ReportTask::publish_session_ended(
+    uint32_t sessions_ended,
     const NightCatalogRefreshTarget &target) {
-    if (!runtime_ || !runtime_->initialized || generation == 0) {
+    if (!runtime_ || !runtime_->initialized) {
         return OperationAdmission::Rejected;
     }
+    return runtime_->publish_session_ended(sessions_ended, target);
+}
 
-    ReportTaskCommand command;
-    command.kind = ReportTaskCommandKind::RefreshCatalog;
-    command.generation = generation;
-    command.current_offset_valid = current_offset_valid;
-    command.current_offset_minutes = current_offset_minutes;
-    command.catalog_target = target;
-    return runtime_->enqueue(command);
+OperationAdmission ReportTask::publish_timezone_change(
+    uint32_t revision,
+    bool offset_valid,
+    int32_t offset_minutes) {
+    if (!runtime_ || !runtime_->initialized) {
+        return OperationAdmission::Rejected;
+    }
+    return runtime_->publish_timezone_change(
+        revision, offset_valid, offset_minutes);
 }
 
 void ReportTask::publish_activity(const ActivitySnapshot &activity) {
@@ -1490,25 +1766,20 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     Runtime &runtime = *runtime_;
     runtime.last_step_ms = now_ms;
 
-    bool worked = runtime.apply_pending_activity();
+    bool worked = runtime.apply_pending_refresh_inputs(now_ms);
+    if (!runtime.reconcile_deadline_initialized) {
+        runtime.reconcile_pending = true;
+        runtime.reconcile_due_ms = now_ms + CATALOG_RECONCILE_IDLE_MS;
+        runtime.reconcile_deadline_initialized = true;
+        worked = true;
+    }
+    worked = runtime.apply_pending_activity() || worked;
     const bool startup_allowed = runtime.startup_idle_allowed(now_ms);
     const bool local_blocked = runtime.local_background_work_blocked();
 
     ReportTaskCommand command;
     if (runtime.pop(command)) {
-        if (command.kind == ReportTaskCommandKind::RefreshCatalog) {
-            (void)runtime.engine.cancel_background();
-            runtime.pending_refresh.generation = command.generation;
-            runtime.pending_refresh.current_offset_valid =
-                command.current_offset_valid;
-            runtime.pending_refresh.current_offset_minutes =
-                command.current_offset_minutes;
-            runtime.pending_refresh.target = command.catalog_target;
-            runtime.pending_refresh.summary_attempted =
-                command.catalog_target.valid() && runtime.catalog;
-            runtime.catalog_refresh_retry_at_ms = 0;
-            runtime.catalog_refresh_retry_attempt = 0;
-        } else if (command.kind == ReportTaskCommandKind::Rebuild) {
+        if (command.kind == ReportTaskCommandKind::Rebuild) {
             runtime.rebuild_catalog = runtime.catalog;
             runtime.rebuild_cursor = 0;
         } else if (!runtime.catalog) {
@@ -1551,13 +1822,22 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             if (completed == CatalogStorePurpose::Load) {
                 runtime.catalog_load_pending = false;
                 if (status.state == NightCatalogStoreState::Ready) {
-                    runtime.durable_catalog_generation = status.generation;
+                    runtime.record_durable_catalog_generation(status.generation);
                     publish_catalog(runtime.catalog_store.snapshot(),
                                     status.generation);
                 }
             } else if (status.state == NightCatalogStoreState::Ready) {
-                runtime.durable_catalog_generation = status.generation;
-                runtime.pending_catalog_save.reset();
+                runtime.record_durable_catalog_generation(status.generation);
+                const bool saved_latest =
+                    runtime.pending_catalog_save &&
+                    runtime.pending_catalog_save_generation ==
+                        runtime.catalog_store_save_generation &&
+                    status.generation == runtime.catalog_store_save_generation;
+                if (saved_latest) {
+                    runtime.pending_catalog_save.reset();
+                    runtime.pending_catalog_save_generation = 0;
+                    runtime.pending_catalog_save_post_therapy = false;
+                }
                 runtime.catalog_store_retry_at_ms = 0;
                 runtime.catalog_store_retry_attempt = 0;
             } else {
@@ -1603,13 +1883,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = runtime.start_store_catalog_load(now_ms) || worked;
     }
 
+    worked = runtime.materialize_due_reconcile(now_ms) || worked;
+
     if (runtime.summary_acquisition.active()) {
         worked = runtime.summary_acquisition.poll() || worked;
     }
     if (runtime.pending_refresh.valid() &&
         !runtime.pending_refresh.summary_attempted &&
         !runtime.summary_acquisition.active() &&
-        !local_blocked && startup_allowed) {
+        !local_blocked && startup_allowed &&
+        runtime.catalog_storage_ready() &&
+        deadline_due(now_ms, runtime.pending_refresh.due_ms)) {
         if (!runtime.activity.as11_rpc_available) {
             runtime.pending_refresh.summary_attempted = true;
         } else {
@@ -1642,18 +1926,30 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 publish_catalog(runtime.catalog_refresh.snapshot(),
                                 runtime.refresh_generation);
                 runtime.pending_catalog_save = runtime.catalog;
+                runtime.pending_catalog_save_generation =
+                    runtime.catalog_generation;
+                runtime.pending_catalog_save_post_therapy =
+                    runtime.pending_catalog_save_post_therapy ||
+                    runtime.refresh_post_therapy;
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
             } else if (status.retryable) {
                 if (!runtime.pending_refresh.valid()) {
                     runtime.pending_refresh.generation =
                         runtime.refresh_generation;
+                    runtime.pending_refresh.due_ms = 0;
                     runtime.pending_refresh.current_offset_valid =
                         runtime.refresh_offset_valid;
                     runtime.pending_refresh.current_offset_minutes =
                         runtime.refresh_offset_minutes;
                     runtime.pending_refresh.target = runtime.refresh_target;
                     runtime.pending_refresh.summary_attempted = true;
+                    runtime.pending_refresh.post_therapy =
+                        runtime.refresh_post_therapy;
+                } else {
+                    runtime.pending_refresh.post_therapy =
+                        runtime.pending_refresh.post_therapy ||
+                        runtime.refresh_post_therapy;
                 }
                 runtime.catalog_refresh_retry_at_ms =
                     now_ms + retry_delay(
@@ -1661,10 +1957,18 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 advance_retry(runtime.catalog_refresh_retry_attempt);
                 ++runtime.command_failures;
             } else {
+                if (runtime.refresh_post_therapy ||
+                    runtime.refresh_target.valid()) {
+                    runtime.schedule_reconcile(
+                        now_ms,
+                        true,
+                        false);
+                }
                 ++runtime.command_failures;
             }
             runtime.refresh_generation = 0;
             runtime.refresh_target = {};
+            runtime.refresh_post_therapy = false;
             worked = true;
         }
     }
@@ -1676,6 +1980,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending && !local_blocked &&
         startup_allowed &&
+        runtime.catalog_storage_ready() &&
+        deadline_due(now_ms, runtime.pending_refresh.due_ms) &&
         deadline_due(now_ms, runtime.catalog_refresh_retry_at_ms)) {
         std::shared_ptr<const NightCatalogSummarySnapshot> summary =
             runtime.summary_acquisition.snapshot();
@@ -1705,6 +2011,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.refresh_offset_minutes =
                 runtime.pending_refresh.current_offset_minutes;
             runtime.refresh_target = runtime.pending_refresh.target;
+            runtime.refresh_post_therapy =
+                runtime.pending_refresh.post_therapy;
             runtime.pending_refresh.clear();
             runtime.catalog_refresh_retry_at_ms = 0;
         } else if (admitted == OperationAdmission::Rejected) {
@@ -1724,12 +2032,16 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         const OperationAdmission admitted =
             runtime.catalog_store.request_save(
                 runtime.pending_catalog_save,
-                runtime.catalog_generation);
+                runtime.pending_catalog_save_generation);
         if (admitted == OperationAdmission::Accepted) {
             runtime.store_purpose = CatalogStorePurpose::Save;
+            runtime.catalog_store_save_generation =
+                runtime.pending_catalog_save_generation;
         } else if (admitted == OperationAdmission::Rejected) {
             ++runtime.command_failures;
-            runtime.pending_catalog_save.reset();
+            runtime.catalog_store_retry_at_ms =
+                now_ms + retry_delay(runtime.catalog_store_retry_attempt);
+            advance_retry(runtime.catalog_store_retry_attempt);
         }
         worked = true;
     }
