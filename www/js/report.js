@@ -1177,7 +1177,7 @@
 
     function validReportRange(range) {
       return range && Number.isFinite(range.start) && Number.isFinite(range.end) &&
-        range.end - range.start > 60000;
+        range.end - range.start >= 60000;
     }
 
     function updateReportZoomControls() {
@@ -1442,9 +1442,6 @@
 
       const extent = reportChartExtent(definition, ranges);
       const seriesList = reportChartSeriesList(definition);
-      if (!seriesList.length && reportBaseLoadedCharts.has(key) && !pending) {
-        return false;
-      }
       item.seriesList = seriesList;
       item.events = reportEvents.slice();
       item.minY = extent.min;
