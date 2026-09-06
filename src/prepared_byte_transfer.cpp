@@ -4,12 +4,6 @@ namespace aircannect {
 
 void PreparedByteTransfer::bind(uint8_t *storage, size_t capacity) {
     ring_.bind(storage, capacity);
-    consumed_.store(0, std::memory_order_relaxed);
-    consumer_activity_ms_.store(0, std::memory_order_relaxed);
-    consumer_attached_.store(false, std::memory_order_relaxed);
-    consumer_closed_.store(false, std::memory_order_relaxed);
-    producer_done_.store(false, std::memory_order_relaxed);
-    cancel_requested_.store(false, std::memory_order_relaxed);
 }
 
 void PreparedByteTransfer::attach(uint32_t now_ms) {

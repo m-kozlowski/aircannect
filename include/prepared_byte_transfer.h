@@ -15,6 +15,8 @@ public:
     PreparedByteTransfer &operator=(const PreparedByteTransfer &) = delete;
 
     // producer
+    // Each transfer is one-shot; bind only attaches its ring storage. Callers
+    // must use a fresh transfer rather than reusing one after completion.
     void bind(uint8_t *storage, size_t capacity);
     uint8_t *write_span(size_t &length) { return ring_.write_span(length); }
     bool commit_write(size_t length) { return ring_.commit_write(length); }
