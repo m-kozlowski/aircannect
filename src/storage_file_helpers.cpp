@@ -1,7 +1,9 @@
 #include "storage_internal.h"
 
+#include <algorithm>
 #include <string.h>
 
+#include "memory_manager.h"
 #include "storage_path.h"
 
 namespace aircannect::Storage {
@@ -18,10 +20,9 @@ ParentDirectoryStep ensure_parent_directory_step(const char *path,
 
         char parent[AC_STORAGE_PATH_MAX] = {};
         memcpy(parent, path, static_cast<size_t>(last - path));
-        File directory = open(parent, "r");
-        if (directory) {
-            const bool valid = directory.isDirectory();
-            directory.close();
+        struct stat info {};
+        if (file_stat(parent, info)) {
+            const bool valid = S_ISDIR(info.st_mode);
             cursor = strlen(path);
             return valid ? ParentDirectoryStep::Done
                          : ParentDirectoryStep::Failed;
@@ -51,15 +52,31 @@ bool ensure_parent_directories(const char *path) {
 }
 
 uint64_t file_modified(const char *path) {
-    File file = open(path, "r");
-    uint64_t modified = 0;
-    if (file && !file.isDirectory()) {
-        const time_t last_write = file.getLastWrite();
-        if (last_write > 0) modified = static_cast<uint64_t>(last_write);
+    struct stat info {};
+    return file_stat(path, info) && S_ISREG(info.st_mode) && info.st_mtime > 0
+        ? static_cast<uint64_t>(info.st_mtime) : 0;
+}
+
+size_t write_buffer(File &file, const uint8_t *data, size_t size) {
+    // S3 SDMMC otherwise bounces PSRAM data through one 512-byte DMA sector
+    // per transaction. Keep stdio buffers small so they do not undo staging.
+    constexpr size_t DMA_BYTES = 4096;
+    if (size < 1024) return file.write(data, size);
+
+    auto *dma = static_cast<uint8_t *>(Memory::alloc_dma(DMA_BYTES));
+    if (!dma) return file.write(data, size);
+
+    size_t written = 0;
+    while (written < size) {
+        const size_t chunk = std::min(DMA_BYTES, size - written);
+        memcpy(dma, data + written, chunk);
+        const size_t part = file.write(dma, chunk);
+        written += part;
+        if (part != chunk) break;
     }
 
-    if (file) file.close();
-    return modified;
+    Memory::free(dma);
+    return written;
 }
 
 }  // namespace aircannect::Storage

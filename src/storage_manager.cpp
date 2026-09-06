@@ -1,6 +1,7 @@
 #include "storage_internal.h"
 
 #include <string.h>
+#include <sys/stat.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -8,6 +9,7 @@
 #include "board.h"
 #include "debug_log.h"
 #include "string_util.h"
+#include "storage_path.h"
 
 #if AC_STORAGE_SDMMC_ENABLED
 #include "soc/soc_caps.h"
@@ -342,19 +344,29 @@ bool ensure_dir(const char *path) {
     if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
-    if (fs->exists(path)) {
-        File dir = fs->open(path);
-        const bool ok = dir && dir.isDirectory();
-        if (dir) dir.close();
-        return ok;
-    }
+
+    struct stat info {};
+    if (file_stat(path, info)) return S_ISDIR(info.st_mode);
+
     return fs->mkdir(path);
 }
 
 bool exists(const char *path) {
-    if (!initialized || !path || !*path) return false;
+    struct stat info {};
+    return file_stat(path, info);
+}
+
+bool file_stat(const char *path, struct stat &info) {
+    if (!initialized || !path || path[0] != '/') return false;
     fs::FS *fs = active_fs();
-    return fs && fs->exists(path);
+    if (!fs) return false;
+
+    char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
+    const int length = snprintf(full_path, sizeof(full_path), "%s%s",
+                                AC_STORAGE_MOUNT_POINT, path);
+
+    return length > 0 && static_cast<size_t>(length) < sizeof(full_path) &&
+           ::stat(full_path, &info) == 0;
 }
 
 bool remove(const char *path) {

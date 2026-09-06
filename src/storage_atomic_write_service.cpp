@@ -367,8 +367,8 @@ bool StorageAtomicWriteService::write_locked(const char *&error) {
     const size_t wanted = std::min(remaining, WRITE_STEP_BYTES);
     size_t written = 0;
     {
-        written = job_->output.write(job_->bytes->data() + job_->offset,
-                                     wanted);
+        written = Storage::write_buffer(
+            job_->output, job_->bytes->data() + job_->offset, wanted);
     }
     if (written != wanted) {
         error = "write_failed";

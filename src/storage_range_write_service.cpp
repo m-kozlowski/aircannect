@@ -176,8 +176,8 @@ const char *StorageRangeWriteService::write_locked() {
     const LargeByteBuffer &bytes = *job_->command.bytes;
     const size_t count = std::min(bytes.size() - job_->written,
                                   AC_STORAGE_RANGE_WRITE_STEP_BYTES);
-    const size_t written = job_->output.write(
-        bytes.data() + job_->written, count);
+    const size_t written = Storage::write_buffer(
+        job_->output, bytes.data() + job_->written, count);
 
     job_->written += written;
     if (written != count) return "write_failed";

@@ -105,6 +105,15 @@ bool psram_available() {
 #endif
 }
 
+void *alloc_dma(size_t size) {
+#ifdef ARDUINO
+    return size ? heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)
+                : nullptr;
+#else
+    return size ? malloc(size) : nullptr;
+#endif
+}
+
 void *alloc_large(size_t size, bool allow_internal_fallback) {
 #ifdef ARDUINO
     ensure_begin();
