@@ -1825,6 +1825,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.record_durable_catalog_generation(status.generation);
                     publish_catalog(runtime.catalog_store.snapshot(),
                                     status.generation);
+                } else if (!runtime.catalog) {
+                    runtime.schedule_reconcile(now_ms, false);
                 }
             } else if (status.state == NightCatalogStoreState::Ready) {
                 runtime.record_durable_catalog_generation(status.generation);
@@ -1859,6 +1861,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.catalog_store_retry_at_ms = 0;
         } else if (admitted == OperationAdmission::Rejected) {
             runtime.catalog_load_pending = false;
+            if (!runtime.catalog) runtime.schedule_reconcile(now_ms, false);
             ++runtime.command_failures;
         }
         worked = true;
