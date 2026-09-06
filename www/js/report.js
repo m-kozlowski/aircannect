@@ -2737,7 +2737,7 @@
 
       const keys = signalStoreBaseLoadKeys(signalStoreExpandedChartKeys());
       await runReportFetchJobs(keys.map((key) => () =>
-        loadSignalStoreBaseChart(key, token, signal)), 2);
+        loadSignalStoreBaseChart(key, token, signal)), 4);
       return token === reportLoadToken;
     }
 
@@ -2755,7 +2755,7 @@
         const keys = signalStoreBaseLoadKeys([key]);
         await runReportFetchJobs(keys.map((chartKey) =>
           () => loadSignalStoreBaseChart(
-            chartKey, token, controller.signal)), 2);
+            chartKey, token, controller.signal)), 1);
         if (reportZoom && token === reportLoadToken) {
           ensureSignalStoreRangeLoaded(
             reportZoom.start, reportZoom.end, [key]);
@@ -2845,7 +2845,7 @@
             entry.loadedCharts.add(key);
             applySignalStoreRangeChart(entry, key);
             if (!updateRenderedReportChart(key)) renderReportCharts();
-          }), 2);
+          }), 4);
         }
 
         // All requested charts are published before adjacent blocks compete for I/O.
@@ -2963,9 +2963,14 @@
           reportBaseChartPromises.clear();
           if (reportRangeView) reportRangeView.promise = null;
 
-          await runReportFetchJobs(signalStoreExpandedChartKeys().map((key) =>
-            () => ensureSignalStoreChartLoaded(key)), 2);
+          const keys = signalStoreBaseLoadKeys(signalStoreExpandedChartKeys());
+          await runReportFetchJobs(keys.map((key) =>
+            () => loadSignalStoreBaseChart(key, token, controller.signal)), 4);
           if (token !== reportLoadToken) return;
+
+          if (reportZoom) {
+            ensureSignalStoreRangeLoaded(reportZoom.start, reportZoom.end);
+          }
         }
 
         renderReportSummary();

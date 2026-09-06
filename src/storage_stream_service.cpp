@@ -146,7 +146,7 @@ bool StorageStreamService::request_stream(
     }
     const bool export_slot_reserved =
         command.lane == StorageStreamLane::Export &&
-        export_streams >= STREAM_CAPACITY - 1;
+        export_streams >= 1;
     if (free_index == SIZE_MAX || export_slot_reserved) {
         unlock();
         copy_cstr(error_out, error_out_size, "stream_slots_full");

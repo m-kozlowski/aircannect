@@ -48,7 +48,7 @@ private:
     bool step_stream_locked(size_t index);
     bool step_lane_locked(StorageStreamLane lane);
 
-    static constexpr size_t STREAM_CAPACITY = 2;
+    static constexpr size_t STREAM_CAPACITY = 4;
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     std::shared_ptr<StorageByteStream> streams_[STREAM_CAPACITY];
