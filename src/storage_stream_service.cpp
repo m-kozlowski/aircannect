@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <errno.h>
 #include <new>
 #include <string.h>
 
 #include <Arduino.h>
 #include <FS.h>
 
+#include "debug_log.h"
 #include "memory_manager.h"
 #include "prepared_byte_transfer.h"
 #include "runtime_clock.h"
@@ -255,7 +257,15 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
     }
 
     {
+        errno = 0;
         stream.input = Storage::open(stream.path, "r");
+        const int open_error = errno;
+        if (!stream.input) {
+            Log::logf(CAT_STORAGE, LOG_WARN,
+                      "stream open failed errno=%d path=%s\n",
+                      open_error, stream.path);
+        }
+
         if (stream.input && !stream.input.isDirectory()) {
             stream.source_size = static_cast<uint64_t>(stream.input.size());
             stream.modified = file_modified(stream.input);
