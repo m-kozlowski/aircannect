@@ -1,6 +1,7 @@
 #include "report_http_controller.h"
 
 #include "http_route_registry.h"
+#include <WebResponseImpl.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -13,6 +14,7 @@
 #include <utility>
 
 #include "async_prepared_response.h"
+#include "async_deferred_response.h"
 #include "json_util.h"
 #include "night_catalog.h"
 #include "report_signal_store.h"
@@ -49,17 +51,21 @@ enum class PendingKind : uint8_t {
     Signal,
 };
 
-void send_json_error(AsyncWebServerRequest *request,
-                     int status,
-                     const char *error) {
-    if (!request) return;
-
+std::unique_ptr<AsyncWebServerResponse> json_error_response(
+    int status, const char *error) {
     char body[160] = {};
     snprintf(body,
              sizeof(body),
              "{\"ok\":false,\"error\":\"%s\"}",
              error ? error : "error");
-    request->send(status, "application/json", body);
+    return std::unique_ptr<AsyncWebServerResponse>(
+        new AsyncBasicResponse(status, "application/json", body));
+}
+
+void send_json_error(AsyncWebServerRequest *request,
+                     int status,
+                     const char *error) {
+    if (request) request->send(json_error_response(status, error).release());
 }
 
 void send_preparing(AsyncWebServerRequest *request) {
@@ -520,7 +526,7 @@ struct HttpStreamRef {
 struct ReportHttpController::PendingResponses {
     struct Entry {
         PendingKind kind = PendingKind::Events;
-        AsyncWebServerRequestPtr request;
+        std::shared_ptr<AsyncDeferredResponse::State> response;
         StorageStreamCommand command;
         std::shared_ptr<StorageByteStream> stream;
         uint32_t deadline_ms = 0;
@@ -603,7 +609,7 @@ void ReportHttpController::poll() {
         PendingResponses::Entry entry = std::move(slot);
         xSemaphoreGive(pending_->mutex);
 
-        const bool expired = entry.request.expired();
+        const bool expired = entry.response->cancelled();
         if (expired) {
             if (entry.stream) stream_port_->finish(*entry.stream, false);
         }
@@ -638,41 +644,33 @@ void ReportHttpController::poll() {
 
         if (waiting || expired) continue;
 
-        const AsyncWebServerRequestPtr pending_request = entry.request;
         PendingResponses::Entry ready = std::move(entry);
-
-        std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
-        if (!request) {
-            if (ready.stream) stream_port_->finish(*ready.stream, false);
-            return;
-        }
         if (timed_out) {
             if (ready.stream) stream_port_->finish(*ready.stream, false);
-            send_json_error(request.get(), 503, "report_stream_timeout");
+            ready.response->publish(
+                json_error_response(503, "report_stream_timeout"));
             return;
         }
         if (status.state == StorageStreamState::Error ||
             status.state == StorageStreamState::Cancelled) {
             if (ready.stream) stream_port_->finish(*ready.stream, false);
-            send_json_error(request.get(),
-                            503,
-                            status.error[0]
-                                ? status.error
-                                : "report_stream_failed");
+            ready.response->publish(json_error_response(
+                503, status.error[0] ? status.error : "report_stream_failed"));
             return;
         }
         if (status.state != StorageStreamState::Ready ||
             status.size != ready.response_size ||
             !stream_port_->attach(*ready.stream)) {
             stream_port_->finish(*ready.stream, false);
-            send_json_error(request.get(), 503, "report_stream_unavailable");
+            ready.response->publish(
+                json_error_response(503, "report_stream_unavailable"));
             return;
         }
 
         std::shared_ptr<HttpStreamRef> ref = std::make_shared<HttpStreamRef>();
         if (!ref) {
             stream_port_->finish(*ready.stream, false);
-            send_json_error(request.get(), 503, "response_alloc");
+            ready.response->publish(json_error_response(503, "response_alloc"));
             return;
         }
         ref->port = stream_port_;
@@ -703,7 +701,7 @@ void ReportHttpController::poll() {
                 });
         if (!response) {
             ref->finish(false);
-            send_json_error(request.get(), 503, "response_alloc");
+            ready.response->publish(json_error_response(503, "response_alloc"));
             return;
         }
 
@@ -724,7 +722,8 @@ void ReportHttpController::poll() {
                                ready.grid_phase_ms,
                                ready.envelope);
         }
-        request->send(response);
+        ready.response->publish(
+            std::unique_ptr<AsyncWebServerResponse>(response));
         return;
     }
 
@@ -1081,11 +1080,20 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         return;
     }
 
-    pending.request = request->pause();
+    pending.response = std::make_shared<AsyncDeferredResponse::State>();
+    auto *response = new (std::nothrow) AsyncDeferredResponse(pending.response);
+    if (!response) {
+        xSemaphoreGive(pending_->mutex);
+        send_json_error(request, 503, "response_alloc");
+        return;
+    }
+
     pending.command = std::move(command);
     pending.deadline_ms = millis() + REPORT_HTTP_PENDING_TIMEOUT_MS;
     *slot = std::move(pending);
     xSemaphoreGive(pending_->mutex);
+
+    request->send(response);
 }
 
 void ReportHttpController::publish_completion() {
