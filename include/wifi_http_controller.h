@@ -19,7 +19,7 @@ class WifiManager;
 class WifiHttpController final : public HttpRouteModule {
 public:
     bool begin(WifiManager &wifi);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
 private:
@@ -49,7 +49,7 @@ private:
     void send_update(AsyncWebServerRequest *request);
 
     WifiManager *wifi_ = nullptr;
-    MainLoopInbox<Command, CommandQueueDepth> commands_;
+    MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
 
     StaticSemaphore_t cache_mutex_storage_ = {};
     SemaphoreHandle_t cache_mutex_ = nullptr;

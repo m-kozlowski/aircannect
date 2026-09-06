@@ -27,7 +27,7 @@ class LiveHttpController final : public HttpRouteModule {
 public:
     bool begin(StreamBroker &stream, LiveChartService &live);
     void stop();
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll(size_t connected_sse_clients,
               size_t healthy_sse_clients,
               uint32_t now_ms);

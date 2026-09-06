@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <algorithm>
 #include <new>
@@ -285,7 +285,7 @@ bool OtaHttpController::begin(FirmwareInstaller &installer,
     return snapshot_initialized_ && resmed_snapshot_initialized_;
 }
 
-void OtaHttpController::register_routes(AsyncWebServer &server) {
+void OtaHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/ota"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_esp_status(request,

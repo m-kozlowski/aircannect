@@ -33,7 +33,7 @@ public:
                UpdateChecker &update_checker,
                ResmedFirmwarePreparer &resmed_preparer,
                ResmedOtaManager &resmed_ota);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
     const PublishedJsonSnapshot &snapshot() const { return snapshot_; }
@@ -93,7 +93,7 @@ private:
     ResmedFirmwarePreparer *resmed_preparer_ = nullptr;
     ResmedOtaManager *resmed_ota_ = nullptr;
 
-    MainLoopInbox<Command, CommandQueueDepth> commands_;
+    MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
 
     PublishedJsonSnapshot snapshot_;
     LargeTextBuffer snapshot_build_json_;

@@ -1,6 +1,6 @@
 #include "export_http_controller.h"
 
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include "export_coordinator.h"
 #include "json_util.h"
@@ -135,7 +135,7 @@ bool ExportHttpController::begin(ExportCoordinator &coordinator) {
     return true;
 }
 
-void ExportHttpController::register_routes(AsyncWebServer &server) {
+void ExportHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/storage/sync/start"), HTTP_POST,
               [this](AsyncWebServerRequest *request) {
         send_smb_sync_start(request);

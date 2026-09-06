@@ -25,7 +25,7 @@ public:
                As11DeviceService &device,
                TimeSyncService &time_sync,
                As11BleRpcLink &ble_link);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
     const PublishedJsonSnapshot &ble_pairing_snapshot() const {
@@ -68,7 +68,7 @@ private:
     As11DeviceService *device_ = nullptr;
     TimeSyncService *time_sync_ = nullptr;
     As11BleRpcLink *ble_link_ = nullptr;
-    MainLoopInbox<Command, CommandQueueDepth> commands_;
+    MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
     std::atomic<bool> as11_unavailable_{false};
 
     PublishedJsonSnapshot ble_pairing_snapshot_;

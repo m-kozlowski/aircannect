@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 #include <esp_system.h>
 
 #include <algorithm>
@@ -164,7 +164,7 @@ void StorageUploadHttpController::publish_activity(
                           std::memory_order_relaxed);
 }
 
-void StorageUploadHttpController::register_routes(AsyncWebServer &server) {
+void StorageUploadHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(
         AsyncURIMatcher::exact("/api/storage/upload/start"), HTTP_POST,
         [this](AsyncWebServerRequest *request) { send_start(request); },

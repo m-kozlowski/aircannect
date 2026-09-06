@@ -30,7 +30,7 @@ public:
 
     void begin(ReportTask &report_task);
     void poll();
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
 
     const PublishedJsonSnapshot &completion_snapshot() const {
         return completion_snapshot_;

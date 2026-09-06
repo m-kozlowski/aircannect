@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <algorithm>
 #include <memory>
@@ -687,7 +687,7 @@ void StorageHttpController::poll_archive_download() {
     request->send(response);
 }
 
-void StorageHttpController::register_routes(AsyncWebServer &server) {
+void StorageHttpController::register_routes(HttpRouteRegistry &server) {
     // Storage browser and jobs
     server.on(AsyncURIMatcher::exact("/api/storage/list"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {

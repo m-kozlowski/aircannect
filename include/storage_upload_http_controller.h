@@ -20,7 +20,7 @@ class StorageUploadHttpController final : public HttpRouteModule {
 public:
     bool begin(StorageUploadPort &upload_port,
                StorageStatusPort &status_port);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
 
     void publish_activity(const ActivitySnapshot &activity);
 

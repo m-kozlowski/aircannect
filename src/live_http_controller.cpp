@@ -1,7 +1,7 @@
 #include "live_http_controller.h"
 
 #include <Arduino.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include "json_util.h"
 #include "live_chart_service.h"
@@ -159,7 +159,7 @@ void LiveHttpController::stop() {
     live_json_.clear();
 }
 
-void LiveHttpController::register_routes(AsyncWebServer &server) {
+void LiveHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/stream"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_stream_snapshot(request);

@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -451,7 +451,7 @@ bool ConfigHttpController::begin(ConfigService &config) {
     return publish_snapshots();
 }
 
-void ConfigHttpController::register_routes(AsyncWebServer &server) {
+void ConfigHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/config"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_config(request, nullptr);

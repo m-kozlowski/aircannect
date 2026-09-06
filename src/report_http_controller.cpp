@@ -1,6 +1,6 @@
 #include "report_http_controller.h"
 
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -488,7 +488,7 @@ struct ReportHttpController::PendingResponses {
 ReportHttpController::ReportHttpController() = default;
 ReportHttpController::~ReportHttpController() = default;
 
-void ReportHttpController::register_routes(AsyncWebServer &server) {
+void ReportHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/report/summary"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_summary(request);

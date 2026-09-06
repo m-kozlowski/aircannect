@@ -27,7 +27,7 @@ public:
     bool begin(RpcRequestPort &rpc,
                As11DeviceService &device,
                As11SettingsManager &settings);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
     const PublishedJsonSnapshot &snapshot() const {
@@ -64,7 +64,7 @@ private:
 
     StaticSemaphore_t cache_mutex_storage_ = {};
     SemaphoreHandle_t cache_mutex_ = nullptr;
-    MainLoopInbox<Command, CommandQueueDepth> commands_;
+    MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
 
     LargeTextBuffer catalog_json_;
     PublishedJsonSnapshot settings_snapshot_;

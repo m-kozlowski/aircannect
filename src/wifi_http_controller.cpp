@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <utility>
 
@@ -58,7 +58,7 @@ bool WifiHttpController::begin(WifiManager &wifi) {
     return publish_snapshot();
 }
 
-void WifiHttpController::register_routes(AsyncWebServer &server) {
+void WifiHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/wifi"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_snapshot(request);

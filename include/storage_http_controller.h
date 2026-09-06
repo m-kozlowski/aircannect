@@ -36,7 +36,7 @@ public:
                StorageDeletePort &delete_port,
                StorageStatusPort &status_port);
     void poll();
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
 
     void publish_activity(const ActivitySnapshot &activity);
 

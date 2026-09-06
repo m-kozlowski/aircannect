@@ -1,7 +1,7 @@
 #include "web_ui.h"
 
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 #include <string.h>
 #include <utility>
 
@@ -123,7 +123,13 @@ bool WebUI::begin(StatusHttpController &status,
         });
         server_->addHandler(events_);
     }
-    register_routes(route_modules, route_module_count);
+    if (!register_routes(route_modules, route_module_count)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[WEB] route allocation failed\n");
+        stop();
+        return false;
+    }
+
     publish_snapshots(true);
     server_->begin();
     started_ = true;
@@ -1085,20 +1091,22 @@ void WebUI::execute_console_line(const std::string &line) {
     append_console_log(entry);
 }
 
-void WebUI::register_routes(HttpRouteModule *const *route_modules,
+bool WebUI::register_routes(HttpRouteModule *const *route_modules,
                             size_t route_module_count) {
+    HttpRouteRegistry routes(*server_);
+
     // Static UI and snapshots
-    server_->on("/", HTTP_GET, send_web_ui);
-    server_->on(AsyncURIMatcher::exact("/wizard"), HTTP_GET, send_web_ui);
+    routes.on("/", HTTP_GET, send_web_ui);
+    routes.on(AsyncURIMatcher::exact("/wizard"), HTTP_GET, send_web_ui);
 
     // Web console and file log
-    server_->on(
+    routes.on(
         AsyncURIMatcher::exact("/api/console"), HTTP_GET,
         [this](AsyncWebServerRequest *request) {
             send_console_snapshot(request);
         });
 
-    server_->on(
+    routes.on(
         AsyncURIMatcher::exact("/api/console"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             JsonDocument doc;
@@ -1134,7 +1142,7 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
         },
         nullptr, http_request_body_handler);
 
-    server_->on(
+    routes.on(
         AsyncURIMatcher::exact("/api/console/clear"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             send_queue_result(request,
@@ -1143,7 +1151,7 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
 
     for (size_t i = 0; i < route_module_count; ++i) {
         if (route_modules && route_modules[i]) {
-            route_modules[i]->register_routes(*server_);
+            route_modules[i]->register_routes(routes);
         }
     }
 
@@ -1151,6 +1159,7 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
         request->send(404, "application/json",
                       "{\"ok\":false,\"error\":\"not found\"}");
     });
+    return routes.ready();
 }
 
 }  // namespace aircannect

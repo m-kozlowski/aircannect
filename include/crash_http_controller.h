@@ -13,7 +13,7 @@ public:
     explicit CrashHttpController(CrashDiagnostics &diagnostics)
         : diagnostics_(diagnostics) {}
 
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
 
 private:
     void send_status(AsyncWebServerRequest *request) const;

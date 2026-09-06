@@ -15,7 +15,7 @@ struct SystemStatusSnapshot;
 class StatusHttpController final : public HttpRouteModule {
 public:
     bool begin();
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
 
     bool refresh_due(uint32_t device_revision,
                      uint32_t config_revision,

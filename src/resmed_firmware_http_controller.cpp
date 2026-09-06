@@ -1,7 +1,7 @@
 #include "resmed_firmware_http_controller.h"
 
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <algorithm>
 #include <string.h>
@@ -83,7 +83,7 @@ bool ResmedFirmwareHttpController::begin(
     return publish_status_snapshot(true);
 }
 
-void ResmedFirmwareHttpController::register_routes(AsyncWebServer &server) {
+void ResmedFirmwareHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/resmed-ota/repository"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_catalog(request);

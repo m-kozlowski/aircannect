@@ -1,6 +1,6 @@
 #include "status_http_controller.h"
 
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 #include <stdio.h>
 #include <string_view>
 
@@ -153,7 +153,7 @@ bool StatusHttpController::begin() {
            build_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
 }
 
-void StatusHttpController::register_routes(AsyncWebServer &server) {
+void StatusHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/status"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_snapshot(request);

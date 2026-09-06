@@ -24,7 +24,7 @@ class ConfigService;
 class ConfigHttpController final : public HttpRouteModule {
 public:
     bool begin(ConfigService &config);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
     const PublishedJsonSnapshot &update_snapshot() const {
@@ -69,7 +69,7 @@ private:
     void send_onboarding_complete(AsyncWebServerRequest *request);
 
     ConfigService *config_ = nullptr;
-    MainLoopInbox<Command, CommandQueueDepth> commands_;
+    MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
 
     StaticSemaphore_t cache_mutex_storage_ = {};
     SemaphoreHandle_t cache_mutex_ = nullptr;

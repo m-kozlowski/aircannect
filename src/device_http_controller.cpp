@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <string>
 #include <string.h>
@@ -70,7 +70,7 @@ bool DeviceHttpController::begin(RpcRequestPort &rpc,
     return publish_ble_pairing_snapshot();
 }
 
-void DeviceHttpController::register_routes(AsyncWebServer &server) {
+void DeviceHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(
         AsyncURIMatcher::exact("/api/time"), HTTP_POST,
         [this](AsyncWebServerRequest *request) { send_time_action(request); },

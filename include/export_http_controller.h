@@ -12,7 +12,7 @@ class LargeTextBuffer;
 class ExportHttpController final : public HttpRouteModule {
 public:
     bool begin(ExportCoordinator &coordinator);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
 
     bool build_status_snapshot(LargeTextBuffer &json) const;
 

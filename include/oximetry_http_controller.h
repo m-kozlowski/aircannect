@@ -25,7 +25,7 @@ public:
                BleSensorSource &sensor,
                PlxPeripheral &peripheral,
                ConfigService &config);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
     const PublishedJsonSnapshot &snapshot() const { return snapshot_; }
@@ -68,7 +68,7 @@ private:
     BleSensorSource *sensor_ = nullptr;
     PlxPeripheral *peripheral_ = nullptr;
     ConfigService *config_ = nullptr;
-    MainLoopInbox<Command, CommandQueueDepth> commands_;
+    MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
 
     PublishedJsonSnapshot snapshot_;
     LargeTextBuffer snapshot_build_json_;

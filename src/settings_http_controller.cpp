@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <string.h>
 #include <utility>
@@ -270,7 +270,7 @@ bool SettingsHttpController::begin(RpcRequestPort &rpc,
     return !catalog_json_.overflowed();
 }
 
-void SettingsHttpController::register_routes(AsyncWebServer &server) {
+void SettingsHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/settings-catalog"), HTTP_GET,
                [this](AsyncWebServerRequest *request) {
         send_catalog(request);

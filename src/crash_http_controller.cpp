@@ -1,6 +1,6 @@
 #include "crash_http_controller.h"
 
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <algorithm>
 #include <new>
@@ -87,7 +87,7 @@ bool build_status_json(const CrashDiagnosticsSnapshot &snapshot,
 
 }  // namespace
 
-void CrashHttpController::register_routes(AsyncWebServer &server) {
+void CrashHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(AsyncURIMatcher::exact("/api/crash"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_status(request);

@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
+#include "http_route_registry.h"
 
 #include <string.h>
 #include <utility>
@@ -124,7 +124,7 @@ bool OximetryHttpController::begin(OximetryHub &hub,
     return publish_snapshot();
 }
 
-void OximetryHttpController::register_routes(AsyncWebServer &server) {
+void OximetryHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(
         AsyncURIMatcher::exact("/api/oximetry"), HTTP_POST,
         [this](AsyncWebServerRequest *request) { send_action(request); },

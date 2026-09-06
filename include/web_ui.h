@@ -104,7 +104,7 @@ public:
 
 private:
     // Server setup and cached snapshots
-    void register_routes(HttpRouteModule *const *route_modules,
+    bool register_routes(HttpRouteModule *const *route_modules,
                          size_t route_module_count);
     void bind_snapshot_channels(
         ConfigHttpController &config_http,

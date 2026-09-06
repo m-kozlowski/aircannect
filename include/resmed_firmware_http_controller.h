@@ -15,7 +15,7 @@ class ResmedFirmwareRepository;
 class ResmedFirmwareHttpController final : public HttpRouteModule {
 public:
     bool begin(ResmedFirmwareRepository &repository);
-    void register_routes(AsyncWebServer &server) override;
+    void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
     const PublishedJsonSnapshot &status_snapshot() const {
