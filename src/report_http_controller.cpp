@@ -388,12 +388,14 @@ uint64_t catalog_identity(const NightCatalog &catalog,
 
 bool format_catalog_etag(const NightCatalog &catalog,
                          const ReportSignalStoreCatalog *store,
+                         uint32_t generation,
                          char *out,
                          size_t out_size) {
     const int written = snprintf(
         out,
         out_size,
-        "\"catalog-%016llx\"",
+        "\"catalog-%08lx-%016llx\"",
+        static_cast<unsigned long>(generation),
         static_cast<unsigned long long>(catalog_identity(catalog, store)));
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
@@ -427,6 +429,11 @@ bool begin_missing_night(AsyncWebServerRequest *request,
         ReportRequestPriority::Foreground,
         generation,
         false);
+    if (admitted == OperationAdmission::Busy) {
+        send_json_error(request, 503, "report_queue_busy");
+        return false;
+    }
+
     if (admitted == OperationAdmission::Rejected) {
         send_json_error(request, 503, "report_queue_unavailable");
         return false;
@@ -710,9 +717,12 @@ void ReportHttpController::send_summary(
     }
     const std::shared_ptr<const ReportSignalStoreCatalog> store =
         report_task_->store_catalog_snapshot();
+    const ReportTaskControlSnapshot status =
+        report_task_->control_snapshot();
 
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
-    if (format_catalog_etag(*catalog, store.get(), etag, sizeof(etag)) &&
+    if (format_catalog_etag(*catalog, store.get(), status.catalog_generation,
+                            etag, sizeof(etag)) &&
         request_etag_matches(request, etag)) {
         send_not_modified(request, etag, {}, 0);
         return;
@@ -725,8 +735,6 @@ void ReportHttpController::send_summary(
         return;
     }
 
-    const ReportTaskControlSnapshot status =
-        report_task_->control_snapshot();
     char number[32] = {};
     *json = "{\"state\":\"ready\",\"generation\":";
     snprintf(number,
