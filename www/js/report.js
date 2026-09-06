@@ -3065,6 +3065,7 @@
         data.success ? 1 : 0,
         data.forced ? 1 : 0,
         data.generation || "",
+        data.source_revision || "",
         data.error || "",
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
@@ -3084,6 +3085,17 @@
         return;
       }
       const current = nightId === reportCurrentNightId;
+      const cached = current && reportResult ? reportResult :
+        reportResultClientCache.get(
+          "/api/report/result?night=" + encodeURIComponent(nightId))?.decoded;
+      const generation = Number(data.generation) || 0;
+      if (cached && generation &&
+          (cached.generation > generation ||
+           (cached.generation === generation && data.source_revision &&
+            cached.source_revision === String(data.source_revision)))) {
+        return;
+      }
+
       const reload = active && (current ||
         (!reportResult && nightId === selectedNightId));
       invalidateReportNightCache(nightId, !!data.forced);

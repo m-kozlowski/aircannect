@@ -1135,6 +1135,13 @@ void ReportHttpController::publish_completion() {
     json_add_uint64(completion_json_,
                     "generation",
                     completion.store_generation);
+    char revision[17] = {};
+    snprintf(revision,
+             sizeof(revision),
+             "%016llx",
+             static_cast<unsigned long long>(
+                 completion.request.artifact.source_revision.value()));
+    json_add_string(completion_json_, "source_revision", revision);
     json_add_string(completion_json_, "error", error);
     completion_json_ += '}';
 
