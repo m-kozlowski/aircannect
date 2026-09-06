@@ -633,9 +633,12 @@
     // so they line up. Drawn before the data so traces/marks sit on top.
     function drawReportTimeAxis(svg, pad, graphW, graphH, height, start, end) {
       const ticks = reportTimeTickCount(graphW);
+      const formatTime = (end - start) / ticks < 60000
+        ? fmtReportClock : fmtReportTime;
       for (let i = 0; i <= ticks; i++) {
         const frac = i / ticks;
         const x = pad.left + graphW * frac;
+        const anchor = i === 0 ? "start" : i === ticks ? "end" : "middle";
         svg.appendChild(svgNode("line", {
           x1: x.toFixed(1),
           y1: String(pad.top),
@@ -645,8 +648,8 @@
           "stroke-width": "1",
           "stroke-dasharray": "2 5",
         }));
-        svg.appendChild(svgText(fmtReportTime(start + (end - start) * frac),
-          x, height - 5, {"text-anchor": "middle"}));
+        svg.appendChild(svgText(formatTime(start + (end - start) * frac),
+          x, height - 5, {"text-anchor": anchor}));
       }
     }
 
