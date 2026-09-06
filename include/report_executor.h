@@ -70,8 +70,9 @@ public:
                               const ReportEventRecord &event) = 0;
 
     // Polled after releasing the operation's prepared read, even if ready()
-    // is false. Flush all active blocks here; false yields, true permits the
-    // next operation/source (or completion). Must tolerate repeated calls.
+    // is false. Complete required source-boundary work; false yields, true
+    // permits the next operation/source. Sinks may retain bounded buffers
+    // until final publication. Must tolerate repeated calls.
     // Cancellation/failure releases executor resources without draining.
     virtual bool end_operation() { return true; }
 

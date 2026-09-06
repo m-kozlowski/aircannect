@@ -152,7 +152,8 @@ public:
         ReportSignalStoreLevel level,
         size_t first_slot,
         const int16_t *const *raw_blocks,
-        size_t block_count);
+        size_t block_count,
+        bool include_header = false);
 
     static bool inspect(const uint8_t *bytes,
                         size_t length,

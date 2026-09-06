@@ -252,23 +252,30 @@ bool ReportSignalStoreService::merge_read() {
 }
 
 bool ReportSignalStoreService::encode_current() {
-    if (phase_ == Phase::EncodeHeader) {
-        block_bytes_ = ReportSignalStoreFileCodec::encode_header(track_, level_);
-    } else {
-        const int64_t block_start = track_.first_block_start_ms +
-            static_cast<int64_t>(slot_) * REPORT_SIGNAL_STORE_BLOCK_MS;
+    const int64_t block_start = track_.first_block_start_ms +
+        static_cast<int64_t>(slot_) * REPORT_SIGNAL_STORE_BLOCK_MS;
 
-        if (!ReportSignalStoreFileCodec::plane_range(
-                track_, block_start, block_count_, level_, range_)) {
-            fail("report_signal_store_block_range_invalid");
-            return true;
-        }
-
-        block_bytes_ = ReportSignalStoreFileCodec::encode_blocks(
-            track_, level_, slot_, raw_blocks_, block_count_);
+    if (!ReportSignalStoreFileCodec::plane_range(
+            track_, block_start, block_count_, level_, range_)) {
+        fail("report_signal_store_block_range_invalid");
+        return true;
     }
 
-    const size_t expected = phase_ == Phase::EncodeHeader
+    const bool include_header = phase_ == Phase::EncodeHeader &&
+        range_.offset == ReportSignalStoreFileCodec::HeaderBytes;
+    const bool separate_header = phase_ == Phase::EncodeHeader && !include_header;
+    if (separate_header) {
+        block_bytes_ = ReportSignalStoreFileCodec::encode_header(track_, level_);
+    } else {
+        block_bytes_ = ReportSignalStoreFileCodec::encode_blocks(
+            track_, level_, slot_, raw_blocks_, block_count_, include_header);
+        if (include_header) {
+            range_.offset = 0;
+            range_.length += ReportSignalStoreFileCodec::HeaderBytes;
+        }
+    }
+
+    const size_t expected = separate_header
         ? ReportSignalStoreFileCodec::HeaderBytes : range_.length;
 
     if (!block_bytes_ || block_bytes_->size() != expected ||
@@ -277,7 +284,7 @@ bool ReportSignalStoreService::encode_current() {
         return true;
     }
 
-    phase_ = phase_ == Phase::EncodeHeader
+    phase_ = separate_header
         ? Phase::SubmitHeader : Phase::SubmitBlock;
     return true;
 }
@@ -296,7 +303,7 @@ bool ReportSignalStoreService::submit_range() {
     command.path = path;
     command.bytes = block_bytes_;
     command.offset = header ? 0 : range_.offset;
-    command.truncate = header && !existing_file_;
+    command.truncate = command.offset == 0 && !existing_file_;
     command.generation = operation_generation_;
     command.lane = lane_;
 

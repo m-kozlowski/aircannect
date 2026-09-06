@@ -240,11 +240,13 @@ ReportSignalStoreFileCodec::encode_blocks(
     ReportSignalStoreLevel level,
     size_t first_slot,
     const int16_t *const *raw_blocks,
-    size_t block_count) {
+    size_t block_count,
+    bool include_header) {
     SignalFileLayout file_layout;
     if (!raw_blocks || !layout(track, level, file_layout) ||
         block_count == 0 || first_slot >= track.block_slot_count ||
-        block_count > track.block_slot_count - first_slot) {
+        block_count > track.block_slot_count - first_slot ||
+        (include_header && count_bits(track.present_blocks, first_slot) != 0)) {
         return {};
     }
 
@@ -253,6 +255,8 @@ ReportSignalStoreFileCodec::encode_blocks(
                                total_bytes)) {
         return {};
     }
+    const size_t prefix_bytes = include_header ? HeaderBytes : 0;
+    if (!CheckedSize::add_array(total_bytes, prefix_bytes, 1)) return {};
 
     for (size_t i = 0; i < block_count; ++i) {
         if (!raw_blocks[i] || !bit(track.present_blocks, first_slot + i)) {
@@ -264,9 +268,15 @@ ReportSignalStoreFileCodec::encode_blocks(
         LargeByteBuffer::allocate(total_bytes);
     if (!output) return {};
 
+    if (include_header) {
+        const auto header = encode_header(track, level);
+        if (!header) return {};
+        memcpy(output->data(), header->data(), HeaderBytes);
+    }
+
     for (size_t block = 0; block < block_count; ++block) {
         uint8_t *block_output = output->data() +
-            block * file_layout.block_bytes;
+            prefix_bytes + block * file_layout.block_bytes;
         if (level == ReportSignalStoreLevel::Raw) {
             for (uint32_t i = 0; i < file_layout.samples_per_block; ++i) {
                 put_i16(block_output + static_cast<size_t>(i) * 2,

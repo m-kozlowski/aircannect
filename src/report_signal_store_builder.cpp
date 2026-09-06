@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits.h>
 #include <new>
+#include <optional>
 #include <string.h>
 #include <utility>
 
@@ -18,6 +19,7 @@ namespace aircannect {
 namespace {
 
 constexpr size_t INITIAL_EVENT_CAPACITY = 64;
+constexpr size_t RAW_BUFFER_BUDGET = 2 * 1024 * 1024;
 
 int64_t align_block_start(int64_t timestamp_ms) {
     int64_t remainder = timestamp_ms % REPORT_SIGNAL_STORE_BLOCK_MS;
@@ -73,6 +75,8 @@ struct TrackWork {
     bool file_exists = false;
     bool recount_samples = false;
     int64_t last_accepted_ms = -1;
+    size_t last_slot = 0;
+    uint32_t next_sample_index = 0;
 };
 
 float fallback_scale(ReportSignalId signal) {
@@ -128,6 +132,9 @@ struct ReportSignalStoreBuilder::Runtime {
     TrackWork *tracks = nullptr;
     size_t track_count = 0;
     size_t track_capacity = 0;
+    size_t last_track = SIZE_MAX;
+    ReportSourceId last_source = ReportSourceId::Summary;
+    bool last_original = false;
     ReportEventRecord *events = nullptr;
     size_t event_count = 0;
     size_t event_capacity = 0;
@@ -147,6 +154,7 @@ struct ReportSignalStoreBuilder::Runtime {
     size_t writing_slot = 0;
     size_t writing_count = 0;
     bool completed_blocks_pending = false;
+    size_t buffered_raw_bytes = 0;
 
     void release_track_blocks(TrackWork &track) {
         for (size_t slot = 0;
@@ -171,6 +179,7 @@ struct ReportSignalStoreBuilder::Runtime {
         tracks = nullptr;
         track_count = 0;
         track_capacity = 0;
+        last_track = SIZE_MAX;
 
         Memory::free(events);
         events = nullptr;
@@ -194,6 +203,7 @@ struct ReportSignalStoreBuilder::Runtime {
         writing_slot = 0;
         writing_count = 0;
         completed_blocks_pending = false;
+        buffered_raw_bytes = 0;
     }
 
     bool reserve_events(size_t required) {
@@ -444,6 +454,7 @@ bool ReportSignalStoreBuilder::configure_series(
 
     runtime_->scales[index] = scale;
     runtime_->configured[index] = true;
+    runtime_->last_track = SIZE_MAX;
     return true;
 }
 
@@ -468,20 +479,43 @@ bool ReportSignalStoreBuilder::accept_series(
 
     const size_t signal_index = static_cast<size_t>(series.signal);
     const bool original = sample.raw_valid && runtime_->configured[signal_index];
-    const auto format = track_format(
-        series, original ? &runtime_->scales[signal_index] : nullptr,
-        sample.timestamp_ms);
-    const uint32_t phase = format.grid_phase_ms;
-    const float scale = format.value_scale;
-    const float offset = format.value_offset;
-    const int16_t missing = format.missing_value;
+    uint32_t phase = 0;
+    bool sequential = false;
+    if (runtime_->last_track < runtime_->track_count) {
+        const TrackWork &previous = runtime_->tracks[runtime_->last_track];
+        sequential = previous.last_accepted_ms >= 0 &&
+            previous.track.signal == series.signal &&
+            previous.track.sample_interval_ms == series.sample_interval_ms &&
+            sample.timestamp_ms - previous.last_accepted_ms ==
+                series.sample_interval_ms;
+        if (sequential) phase = previous.track.grid_phase_ms;
+    }
+    if (!sequential) {
+        phase = grid_phase(sample.timestamp_ms, series.sample_interval_ms);
+    }
 
     TrackWork *work = nullptr;
-    for (size_t i = 0; i < runtime_->track_count; ++i) {
-        ReportSignalStoreTrack &track = runtime_->tracks[i].track;
-        if (same_track_format(track, format)) {
-            work = &runtime_->tracks[i];
-            break;
+    if (runtime_->last_track < runtime_->track_count &&
+        runtime_->last_source == series.source &&
+        runtime_->last_original == original) {
+        TrackWork &previous = runtime_->tracks[runtime_->last_track];
+        if (previous.track.signal == series.signal &&
+            previous.track.sample_interval_ms == series.sample_interval_ms &&
+            previous.track.grid_phase_ms == phase) {
+            work = &previous;
+        }
+    }
+
+    std::optional<ReportSignalStoreTrack> format;
+    if (!work) {
+        format = track_format(
+            series, original ? &runtime_->scales[signal_index] : nullptr,
+            sample.timestamp_ms);
+        for (size_t i = 0; i < runtime_->track_count; ++i) {
+            if (same_track_format(runtime_->tracks[i].track, *format)) {
+                work = &runtime_->tracks[i];
+                break;
+            }
         }
     }
 
@@ -517,9 +551,9 @@ bool ReportSignalStoreBuilder::accept_series(
         work->track.block_slot_count = runtime_->block_slot_count;
         work->track.generation = runtime_->store_generation;
         work->track.sample_interval_ms = series.sample_interval_ms;
-        work->track.value_scale = scale;
-        work->track.value_offset = offset;
-        work->track.missing_value = missing;
+        work->track.value_scale = format->value_scale;
+        work->track.value_offset = format->value_offset;
+        work->track.missing_value = format->missing_value;
         work->track.grid_phase_ms = phase;
         work->track.first_block_start_ms =
             runtime_->first_block_start_ms;
@@ -541,6 +575,13 @@ bool ReportSignalStoreBuilder::accept_series(
         }
     }
 
+    runtime_->last_track = static_cast<size_t>(work - runtime_->tracks);
+    runtime_->last_source = series.source;
+    runtime_->last_original = original;
+    const float scale = work->track.value_scale;
+    const float offset = work->track.value_offset;
+    const int16_t missing = work->track.missing_value;
+
     if (work->recount_samples) {
         work->track.valid_sample_count = 0;
         work->track.expected_sample_count = 0;
@@ -549,40 +590,48 @@ bool ReportSignalStoreBuilder::accept_series(
         work->recount_samples = false;
     }
 
-    const int64_t block_start = align_block_start(sample.timestamp_ms);
-    const int64_t slot_value =
-        (block_start - runtime_->first_block_start_ms) /
-        REPORT_SIGNAL_STORE_BLOCK_MS;
-    if (block_start < runtime_->first_block_start_ms || slot_value < 0 ||
-        slot_value >= runtime_->block_slot_count) {
-        failure_reason_ = "report_signal_store_sample_outside_night";
-        return false;
-    }
-    const size_t slot = static_cast<size_t>(slot_value);
-
     if (sample.timestamp_ms == work->last_accepted_ms) return true;
     if (sample.timestamp_ms < work->last_accepted_ms) {
         failure_reason_ = "report_signal_store_nonchronological_source";
         return false;
     }
-    work->last_accepted_ms = sample.timestamp_ms;
-
     const uint32_t samples_per_block = static_cast<uint32_t>(
         REPORT_SIGNAL_STORE_BLOCK_MS / series.sample_interval_ms);
-    const int64_t first_sample = first_grid_sample(
-        block_start, series.sample_interval_ms, phase);
-    const int64_t sample_delta = sample.timestamp_ms - first_sample;
-    if (sample_delta < 0 ||
-        (sample_delta % series.sample_interval_ms) != 0) {
-        failure_reason_ = "report_signal_store_sample_grid_invalid";
-        return false;
+
+    size_t slot = work->last_slot;
+    uint32_t sample_index = work->next_sample_index;
+    if (work->last_accepted_ms < 0 ||
+        sample.timestamp_ms - work->last_accepted_ms !=
+            series.sample_interval_ms ||
+        sample_index >= samples_per_block) {
+        const int64_t block_start = align_block_start(sample.timestamp_ms);
+        const int64_t slot_value =
+            (block_start - runtime_->first_block_start_ms) /
+            REPORT_SIGNAL_STORE_BLOCK_MS;
+        if (block_start < runtime_->first_block_start_ms || slot_value < 0 ||
+            slot_value >= runtime_->block_slot_count) {
+            failure_reason_ = "report_signal_store_sample_outside_night";
+            return false;
+        }
+        slot = static_cast<size_t>(slot_value);
+
+        const int64_t first_sample = first_grid_sample(
+            block_start, series.sample_interval_ms, phase);
+        const int64_t sample_delta = sample.timestamp_ms - first_sample;
+        if (sample_delta < 0 || (sample_delta % series.sample_interval_ms) != 0) {
+            failure_reason_ = "report_signal_store_sample_grid_invalid";
+            return false;
+        }
+        sample_index = static_cast<uint32_t>(
+            sample_delta / series.sample_interval_ms);
+        if (sample_index >= samples_per_block) {
+            failure_reason_ = "report_signal_store_sample_index_invalid";
+            return false;
+        }
     }
-    const uint64_t sample_index = static_cast<uint64_t>(
-        sample_delta / series.sample_interval_ms);
-    if (sample_index >= samples_per_block) {
-        failure_reason_ = "report_signal_store_sample_index_invalid";
-        return false;
-    }
+    work->last_accepted_ms = sample.timestamp_ms;
+    work->last_slot = slot;
+    work->next_sample_index = sample_index + 1;
 
     const int32_t canonical_value = report_series_canonical_value_milli(
         series, sample.value_milli);
@@ -595,7 +644,7 @@ bool ReportSignalStoreBuilder::accept_series(
     }
     const int16_t encoded = static_cast<int16_t>(quantized);
 
-    const bool write_sample = slot_value >= work->append_slot;
+    const bool write_sample = static_cast<int>(slot) >= work->append_slot;
     if (write_sample && !work->raw_blocks[slot]) {
         work->raw_blocks[slot] = static_cast<int16_t *>(Memory::alloc_large(
             static_cast<size_t>(samples_per_block) * sizeof(int16_t), false));
@@ -604,6 +653,8 @@ bool ReportSignalStoreBuilder::accept_series(
             failure_reason_ = "report_signal_store_block_allocation_failed";
             return false;
         }
+        runtime_->buffered_raw_bytes +=
+            static_cast<size_t>(samples_per_block) * sizeof(int16_t);
         std::fill_n(work->raw_blocks[slot],
                     samples_per_block,
                     missing);
@@ -695,6 +746,9 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
             const size_t slot = runtime_->writing_slot + i;
             Memory::free(work.raw_blocks[slot]);
             work.raw_blocks[slot] = nullptr;
+            runtime_->buffered_raw_bytes -=
+                (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
+                sizeof(int16_t);
             work.written_blocks[slot / 8] |=
                 static_cast<uint8_t>(1u << (slot % 8));
         }
@@ -721,10 +775,16 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
                 ? StorageAtomicWriteLane::Foreground
                 : StorageAtomicWriteLane::Maintenance;
 
+            const size_t raw_block_bytes =
+                (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
+                sizeof(int16_t);
+            const size_t batch_limit = std::min(
+                ReportSignalStoreService::MaxWriteBatchBlocks,
+                (AC_STORAGE_RANGE_WRITE_MAX_BYTES -
+                 ReportSignalStoreFileCodec::HeaderBytes) / raw_block_bytes);
             size_t block_count = 1;
             if (!existing_block) {
-                for (; block_count < ReportSignalStoreService::MaxWriteBatchBlocks;
-                     ++block_count) {
+                for (; block_count < batch_limit; ++block_count) {
                     const size_t candidate = slot + block_count;
                     if (candidate >= runtime_->block_slot_count ||
                         (!include_partial &&
@@ -736,11 +796,10 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
                     }
                 }
 
-                if (!include_partial && block_count <
-                        ReportSignalStoreService::MaxWriteBatchBlocks &&
+                if (!include_partial && block_count < batch_limit &&
                     slot + block_count >= static_cast<size_t>(work.newest_slot)) {
-                    // Keep the current block open until four closed blocks,
-                    // unless a gap forces a partial.
+                    // Batch by bytes: slow signals need not close a file
+                    // after only a few kilobytes. Gaps still end a batch.
                     continue;
                 }
             }
@@ -779,9 +838,12 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
     return true;
 }
 
-bool ReportSignalStoreBuilder::ready() { return flush_blocks(false); }
+bool ReportSignalStoreBuilder::ready() {
+    return flush_blocks(
+        runtime_ && runtime_->buffered_raw_bytes > RAW_BUFFER_BUDGET);
+}
 
-bool ReportSignalStoreBuilder::end_operation() { return flush_blocks(true); }
+bool ReportSignalStoreBuilder::end_operation() { return ready(); }
 
 bool ReportSignalStoreBuilder::accept_event(
     uint16_t session_index,
@@ -819,7 +881,7 @@ bool ReportSignalStoreBuilder::finish_build() {
         return false;
     }
 
-    if (!end_operation()) return false;
+    if (!flush_blocks(true)) return false;
 
     if (runtime_->event_count > 1) {
         std::sort(runtime_->events,

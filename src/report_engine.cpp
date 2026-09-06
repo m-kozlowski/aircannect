@@ -730,6 +730,8 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     const ReportExecutorStatus status = executor_.status();
     if (status.state == ReportExecutorState::Complete) {
         const bool finished = builder_.finish_build();
+        if (!finished && !builder_.failure_reason()) return false;
+
         std::shared_ptr<ReportSignalStoreBundle> bundle =
             finished ? builder_.take_completed() : nullptr;
         if (!finished || !bundle) {

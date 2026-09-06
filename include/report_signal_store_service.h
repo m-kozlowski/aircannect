@@ -34,10 +34,7 @@ struct ReportSignalStoreStatus {
 
 class ReportSignalStoreService {
 public:
-    static constexpr size_t MaxWriteBatchBlocks = 4;
-    static_assert(MaxWriteBatchBlocks * ReportSignalStoreFileCodec::MaxBlockBytes <=
-                      AC_STORAGE_RANGE_WRITE_MAX_BYTES,
-                  "signal store batch exceeds range write bound");
+    static constexpr size_t MaxWriteBatchBlocks = REPORT_SIGNAL_STORE_MAX_BLOCKS;
 
     ReportSignalStoreService() = default;
     ~ReportSignalStoreService();
