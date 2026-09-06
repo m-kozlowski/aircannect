@@ -12,6 +12,22 @@ ParentDirectoryStep ensure_parent_directory_step(const char *path,
         return ParentDirectoryStep::Failed;
     }
 
+    if (cursor == 0) {
+        const char *last = strrchr(path, '/');
+        if (last == path) return ParentDirectoryStep::Done;
+
+        char parent[AC_STORAGE_PATH_MAX] = {};
+        memcpy(parent, path, static_cast<size_t>(last - path));
+        File directory = open(parent, "r");
+        if (directory) {
+            const bool valid = directory.isDirectory();
+            directory.close();
+            cursor = strlen(path);
+            return valid ? ParentDirectoryStep::Done
+                         : ParentDirectoryStep::Failed;
+        }
+    }
+
     const char *slash = strchr(path + (cursor ? cursor : 1), '/');
     if (!slash) return ParentDirectoryStep::Done;
 

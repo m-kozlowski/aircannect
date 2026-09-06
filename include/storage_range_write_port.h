@@ -31,7 +31,7 @@ struct StorageRangeWriteCompletion {
     OperationTicket ticket;
     OperationOutcome outcome;
     uint64_t bytes_written = 0;
-    // Post-close mtime on success, or zero when unavailable (as for atomic writes).
+    // Flushed file mtime on success, or zero when unavailable.
     uint64_t modified = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };

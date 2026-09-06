@@ -178,8 +178,13 @@ const char *StorageRangeWriteService::write_locked() {
 
 void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                                              const char *error) {
+    uint64_t modified = 0;
     if (job_->output) {
         job_->output.flush();
+        if (outcome.disposition == OperationDisposition::Succeeded) {
+            const time_t last_write = job_->output.getLastWrite();
+            if (last_write > 0) modified = static_cast<uint64_t>(last_write);
+        }
         job_->output.close();
     }
 
@@ -189,8 +194,7 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
         completion_.ticket = job_->ticket;
         completion_.outcome = outcome;
         completion_.bytes_written = job_->written;
-        completion_.modified = outcome.disposition == OperationDisposition::Succeeded
-            ? Storage::file_modified(job_->command.path.c_str()) : 0;
+        completion_.modified = modified;
 
         snprintf(completion_.error, sizeof(completion_.error), "%s",
                  error ? error : "");
