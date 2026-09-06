@@ -17,6 +17,13 @@ bool rename(const char *from, const char *to);
 File open(const char *path, const char *mode);
 int open_descriptor(const char *path, int flags);
 
+// Storage-task-only reuse of flushed range-write descriptors, at most three
+// including the current write. Other mutations discard idle descriptors.
+// take reserves room before an open; close returns a flushed handle or closes it.
+int take_write_handle(const char *path);
+void close_write_handle(const char *path, int descriptor, bool retain);
+bool release_write_handles();
+
 // Storage-task file preparation and post-close metadata
 enum class ParentDirectoryStep : uint8_t { More, Done, Failed };
 ParentDirectoryStep ensure_parent_directory_step(const char *path,

@@ -273,6 +273,7 @@ void update_capacity_if_due(uint32_t now_ms) {
 }
 
 bool mount_storage() {
+    release_write_handles();
     reset_status();
 
 #if AC_STORAGE_SDMMC_ENABLED
@@ -393,13 +394,20 @@ int open_descriptor(const char *path, int flags) {
     char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
     if (!native_path(path, full_path, sizeof(full_path))) return -1;
 
-    return ::open(full_path, flags, 0666);
+    int descriptor = ::open(full_path, flags, 0666);
+    if (descriptor < 0 && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
+        release_write_handles()) {
+        descriptor = ::open(full_path, flags, 0666);
+    }
+    return descriptor;
 }
 
 bool remove(const char *path) {
     if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
+
+    release_write_handles();
     if (fs->remove(path)) return true;
     return !fs->exists(path);
 }
@@ -408,6 +416,8 @@ bool rmdir(const char *path) {
     if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
+
+    release_write_handles();
     if (fs->rmdir(path)) return true;
     return !fs->exists(path);
 }
@@ -415,13 +425,25 @@ bool rmdir(const char *path) {
 bool rename(const char *from, const char *to) {
     if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
+
+    release_write_handles();
     return fs && fs->rename(from, to);
 }
 
 File open(const char *path, const char *mode) {
     if (!initialized || !path || !*path || !mode || !*mode) return File();
     fs::FS *fs = active_fs();
-    return fs ? fs->open(path, mode) : File();
+    if (!fs) return File();
+
+    if (mode[0] != 'r' || strchr(mode, '+')) release_write_handles();
+
+    File file = fs->open(path, mode);
+    if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
+        release_write_handles()) {
+        file = fs->open(path, mode);
+    }
+
+    return file;
 }
 
 const char *type_name(StorageType type) {

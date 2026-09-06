@@ -51,6 +51,9 @@ public:
     void cancel();
     void reset();
 
+    // End a complete build, not the per-track reset between block batches.
+    void release_write_handles();
+
     // The caller retains mutable raw until terminal status, then resets us.
     // Track contains the accumulated bitmap, including this slot.
     // existing_block fills missing raw cells from disk. !existing_file truncates

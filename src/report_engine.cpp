@@ -893,6 +893,7 @@ void ReportEngine::reset_active() {
     executor_.reset();
     builder_.discard_build();
     store_.reset();
+    store_.release_write_handles();
     fallback_acquisition_.reset();
     active_plan_.reset();
     active_request_ = {};

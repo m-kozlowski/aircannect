@@ -2176,6 +2176,7 @@ void task_entry(void *) {
             }
 
             if (have_job) {
+                Storage::release_write_handles();
                 process_job(slots[slot_index]);
                 if (lock_queue(50)) {
                     clear_slot(slots[slot_index]);
@@ -2613,6 +2614,10 @@ FileLogSinkPort &file_log_port() {
 
 void publish_activity(const ActivitySnapshot &activity,
                       bool ota_storage_upload_active) {
+    range_write_service.set_retention_allowed(
+        !activity.therapy_active && !activity.ota_install_active &&
+        !activity.export_work_claimed);
+
     storage_therapy_active.store(activity.therapy_active,
                                  std::memory_order_release);
     capacity_update_allowed.store(!activity.therapy_active &&

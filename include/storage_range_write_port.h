@@ -12,6 +12,8 @@ struct StorageRangeWriteCommand {
     std::shared_ptr<const LargeByteBuffer> bytes;
     uint64_t offset = 0;
     bool truncate = false;
+    // Reuse hint only; successful completion still means the bytes are flushed.
+    bool retain_handle = false;
     uint32_t generation = 0;
     StorageAtomicWriteLane lane = StorageAtomicWriteLane::Maintenance;
 
@@ -54,6 +56,11 @@ public:
     // Acceptance queues owner-side cancellation without waiting for file I/O.
     // The caller can release the ticket; no completion is delivered afterwards.
     virtual bool abandon(OperationTicket ticket) = 0;
+
+    // Advisory reuse ends at the producer's build boundary. This queues
+    // closure on the storage task, including handles from completed writes.
+    virtual void release_handles() = 0;
+
     virtual bool take_completion(
         OperationTicket ticket, StorageRangeWriteCompletion &completion) = 0;
 };

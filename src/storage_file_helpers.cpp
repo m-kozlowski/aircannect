@@ -5,9 +5,76 @@
 #include <unistd.h>
 
 #include "memory_manager.h"
+#include "large_object.h"
+#include "string_util.h"
 #include "storage_path.h"
 
 namespace aircannect::Storage {
+
+namespace {
+
+struct WriteHandleCache {
+    struct Entry {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        int descriptor = -1;
+    };
+
+    static constexpr size_t Capacity = 3;
+    Entry entries[Capacity];
+    size_t count = 0;
+
+    int take(size_t index) {
+        const int descriptor = entries[index].descriptor;
+        for (size_t i = index + 1; i < count; ++i) entries[i - 1] = entries[i];
+        entries[--count] = {};
+        return descriptor;
+    }
+};
+
+WriteHandleCache *write_handles = nullptr;
+
+}  // namespace
+
+int take_write_handle(const char *path) {
+    if (!write_handles) return -1;
+
+    for (size_t i = 0; i < write_handles->count; ++i) {
+        if (strcmp(write_handles->entries[i].path, path) == 0) {
+            return write_handles->take(i);
+        }
+    }
+
+    if (write_handles->count == WriteHandleCache::Capacity) {
+        ::close(write_handles->take(0));
+    }
+    return -1;
+}
+
+void close_write_handle(const char *path, int descriptor, bool retain) {
+    if (descriptor < 0) return;
+    if (retain && !write_handles) {
+        write_handles = LargeObject::create<WriteHandleCache>();
+    }
+
+    if (!retain || !write_handles) {
+        ::close(descriptor);
+        return;
+    }
+
+    auto &entry = write_handles->entries[write_handles->count++];
+    copy_cstr(entry.path, sizeof(entry.path), path);
+    entry.descriptor = descriptor;
+}
+
+bool release_write_handles() {
+    if (!write_handles) return false;
+
+    const bool released = write_handles->count != 0;
+    while (write_handles->count) ::close(write_handles->take(0));
+    LargeObject::destroy(write_handles);
+    write_handles = nullptr;
+    return released;
+}
 
 ParentDirectoryStep ensure_parent_directory_step(const char *path,
                                                  size_t &cursor) {

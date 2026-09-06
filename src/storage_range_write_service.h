@@ -15,6 +15,7 @@ public:
     ~StorageRangeWriteService();
     bool begin(WakeCallback wake);
     void set_task_available(bool available);
+    void set_retention_allowed(bool allowed);
 
     // Called only by the StorageService task, below EDF work.
     bool step(StorageAtomicWriteLane lane);
@@ -22,6 +23,7 @@ public:
     OperationSubmission request_write(
         const StorageRangeWriteCommand &command) override;
     bool abandon(OperationTicket ticket) override;
+    void release_handles() override;
     bool take_completion(
         OperationTicket ticket,
         StorageRangeWriteCompletion &completion) override;
@@ -55,6 +57,8 @@ private:
     WakeCallback wake_ = nullptr;
     std::atomic<bool> task_available_{false};
     std::atomic<uint64_t> abandon_request_{0};
+    std::atomic<bool> release_requested_{false};
+    std::atomic<bool> retention_allowed_{true};
     uint32_t next_ticket_id_ = 0;
 
     Job *job_ = nullptr;

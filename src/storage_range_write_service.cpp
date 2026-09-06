@@ -13,6 +13,7 @@
 namespace aircannect {
 
 StorageRangeWriteService::~StorageRangeWriteService() {
+    Storage::release_write_handles();
     if (job_) {
         if (job_->output >= 0) ::close(job_->output);
         LargeObject::destroy(job_);
@@ -104,8 +105,20 @@ bool StorageRangeWriteService::abandon(OperationTicket ticket) {
 
     if (!accepted && previous != requested) return false;
 
+    release_handles();
     wake();
     return true;
+}
+
+void StorageRangeWriteService::release_handles() {
+    release_requested_.store(true, std::memory_order_release);
+    wake();
+}
+
+void StorageRangeWriteService::set_retention_allowed(bool allowed) {
+    const bool previous = retention_allowed_.exchange(allowed,
+                                                      std::memory_order_acq_rel);
+    if (previous && !allowed) release_handles();
 }
 
 bool StorageRangeWriteService::take_completion(
@@ -127,7 +140,15 @@ const char *StorageRangeWriteService::open_locked() {
     const StorageRangeWriteCommand &command = job_->command;
     const int flags = O_RDWR | (command.offset == 0 ? O_CREAT : 0) |
                       (command.truncate ? O_TRUNC : 0);
-    job_->output = Storage::open_descriptor(command.path.c_str(), flags);
+    job_->output = Storage::take_write_handle(command.path.c_str());
+    if (job_->output >= 0 && command.truncate) {
+        ::close(job_->output);
+        job_->output = -1;
+    }
+
+    if (job_->output < 0) {
+        job_->output = Storage::open_descriptor(command.path.c_str(), flags);
+    }
 
     if (job_->output < 0) {
         const int error = errno;
@@ -191,11 +212,22 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
         if (outcome.disposition == OperationDisposition::Succeeded) {
             modified = Storage::file_modified(job_->command.path.c_str());
         }
-        ::close(job_->output);
     }
 
     // Catch cancellation posted during a blocking write or flush as well.
     (void)apply_abandon_locked();
+    const bool released = release_requested_.exchange(false,
+                                                      std::memory_order_acq_rel);
+    if (released || job_->abandoned ||
+        outcome.disposition != OperationDisposition::Succeeded) {
+        Storage::release_write_handles();
+    }
+
+    const bool retain = job_->command.retain_handle && !released &&
+        !job_->abandoned && retention_allowed_.load(std::memory_order_acquire) &&
+        outcome.disposition == OperationDisposition::Succeeded;
+
+    Storage::close_write_handle(job_->command.path.c_str(), job_->output, retain);
     if (!job_->abandoned) {
         completion_.ticket = job_->ticket;
         completion_.outcome = outcome;
@@ -214,10 +246,18 @@ bool StorageRangeWriteService::step(StorageAtomicWriteLane lane) {
     if (!ready() || !lock()) return false;
 
     const bool abandoned = apply_abandon_locked();
+    const bool release = release_requested_.exchange(false,
+                                                     std::memory_order_acq_rel);
+    bool released = false;
+    if (release || !retention_allowed_.load(std::memory_order_acquire)) {
+        released = Storage::release_write_handles();
+        job_->command.retain_handle = false;
+    }
+
     if (!job_->ticket.valid() ||
         (!job_->abandoned && job_->command.lane != lane)) {
         unlock();
-        return abandoned;
+        return abandoned || released;
     }
 
     const char *error = nullptr;

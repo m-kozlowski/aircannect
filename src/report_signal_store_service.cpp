@@ -30,6 +30,11 @@ bool ReportSignalStoreStatus::terminal() const {
 
 ReportSignalStoreService::~ReportSignalStoreService() {
     cancel();
+    release_write_handles();
+}
+
+void ReportSignalStoreService::release_write_handles() {
+    if (range_write_port_) range_write_port_->release_handles();
 }
 
 void ReportSignalStoreService::begin(
@@ -156,6 +161,7 @@ OperationAdmission ReportSignalStoreService::start(
         return OperationAdmission::Rejected;
     }
 
+    release_write_handles();
     bundle_ = std::move(bundle);
     published_metadata_.reset();
     operation_generation_ = operation_generation;
@@ -312,6 +318,7 @@ bool ReportSignalStoreService::submit_range() {
     command.bytes = block_bytes_;
     command.offset = header ? 0 : range_.offset;
     command.truncate = command.offset == 0 && !existing_file_;
+    command.retain_handle = true;
     command.generation = operation_generation_;
     command.lane = lane_;
 
