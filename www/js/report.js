@@ -1829,6 +1829,8 @@
                code === "report_queue_unavailable" ||
                code === "report_stream_unavailable" ||
                code === "report_stream_slots_full" ||
+               code === "stream_busy" ||
+               code === "stream_slots_full" ||
                code === "response_alloc";
       } catch (error) {
         return false;
@@ -2469,25 +2471,27 @@
                                                 context) {
       if (!context.active()) return;
 
-      const missing = [];
+      const runs = [];
+      let run = null;
       for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
         const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
         const key = signalStoreCacheKey(track, level, block, context);
-        if (signalStoreBlockPresent(track, slot) &&
-            !signalStoreTouchBlock(key, track, context)) {
-          missing.push(block);
+        if (!signalStoreBlockPresent(track, slot)) continue;
+
+        if (signalStoreTouchBlock(key, track, context)) {
+          run = null;
+          continue;
+        }
+
+        if (!run || block - run.from >=
+            SIGNAL_STORE_MAX_BLOCKS * SIGNAL_STORE_BLOCK_MS) {
+          run = {from: block, to: block + SIGNAL_STORE_BLOCK_MS};
+          runs.push(run);
+        } else {
+          run.to = block + SIGNAL_STORE_BLOCK_MS;
         }
       }
 
-      const runs = [];
-      missing.forEach((block) => {
-        const last = runs.length ? runs[runs.length - 1] : null;
-        if (last && last.to === block) {
-          last.to += SIGNAL_STORE_BLOCK_MS;
-        } else {
-          runs.push({from: block, to: block + SIGNAL_STORE_BLOCK_MS});
-        }
-      });
       await runReportFetchJobs(runs.map((run) => () =>
         fetchSignalStoreBlocks(
           track, level, run.from, run.to, context)), 1);
@@ -3056,11 +3060,15 @@
       if (!data.success || data.kind !== "night" || !data.night) return;
 
       const nightId = String(data.night);
-      const reload = nightId === reportCurrentNightId &&
-        AirCANnect.pages.isActive("report");
+      const active = AirCANnect.pages.isActive("report");
+      const selected = selectedReportNight();
+      const selectedNightId = selected ? String(selected.id) : "";
+      const current = nightId === reportCurrentNightId;
+      const reload = active && (current ||
+        (!reportResult && nightId === selectedNightId));
       invalidateReportNightCache(nightId, !!data.forced);
-      if (nightId === reportCurrentNightId) cancelReportRequests(!data.forced);
-      if (reload) loadSelectedReportNight(true);
+      if (current) cancelReportRequests(!data.forced);
+      if (reload) loadSelectedReportNight(current && !!reportResult);
     }
 
     AirCANnect.events.subscribe("report", handleReportCompletion);
