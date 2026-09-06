@@ -66,6 +66,27 @@ public:
     virtual bool accept_series(uint16_t session_index,
                                const ReportSeriesDescriptor &series,
                                const ReportSeriesSample &sample) = 0;
+
+    // EDF-only fast path. The span is borrowed until this call returns;
+    // the default preserves existing sinks by adapting valid words to the
+    // sample contract. Fallback decoding continues through accept_series().
+    virtual bool accept_series_span(
+        uint16_t session_index,
+        const ReportSeriesDescriptor &series,
+        const EdfReportSeriesSpan &span) {
+        if (!span.valid()) return false;
+        for (uint32_t i = 0; i < span.sample_count; ++i) {
+            if (span.missing_at(i)) continue;
+
+            ReportSeriesSample sample;
+            sample.timestamp_ms = span.timestamp_at(i);
+            sample.value_milli = span.value_milli_at(i);
+            sample.raw = span.raw_at(i);
+            sample.raw_valid = true;
+            if (!accept_series(session_index, series, sample)) return false;
+        }
+        return true;
+    }
     virtual bool accept_event(uint16_t session_index,
                               const ReportEventRecord &event) = 0;
 
@@ -119,6 +140,8 @@ private:
 
     static bool emit_series(void *context,
                             const ReportSeriesSample &sample);
+    static bool emit_series_span(void *context,
+                                 const EdfReportSeriesSpan &span);
     static bool emit_event(void *context,
                            const ReportEventRecord &event);
 

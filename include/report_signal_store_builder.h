@@ -33,6 +33,10 @@ public:
     bool accept_series(uint16_t session_index,
                        const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;
+    bool accept_series_span(
+        uint16_t session_index,
+        const ReportSeriesDescriptor &series,
+        const EdfReportSeriesSpan &span) override;
     bool accept_event(uint16_t session_index,
                       const ReportEventRecord &event) override;
     bool finish_build();
@@ -43,6 +47,16 @@ public:
 
 private:
     struct Runtime;
+    bool accept_raw_sample(uint16_t session_index,
+                           const ReportSeriesDescriptor &series,
+                           int64_t timestamp_ms,
+                           int16_t raw,
+                           const EdfSignalScale *scale = nullptr);
+    bool accept_raw_run(uint16_t session_index,
+                        const ReportSeriesDescriptor &series,
+                        const EdfReportSeriesSpan &span,
+                        size_t begin,
+                        size_t end);
     bool flush_blocks(bool include_partial);
     Runtime *runtime_ = nullptr;
     ReportSignalStoreService *store_ = nullptr;

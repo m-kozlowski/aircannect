@@ -104,6 +104,8 @@ private:
     Runtime *runtime_ = nullptr;
 };
 
+bool report_signal_has_metric_consumer(ReportSignalId signal);
+
 void report_night_count_event(ReportEventCounts &counts,
                               const ReportEventRecord &event);
 void report_night_metrics_from_catalog(const NightCatalogMetrics &source,

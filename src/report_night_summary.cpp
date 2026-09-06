@@ -379,6 +379,10 @@ ReportCalculatedMetrics ReportMetricAccumulator::finish() const {
     return out;
 }
 
+bool report_signal_has_metric_consumer(ReportSignalId signal) {
+    return metric_histogram_index(signal) >= 0;
+}
+
 std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
     const {
     if (!runtime_) return {};

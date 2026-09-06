@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "large_object.h"
+#include "edf_bytes.h"
 #include "large_scratch_array.h"
 #include "memory_manager.h"
 #include "report_night_summary.h"
@@ -228,6 +229,144 @@ struct ReportSignalStoreBuilder::Runtime {
         work.tail_metrics = LargeObject::create<ReportMetricAccumulator>();
         return work.tail_metrics &&
             work.tail_metrics->begin(report_signal_bit(work.track.signal));
+    }
+
+    bool ensure_raw_block(TrackWork &work,
+                          size_t slot,
+                          uint32_t samples_per_block,
+                          const char *&failure) {
+        if (work.raw_blocks[slot]) return true;
+
+        work.raw_blocks[slot] = static_cast<int16_t *>(Memory::alloc_large(
+            static_cast<size_t>(samples_per_block) * sizeof(int16_t), false));
+        if (!work.raw_blocks[slot]) {
+            failure = "report_signal_store_block_allocation_failed";
+            return false;
+        }
+        buffered_raw_bytes +=
+            static_cast<size_t>(samples_per_block) * sizeof(int16_t);
+        std::fill_n(work.raw_blocks[slot], samples_per_block,
+                    work.track.missing_value);
+
+        if (work.track.present_blocks[slot / 8] & (1u << (slot % 8))) {
+            return true;
+        }
+        for (size_t later = slot + 1;
+             later < block_slot_count;
+             ++later) {
+            if (work.written_blocks[later / 8] & (1u << (later % 8))) {
+                failure = "report_signal_store_rebuild_required";
+                return false;
+            }
+        }
+        work.track.present_blocks[slot / 8] |=
+            static_cast<uint8_t>(1u << (slot % 8));
+        ++work.track.present_block_count;
+        return true;
+    }
+
+    bool append_raw_range(uint16_t session_index,
+                          const ReportSeriesDescriptor &series,
+                          TrackWork &work,
+                          size_t slot,
+                          uint32_t sample_index,
+                          uint32_t count,
+                          int64_t first_timestamp_ms,
+                          const uint8_t *raw_bytes,
+                          const EdfSignalScale *scale,
+                          int32_t single_canonical_value,
+                          const char *&failure) {
+        const uint32_t samples_per_block = static_cast<uint32_t>(
+            REPORT_SIGNAL_STORE_BLOCK_MS / series.sample_interval_ms);
+        const int64_t last_timestamp_ms = first_timestamp_ms +
+            static_cast<int64_t>(count - 1) * series.sample_interval_ms;
+
+        for (uint32_t i = 0; i < count; ++i) {
+            const int16_t raw = edf_read_i16_le_sample(raw_bytes, i);
+            if (raw == work.track.missing_value) {
+                failure = "report_signal_store_value_invalid";
+                return false;
+            }
+        }
+
+        const bool write_sample = static_cast<int>(slot) >= work.append_slot;
+        if (write_sample && !ensure_raw_block(
+                work, slot, samples_per_block, failure)) {
+            return false;
+        }
+        if (write_sample) {
+            memcpy(work.raw_blocks[slot] + sample_index,
+                   raw_bytes, static_cast<size_t>(count) * 2);
+            if (work.newest_slot >= 0 &&
+                static_cast<int>(slot) > work.newest_slot) {
+                completed_blocks_pending = true;
+            }
+            work.newest_slot = std::max(work.newest_slot,
+                                        static_cast<int>(slot));
+        }
+
+        work.last_accepted_ms = last_timestamp_ms;
+        work.last_slot = slot;
+        work.next_sample_index = sample_index + count;
+
+        const uint32_t closed_count =
+            last_timestamp_ms < closed_before_ms
+                ? count
+                : (first_timestamp_ms < closed_before_ms
+                       ? static_cast<uint32_t>(
+                             (closed_before_ms - first_timestamp_ms - 1) /
+                                 series.sample_interval_ms + 1)
+                       : 0);
+        if (closed_count > 0) {
+            if (work.closed.valid_sample_count == 0) {
+                work.closed.first_valid_sample_ms = first_timestamp_ms;
+            }
+            work.closed.last_valid_sample_ms = first_timestamp_ms +
+                static_cast<int64_t>(closed_count - 1) * series.sample_interval_ms;
+            work.closed.valid_sample_count += closed_count;
+        }
+
+        if (report_signal_has_metric_consumer(series.signal)) {
+            if (closed_count < count && !prepare_tail(work)) {
+                failure = "report_signal_store_tail_allocation_failed";
+                return false;
+            }
+
+            for (uint32_t i = 0; i < count; ++i) {
+                const int32_t canonical_value = scale
+                    ? report_series_canonical_value_milli(
+                          series,
+                          edf_report_physical_value_milli(
+                              *scale, edf_read_i16_le_sample(raw_bytes, i)))
+                    : single_canonical_value;
+                if (i < closed_count) {
+                    closed_metrics.accept(series.signal, canonical_value);
+                } else {
+                    work.tail_metrics->accept(series.signal, canonical_value);
+                }
+            }
+        }
+
+        ReportSignalStoreTrack &track = work.track;
+        if (track.valid_sample_count == 0) {
+            track.first_valid_sample_ms = first_timestamp_ms;
+        }
+        track.last_valid_sample_ms = last_timestamp_ms;
+        track.valid_sample_count += count;
+
+        if (!work.sessions_seen[session_index]) {
+            work.sessions_seen[session_index] = 1;
+            const ReportReadSession *session = plan->session(session_index);
+            const uint64_t expected = expected_samples(
+                session->output_window, series.sample_interval_ms,
+                track.grid_phase_ms);
+            if (track.expected_sample_count > UINT64_MAX - expected) {
+                failure = "report_signal_store_coverage_overflow";
+                return false;
+            }
+            track.expected_sample_count += expected;
+        }
+        return true;
     }
 
     void update_expected_coverage() {
@@ -629,12 +768,11 @@ bool ReportSignalStoreBuilder::accept_series(
             return false;
         }
     }
-    work->last_accepted_ms = sample.timestamp_ms;
-    work->last_slot = slot;
-    work->next_sample_index = sample_index + 1;
-
-    const int32_t canonical_value = report_series_canonical_value_milli(
-        series, sample.value_milli);
+    const bool metrics_needed =
+        report_signal_has_metric_consumer(series.signal);
+    const int32_t canonical_value = !sample.raw_valid || metrics_needed
+        ? report_series_canonical_value_milli(series, sample.value_milli)
+        : 0;
 
     const long quantized = sample.raw_valid ? sample.raw
         : lround((canonical_value / 1000.0 - offset) / scale);
@@ -643,84 +781,148 @@ bool ReportSignalStoreBuilder::accept_series(
         return false;
     }
     const int16_t encoded = static_cast<int16_t>(quantized);
+    uint8_t encoded_bytes[2];
+    edf_write_i16_le(encoded_bytes, encoded);
 
-    const bool write_sample = static_cast<int>(slot) >= work->append_slot;
-    if (write_sample && !work->raw_blocks[slot]) {
-        work->raw_blocks[slot] = static_cast<int16_t *>(Memory::alloc_large(
-            static_cast<size_t>(samples_per_block) * sizeof(int16_t), false));
+    return runtime_->append_raw_range(
+        session_index, series, *work, slot, sample_index, 1,
+        sample.timestamp_ms, encoded_bytes, nullptr,
+        metrics_needed ? canonical_value : 0, failure_reason_);
+}
 
-        if (!work->raw_blocks[slot]) {
-            failure_reason_ = "report_signal_store_block_allocation_failed";
+bool ReportSignalStoreBuilder::accept_raw_sample(
+    uint16_t session_index,
+    const ReportSeriesDescriptor &series,
+    int64_t timestamp_ms,
+    int16_t raw,
+    const EdfSignalScale *scale) {
+    ReportSeriesSample sample;
+    sample.timestamp_ms = timestamp_ms;
+    sample.raw = raw;
+    sample.raw_valid = true;
+    if (report_signal_has_metric_consumer(series.signal)) {
+        const size_t signal_index = static_cast<size_t>(series.signal);
+        if (!runtime_ || signal_index >=
+                static_cast<size_t>(ReportSignalId::Count) ||
+            !runtime_->configured[signal_index]) {
+            failure_reason_ = "report_signal_store_series_scale_missing";
             return false;
         }
-        runtime_->buffered_raw_bytes +=
-            static_cast<size_t>(samples_per_block) * sizeof(int16_t);
-        std::fill_n(work->raw_blocks[slot],
-                    samples_per_block,
-                    missing);
-
-        if (!(work->track.present_blocks[slot / 8] & (1u << (slot % 8)))) {
-            for (size_t later = slot + 1;
-                 later < runtime_->block_slot_count;
-                 ++later) {
-                if (work->written_blocks[later / 8] & (1u << (later % 8))) {
-                    failure_reason_ = "report_signal_store_rebuild_required";
-                    return false;
-                }
-            }
-            work->track.present_blocks[slot / 8] |=
-                static_cast<uint8_t>(1u << (slot % 8));
-            ++work->track.present_block_count;
-        }
+        sample.value_milli = edf_report_physical_value_milli(
+            scale ? *scale : runtime_->scales[signal_index], raw);
     }
+    return accept_series(session_index, series, sample);
+}
 
-    if (write_sample) {
-        work->raw_blocks[slot][sample_index] = encoded;
-        if (work->newest_slot >= 0 &&
-            static_cast<int>(slot) > work->newest_slot) {
-            runtime_->completed_blocks_pending = true;
-        }
-        work->newest_slot = static_cast<int>(slot);
-    }
-    if (sample.timestamp_ms < runtime_->closed_before_ms) {
-        runtime_->closed_metrics.accept(series.signal, canonical_value);
-        if (work->closed.valid_sample_count == 0) {
-            work->closed.first_valid_sample_ms = sample.timestamp_ms;
-        }
-        work->closed.last_valid_sample_ms = sample.timestamp_ms;
-        ++work->closed.valid_sample_count;
-    } else {
-        if (!runtime_->prepare_tail(*work)) {
-            failure_reason_ = "report_signal_store_tail_allocation_failed";
+bool ReportSignalStoreBuilder::accept_raw_run(
+    uint16_t session_index,
+    const ReportSeriesDescriptor &series,
+    const EdfReportSeriesSpan &span,
+    size_t begin,
+    size_t end) {
+    TrackWork &work = runtime_->tracks[runtime_->last_track];
+    const uint32_t samples_per_block = static_cast<uint32_t>(
+        REPORT_SIGNAL_STORE_BLOCK_MS / series.sample_interval_ms);
+
+    // The caller supplies a regular, valid run on this track's time grid.
+    // Split only where it crosses a stored 15-minute block.
+    while (begin < end) {
+        const int64_t timestamp_ms = span.timestamp_at(begin);
+        const int64_t block_start = align_block_start(timestamp_ms);
+        const size_t slot = static_cast<size_t>(
+            (block_start - runtime_->first_block_start_ms) /
+                REPORT_SIGNAL_STORE_BLOCK_MS);
+        const int64_t first_sample = first_grid_sample(
+            block_start, series.sample_interval_ms, work.track.grid_phase_ms);
+        const uint32_t sample_index = static_cast<uint32_t>(
+            (timestamp_ms - first_sample) / series.sample_interval_ms);
+        const uint32_t count = static_cast<uint32_t>(std::min(
+            end - begin, static_cast<size_t>(samples_per_block - sample_index)));
+
+        if (!runtime_->append_raw_range(
+                session_index, series, work, slot, sample_index, count,
+                timestamp_ms, span.data + begin * 2, &span.scale, 0,
+                failure_reason_)) {
             return false;
         }
-        work->tail_metrics->accept(series.signal, canonical_value);
-    }
-
-    ReportSignalStoreTrack &track = work->track;
-    if (track.valid_sample_count == 0) {
-        track.first_valid_sample_ms = sample.timestamp_ms;
-        track.last_valid_sample_ms = sample.timestamp_ms;
-    } else {
-        track.first_valid_sample_ms = std::min(
-            track.first_valid_sample_ms, sample.timestamp_ms);
-        track.last_valid_sample_ms = std::max(
-            track.last_valid_sample_ms, sample.timestamp_ms);
-    }
-    ++track.valid_sample_count;
-
-    if (!work->sessions_seen[session_index]) {
-        work->sessions_seen[session_index] = 1;
-        const uint64_t count = expected_samples(
-            session->output_window, series.sample_interval_ms, phase);
-        if (track.expected_sample_count > UINT64_MAX - count) {
-            failure_reason_ = "report_signal_store_coverage_overflow";
-            return false;
-        }
-        track.expected_sample_count += count;
+        begin += count;
     }
     return true;
 }
+
+bool ReportSignalStoreBuilder::accept_series_span(
+    uint16_t session_index,
+    const ReportSeriesDescriptor &series,
+    const EdfReportSeriesSpan &span) {
+    const size_t signal_index = static_cast<size_t>(series.signal);
+    if (!runtime_ || !runtime_->active || !runtime_->plan || !span.valid() ||
+        session_index >= runtime_->plan->session_count() ||
+        signal_index >= static_cast<size_t>(ReportSignalId::Count) ||
+        !runtime_->configured[signal_index] ||
+        series.sample_interval_ms < 40 ||
+        (REPORT_SIGNAL_STORE_BLOCK_MS % series.sample_interval_ms) != 0) {
+        failure_reason_ = "report_signal_store_series_span_invalid";
+        return false;
+    }
+
+    const auto &window = runtime_->plan->session(session_index)->output_window;
+    if (span.timestamp_at(0) < window.start_ms ||
+        span.timestamp_at(span.sample_count - 1) >= window.end_ms) {
+        failure_reason_ = "report_signal_store_series_invalid";
+        return false;
+    }
+
+    size_t first_valid = span.sample_count;
+    for (uint32_t i = 0; i < span.sample_count; ++i) {
+        if (!span.missing_at(i)) {
+            first_valid = i;
+            break;
+        }
+    }
+    if (first_valid == span.sample_count) return true;
+
+    if (!accept_raw_sample(
+            session_index, series, span.timestamp_at(
+                static_cast<uint32_t>(first_valid)),
+            span.raw_at(static_cast<uint32_t>(first_valid)), &span.scale)) {
+        return false;
+    }
+
+    const bool regular = static_cast<uint64_t>(span.samples_per_record) *
+            series.sample_interval_ms == span.record_duration_ms;
+    if (!regular) {
+        for (size_t i = first_valid + 1; i < span.sample_count; ++i) {
+            if (span.missing_at(static_cast<uint32_t>(i))) continue;
+            if (!accept_raw_sample(
+                    session_index, series, span.timestamp_at(
+                        static_cast<uint32_t>(i)),
+                    span.raw_at(static_cast<uint32_t>(i)), &span.scale)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    size_t cursor = first_valid + 1;
+    while (cursor < span.sample_count) {
+        while (cursor < span.sample_count && span.missing_at(
+                   static_cast<uint32_t>(cursor))) {
+            ++cursor;
+        }
+        if (cursor == span.sample_count) break;
+
+        const size_t begin = cursor;
+        while (cursor < span.sample_count && !span.missing_at(
+                   static_cast<uint32_t>(cursor))) {
+            ++cursor;
+        }
+        if (!accept_raw_run(session_index, series, span, begin, cursor)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 
 bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
     if (!runtime_ || failure_reason_) return false;

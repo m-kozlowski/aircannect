@@ -486,14 +486,14 @@ bool ReportExecutor::decode_record() {
         for (size_t i = 0; i < mapping_count; ++i) {
             callback_mapping_ = &mappings[i];
             const EdfReportSeriesStatus decode_status =
-                edf_report_decode_series_record(
+                edf_report_decode_series_record_spans(
                     decoders_[i],
                     record_buffer_,
                     file->record_size,
                     source_record_index,
                     mappings[i].output_window.start_ms,
                     mappings[i].output_window.end_ms,
-                    emit_series,
+                    emit_series_span,
                     this);
             if (decode_status != EdfReportSeriesStatus::Ok) {
                 finish(ReportExecutorState::Failed,
@@ -741,6 +741,25 @@ bool ReportExecutor::emit_series(void *context,
             executor->callback_operation_->session_index,
             executor->callback_mapping_->series,
             sample)) {
+        executor->sink_rejected_ = true;
+        return false;
+    }
+    return true;
+}
+
+bool ReportExecutor::emit_series_span(
+    void *context,
+    const EdfReportSeriesSpan &span) {
+    ReportExecutor *executor = static_cast<ReportExecutor *>(context);
+    if (!executor || !executor->sink_ || !executor->callback_mapping_ ||
+        !executor->callback_operation_) {
+        return false;
+    }
+
+    if (!executor->sink_->accept_series_span(
+            executor->callback_operation_->session_index,
+            executor->callback_mapping_->series,
+            span)) {
         executor->sink_rejected_ = true;
         return false;
     }
