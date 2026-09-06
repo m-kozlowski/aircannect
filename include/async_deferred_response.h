@@ -11,7 +11,7 @@ namespace aircannect {
 // starts and advances that response, including when preparation ends late.
 class AsyncDeferredResponse final : public AsyncWebServerResponse {
 public:
-    class State {
+    class State : public std::enable_shared_from_this<State> {
     public:
         ~State();
 
@@ -22,9 +22,14 @@ public:
         friend class AsyncDeferredResponse;
         void cancel();
         std::unique_ptr<AsyncWebServerResponse> take();
+        static void resume(void *context);
 
         std::atomic<bool> cancelled_{false};
         std::atomic<AsyncWebServerResponse *> ready_{nullptr};
+
+        // Accessed only by AsyncTCP, including response destruction.
+        AsyncDeferredResponse *owner_ = nullptr;
+        AsyncWebServerRequest *request_ = nullptr;
     };
 
     explicit AsyncDeferredResponse(std::shared_ptr<State> state);

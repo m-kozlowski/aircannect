@@ -1,6 +1,9 @@
 #include "async_deferred_response.h"
 
+#include <new>
 #include <utility>
+
+#include "async_tcp_dispatch.h"
 
 namespace aircannect {
 
@@ -22,7 +25,23 @@ bool AsyncDeferredResponse::State::publish(
         delete ready_.exchange(nullptr);
         return false;
     }
+
+    auto self = weak_from_this().lock();
+    if (self) {
+        auto *queued = new (std::nothrow) std::shared_ptr<State>(std::move(self));
+        if (queued && !ac_async_tcp_dispatch(resume, queued)) delete queued;
+    }
+    // Under allocation/queue pressure the existing TCP poll remains a fallback.
     return true;
+}
+
+void AsyncDeferredResponse::State::resume(void *context) {
+    std::unique_ptr<std::shared_ptr<State>> queued(
+        static_cast<std::shared_ptr<State> *>(context));
+    State &state = **queued;
+    if (!state.cancelled() && state.owner_ && state.request_) {
+        state.owner_->start_ready(state.request_);
+    }
 }
 
 void AsyncDeferredResponse::State::cancel() {
@@ -39,7 +58,11 @@ AsyncDeferredResponse::AsyncDeferredResponse(std::shared_ptr<State> state)
     : state_(std::move(state)) {}
 
 AsyncDeferredResponse::~AsyncDeferredResponse() {
-    if (state_) state_->cancel();
+    if (state_) {
+        state_->owner_ = nullptr;
+        state_->request_ = nullptr;
+        state_->cancel();
+    }
 }
 
 bool AsyncDeferredResponse::_sourceValid() const { return state_ != nullptr; }
@@ -73,6 +96,10 @@ void AsyncDeferredResponse::start_ready(AsyncWebServerRequest *request) {
 }
 
 void AsyncDeferredResponse::_respond(AsyncWebServerRequest *request) {
+    if (state_) {
+        state_->owner_ = this;
+        state_->request_ = request;
+    }
     start_ready(request);
 }
 
