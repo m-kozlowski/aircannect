@@ -1900,17 +1900,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             const OperationAdmission admitted =
                 runtime.summary_acquisition.request(
                     runtime.pending_refresh.generation);
-            if (admitted == OperationAdmission::Rejected) {
+            if (admitted == OperationAdmission::Accepted) {
+                runtime.pending_refresh.summary_attempted = true;
+            } else if (admitted == OperationAdmission::Rejected) {
                 runtime.pending_refresh.summary_attempted = true;
                 ++runtime.command_failures;
             }
         }
         worked = true;
-    }
-    if (runtime.pending_refresh.valid() &&
-        runtime.summary_acquisition.status().state !=
-            ReportSummaryAcquisitionState::Waiting) {
-        runtime.pending_refresh.summary_attempted = true;
     }
 
     if (runtime.catalog_refresh.active()) {
