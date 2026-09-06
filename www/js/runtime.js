@@ -86,6 +86,12 @@
         return fetch(url, options);
       }
 
+      async function requestBody(url, options) {
+        const response = await request(url, options);
+        const body = await response.arrayBuffer();
+        return {response, body};
+      }
+
       async function requestOk(url, options) {
         const response = await request(url, options);
         if (!response.ok) throw new Error(await response.text());
@@ -755,7 +761,7 @@
           pad2,
           rssi: formatRssi,
         }),
-        http: Object.freeze({request, requestOk, upload}),
+        http: Object.freeze({request, requestBody, requestOk, upload}),
         pages: Object.freeze({
           active: activePageId,
           define: definePages,

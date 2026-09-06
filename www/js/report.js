@@ -2182,10 +2182,10 @@
         timeoutValue,
         request: () => {
           const cached = lruGet(reportResultClientCache, url);
-          return AirCANnect.http.request(
+          return AirCANnect.http.requestBody(
             url, conditionalRequestOptions(cached, signal));
         },
-        handle: async (response) => {
+        handle: async ({response, body}) => {
           if (response.status === 304) {
             const cached = lruGet(reportResultClientCache, url);
             if (!cached) throw new Error("report cache revalidation failed");
@@ -2195,7 +2195,7 @@
             }};
           }
           if (response.status === 200) {
-            const buffer = await response.arrayBuffer();
+            const buffer = body;
             if (signal.aborted || token !== reportLoadToken) return null;
 
             const decoded = decodeSignalStoreNight(buffer);
@@ -2224,7 +2224,7 @@
             return {done: true, value: {status: 404, result: null}};
           }
 
-          const text = await response.text();
+          const text = new TextDecoder().decode(body);
           if (response.status === 503 && isTransientReportError(text)) {
             return {done: false};
           }
@@ -2385,16 +2385,16 @@
         waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
-        request: () => AirCANnect.http.request(url, {
+        request: () => AirCANnect.http.requestBody(url, {
           cache: "no-store",
           signal: context.signal,
         }),
-        handle: async (response) => {
+        handle: async ({response, body}) => {
           if (response.status === 202) {
             return {done: false, waitForReport: true};
           }
           if (response.status !== 200 && response.status !== 204) {
-            const text = await response.text();
+            const text = new TextDecoder().decode(body);
             if (response.status === 503 && isTransientReportError(text)) {
               return {done: false};
             }
@@ -2419,8 +2419,7 @@
             throw new Error("report signal identity mismatch");
           }
 
-          const buffer = response.status === 204
-            ? new ArrayBuffer(0) : await response.arrayBuffer();
+          const buffer = body;
           if (!context.active()) return null;
 
           const blockBytes = SIGNAL_STORE_BLOCK_MS / level.interval *
@@ -2623,23 +2622,22 @@
         waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
-        request: () => AirCANnect.http.request(url, {
+        request: () => AirCANnect.http.requestBody(url, {
           cache: "no-store",
           signal: context.signal,
         }),
-        handle: async (response) => {
+        handle: async ({response, body}) => {
           if (response.status === 202) {
             return {done: false, waitForReport: true};
           }
           if (response.status !== 200) {
-            const text = await response.text();
+            const text = new TextDecoder().decode(body);
             if (response.status === 503 && isTransientReportError(text)) {
               return {done: false};
             }
             throw new Error(text || "report events request failed");
           }
-          return {done: true, value: decodeSignalStoreEvents(
-            await response.arrayBuffer(), context)};
+          return {done: true, value: decodeSignalStoreEvents(body, context)};
         },
       });
       if (!context.active()) return [];
