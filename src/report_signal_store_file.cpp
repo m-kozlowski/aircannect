@@ -230,24 +230,55 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreFileCodec::encode_block(
     ReportSignalStoreLevel level,
     size_t slot,
     const int16_t *raw) {
+    const int16_t *raw_blocks[] = {raw};
+    return encode_blocks(track, level, slot, raw_blocks, 1);
+}
+
+std::shared_ptr<const LargeByteBuffer>
+ReportSignalStoreFileCodec::encode_blocks(
+    const ReportSignalStoreTrack &track,
+    ReportSignalStoreLevel level,
+    size_t first_slot,
+    const int16_t *const *raw_blocks,
+    size_t block_count) {
     SignalFileLayout file_layout;
-    if (!raw || !layout(track, level, file_layout) ||
-        slot >= track.block_slot_count || !bit(track.present_blocks, slot)) {
+    if (!raw_blocks || !layout(track, level, file_layout) ||
+        block_count == 0 || first_slot >= track.block_slot_count ||
+        block_count > track.block_slot_count - first_slot) {
         return {};
     }
 
+    size_t total_bytes = 0;
+    if (!CheckedSize::multiply(block_count, file_layout.block_bytes,
+                               total_bytes)) {
+        return {};
+    }
+
+    for (size_t i = 0; i < block_count; ++i) {
+        if (!raw_blocks[i] || !bit(track.present_blocks, first_slot + i)) {
+            return {};
+        }
+    }
+
     std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(file_layout.block_bytes);
+        LargeByteBuffer::allocate(total_bytes);
     if (!output) return {};
 
-    if (level == ReportSignalStoreLevel::Raw) {
-        for (uint32_t i = 0; i < file_layout.samples_per_block; ++i) {
-            put_i16(output->data() + static_cast<size_t>(i) * 2, raw[i]);
+    for (size_t block = 0; block < block_count; ++block) {
+        uint8_t *block_output = output->data() +
+            block * file_layout.block_bytes;
+        if (level == ReportSignalStoreLevel::Raw) {
+            for (uint32_t i = 0; i < file_layout.samples_per_block; ++i) {
+                put_i16(block_output + static_cast<size_t>(i) * 2,
+                        raw_blocks[block][i]);
+            }
+        } else {
+            const int64_t block_start = track.first_block_start_ms +
+                static_cast<int64_t>(first_slot + block) *
+                    REPORT_SIGNAL_STORE_BLOCK_MS;
+            build_envelopes(track, block_start, raw_blocks[block],
+                            file_layout, block_output);
         }
-    } else {
-        const int64_t block_start = track.first_block_start_ms +
-            static_cast<int64_t>(slot) * REPORT_SIGNAL_STORE_BLOCK_MS;
-        build_envelopes(track, block_start, raw, file_layout, output->data());
     }
 
     return LargeByteBuffer::freeze(std::move(output));

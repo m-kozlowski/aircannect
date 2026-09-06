@@ -145,6 +145,7 @@ struct ReportSignalStoreBuilder::Runtime {
     bool configured[static_cast<size_t>(ReportSignalId::Count)] = {};
     size_t writing_track = SIZE_MAX;
     size_t writing_slot = 0;
+    size_t writing_count = 0;
     bool completed_blocks_pending = false;
 
     void release_track_blocks(TrackWork &track) {
@@ -190,6 +191,8 @@ struct ReportSignalStoreBuilder::Runtime {
         active = false;
         memset(configured, 0, sizeof(configured));
         writing_track = SIZE_MAX;
+        writing_slot = 0;
+        writing_count = 0;
         completed_blocks_pending = false;
     }
 
@@ -688,13 +691,17 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
         }
 
         TrackWork &work = runtime_->tracks[runtime_->writing_track];
-        const size_t slot = runtime_->writing_slot;
-        Memory::free(work.raw_blocks[slot]);
-        work.raw_blocks[slot] = nullptr;
-        work.written_blocks[slot / 8] |=
-            static_cast<uint8_t>(1u << (slot % 8));
+        for (size_t i = 0; i < runtime_->writing_count; ++i) {
+            const size_t slot = runtime_->writing_slot + i;
+            Memory::free(work.raw_blocks[slot]);
+            work.raw_blocks[slot] = nullptr;
+            work.written_blocks[slot / 8] |=
+                static_cast<uint8_t>(1u << (slot % 8));
+        }
         work.file_exists = true;
         runtime_->writing_track = SIZE_MAX;
+        runtime_->writing_slot = 0;
+        runtime_->writing_count = 0;
         store_->reset();
     }
 
@@ -714,10 +721,47 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
                 ? StorageAtomicWriteLane::Foreground
                 : StorageAtomicWriteLane::Maintenance;
 
-            const auto admitted = store_->start_block(
-                work.track, slot, work.raw_blocks[slot], existing_block,
-                work.file_exists, runtime_->request.ticket.generation, lane,
-                include_partial);
+            size_t block_count = 1;
+            if (!existing_block) {
+                for (; block_count < ReportSignalStoreService::MaxWriteBatchBlocks;
+                     ++block_count) {
+                    const size_t candidate = slot + block_count;
+                    if (candidate >= runtime_->block_slot_count ||
+                        (!include_partial &&
+                         static_cast<int>(candidate) >= work.newest_slot) ||
+                        !work.raw_blocks[candidate] ||
+                        (work.written_blocks[candidate / 8] &
+                         (1u << (candidate % 8)))) {
+                        break;
+                    }
+                }
+
+                if (!include_partial && block_count <
+                        ReportSignalStoreService::MaxWriteBatchBlocks &&
+                    slot + block_count >= static_cast<size_t>(work.newest_slot)) {
+                    // Keep the current block open until four closed blocks,
+                    // unless a gap forces a partial.
+                    continue;
+                }
+            }
+
+            OperationAdmission admitted = OperationAdmission::Rejected;
+            if (existing_block) {
+                admitted = store_->start_block(
+                    work.track, slot, work.raw_blocks[slot], true,
+                    work.file_exists, runtime_->request.ticket.generation,
+                    lane, include_partial);
+            } else {
+                int16_t *raw_blocks[
+                    ReportSignalStoreService::MaxWriteBatchBlocks] = {};
+                for (size_t batch = 0; batch < block_count; ++batch) {
+                    raw_blocks[batch] = work.raw_blocks[slot + batch];
+                }
+                admitted = store_->start_blocks(
+                    work.track, slot, raw_blocks, block_count,
+                    work.file_exists, runtime_->request.ticket.generation,
+                    lane, include_partial);
+            }
 
             if (admitted == OperationAdmission::Busy) return false;
             if (admitted != OperationAdmission::Accepted) {
@@ -727,6 +771,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
 
             runtime_->writing_track = i;
             runtime_->writing_slot = slot;
+            runtime_->writing_count = block_count;
             return false;
         }
     }

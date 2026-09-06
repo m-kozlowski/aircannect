@@ -34,6 +34,11 @@ struct ReportSignalStoreStatus {
 
 class ReportSignalStoreService {
 public:
+    static constexpr size_t MaxWriteBatchBlocks = 4;
+    static_assert(MaxWriteBatchBlocks * ReportSignalStoreFileCodec::MaxBlockBytes <=
+                      AC_STORAGE_RANGE_WRITE_MAX_BYTES,
+                  "signal store batch exceeds range write bound");
+
     ReportSignalStoreService() = default;
     ~ReportSignalStoreService();
 
@@ -60,6 +65,19 @@ public:
         size_t slot,
         int16_t *raw,
         bool existing_block,
+        bool existing_file,
+        uint32_t operation_generation,
+        StorageAtomicWriteLane lane,
+        bool finalize_header = true);
+
+    // The caller retains each raw block until terminal status, then resets us.
+    // Blocks must be new, present, and contiguous; existing blocks use
+    // start_block() so their read/merge path stays single-block.
+    OperationAdmission start_blocks(
+        const ReportSignalStoreTrack &track,
+        size_t first_slot,
+        int16_t *const *raw_blocks,
+        size_t block_count,
         bool existing_file,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane,
@@ -127,6 +145,8 @@ private:
     ReportSignalStorePlaneRange range_;
     size_t slot_ = 0;
     int16_t *raw_ = nullptr;
+    const int16_t *raw_blocks_[MaxWriteBatchBlocks] = {};
+    size_t block_count_ = 0;
     bool existing_file_ = false;
     bool write_header_ = true;
     std::shared_ptr<const LargeByteBuffer> block_bytes_;

@@ -60,34 +60,76 @@ OperationAdmission ReportSignalStoreService::start_block(
     bool finalize_header) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
 
-    if (!read_port_ || !range_write_port_ || !raw ||
-        (lane != StorageAtomicWriteLane::Foreground &&
-         lane != StorageAtomicWriteLane::Maintenance) ||
-        operation_generation == 0 || !report_signal_store_track_valid(track) ||
-        slot >= track.block_slot_count || (existing_block && !existing_file) ||
-        !(track.present_blocks[slot / 8] & (1u << (slot % 8)))) {
+    if (existing_block && (!read_port_ || !existing_file)) {
         copy_cstr(status_.error, sizeof(status_.error),
                   "report_signal_store_block_invalid");
         return OperationAdmission::Rejected;
     }
 
-    const int64_t block_start = track.first_block_start_ms +
-        static_cast<int64_t>(slot) * REPORT_SIGNAL_STORE_BLOCK_MS;
-    ReportSignalStorePlaneRange range;
+    int16_t *raw_blocks[] = {raw};
+    const OperationAdmission admission = start_blocks(
+        track, slot, raw_blocks, 1, existing_file, operation_generation,
+        lane, finalize_header);
+    if (admission != OperationAdmission::Accepted) return admission;
 
+    raw_ = raw;
+    if (existing_block) phase_ = Phase::SubmitRead;
+    return OperationAdmission::Accepted;
+}
+
+OperationAdmission ReportSignalStoreService::start_blocks(
+    const ReportSignalStoreTrack &track,
+    size_t first_slot,
+    int16_t *const *raw_blocks,
+    size_t block_count,
+    bool existing_file,
+    uint32_t operation_generation,
+    StorageAtomicWriteLane lane,
+    bool finalize_header) {
+    if (phase_ != Phase::Idle) return OperationAdmission::Busy;
+
+    if (!range_write_port_ || !raw_blocks || block_count == 0 ||
+        block_count > MaxWriteBatchBlocks ||
+        (lane != StorageAtomicWriteLane::Foreground &&
+         lane != StorageAtomicWriteLane::Maintenance) ||
+        operation_generation == 0 || !report_signal_store_track_valid(track) ||
+        first_slot >= track.block_slot_count ||
+        block_count > track.block_slot_count - first_slot) {
+        copy_cstr(status_.error, sizeof(status_.error),
+                  "report_signal_store_blocks_invalid");
+        return OperationAdmission::Rejected;
+    }
+
+    for (size_t i = 0; i < block_count; ++i) {
+        if (!raw_blocks[i] ||
+            !(track.present_blocks[(first_slot + i) / 8] &
+              (1u << ((first_slot + i) % 8)))) {
+            copy_cstr(status_.error, sizeof(status_.error),
+                      "report_signal_store_blocks_invalid");
+            return OperationAdmission::Rejected;
+        }
+    }
+
+    const int64_t block_start = track.first_block_start_ms +
+        static_cast<int64_t>(first_slot) * REPORT_SIGNAL_STORE_BLOCK_MS;
+    ReportSignalStorePlaneRange range;
     if (!ReportSignalStoreFileCodec::plane_range(
-            track, block_start, 1, ReportSignalStoreLevel::Raw, range) ||
-        range.length == 0 ||
-        range.length > ReportSignalStoreFileCodec::MaxBlockBytes ||
+            track, block_start, block_count,
+            ReportSignalStoreLevel::Raw, range) ||
+        range.length == 0 || range.length > AC_STORAGE_RANGE_WRITE_MAX_BYTES ||
         range.length % sizeof(int16_t) != 0) {
         copy_cstr(status_.error, sizeof(status_.error),
-                  "report_signal_store_block_range_invalid");
+                  "report_signal_store_blocks_range_invalid");
         return OperationAdmission::Rejected;
     }
 
     track_ = track;
-    slot_ = slot;
-    raw_ = raw;
+    slot_ = first_slot;
+    raw_ = nullptr;
+    for (size_t i = 0; i < MaxWriteBatchBlocks; ++i) {
+        raw_blocks_[i] = i < block_count ? raw_blocks[i] : nullptr;
+    }
+    block_count_ = block_count;
     existing_file_ = existing_file;
     write_header_ = !existing_file || finalize_header;
     range_ = range;
@@ -98,8 +140,7 @@ OperationAdmission ReportSignalStoreService::start_block(
     status_.state = ReportSignalStoreState::WritingBlock;
     status_.sleep_day = track.sleep_day;
     status_.signal_count = 1;
-    phase_ = existing_block ? Phase::SubmitRead
-        : write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
+    phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
     return OperationAdmission::Accepted;
 }
 
@@ -218,20 +259,20 @@ bool ReportSignalStoreService::encode_current() {
             static_cast<int64_t>(slot_) * REPORT_SIGNAL_STORE_BLOCK_MS;
 
         if (!ReportSignalStoreFileCodec::plane_range(
-                track_, block_start, 1, level_, range_)) {
+                track_, block_start, block_count_, level_, range_)) {
             fail("report_signal_store_block_range_invalid");
             return true;
         }
 
-        block_bytes_ = ReportSignalStoreFileCodec::encode_block(
-            track_, level_, slot_, raw_);
+        block_bytes_ = ReportSignalStoreFileCodec::encode_blocks(
+            track_, level_, slot_, raw_blocks_, block_count_);
     }
 
     const size_t expected = phase_ == Phase::EncodeHeader
         ? ReportSignalStoreFileCodec::HeaderBytes : range_.length;
 
     if (!block_bytes_ || block_bytes_->size() != expected ||
-        expected == 0 || expected > ReportSignalStoreFileCodec::MaxBlockBytes) {
+        expected == 0 || expected > AC_STORAGE_RANGE_WRITE_MAX_BYTES) {
         fail("report_signal_store_block_encode_failed");
         return true;
     }
@@ -307,6 +348,10 @@ void ReportSignalStoreService::advance_level() {
         level_ = ReportSignalStoreLevel::TenSeconds;
     } else {
         raw_ = nullptr;
+        for (size_t i = 0; i < MaxWriteBatchBlocks; ++i) {
+            raw_blocks_[i] = nullptr;
+        }
+        block_count_ = 0;
         status_.signal_index = 1;
         phase_ = Phase::Ready;
         status_.state = ReportSignalStoreState::Ready;
@@ -517,6 +562,10 @@ void ReportSignalStoreService::release_io() {
     // The storage owner retains shared bytes if cancellation is still queued.
     block_bytes_.reset();
     raw_ = nullptr;
+    for (size_t i = 0; i < MaxWriteBatchBlocks; ++i) {
+        raw_blocks_[i] = nullptr;
+    }
+    block_count_ = 0;
 
     if (write_ticket_.valid() && write_port_) {
         (void)write_port_->abandon(write_ticket_);
@@ -530,6 +579,11 @@ void ReportSignalStoreService::clear_operation() {
     level_ = ReportSignalStoreLevel::Raw;
     range_ = {};
     slot_ = 0;
+    raw_ = nullptr;
+    for (size_t i = 0; i < MaxWriteBatchBlocks; ++i) {
+        raw_blocks_[i] = nullptr;
+    }
+    block_count_ = 0;
     existing_file_ = false;
     write_header_ = true;
     read_offset_ = 0;

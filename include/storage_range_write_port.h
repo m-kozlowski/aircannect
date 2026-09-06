@@ -4,7 +4,7 @@
 
 namespace aircannect {
 
-static constexpr size_t AC_STORAGE_RANGE_WRITE_MAX_BYTES = 64 * 1024;
+static constexpr size_t AC_STORAGE_RANGE_WRITE_MAX_BYTES = 256 * 1024;
 static constexpr size_t AC_STORAGE_RANGE_WRITE_STEP_BYTES = 4096;
 
 struct StorageRangeWriteCommand {

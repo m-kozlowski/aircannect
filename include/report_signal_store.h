@@ -147,6 +147,12 @@ public:
         ReportSignalStoreLevel level,
         size_t slot,
         const int16_t *raw);
+    static std::shared_ptr<const LargeByteBuffer> encode_blocks(
+        const ReportSignalStoreTrack &track,
+        ReportSignalStoreLevel level,
+        size_t first_slot,
+        const int16_t *const *raw_blocks,
+        size_t block_count);
 
     static bool inspect(const uint8_t *bytes,
                         size_t length,
