@@ -521,6 +521,7 @@ struct ReportHttpController::PendingResponses {
     struct Entry {
         PendingKind kind = PendingKind::Events;
         AsyncWebServerRequestPtr request;
+        StorageStreamCommand command;
         std::shared_ptr<StorageByteStream> stream;
         uint32_t deadline_ms = 0;
         uint64_t response_size = 0;
@@ -538,7 +539,7 @@ struct ReportHttpController::PendingResponses {
         char level[8] = {};
         char present_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS + 1] = {};
 
-        bool used() const { return static_cast<bool>(stream); }
+        bool used() const { return response_size != 0; }
     };
 
     StaticSemaphore_t mutex_storage = {};
@@ -587,47 +588,72 @@ void ReportHttpController::begin(ReportTask &report_task,
 void ReportHttpController::poll() {
     publish_completion();
 
-    if (!stream_port_ || !pending_ || !pending_->mutex ||
-        xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
-        return;
-    }
+    if (!stream_port_ || !pending_ || !pending_->mutex) return;
 
     const uint32_t now_ms = millis();
-    for (PendingResponses::Entry &entry : pending_->entries) {
-        if (!entry.used()) continue;
-
-        if (entry.request.expired()) {
-            stream_port_->finish(*entry.stream, false);
-            entry = {};
+    for (PendingResponses::Entry &slot : pending_->entries) {
+        if (xSemaphoreTake(pending_->mutex, 0) != pdTRUE) return;
+        if (!slot.used()) {
+            xSemaphoreGive(pending_->mutex);
             continue;
         }
 
-        StorageStreamStatus status;
-        if (!stream_port_->status(*entry.stream, status)) continue;
+        // Moving leaves response_size in the slot, reserving it while poll
+        // consults storage without holding the HTTP admission mutex.
+        PendingResponses::Entry entry = std::move(slot);
+        xSemaphoreGive(pending_->mutex);
+
+        const bool expired = entry.request.expired();
+        if (expired) {
+            if (entry.stream) stream_port_->finish(*entry.stream, false);
+        }
+
         const bool timed_out =
             millis_deadline_reached(now_ms, entry.deadline_ms);
-        if (status.state == StorageStreamState::Preparing && !timed_out) {
-            continue;
+        StorageStreamStatus status;
+
+        if (!expired && !entry.stream && !timed_out) {
+            if (!stream_port_->request_stream(entry.command,
+                                              entry.stream,
+                                              status.error,
+                                              sizeof(status.error))) {
+                if (strcmp(status.error, "stream_busy") != 0 &&
+                    strcmp(status.error, "stream_slots_full") != 0) {
+                    status.state = StorageStreamState::Error;
+                }
+            }
         }
+
+        if (!expired && entry.stream && !timed_out) {
+            (void)stream_port_->status(*entry.stream, status);
+        }
+
+        const bool waiting = !expired && !timed_out &&
+            status.state == StorageStreamState::Preparing;
+
+        xSemaphoreTake(pending_->mutex, portMAX_DELAY);
+        if (waiting) slot = std::move(entry);
+        else slot = {};
+        xSemaphoreGive(pending_->mutex);
+
+        if (waiting || expired) continue;
 
         const AsyncWebServerRequestPtr pending_request = entry.request;
         PendingResponses::Entry ready = std::move(entry);
-        entry = {};
-        xSemaphoreGive(pending_->mutex);
 
         std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
         if (!request) {
-            stream_port_->finish(*ready.stream, false);
+            if (ready.stream) stream_port_->finish(*ready.stream, false);
             return;
         }
         if (timed_out) {
-            stream_port_->finish(*ready.stream, false);
+            if (ready.stream) stream_port_->finish(*ready.stream, false);
             send_json_error(request.get(), 503, "report_stream_timeout");
             return;
         }
         if (status.state == StorageStreamState::Error ||
             status.state == StorageStreamState::Cancelled) {
-            stream_port_->finish(*ready.stream, false);
+            if (ready.stream) stream_port_->finish(*ready.stream, false);
             send_json_error(request.get(),
                             503,
                             status.error[0]
@@ -702,7 +728,6 @@ void ReportHttpController::poll() {
         return;
     }
 
-    xSemaphoreGive(pending_->mutex);
 }
 
 void ReportHttpController::send_summary(
@@ -1037,24 +1062,9 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         return;
     }
 
-    char stream_error[AC_STORAGE_ERROR_MAX] = {};
-    if (!stream_port_->request_stream(
-            command,
-            pending.stream,
-            stream_error,
-            sizeof(stream_error))) {
-        send_json_error(request,
-                        503,
-                        stream_error[0]
-                            ? stream_error
-                            : "report_stream_unavailable");
-        return;
-    }
-
     if (!pending_ || !pending_->mutex ||
         xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
-        stream_port_->finish(*pending.stream, false);
-        send_preparing(request);
+        send_json_error(request, 503, "report_stream_slots_full");
         return;
     }
 
@@ -1067,12 +1077,12 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     }
     if (!slot) {
         xSemaphoreGive(pending_->mutex);
-        stream_port_->finish(*pending.stream, false);
         send_json_error(request, 503, "report_stream_slots_full");
         return;
     }
 
     pending.request = request->pause();
+    pending.command = std::move(command);
     pending.deadline_ms = millis() + REPORT_HTTP_PENDING_TIMEOUT_MS;
     *slot = std::move(pending);
     xSemaphoreGive(pending_->mutex);
