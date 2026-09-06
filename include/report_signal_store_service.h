@@ -53,6 +53,8 @@ public:
     // Track contains the accumulated bitmap, including this slot.
     // existing_block fills missing raw cells from disk. !existing_file truncates
     // stale bytes even when an abandoned attempt left a file at the same path.
+    // Intermediate blocks can defer header updates; the last block of an
+    // operation finalizes them before any night metadata may be published.
     OperationAdmission start_block(
         const ReportSignalStoreTrack &track,
         size_t slot,
@@ -60,7 +62,8 @@ public:
         bool existing_block,
         bool existing_file,
         uint32_t operation_generation,
-        StorageAtomicWriteLane lane);
+        StorageAtomicWriteLane lane,
+        bool finalize_header = true);
 
     // Signal blocks must already be durable; metadata is published last.
     OperationAdmission start(
@@ -125,6 +128,7 @@ private:
     size_t slot_ = 0;
     int16_t *raw_ = nullptr;
     bool existing_file_ = false;
+    bool write_header_ = true;
     std::shared_ptr<const LargeByteBuffer> block_bytes_;
     OperationTicket read_ticket_;
     StoragePreparedRead prepared_;

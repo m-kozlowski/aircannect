@@ -56,7 +56,8 @@ OperationAdmission ReportSignalStoreService::start_block(
     bool existing_block,
     bool existing_file,
     uint32_t operation_generation,
-    StorageAtomicWriteLane lane) {
+    StorageAtomicWriteLane lane,
+    bool finalize_header) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
 
     if (!read_port_ || !range_write_port_ || !raw ||
@@ -88,6 +89,7 @@ OperationAdmission ReportSignalStoreService::start_block(
     slot_ = slot;
     raw_ = raw;
     existing_file_ = existing_file;
+    write_header_ = !existing_file || finalize_header;
     range_ = range;
     level_ = ReportSignalStoreLevel::Raw;
     operation_generation_ = operation_generation;
@@ -96,7 +98,8 @@ OperationAdmission ReportSignalStoreService::start_block(
     status_.state = ReportSignalStoreState::WritingBlock;
     status_.sleep_day = track.sleep_day;
     status_.signal_count = 1;
-    phase_ = existing_block ? Phase::SubmitRead : Phase::EncodeHeader;
+    phase_ = existing_block ? Phase::SubmitRead
+        : write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
     return OperationAdmission::Accepted;
 }
 
@@ -202,7 +205,7 @@ bool ReportSignalStoreService::merge_read() {
     if (read_offset_ == range_.length) {
         read_port_->release_prepared(prepared_);
         prepared_ = {};
-        phase_ = Phase::EncodeHeader;
+        phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
     }
     return true;
 }
@@ -310,7 +313,7 @@ void ReportSignalStoreService::advance_level() {
         return;
     }
 
-    phase_ = Phase::EncodeHeader;
+    phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
 }
 
 std::shared_ptr<const LargeByteBuffer>
@@ -528,6 +531,7 @@ void ReportSignalStoreService::clear_operation() {
     range_ = {};
     slot_ = 0;
     existing_file_ = false;
+    write_header_ = true;
     read_offset_ = 0;
     read_low_byte_ = 0;
     bundle_.reset();

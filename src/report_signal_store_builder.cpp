@@ -145,6 +145,7 @@ struct ReportSignalStoreBuilder::Runtime {
     bool configured[static_cast<size_t>(ReportSignalId::Count)] = {};
     size_t writing_track = SIZE_MAX;
     size_t writing_slot = 0;
+    bool completed_blocks_pending = false;
 
     void release_track_blocks(TrackWork &track) {
         for (size_t slot = 0;
@@ -189,6 +190,7 @@ struct ReportSignalStoreBuilder::Runtime {
         active = false;
         memset(configured, 0, sizeof(configured));
         writing_track = SIZE_MAX;
+        completed_blocks_pending = false;
     }
 
     bool reserve_events(size_t required) {
@@ -620,6 +622,10 @@ bool ReportSignalStoreBuilder::accept_series(
 
     if (write_sample) {
         work->raw_blocks[slot][sample_index] = encoded;
+        if (work->newest_slot >= 0 &&
+            static_cast<int>(slot) > work->newest_slot) {
+            runtime_->completed_blocks_pending = true;
+        }
         work->newest_slot = static_cast<int>(slot);
     }
     if (sample.timestamp_ms < runtime_->closed_before_ms) {
@@ -669,6 +675,9 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
         return false;
     }
 
+    if (!include_partial && !runtime_->completed_blocks_pending &&
+        runtime_->writing_track == SIZE_MAX) return true;
+
     if (runtime_->writing_track != SIZE_MAX) {
         store_->poll();
         if (!store_->status().terminal()) return false;
@@ -707,7 +716,8 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
 
             const auto admitted = store_->start_block(
                 work.track, slot, work.raw_blocks[slot], existing_block,
-                work.file_exists, runtime_->request.ticket.generation, lane);
+                work.file_exists, runtime_->request.ticket.generation, lane,
+                include_partial);
 
             if (admitted == OperationAdmission::Busy) return false;
             if (admitted != OperationAdmission::Accepted) {
@@ -720,6 +730,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
             return false;
         }
     }
+    runtime_->completed_blocks_pending = false;
     return true;
 }
 

@@ -123,7 +123,8 @@ const char *StorageRangeWriteService::open_locked() {
     const StorageRangeWriteCommand &command = job_->command;
     if (!Storage::mounted()) return "storage_not_mounted";
 
-    if (command.offset == 0) {
+    const bool exists = Storage::exists(command.path.c_str());
+    if (!exists && command.offset == 0) {
         const auto parents = Storage::ensure_parent_directory_step(
             command.path.c_str(), job_->parent_cursor);
 
@@ -133,7 +134,6 @@ const char *StorageRangeWriteService::open_locked() {
         if (parents == Storage::ParentDirectoryStep::More) return nullptr;
     }
 
-    const bool exists = Storage::exists(command.path.c_str());
     if (!exists && command.offset != 0) return "file_not_found";
 
     // Never fall back to "w" after a failed "r+": an unreadable existing
