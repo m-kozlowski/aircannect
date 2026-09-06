@@ -86,7 +86,8 @@ bool AsyncPreparedResponse::fill_pending() {
 
 void AsyncPreparedResponse::fail(AsyncWebServerRequest *request) {
     _state = RESPONSE_FAILED;
-    if (request && request->client()) request->client()->close();
+    // close() destroys the request inline, before its ACK callback returns.
+    if (request && request->client()) request->client()->abort();
 }
 
 size_t AsyncPreparedResponse::_ack(AsyncWebServerRequest *request,
@@ -129,7 +130,10 @@ size_t AsyncPreparedResponse::_ack(AsyncWebServerRequest *request,
                 break;
             }
             if (!fill_pending()) {
-                if (source_ended_) fail(request);
+                if (source_ended_) {
+                    fail(request);
+                    return 0;
+                }
                 break;
             }
         }

@@ -64,7 +64,7 @@ void AsyncDeferredResponse::start_ready(AsyncWebServerRequest *request) {
 
     if (!response_->_sourceValid()) {
         failed_ = true;
-        if (request && request->client()) request->client()->close();
+        if (request && request->client()) request->client()->abort();
         return;
     }
 
