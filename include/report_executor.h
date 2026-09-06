@@ -158,12 +158,14 @@ private:
 
     OperationTicket ticket_;
     StoragePreparedRead prepared_;
+    const uint8_t *prepared_view_data_ = nullptr;
+    size_t prepared_view_length_ = 0;
 
-    uint8_t *record_buffer_ = nullptr;
-    size_t record_capacity_ = 0;
+    // Fallback payload scratch; EDF records borrow prepared storage directly.
+    uint8_t *fallback_buffer_ = nullptr;
+    size_t fallback_capacity_ = 0;
     EdfReportSeriesDecoder *decoders_ = nullptr;
     size_t decoder_capacity_ = 0;
-    size_t decoder_count_ = 0;
     bool fallback_loaded_ = false;
 
     EdfReportEventDecodeContext event_context_;

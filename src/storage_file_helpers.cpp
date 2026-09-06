@@ -8,6 +8,7 @@
 #include "large_object.h"
 #include "string_util.h"
 #include "storage_path.h"
+#include "storage_range_write_port.h"
 
 namespace aircannect::Storage {
 
@@ -32,6 +33,11 @@ struct WriteHandleCache {
 };
 
 WriteHandleCache *write_handles = nullptr;
+bool write_close_failed = false;
+
+void close_descriptor(int descriptor) {
+    if (::close(descriptor) != 0) write_close_failed = true;
+}
 
 }  // namespace
 
@@ -45,7 +51,7 @@ int take_write_handle(const char *path) {
     }
 
     if (write_handles->count == WriteHandleCache::Capacity) {
-        ::close(write_handles->take(0));
+        close_descriptor(write_handles->take(0));
     }
     return -1;
 }
@@ -57,7 +63,7 @@ void close_write_handle(const char *path, int descriptor, bool retain) {
     }
 
     if (!retain || !write_handles) {
-        ::close(descriptor);
+        close_descriptor(descriptor);
         return;
     }
 
@@ -70,10 +76,27 @@ bool release_write_handles() {
     if (!write_handles) return false;
 
     const bool released = write_handles->count != 0;
-    while (write_handles->count) ::close(write_handles->take(0));
+    while (write_handles->count) close_descriptor(write_handles->take(0));
     LargeObject::destroy(write_handles);
     write_handles = nullptr;
     return released;
+}
+
+bool finish_write_handles() {
+    release_write_handles();
+    const bool succeeded = !write_close_failed;
+    write_close_failed = false;
+    return succeeded;
+}
+
+void release_write_handle(const char *path) {
+    if (!write_handles) return;
+    for (size_t i = 0; i < write_handles->count; ++i) {
+        if (strcmp(write_handles->entries[i].path, path) == 0) {
+            close_descriptor(write_handles->take(i));
+            return;
+        }
+    }
 }
 
 ParentDirectoryStep ensure_parent_directory_step(const char *path,
@@ -127,21 +150,35 @@ uint64_t file_modified(const char *path) {
 
 namespace {
 
-template <typename Write>
-size_t write_staged(Write write, const uint8_t *data, size_t size) {
+template <typename Write, typename Span>
+size_t write_staged(Write write, Span span, size_t size) {
     // S3 SDMMC otherwise bounces PSRAM data through one 512-byte DMA sector
     // per transaction. Keep stdio buffers small so they do not undo staging.
     constexpr size_t DMA_BYTES = 4096;
-    if (size < 1024) return write(data, size);
-
-    auto *dma = static_cast<uint8_t *>(Memory::alloc_dma(DMA_BYTES));
-    if (!dma) return write(data, size);
+    auto *dma = size >= 1024
+        ? static_cast<uint8_t *>(Memory::alloc_dma(DMA_BYTES)) : nullptr;
 
     size_t written = 0;
     while (written < size) {
-        const size_t chunk = std::min(DMA_BYTES, size - written);
-        memcpy(dma, data + written, chunk);
-        const size_t part = write(dma, chunk);
+        size_t available = 0;
+        const uint8_t *data = span(written, available);
+        if (!data || !available) break;
+
+        size_t chunk = std::min(available, size - written);
+        if (dma) {
+            chunk = std::min(DMA_BYTES, size - written);
+            size_t copied = 0;
+            while (copied < chunk) {
+                data = span(written + copied, available);
+                if (!data || !available) break;
+                const size_t count = std::min(available, chunk - copied);
+                memcpy(dma + copied, data, count);
+                copied += count;
+            }
+            if (copied != chunk) break;
+            data = dma;
+        }
+        const size_t part = write(data, chunk);
         written += part;
         if (part != chunk) break;
     }
@@ -155,14 +192,20 @@ size_t write_staged(Write write, const uint8_t *data, size_t size) {
 size_t write_buffer(File &file, const uint8_t *data, size_t size) {
     return write_staged([&file](const uint8_t *bytes, size_t count) {
         return file.write(bytes, count);
-    }, data, size);
+    }, [data, size](size_t offset, size_t &available) {
+        available = size - offset;
+        return data + offset;
+    }, size);
 }
 
-size_t write_buffer(int descriptor, const uint8_t *data, size_t size) {
+size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
+                     size_t offset, size_t size) {
     return write_staged([descriptor](const uint8_t *bytes, size_t count) {
         const ssize_t written = ::write(descriptor, bytes, count);
         return written > 0 ? static_cast<size_t>(written) : 0;
-    }, data, size);
+    }, [&command, offset](size_t position, size_t &available) {
+        return command.span(offset + position, available);
+    }, size);
 }
 
 }  // namespace aircannect::Storage

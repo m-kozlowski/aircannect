@@ -68,7 +68,7 @@ struct TrackWork {
     ReportBuildTrackState previous_full;
     ReportMetricAccumulator *tail_metrics = nullptr;
     bool source_present = false;
-    int16_t *raw_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS] = {};
+    std::shared_ptr<LargeByteBuffer> raw_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS];
     uint8_t *sessions_seen = nullptr;
     uint8_t written_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
     int newest_slot = -1;
@@ -161,8 +161,7 @@ struct ReportSignalStoreBuilder::Runtime {
         for (size_t slot = 0;
              slot < REPORT_SIGNAL_STORE_MAX_BLOCKS;
              ++slot) {
-            Memory::free(track.raw_blocks[slot]);
-            track.raw_blocks[slot] = nullptr;
+            track.raw_blocks[slot].reset();
         }
         Memory::free(track.sessions_seen);
         track.sessions_seen = nullptr;
@@ -237,16 +236,17 @@ struct ReportSignalStoreBuilder::Runtime {
                           const char *&failure) {
         if (work.raw_blocks[slot]) return true;
 
-        work.raw_blocks[slot] = static_cast<int16_t *>(Memory::alloc_large(
-            static_cast<size_t>(samples_per_block) * sizeof(int16_t), false));
+        work.raw_blocks[slot] = LargeByteBuffer::allocate_shared(
+            static_cast<size_t>(samples_per_block) * sizeof(int16_t));
         if (!work.raw_blocks[slot]) {
             failure = "report_signal_store_block_allocation_failed";
             return false;
         }
         buffered_raw_bytes +=
             static_cast<size_t>(samples_per_block) * sizeof(int16_t);
-        std::fill_n(work.raw_blocks[slot], samples_per_block,
-                    work.track.missing_value);
+        std::fill_n(
+            reinterpret_cast<int16_t *>(work.raw_blocks[slot]->data()),
+            samples_per_block, work.track.missing_value);
 
         if (work.track.present_blocks[slot / 8] & (1u << (slot % 8))) {
             return true;
@@ -281,21 +281,13 @@ struct ReportSignalStoreBuilder::Runtime {
         const int64_t last_timestamp_ms = first_timestamp_ms +
             static_cast<int64_t>(count - 1) * series.sample_interval_ms;
 
-        for (uint32_t i = 0; i < count; ++i) {
-            const int16_t raw = edf_read_i16_le_sample(raw_bytes, i);
-            if (raw == work.track.missing_value) {
-                failure = "report_signal_store_value_invalid";
-                return false;
-            }
-        }
-
         const bool write_sample = static_cast<int>(slot) >= work.append_slot;
         if (write_sample && !ensure_raw_block(
                 work, slot, samples_per_block, failure)) {
             return false;
         }
         if (write_sample) {
-            memcpy(work.raw_blocks[slot] + sample_index,
+            memcpy(work.raw_blocks[slot]->data() + sample_index * sizeof(int16_t),
                    raw_bytes, static_cast<size_t>(count) * 2);
             if (work.newest_slot >= 0 &&
                 static_cast<int>(slot) > work.newest_slot) {
@@ -666,17 +658,22 @@ bool ReportSignalStoreBuilder::accept_series(
                 return false;
             }
 
-            void *storage = Memory::realloc_large(
-                runtime_->tracks, next * sizeof(TrackWork), false);
-            if (!storage) {
+            auto *tracks = static_cast<TrackWork *>(Memory::alloc_large(
+                next * sizeof(TrackWork), false));
+            if (!tracks) {
                 failure_reason_ = "report_signal_store_track_allocation_failed";
                 return false;
             }
 
-            runtime_->tracks = static_cast<TrackWork *>(storage);
-            for (size_t i = runtime_->track_capacity; i < next; ++i) {
-                new (&runtime_->tracks[i]) TrackWork();
+            for (size_t i = 0; i < runtime_->track_capacity; ++i) {
+                new (&tracks[i]) TrackWork(std::move(runtime_->tracks[i]));
+                runtime_->tracks[i].~TrackWork();
             }
+            for (size_t i = runtime_->track_capacity; i < next; ++i) {
+                new (&tracks[i]) TrackWork();
+            }
+            Memory::free(runtime_->tracks);
+            runtime_->tracks = tracks;
             runtime_->track_capacity = next;
         }
 
@@ -914,6 +911,11 @@ bool ReportSignalStoreBuilder::accept_series_span(
         const size_t begin = cursor;
         while (cursor < span.sample_count && !span.missing_at(
                    static_cast<uint32_t>(cursor))) {
+            if (span.raw_at(static_cast<uint32_t>(cursor)) ==
+                runtime_->tracks[runtime_->last_track].track.missing_value) {
+                failure_reason_ = "report_signal_store_value_invalid";
+                return false;
+            }
             ++cursor;
         }
         if (!accept_raw_run(session_index, series, span, begin, cursor)) {
@@ -946,8 +948,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
         TrackWork &work = runtime_->tracks[runtime_->writing_track];
         for (size_t i = 0; i < runtime_->writing_count; ++i) {
             const size_t slot = runtime_->writing_slot + i;
-            Memory::free(work.raw_blocks[slot]);
-            work.raw_blocks[slot] = nullptr;
+            work.raw_blocks[slot].reset();
             runtime_->buffered_raw_bytes -=
                 (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
                 sizeof(int16_t);
@@ -1013,13 +1014,8 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
                     work.file_exists, runtime_->request.ticket.generation,
                     lane, include_partial);
             } else {
-                int16_t *raw_blocks[
-                    ReportSignalStoreService::MaxWriteBatchBlocks] = {};
-                for (size_t batch = 0; batch < block_count; ++batch) {
-                    raw_blocks[batch] = work.raw_blocks[slot + batch];
-                }
                 admitted = store_->start_blocks(
-                    work.track, slot, raw_blocks, block_count,
+                    work.track, slot, work.raw_blocks + slot, block_count,
                     work.file_exists, runtime_->request.ticket.generation,
                     lane, include_partial);
             }

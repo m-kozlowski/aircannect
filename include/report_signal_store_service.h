@@ -54,7 +54,8 @@ public:
     // End a complete build, not the per-track reset between block batches.
     void release_write_handles();
 
-    // The caller retains mutable raw until terminal status, then resets us.
+    // Raw buffers are shared through storage completion, including cancellation.
+    // The caller must not modify them while this operation is active.
     // Track contains the accumulated bitmap, including this slot.
     // existing_block fills missing raw cells from disk. !existing_file truncates
     // stale bytes even when an abandoned attempt left a file at the same path.
@@ -63,27 +64,27 @@ public:
     OperationAdmission start_block(
         const ReportSignalStoreTrack &track,
         size_t slot,
-        int16_t *raw,
+        std::shared_ptr<LargeByteBuffer> raw,
         bool existing_block,
         bool existing_file,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane,
         bool finalize_header = true);
 
-    // The caller retains each raw block until terminal status, then resets us.
+    // The service shares each raw block until terminal status, then resets.
     // Blocks must be new, present, and contiguous; existing blocks use
     // start_block() so their read/merge path stays single-block.
     OperationAdmission start_blocks(
         const ReportSignalStoreTrack &track,
         size_t first_slot,
-        int16_t *const *raw_blocks,
+        const std::shared_ptr<LargeByteBuffer> *raw_blocks,
         size_t block_count,
         bool existing_file,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane,
         bool finalize_header = true);
 
-    // Signal blocks must already be durable; metadata is published last.
+    // Closes signal files first; metadata is published only after success.
     OperationAdmission start(
         std::shared_ptr<ReportSignalStoreBundle> bundle,
         uint32_t operation_generation,
@@ -104,6 +105,8 @@ private:
         EncodeBlock,
         SubmitBlock,
         WaitBlock,
+        SubmitFinish,
+        WaitFinish,
         SubmitEvents,
         WaitEvents,
         SubmitCheckpoint,
@@ -122,6 +125,7 @@ private:
     bool encode_current();
     bool submit_range();
     bool finish_range();
+    bool finish_writes();
     void advance_level();
 
     // Events and metadata publication
@@ -146,10 +150,13 @@ private:
     size_t slot_ = 0;
     int16_t *raw_ = nullptr;
     const int16_t *raw_blocks_[MaxWriteBatchBlocks] = {};
+    std::shared_ptr<LargeByteBuffer> raw_buffers_[MaxWriteBatchBlocks];
     size_t block_count_ = 0;
     bool existing_file_ = false;
     bool write_header_ = true;
     std::shared_ptr<const LargeByteBuffer> block_bytes_;
+    std::shared_ptr<const StorageWriteBuffers> block_buffers_;
+    size_t write_size_ = 0;
     std::shared_ptr<const LargeByteBuffer> one_second_bytes_;
     OperationTicket read_ticket_;
     StoragePreparedRead prepared_;

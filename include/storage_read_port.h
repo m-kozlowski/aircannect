@@ -50,6 +50,19 @@ struct StoragePreparedRead {
     bool valid() const { return id != 0; }
 };
 
+// Borrowed immutable bytes from one completed prepared read. The view remains
+// valid until its owning caller releases the matching handle. It must not be
+// retained after release_prepared(), and only that owner may release it.
+struct StoragePreparedReadView {
+    PreparedByteReadState state = PreparedByteReadState::End;
+    const uint8_t *data = nullptr;
+    size_t length = 0;
+
+    bool valid() const {
+        return state == PreparedByteReadState::Data && data != nullptr;
+    }
+};
+
 struct StorageReadCompletion {
     OperationTicket ticket;
     OperationOutcome outcome;
@@ -74,6 +87,16 @@ public:
                                            size_t offset,
                                            uint8_t *buffer,
                                            size_t capacity) const = 0;
+
+    // Returns a borrowed view of the complete prepared slot without copying.
+    // The returned pointer is valid until the owning caller invokes
+    // release_prepared(prepared). Retry means the storage queue lock was
+    // contended; End means the handle is invalid or no longer outstanding.
+    virtual StoragePreparedReadView view_prepared(
+        StoragePreparedRead prepared) const = 0;
+
+    // The caller that receives a completion owns its prepared slot and must
+    // release it exactly once after all borrowed views are finished.
     virtual void release_prepared(StoragePreparedRead prepared) = 0;
 };
 

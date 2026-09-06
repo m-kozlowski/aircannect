@@ -174,6 +174,8 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
     decoder_capacity = 0;
     if (!plan_) return false;
 
+    bool valid_operation = false;
+
     for (size_t i = 0; i < plan_->operation_count(); ++i) {
         const ReportReadOperation *operation = plan_->operation(i);
         if (!operation || operation->record_count == 0 ||
@@ -234,6 +236,7 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
             record_capacity = std::max(
                 record_capacity,
                 static_cast<size_t>(operation->length));
+            valid_operation = true;
             continue;
         }
 
@@ -294,19 +297,20 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
             }
         }
 
-        record_capacity = std::max(record_capacity,
-                                   static_cast<size_t>(file->record_size));
         decoder_capacity = std::max(decoder_capacity, mapping_count);
+        valid_operation = true;
     }
-    return record_capacity > 0;
+    return valid_operation;
 }
 
 bool ReportExecutor::allocate_scratch(size_t record_capacity,
                                       size_t decoder_capacity) {
-    record_buffer_ = static_cast<uint8_t *>(
-        Memory::calloc_large(record_capacity, 1, false));
-    if (!record_buffer_) return false;
-    record_capacity_ = record_capacity;
+    if (record_capacity > 0) {
+        fallback_buffer_ = static_cast<uint8_t *>(
+            Memory::calloc_large(record_capacity, 1, false));
+        if (!fallback_buffer_) return false;
+        fallback_capacity_ = record_capacity;
+    }
 
     if (decoder_capacity == 0) return true;
     decoders_ = static_cast<EdfReportSeriesDecoder *>(
@@ -395,16 +399,13 @@ bool ReportExecutor::prepare_operation() {
     if (!operation) return false;
 
     record_index_ = 0;
-    decoder_count_ = 0;
     fallback_loaded_ = false;
     if (fallback_kind(operation->kind)) return true;
 
     const NightCatalogSourceFile *file = operation
         ? plan_->source_file(*operation)
         : nullptr;
-    if (!file || file->record_size > record_capacity_) {
-        return false;
-    }
+    if (!file) return false;
 
     if (operation->kind == ReportReadOperationKind::Numeric) {
         size_t mapping_count = 0;
@@ -429,7 +430,6 @@ bool ReportExecutor::prepare_operation() {
                 return false;
             }
         }
-        decoder_count_ = mapping_count;
         return true;
     }
 
@@ -466,15 +466,27 @@ bool ReportExecutor::decode_record() {
 
     const size_t prepared_offset =
         static_cast<size_t>(record_index_) * file->record_size;
-    const PreparedByteRead read = read_port_->read_prepared(
-        prepared_, prepared_offset, record_buffer_, file->record_size);
-    if (read.state == PreparedByteReadState::Retry) return false;
-    if (read.state != PreparedByteReadState::Data ||
-        read.bytes != file->record_size) {
+    if (!prepared_view_data_) {
+        const StoragePreparedReadView view =
+            read_port_->view_prepared(prepared_);
+        if (view.state == PreparedByteReadState::Retry) return false;
+        if (view.state != PreparedByteReadState::Data || !view.data) {
+            finish(ReportExecutorState::Failed,
+                   ReportExecutorError::StorageShortRead);
+            return false;
+        }
+        prepared_view_data_ = view.data;
+        prepared_view_length_ = view.length;
+    }
+    if (prepared_view_length_ != prepared_.length ||
+        prepared_offset > prepared_view_length_ ||
+        file->record_size > prepared_view_length_ - prepared_offset) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::StorageShortRead);
         return false;
     }
+
+    const uint8_t *record = prepared_view_data_ + prepared_offset;
     sink_rejected_ = false;
     callback_operation_ = operation;
     const uint32_t source_record_index =
@@ -488,7 +500,7 @@ bool ReportExecutor::decode_record() {
             const EdfReportSeriesStatus decode_status =
                 edf_report_decode_series_record_spans(
                     decoders_[i],
-                    record_buffer_,
+                    record,
                     file->record_size,
                     source_record_index,
                     mappings[i].output_window.start_ms,
@@ -518,7 +530,7 @@ bool ReportExecutor::decode_record() {
                 : nullptr;
         const EdfReportEventStatus decode_status =
             edf_report_decode_annotation_record(source,
-                                                record_buffer_,
+                                                record,
                                                 file->record_size,
                                                 true,
                                                 emit_event,
@@ -550,7 +562,7 @@ bool ReportExecutor::decode_fallback_operation() {
         : nullptr;
     if (!operation || !file || !section ||
         record_index_ >= operation->record_count ||
-        operation->length > record_capacity_) {
+        operation->length > fallback_capacity_) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
         return false;
@@ -558,7 +570,7 @@ bool ReportExecutor::decode_fallback_operation() {
 
     if (!fallback_loaded_) {
         const PreparedByteRead read = read_port_->read_prepared(
-            prepared_, 0, record_buffer_, operation->length);
+            prepared_, 0, fallback_buffer_, operation->length);
 
         if (read.state == PreparedByteReadState::Retry) return false;
         if (read.state != PreparedByteReadState::Data ||
@@ -567,7 +579,7 @@ bool ReportExecutor::decode_fallback_operation() {
                    ReportExecutorError::StorageShortRead);
             return false;
         }
-        if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
+        if (crc32_ieee(fallback_buffer_, read.bytes) != section->data_crc32) {
             finish(ReportExecutorState::Failed,
                    ReportExecutorError::DecodeFailed);
             return false;
@@ -575,7 +587,7 @@ bool ReportExecutor::decode_fallback_operation() {
         fallback_loaded_ = true;
     }
 
-    const uint8_t *data = record_buffer_;
+    const uint8_t *data = fallback_buffer_;
     const size_t data_size = operation->length;
     const uint32_t batch_count = std::min<uint32_t>(
         32, operation->record_count - record_index_);
@@ -666,7 +678,6 @@ bool ReportExecutor::poll_operation_end() {
 
     ++operation_index_;
     record_index_ = 0;
-    decoder_count_ = 0;
 
     if (operation_index_ >= operation_count_) {
         finish(ReportExecutorState::Complete, ReportExecutorError::None);
@@ -703,9 +714,11 @@ void ReportExecutor::release_run_resources() {
 }
 
 void ReportExecutor::release_prepared() {
-    if (!read_port_ || !prepared_.valid()) return;
     const StoragePreparedRead prepared = prepared_;
     prepared_ = {};
+    prepared_view_data_ = nullptr;
+    prepared_view_length_ = 0;
+    if (!read_port_ || !prepared.valid()) return;
     read_port_->release_prepared(prepared);
 }
 
@@ -716,11 +729,9 @@ void ReportExecutor::free_scratch() {
     Memory::free(decoders_);
     decoders_ = nullptr;
     decoder_capacity_ = 0;
-    decoder_count_ = 0;
-
-    Memory::free(record_buffer_);
-    record_buffer_ = nullptr;
-    record_capacity_ = 0;
+    Memory::free(fallback_buffer_);
+    fallback_buffer_ = nullptr;
+    fallback_capacity_ = 0;
 }
 
 bool ReportExecutor::emit_series(void *context,

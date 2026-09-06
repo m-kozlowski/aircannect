@@ -4,8 +4,27 @@
 #include <string.h>
 
 #include "memory_manager.h"
+#include "large_allocator.h"
 
 namespace aircannect {
+
+struct LargeByteBuffer::SharedStorage {
+    explicit SharedStorage(size_t size)
+        : buffer(static_cast<uint8_t *>(Memory::alloc_large(size, false)), size) {}
+    LargeByteBuffer buffer;
+};
+
+std::shared_ptr<LargeByteBuffer> LargeByteBuffer::allocate_shared(size_t size) {
+    if (!size) return {};
+    try {
+        auto storage = std::allocate_shared<SharedStorage>(
+            LargeAllocator<SharedStorage>(), size);
+        if (!storage->buffer.data()) return {};
+        return std::shared_ptr<LargeByteBuffer>(storage, &storage->buffer);
+    } catch (const std::bad_alloc &) {
+        return {};
+    }
+}
 
 std::unique_ptr<LargeByteBuffer> LargeByteBuffer::allocate(size_t size) {
     if (size == 0) return {};

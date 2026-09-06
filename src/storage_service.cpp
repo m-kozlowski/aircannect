@@ -202,6 +202,7 @@ PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
                                     size_t offset,
                                     uint8_t *buffer,
                                     size_t capacity);
+StoragePreparedReadView view_prepared_read(StoragePreparedRead prepared);
 void free_prepared_read(StoragePreparedRead prepared);
 
 class ServiceReadPort final : public StorageReadPort {
@@ -230,6 +231,11 @@ public:
                                    uint8_t *buffer,
                                    size_t capacity) const override {
         return copy_prepared_read(prepared, offset, buffer, capacity);
+    }
+
+    StoragePreparedReadView view_prepared(
+        StoragePreparedRead prepared) const override {
+        return view_prepared_read(prepared);
     }
 
     void release_prepared(StoragePreparedRead prepared) override {
@@ -530,7 +536,10 @@ ReadJob *find_read_job_locked(OperationTicket ticket) {
 PreparedReadSlot *find_prepared_read_locked(StoragePreparedRead prepared) {
     if (!prepared.valid()) return nullptr;
     for (PreparedReadSlot &slot : prepared_reads) {
-        if (slot.used && slot.handle.id == prepared.id) return &slot;
+        if (slot.used && slot.handle.id == prepared.id &&
+            slot.handle.length == prepared.length) {
+            return &slot;
+        }
     }
     return nullptr;
 }
@@ -713,7 +722,9 @@ PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
                                     uint8_t *buffer,
                                     size_t capacity) {
     PreparedByteRead result;
-    if (!prepared.valid() || !buffer || capacity == 0) return result;
+    if (!prepared.valid() || !buffer || capacity == 0) {
+        return result;
+    }
 
     if (!lock_queue(0)) {
         result.state = PreparedByteReadState::Retry;
@@ -721,7 +732,8 @@ PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
     }
 
     const PreparedReadSlot *slot = find_prepared_read_locked(prepared);
-    if (!slot || offset >= slot->handle.length) {
+    if (!slot || (slot->handle.length > 0 && !slot->bytes) ||
+        offset >= slot->handle.length) {
         unlock_queue();
         return result;
     }
@@ -729,6 +741,28 @@ PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
     result.state = PreparedByteReadState::Data;
     result.bytes = std::min(capacity, slot->handle.length - offset);
     memcpy(buffer, slot->bytes + offset, result.bytes);
+    unlock_queue();
+    return result;
+}
+
+StoragePreparedReadView view_prepared_read(StoragePreparedRead prepared) {
+    StoragePreparedReadView result;
+    if (!prepared.valid()) return result;
+
+    if (!lock_queue(0)) {
+        result.state = PreparedByteReadState::Retry;
+        return result;
+    }
+
+    const PreparedReadSlot *slot = find_prepared_read_locked(prepared);
+    if (!slot || (slot->handle.length > 0 && !slot->bytes)) {
+        unlock_queue();
+        return result;
+    }
+
+    result.state = PreparedByteReadState::Data;
+    result.data = slot->bytes;
+    result.length = slot->handle.length;
     unlock_queue();
     return result;
 }

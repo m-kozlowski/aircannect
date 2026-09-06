@@ -436,6 +436,7 @@ File open(const char *path, const char *mode) {
     if (!fs) return File();
 
     if (mode[0] != 'r' || strchr(mode, '+')) release_write_handles();
+    else release_write_handle(path);
 
     File file = fs->open(path, mode);
     if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&

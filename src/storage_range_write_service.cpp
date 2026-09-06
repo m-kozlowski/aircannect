@@ -88,6 +88,7 @@ OperationSubmission StorageRangeWriteService::request_write(
     const OperationTicket ticket{next_ticket_id_, command.generation};
     job_->command = command;
     job_->ticket = ticket;
+    if (command.finish) job_->phase = Phase::Flush;
     unlock();
 
     wake();
@@ -142,8 +143,9 @@ const char *StorageRangeWriteService::open_locked() {
                       (command.truncate ? O_TRUNC : 0);
     job_->output = Storage::take_write_handle(command.path.c_str());
     if (job_->output >= 0 && command.truncate) {
-        ::close(job_->output);
+        const int closed = ::close(job_->output);
         job_->output = -1;
+        if (closed != 0) return "close_failed";
     }
 
     if (job_->output < 0) {
@@ -186,31 +188,26 @@ const char *StorageRangeWriteService::open_locked() {
 }
 
 const char *StorageRangeWriteService::write_locked() {
-    const LargeByteBuffer &bytes = *job_->command.bytes;
-    const size_t count = std::min(bytes.size() - job_->written,
+    const size_t size = job_->command.size();
+    const size_t count = std::min(size - job_->written,
                                   AC_STORAGE_RANGE_WRITE_STEP_BYTES);
-    const size_t written = Storage::write_buffer(
-        job_->output, bytes.data() + job_->written, count);
+    const size_t written = Storage::write_buffers(
+        job_->output, job_->command, job_->written, count);
 
     job_->written += written;
     if (written != count) return "write_failed";
-    if (job_->written == bytes.size()) job_->phase = Phase::Flush;
+    if (job_->written == size) job_->phase = Phase::Flush;
 
     return nullptr;
 }
 
 void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                                              const char *error) {
-    uint64_t modified = 0;
-    if (job_->output >= 0) {
+    if (job_->output >= 0 && !job_->command.retain_handle) {
         if (::fsync(job_->output) != 0 &&
             outcome.disposition == OperationDisposition::Succeeded) {
             outcome = OperationOutcome::failed();
             error = "flush_failed";
-        }
-
-        if (outcome.disposition == OperationDisposition::Succeeded) {
-            modified = Storage::file_modified(job_->command.path.c_str());
         }
     }
 
@@ -228,11 +225,17 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
         outcome.disposition == OperationDisposition::Succeeded;
 
     Storage::close_write_handle(job_->command.path.c_str(), job_->output, retain);
+    if (job_->command.finish && !Storage::finish_write_handles() &&
+        outcome.disposition == OperationDisposition::Succeeded) {
+        outcome = OperationOutcome::failed();
+        error = "close_failed";
+    }
+
+    if (job_->abandoned) (void)Storage::finish_write_handles();
     if (!job_->abandoned) {
         completion_.ticket = job_->ticket;
         completion_.outcome = outcome;
         completion_.bytes_written = job_->written;
-        completion_.modified = modified;
 
         snprintf(completion_.error, sizeof(completion_.error), "%s",
                  error ? error : "");

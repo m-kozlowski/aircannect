@@ -9,6 +9,7 @@ namespace aircannect {
 class LargeByteBuffer {
 public:
     static std::unique_ptr<LargeByteBuffer> allocate(size_t size);
+    static std::shared_ptr<LargeByteBuffer> allocate_shared(size_t size);
     static std::shared_ptr<const LargeByteBuffer> copy_and_freeze(
         const void *data, size_t size);
     static std::shared_ptr<const LargeByteBuffer> freeze(
@@ -29,6 +30,7 @@ public:
     bool truncate(size_t size);
 
 private:
+    struct SharedStorage;
     LargeByteBuffer(uint8_t *data, size_t size) : data_(data), size_(size) {}
     LargeByteBuffer(const std::shared_ptr<const LargeByteBuffer> &parent,
                     size_t offset,
