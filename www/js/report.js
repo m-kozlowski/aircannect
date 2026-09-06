@@ -371,6 +371,7 @@
       reportSignalStore = null;
       reportBaseLoadedCharts.clear();
       reportBaseChartPromises.clear();
+      reportBaseChartFailures.clear();
       reportCurrentNightId = "";
       reportCurrentRevision = "";
       reportCurrentGeneration = 0;
@@ -421,6 +422,7 @@
       reportSignalStore = store || null;
       reportBaseLoadedCharts.clear();
       reportBaseChartPromises.clear();
+      reportBaseChartFailures.clear();
       reportCurrentNightId = String(nightId || "");
       reportCurrentRevision = String(revision || "");
       reportCurrentGeneration = Number(generation) || 0;
@@ -1365,20 +1367,39 @@
       return reportSeriesExtent(series);
     }
 
-    function setReportItemLoading(item, loading) {
+    function reportStatusBadge(text, title) {
+      const badge = document.createElement("span");
+      badge.className = "report-res-badge";
+      badge.textContent = text;
+      if (title) badge.title = title;
+      return badge;
+    }
+
+    function reportChartFailure(key) {
+      const current = currentSignalStoreRangeKey();
+      if (current && reportRangeView && reportRangeView.key === current &&
+          reportRangeView.failedCharts &&
+          reportRangeView.failedCharts.has(key)) {
+        return reportRangeView.failedCharts.get(key);
+      }
+      return reportBaseChartFailures.get(key) || null;
+    }
+
+    function setReportItemLoading(item, loading, failure) {
       if (!item || !item.name) return;
-      loading = !!loading &&
-        !reportChartPreferences.collapsed.has(item.key);
-      if (loading && !item.loadingBadge) {
-        const badge = document.createElement("span");
-        badge.className = "report-res-badge";
-        badge.textContent = "loading";
-        item.name.appendChild(badge);
-        item.loadingBadge = badge;
-      } else if (!loading && item.loadingBadge) {
+      const collapsed = reportChartPreferences.collapsed.has(item.key);
+      const text = !collapsed && failure ? "unavailable" :
+        !collapsed && loading ? "loading" : "";
+      const title = failure && failure.message ? failure.message : "";
+      if (item.loadingBadge &&
+          (item.loadingBadge.textContent !== text ||
+           item.loadingBadge.title !== title)) {
         item.loadingBadge.remove();
         item.loadingBadge = null;
       }
+      if (!text || item.loadingBadge) return;
+      item.loadingBadge = reportStatusBadge(text, title);
+      item.name.appendChild(item.loadingBadge);
     }
 
     function updateRenderedReportRange() {
@@ -1395,8 +1416,10 @@
         item.end = range.end;
         item.ranges = ranges;
 
-        const pending = !reportBaseLoadedCharts.has(item.key) ||
-          (!!reportZoom && !signalStoreRangeChartReady(item.key));
+        const failure = reportChartFailure(item.key);
+        const pending = !failure &&
+          (!reportBaseLoadedCharts.has(item.key) ||
+           (!!reportZoom && !signalStoreRangeChartReady(item.key)));
         if (item.type === "series") {
           const definition = reportChartDefinition(item.key);
           if (definition) {
@@ -1407,7 +1430,7 @@
           }
           item.rangePending = pending;
         }
-        setReportItemLoading(item, pending);
+        setReportItemLoading(item, pending, failure);
       });
 
       scheduleReportDraw();
@@ -1420,7 +1443,10 @@
       if (!validReportRange(range)) return false;
 
       const ranges = reportVisibleSessionRanges();
-      const pending = !!reportZoom && !signalStoreRangeChartReady(key);
+      const failure = reportChartFailure(key);
+      const pending = !failure &&
+        (!reportBaseLoadedCharts.has(key) ||
+         (!!reportZoom && !signalStoreRangeChartReady(key)));
       if (key === "events") {
         reportDrawItems.forEach((item) => {
           item.events = reportEvents.slice();
@@ -1428,7 +1454,7 @@
             item.start = range.start;
             item.end = range.end;
             item.ranges = ranges;
-            setReportItemLoading(item, pending);
+            setReportItemLoading(item, pending, failure);
           }
         });
         scheduleReportDraw();
@@ -1453,7 +1479,7 @@
       item.end = range.end;
       item.ranges = ranges;
       item.rangePending = pending;
-      setReportItemLoading(item, pending);
+      setReportItemLoading(item, pending, failure);
       scheduleReportDraw();
       updateReportZoomControls();
       return true;
@@ -1461,8 +1487,9 @@
 
     function renderReportEventFlags(container, range, ranges, definition) {
       // Stay visible if the night has events; do not vanish on an event-free zoom.
+      const failure = reportChartFailure(definition.key);
       if (!((reportResult && reportResult.events_available) ||
-            reportBaseEvents.length)) {
+            reportBaseEvents.length || failure)) {
         return;
       }
       const card = document.createElement("div");
@@ -1472,12 +1499,14 @@
       const name = document.createElement("span");
       name.textContent = definition.title;
       let loadingBadge = null;
+      const pending = !failure &&
+        (!reportBaseLoadedCharts.has(definition.key) ||
+         (reportZoom && !signalStoreRangeChartReady(definition.key)));
       if (!reportChartPreferences.collapsed.has(definition.key) &&
-          (!reportBaseLoadedCharts.has(definition.key) ||
-           (reportZoom && !signalStoreRangeChartReady(definition.key)))) {
-        loadingBadge = document.createElement("span");
-        loadingBadge.className = "report-res-badge";
-        loadingBadge.textContent = "loading";
+          (pending || failure)) {
+        loadingBadge = reportStatusBadge(
+          failure ? "unavailable" : "loading",
+          failure && failure.message ? failure.message : "");
         name.appendChild(loadingBadge);
       }
       title.appendChild(name);
@@ -1578,8 +1607,9 @@
         const availableParts = signalStoreChartParts(def);
         const seriesList = reportChartSeriesList(def);
         const collapsed = reportChartPreferences.collapsed.has(def.key);
+        const failure = reportChartFailure(def.key);
         const basePending = !collapsed && availableParts.length > 0 &&
-          !reportBaseLoadedCharts.has(def.key);
+          !reportBaseLoadedCharts.has(def.key) && !failure;
         if (!seriesList.length && !basePending) {
           if (def.optional && !availableParts.length) return;
 
@@ -1595,7 +1625,10 @@
           ctitle.appendChild(cname);
           const cnote = document.createElement("span");
           cnote.className = "report-chart-note";
-          if (!collapsed && availableParts.length &&
+          if (!collapsed && failure) {
+            cname.appendChild(reportStatusBadge(
+              "unavailable", failure.message || "Report chart unavailable"));
+          } else if (!collapsed && availableParts.length &&
               !reportBaseLoadedCharts.has(def.key)) {
             cnote.textContent = "loading...";
           } else if (!collapsed) {
@@ -1604,12 +1637,12 @@
                 ? "backfilling..."
                 : "not retained for this night";
           }
-          if (!collapsed) ctitle.appendChild(cnote);
+          if (!collapsed && cnote.textContent) ctitle.appendChild(cnote);
           appendReportChartActions(ctitle, def.key);
           card.appendChild(ctitle);
           if (reportChartPreferences.collapsed.has(def.key)) {
             card.classList.add("collapsed");
-          } else if (availableParts.length &&
+          } else if (availableParts.length && !failure &&
                      !reportBaseLoadedCharts.has(def.key)) {
             const placeholder = document.createElement("div");
             placeholder.className = "report-chart-placeholder";
@@ -1626,13 +1659,13 @@
         title.className = "report-chart-title";
         const name = document.createElement("span");
         name.textContent = def.title;
-        const rangePending = !collapsed && !!reportZoom &&
+        const rangePending = !collapsed && !failure && !!reportZoom &&
           !signalStoreRangeChartReady(def.key);
         let loadingBadge = null;
-        if (basePending || rangePending) {
-          loadingBadge = document.createElement("span");
-          loadingBadge.className = "report-res-badge";
-          loadingBadge.textContent = "loading";
+        if (basePending || rangePending || (!collapsed && failure)) {
+          loadingBadge = reportStatusBadge(
+            failure ? "unavailable" : "loading",
+            failure && failure.message ? failure.message : "");
           name.appendChild(loadingBadge);
         }
         if (seriesDefs.some((sd) => lowResByName[sd.key])) {
@@ -1923,17 +1956,23 @@
       if (!jobs.length) return;
 
       let next = 0;
+      let firstError = null;
       const workers = [];
       const workerCount = Math.min(concurrency || 2, jobs.length);
       for (let i = 0; i < workerCount; i++) {
         workers.push((async () => {
           while (next < jobs.length) {
             const job = jobs[next++];
-            await job();
+            try {
+              await job();
+            } catch (error) {
+              if (!firstError) firstError = error;
+            }
           }
         })());
       }
       await Promise.all(workers);
+      if (firstError) throw firstError;
     }
 
     function reportChartDefinition(key) {
@@ -2708,12 +2747,23 @@
           context.generation === reportCurrentGeneration &&
           context.revision === reportCurrentRevision,
       };
+      if (reportBaseChartFailures.delete(key)) {
+        if (!updateRenderedReportChart(key)) renderReportCharts();
+      }
       const promise = fetchSignalStoreChart(
         definition, range.start, range.end, context)
         .then((decoded) => {
           if (!decoded || !context.active()) return false;
+          reportBaseChartFailures.delete(key);
           publishSignalStoreBaseChart(key, decoded);
           return true;
+        })
+        .catch((error) => {
+          if (context.active()) {
+            reportBaseChartFailures.set(key, error);
+            if (!updateRenderedReportChart(key)) renderReportCharts();
+          }
+          throw error;
         })
         .finally(() => {
           if (reportBaseChartPromises.get(key) === promise) {
@@ -2831,18 +2881,26 @@
           await runReportFetchJobs(keys.map((key) => async () => {
             const definition = reportChartDefinition(key);
             if (!definition) return;
-            const decoded = await fetchSignalStoreChart(
-              definition, entry.from, entry.to, context);
-            if (!decoded || !context.active()) return;
+            try {
+              const decoded = await fetchSignalStoreChart(
+                definition, entry.from, entry.to, context);
+              if (!decoded || !context.active()) return;
 
-            if (definition.type === "events") {
-              entry.events = decoded.events;
-            } else {
-              Object.assign(entry.series, decoded.series);
+              if (definition.type === "events") {
+                entry.events = decoded.events;
+              } else {
+                Object.assign(entry.series, decoded.series);
+              }
+              entry.failedCharts.delete(key);
+              entry.loadedCharts.add(key);
+              applySignalStoreRangeChart(entry, key);
+              if (!updateRenderedReportChart(key)) renderReportCharts();
+            } catch (error) {
+              if (!context.active()) return;
+              entry.failedCharts.set(key, error);
+              AirCANnect.ui.message("reportMsg", error.message, false, true);
+              if (!updateRenderedReportChart(key)) renderReportCharts();
             }
-            entry.loadedCharts.add(key);
-            applySignalStoreRangeChart(entry, key);
-            if (!updateRenderedReportChart(key)) renderReportCharts();
           }), 4);
         }
 
@@ -2879,6 +2937,7 @@
           series: {},
           events: reportBaseEvents,
           loadedCharts: new Set(),
+          failedCharts: new Map(),
           requestedCharts: new Set(),
           promise: null,
         };
@@ -2891,7 +2950,12 @@
       keys.forEach((chartKey) => {
         if (entry.loadedCharts.has(chartKey)) {
           applySignalStoreRangeChart(entry, chartKey);
-        } else {
+        } else if (requestedKeys) {
+          if (entry.failedCharts.delete(chartKey)) {
+            if (!updateRenderedReportChart(chartKey)) renderReportCharts();
+          }
+          entry.requestedCharts.add(chartKey);
+        } else if (!entry.failedCharts.has(chartKey)) {
           entry.requestedCharts.add(chartKey);
         }
       });
@@ -3144,6 +3208,7 @@
     let reportSignalStore = null;
     const reportBaseLoadedCharts = new Set();
     const reportBaseChartPromises = new Map();
+    const reportBaseChartFailures = new Map();
     let reportCurrentNightId = "";
     let reportCurrentRevision = "";
     let reportCurrentGeneration = 0;
