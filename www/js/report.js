@@ -626,7 +626,7 @@
     }
 
     function reportTimeTickCount(graphW) {
-      return Math.max(4, Math.min(12, Math.round(graphW / 110)));
+      return Math.max(3, Math.min(12, Math.round(graphW / 110)));
     }
 
     // Vertical gridlines + time labels along the x-axis, shared by every chart
