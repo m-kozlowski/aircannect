@@ -2311,13 +2311,14 @@
     function trimSignalStoreBlockCache() {
       let bytes = 0;
       reportSignalBlockCache.forEach((entry) => {
-        bytes += entry.buffer.byteLength;
+        bytes += entry.buffer.byteLength +
+          SIGNAL_STORE_BLOCK_CACHE_ENTRY_OVERHEAD;
       });
-      while (reportSignalBlockCache.size > SIGNAL_STORE_BLOCK_CACHE_MAX ||
-             bytes > SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES) {
+      while (bytes > SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES) {
         const key = reportSignalBlockCache.keys().next().value;
         if (key === undefined) break;
-        bytes -= reportSignalBlockCache.get(key).buffer.byteLength;
+        bytes -= reportSignalBlockCache.get(key).buffer.byteLength +
+          SIGNAL_STORE_BLOCK_CACHE_ENTRY_OVERHEAD;
         reportSignalBlockCache.delete(key);
       }
     }
@@ -3141,8 +3142,8 @@
     const SIGNAL_STORE_EVENT_HEADER_BYTES = 96;
     const SIGNAL_STORE_BITMAP_BYTES = 16;
     const SIGNAL_STORE_MAX_BLOCKS = 128;
-    const SIGNAL_STORE_BLOCK_CACHE_MAX = 512;
     const SIGNAL_STORE_BLOCK_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+    const SIGNAL_STORE_BLOCK_CACHE_ENTRY_OVERHEAD = 256;
     const SIGNAL_STORE_EVENT_CACHE_MAX = 8;
     const SIGNAL_STORE_PREFETCH_BLOCKS = 2;
     const SIGNAL_STORE_SIGNAL_NAMES = [
