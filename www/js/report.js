@@ -1364,6 +1364,8 @@
 
     function setReportItemLoading(item, loading) {
       if (!item || !item.name) return;
+      loading = !!loading &&
+        !reportChartPreferences.collapsed.has(item.key);
       if (loading && !item.loadingBadge) {
         const badge = document.createElement("span");
         badge.className = "report-res-badge";
@@ -1575,7 +1577,8 @@
         const seriesDefs = def.series || [def];
         const availableParts = signalStoreChartParts(def);
         const seriesList = reportChartSeriesList(def);
-        const basePending = availableParts.length > 0 &&
+        const collapsed = reportChartPreferences.collapsed.has(def.key);
+        const basePending = !collapsed && availableParts.length > 0 &&
           !reportBaseLoadedCharts.has(def.key);
         if (!seriesList.length && !basePending) {
           if (def.optional && !availableParts.length) return;
@@ -1592,16 +1595,16 @@
           ctitle.appendChild(cname);
           const cnote = document.createElement("span");
           cnote.className = "report-chart-note";
-          if (availableParts.length &&
+          if (!collapsed && availableParts.length &&
               !reportBaseLoadedCharts.has(def.key)) {
             cnote.textContent = "loading...";
-          } else {
+          } else if (!collapsed) {
             cnote.textContent =
               reportResult && reportResult.missing_required > 0
                 ? "backfilling..."
                 : "not retained for this night";
           }
-          ctitle.appendChild(cnote);
+          if (!collapsed) ctitle.appendChild(cnote);
           appendReportChartActions(ctitle, def.key);
           card.appendChild(ctitle);
           if (reportChartPreferences.collapsed.has(def.key)) {
@@ -1623,7 +1626,7 @@
         title.className = "report-chart-title";
         const name = document.createElement("span");
         name.textContent = def.title;
-        const rangePending = !!reportZoom &&
+        const rangePending = !collapsed && !!reportZoom &&
           !signalStoreRangeChartReady(def.key);
         let loadingBadge = null;
         if (basePending || rangePending) {
