@@ -1814,13 +1814,6 @@
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);
       updateReportZoomControls();
-
-      if (nights.length) {
-        AirCANnect.ui.message("reportMsg", "Summary loaded", true);
-      } else {
-        const element = document.getElementById("reportMsg");
-        if (element) element.className = "msg";
-      }
     }
 
     // Conditional GET by stable night id. Poll while the backend is building.
@@ -2180,12 +2173,13 @@
 
     async function pollSignalStoreNight(token, nightId, signal) {
       const url = "/api/report/result?night=" + encodeURIComponent(nightId);
+      const timeoutValue = {status: 0, result: null};
       return pollReportFetch({
         active: () => token === reportLoadToken,
         waitUrl: url,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
-        timeoutValue: {status: 0, result: null},
+        timeoutValue,
         request: () => {
           const cached = lruGet(reportResultClientCache, url);
           return AirCANnect.http.request(
@@ -2221,6 +2215,7 @@
             return {done: true, value: {status: 200, result: decoded}};
           }
           if (response.status === 202) {
+            timeoutValue.status = 202;
             AirCANnect.ui.message(
               "reportMsg", "Preparing report...", true, true);
             return {done: false, waitForReport: true};
@@ -2936,6 +2931,10 @@
           AirCANnect.ui.message("reportMsg", "Night not found", false, true);
           return;
         }
+        if (res.status === 202 && !res.result) {
+          AirCANnect.ui.message("reportMsg", "Preparing report...", true, true);
+          return;
+        }
         if ((res.status !== 200 && res.status !== 304) || !res.result) {
           AirCANnect.ui.message("reportMsg", "Report not ready", false, true);
           renderReportSummary();
@@ -3010,6 +3009,10 @@
         }
 
         renderReportSummary();
+        if (!reportNightsNewestFirst().length) {
+          AirCANnect.ui.message("reportMsg", "No nights", true);
+          return;
+        }
         if (loadNight) await loadSelectedReportNight();
       } catch (error) {
         AirCANnect.ui.message("reportMsg", error.message, false, true);
@@ -3061,12 +3064,20 @@
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
       reportHandledCompletionKey = completionKey;
-      if (!data.success || data.kind !== "night" || !data.night) return;
+      if (data.kind !== "night" || !data.night) return;
 
       const nightId = String(data.night);
       const active = AirCANnect.pages.isActive("report");
       const selected = selectedReportNight();
       const selectedNightId = selected ? String(selected.id) : "";
+      if (!data.success) {
+        if (active && !reportResult && nightId === selectedNightId &&
+            data.error !== "cancelled") {
+          AirCANnect.ui.message(
+            "reportMsg", data.error || "Report failed", false, true);
+        }
+        return;
+      }
       const current = nightId === reportCurrentNightId;
       const reload = active && (current ||
         (!reportResult && nightId === selectedNightId));
