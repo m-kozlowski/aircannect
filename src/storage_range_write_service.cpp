@@ -123,7 +123,17 @@ const char *StorageRangeWriteService::open_locked() {
     const StorageRangeWriteCommand &command = job_->command;
     if (!Storage::mounted()) return "storage_not_mounted";
 
-    const bool exists = Storage::exists(command.path.c_str());
+    // Nonzero offsets require an existing file. Reuse the successful open
+    // instead of opening it once for exists() and again for the write.
+    if (command.offset != 0) {
+        job_->output = Storage::open(command.path.c_str(), "r+");
+        if (!job_->output) {
+            return Storage::exists(command.path.c_str())
+                ? "open_failed" : "file_not_found";
+        }
+    }
+
+    const bool exists = job_->output || Storage::exists(command.path.c_str());
     if (!exists && command.offset == 0) {
         const auto parents = Storage::ensure_parent_directory_step(
             command.path.c_str(), job_->parent_cursor);
@@ -134,12 +144,12 @@ const char *StorageRangeWriteService::open_locked() {
         if (parents == Storage::ParentDirectoryStep::More) return nullptr;
     }
 
-    if (!exists && command.offset != 0) return "file_not_found";
-
     // Never fall back to "w" after a failed "r+": an unreadable existing
     // file must not be truncated. Directory and gap checks precede mutation.
     if (exists) {
-        job_->output = Storage::open(command.path.c_str(), "r+");
+        if (!job_->output) {
+            job_->output = Storage::open(command.path.c_str(), "r+");
+        }
         if (!job_->output) return "open_failed";
         if (job_->output.isDirectory()) return "not_a_file";
         if (command.offset > job_->output.size()) return "offset_past_end";

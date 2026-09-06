@@ -105,49 +105,41 @@ int64_t first_sample_in_block(const ReportSignalStoreTrack &track,
     return block_start_ms + delta;
 }
 
-void add_envelope(uint8_t *out,
-                  uint32_t index,
-                  int16_t value,
-                  int16_t missing_value) {
-    uint8_t *cell = out + static_cast<size_t>(index) * 4;
-    int16_t minimum = get_i16(cell);
-    int16_t maximum = get_i16(cell + 2);
-    if (minimum == missing_value) {
-        minimum = value;
-        maximum = value;
-    } else {
-        minimum = std::min(minimum, value);
-        maximum = std::max(maximum, value);
-    }
-
-    put_i16(cell, minimum);
-    put_i16(cell + 2, maximum);
-}
-
 void build_envelopes(const ReportSignalStoreTrack &track,
                      int64_t block_start_ms,
                      const int16_t *raw,
                      const SignalFileLayout &file_layout,
-                     uint8_t *out) {
-    for (uint32_t i = 0; i < file_layout.cell_count; ++i) {
-        put_i16(out + static_cast<size_t>(i) * 4,
-                track.missing_value);
-        put_i16(out + static_cast<size_t>(i) * 4 + 2,
-                track.missing_value);
-    }
+                     uint8_t *out,
+                     const uint8_t *one_second) {
+    const int64_t phase = first_sample_in_block(track, block_start_ms) -
+        block_start_ms;
+    uint32_t cursor = 0;
+    for (uint32_t cell = 0; cell < file_layout.cell_count; ++cell) {
+        int16_t minimum = track.missing_value;
+        int16_t maximum = track.missing_value;
+        const int64_t end_ms =
+            static_cast<int64_t>(cell + 1) * file_layout.interval_ms;
+        const uint32_t end = one_second ? (cell + 1) * 10
+            : static_cast<uint32_t>(std::min<int64_t>(
+                file_layout.samples_per_block,
+                std::max<int64_t>(0, (end_ms - phase +
+                    track.sample_interval_ms - 1) / track.sample_interval_ms)));
 
-    const int64_t first_ms = first_sample_in_block(track, block_start_ms);
-    for (uint32_t i = 0; i < file_layout.samples_per_block; ++i) {
-        const int16_t value = raw[i];
-        if (value == track.missing_value) continue;
+        for (; cursor < end; ++cursor) {
+            const int16_t low = one_second
+                ? get_i16(one_second + static_cast<size_t>(cursor) * 4)
+                : raw[cursor];
+            const int16_t high = one_second
+                ? get_i16(one_second + static_cast<size_t>(cursor) * 4 + 2)
+                : low;
+            if (low == track.missing_value || high == track.missing_value) continue;
 
-        const int64_t timestamp =
-            first_ms + static_cast<int64_t>(i) * track.sample_interval_ms;
-        const uint32_t cell = static_cast<uint32_t>(
-            (timestamp - block_start_ms) / file_layout.interval_ms);
-        if (cell < file_layout.cell_count) {
-            add_envelope(out, cell, value, track.missing_value);
+            minimum = minimum == track.missing_value ? low : std::min(minimum, low);
+            maximum = maximum == track.missing_value ? high : std::max(maximum, high);
         }
+
+        put_i16(out + static_cast<size_t>(cell) * 4, minimum);
+        put_i16(out + static_cast<size_t>(cell) * 4 + 2, maximum);
     }
 }
 
@@ -241,7 +233,8 @@ ReportSignalStoreFileCodec::encode_blocks(
     size_t first_slot,
     const int16_t *const *raw_blocks,
     size_t block_count,
-    bool include_header) {
+    bool include_header,
+    const LargeByteBuffer *one_second) {
     SignalFileLayout file_layout;
     if (!raw_blocks || !layout(track, level, file_layout) ||
         block_count == 0 || first_slot >= track.block_slot_count ||
@@ -257,6 +250,21 @@ ReportSignalStoreFileCodec::encode_blocks(
     }
     const size_t prefix_bytes = include_header ? HeaderBytes : 0;
     if (!CheckedSize::add_array(total_bytes, prefix_bytes, 1)) return {};
+
+    const uint8_t *one_second_body = nullptr;
+    SignalFileLayout one_second_layout;
+    if (one_second) {
+        size_t body_bytes = 0;
+        if (level != ReportSignalStoreLevel::TenSeconds ||
+            !layout(track, ReportSignalStoreLevel::OneSecond, one_second_layout) ||
+            !CheckedSize::multiply(block_count, one_second_layout.block_bytes,
+                                   body_bytes)) return {};
+
+        const size_t size = one_second->size();
+        if (size != body_bytes &&
+            (size < HeaderBytes || size - HeaderBytes != body_bytes)) return {};
+        one_second_body = one_second->data() + (size - body_bytes);
+    }
 
     for (size_t i = 0; i < block_count; ++i) {
         if (!raw_blocks[i] || !bit(track.present_blocks, first_slot + i)) {
@@ -278,16 +286,22 @@ ReportSignalStoreFileCodec::encode_blocks(
         uint8_t *block_output = output->data() +
             prefix_bytes + block * file_layout.block_bytes;
         if (level == ReportSignalStoreLevel::Raw) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            memcpy(block_output, raw_blocks[block], file_layout.block_bytes);
+#else
             for (uint32_t i = 0; i < file_layout.samples_per_block; ++i) {
                 put_i16(block_output + static_cast<size_t>(i) * 2,
                         raw_blocks[block][i]);
             }
+#endif
         } else {
             const int64_t block_start = track.first_block_start_ms +
                 static_cast<int64_t>(first_slot + block) *
                     REPORT_SIGNAL_STORE_BLOCK_MS;
             build_envelopes(track, block_start, raw_blocks[block],
-                            file_layout, block_output);
+                            file_layout, block_output,
+                            one_second_body ? one_second_body +
+                                block * one_second_layout.block_bytes : nullptr);
         }
     }
 

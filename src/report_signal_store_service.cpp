@@ -268,7 +268,11 @@ bool ReportSignalStoreService::encode_current() {
         block_bytes_ = ReportSignalStoreFileCodec::encode_header(track_, level_);
     } else {
         block_bytes_ = ReportSignalStoreFileCodec::encode_blocks(
-            track_, level_, slot_, raw_blocks_, block_count_, include_header);
+            track_, level_, slot_, raw_blocks_, block_count_, include_header,
+            one_second_bytes_.get());
+        if (level_ == ReportSignalStoreLevel::TenSeconds) {
+            one_second_bytes_.reset();
+        }
         if (include_header) {
             range_.offset = 0;
             range_.length += ReportSignalStoreFileCodec::HeaderBytes;
@@ -286,6 +290,10 @@ bool ReportSignalStoreService::encode_current() {
 
     phase_ = separate_header
         ? Phase::SubmitHeader : Phase::SubmitBlock;
+    if (!separate_header && level_ == ReportSignalStoreLevel::OneSecond &&
+        (track_.lod_mask & REPORT_SIGNAL_STORE_LOD_10S)) {
+        one_second_bytes_ = block_bytes_;
+    }
     return true;
 }
 
@@ -569,6 +577,7 @@ void ReportSignalStoreService::release_io() {
     // The storage owner retains shared bytes if cancellation is still queued.
     block_bytes_.reset();
     raw_ = nullptr;
+    one_second_bytes_.reset();
     for (size_t i = 0; i < MaxWriteBatchBlocks; ++i) {
         raw_blocks_[i] = nullptr;
     }

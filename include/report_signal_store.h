@@ -147,13 +147,17 @@ public:
         ReportSignalStoreLevel level,
         size_t slot,
         const int16_t *raw);
+
+    // Optional OneSecond output for the same track/slots, with or without its
+    // combined header. Used only when encoding TenSeconds.
     static std::shared_ptr<const LargeByteBuffer> encode_blocks(
         const ReportSignalStoreTrack &track,
         ReportSignalStoreLevel level,
         size_t first_slot,
         const int16_t *const *raw_blocks,
         size_t block_count,
-        bool include_header = false);
+        bool include_header = false,
+        const LargeByteBuffer *one_second = nullptr);
 
     static bool inspect(const uint8_t *bytes,
                         size_t length,

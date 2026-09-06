@@ -147,6 +147,7 @@ private:
     bool existing_file_ = false;
     bool write_header_ = true;
     std::shared_ptr<const LargeByteBuffer> block_bytes_;
+    std::shared_ptr<const LargeByteBuffer> one_second_bytes_;
     OperationTicket read_ticket_;
     StoragePreparedRead prepared_;
     size_t read_offset_ = 0;
