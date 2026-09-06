@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <string.h>
+#include <unistd.h>
 
 #include "memory_manager.h"
 #include "storage_path.h"
@@ -57,26 +58,44 @@ uint64_t file_modified(const char *path) {
         ? static_cast<uint64_t>(info.st_mtime) : 0;
 }
 
-size_t write_buffer(File &file, const uint8_t *data, size_t size) {
+namespace {
+
+template <typename Write>
+size_t write_staged(Write write, const uint8_t *data, size_t size) {
     // S3 SDMMC otherwise bounces PSRAM data through one 512-byte DMA sector
     // per transaction. Keep stdio buffers small so they do not undo staging.
     constexpr size_t DMA_BYTES = 4096;
-    if (size < 1024) return file.write(data, size);
+    if (size < 1024) return write(data, size);
 
     auto *dma = static_cast<uint8_t *>(Memory::alloc_dma(DMA_BYTES));
-    if (!dma) return file.write(data, size);
+    if (!dma) return write(data, size);
 
     size_t written = 0;
     while (written < size) {
         const size_t chunk = std::min(DMA_BYTES, size - written);
         memcpy(dma, data + written, chunk);
-        const size_t part = file.write(dma, chunk);
+        const size_t part = write(dma, chunk);
         written += part;
         if (part != chunk) break;
     }
 
     Memory::free(dma);
     return written;
+}
+
+}  // namespace
+
+size_t write_buffer(File &file, const uint8_t *data, size_t size) {
+    return write_staged([&file](const uint8_t *bytes, size_t count) {
+        return file.write(bytes, count);
+    }, data, size);
+}
+
+size_t write_buffer(int descriptor, const uint8_t *data, size_t size) {
+    return write_staged([descriptor](const uint8_t *bytes, size_t count) {
+        const ssize_t written = ::write(descriptor, bytes, count);
+        return written > 0 ? static_cast<size_t>(written) : 0;
+    }, data, size);
 }
 
 }  // namespace aircannect::Storage

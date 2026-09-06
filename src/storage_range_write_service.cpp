@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <new>
 #include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "large_object.h"
 #include "storage_internal.h"
@@ -11,6 +14,7 @@ namespace aircannect {
 
 StorageRangeWriteService::~StorageRangeWriteService() {
     if (job_) {
+        if (job_->output >= 0) ::close(job_->output);
         LargeObject::destroy(job_);
     }
 
@@ -121,20 +125,17 @@ bool StorageRangeWriteService::take_completion(
 
 const char *StorageRangeWriteService::open_locked() {
     const StorageRangeWriteCommand &command = job_->command;
-    if (!Storage::mounted()) return "storage_not_mounted";
+    const int flags = O_RDWR | (command.offset == 0 ? O_CREAT : 0) |
+                      (command.truncate ? O_TRUNC : 0);
+    job_->output = Storage::open_descriptor(command.path.c_str(), flags);
 
-    // Nonzero offsets require an existing file. Reuse the successful open
-    // instead of opening it once for exists() and again for the write.
-    if (command.offset != 0) {
-        job_->output = Storage::open(command.path.c_str(), "r+");
-        if (!job_->output) {
-            return Storage::exists(command.path.c_str())
-                ? "open_failed" : "file_not_found";
+    if (job_->output < 0) {
+        const int error = errno;
+        if (command.offset != 0) {
+            return error == ENOENT ? "file_not_found" : "open_failed";
         }
-    }
+        if (error != ENOENT && error != ENOTDIR) return "open_failed";
 
-    const bool exists = job_->output || Storage::exists(command.path.c_str());
-    if (!exists && command.offset == 0) {
         const auto parents = Storage::ensure_parent_directory_step(
             command.path.c_str(), job_->parent_cursor);
 
@@ -142,29 +143,20 @@ const char *StorageRangeWriteService::open_locked() {
             return "parent_create_failed";
         }
         if (parents == Storage::ParentDirectoryStep::More) return nullptr;
+
+        job_->output = Storage::open_descriptor(command.path.c_str(), flags);
+        if (job_->output < 0) return "open_failed";
     }
 
-    // Never fall back to "w" after a failed "r+": an unreadable existing
-    // file must not be truncated. Directory and gap checks precede mutation.
-    if (exists) {
-        if (!job_->output) {
-            job_->output = Storage::open(command.path.c_str(), "r+");
-        }
-        if (!job_->output) return "open_failed";
-        if (job_->output.isDirectory()) return "not_a_file";
-        if (command.offset > job_->output.size()) return "offset_past_end";
+    struct stat info {};
+    if (::fstat(job_->output, &info) != 0) return "stat_failed";
+    if (!S_ISREG(info.st_mode)) return "not_a_file";
+    if (command.offset > static_cast<uint64_t>(info.st_size)) {
+        return "offset_past_end";
     }
 
-    if (!exists || command.truncate) {
-        if (job_->output) job_->output.close();
-        job_->output = Storage::open(command.path.c_str(), "w");
-        if (!job_->output) return "open_failed";
-        if (job_->output.isDirectory()) return "not_a_file";
-    }
-
-    (void)job_->output.setBufferSize(512);
-    if (!job_->output.seek(static_cast<uint32_t>(command.offset)) ||
-        job_->output.position() != command.offset) {
+    if (::lseek(job_->output, command.offset, SEEK_SET) !=
+        static_cast<off_t>(command.offset)) {
         return "seek_failed";
     }
 
@@ -189,13 +181,17 @@ const char *StorageRangeWriteService::write_locked() {
 void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                                              const char *error) {
     uint64_t modified = 0;
-    if (job_->output) {
-        job_->output.flush();
-        if (outcome.disposition == OperationDisposition::Succeeded) {
-            const time_t last_write = job_->output.getLastWrite();
-            if (last_write > 0) modified = static_cast<uint64_t>(last_write);
+    if (job_->output >= 0) {
+        if (::fsync(job_->output) != 0 &&
+            outcome.disposition == OperationDisposition::Succeeded) {
+            outcome = OperationOutcome::failed();
+            error = "flush_failed";
         }
-        job_->output.close();
+
+        if (outcome.disposition == OperationDisposition::Succeeded) {
+            modified = Storage::file_modified(job_->command.path.c_str());
+        }
+        ::close(job_->output);
     }
 
     // Catch cancellation posted during a blocking write or flush as well.

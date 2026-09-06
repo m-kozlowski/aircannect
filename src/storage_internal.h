@@ -15,6 +15,7 @@ bool remove(const char *path);
 bool rmdir(const char *path);
 bool rename(const char *from, const char *to);
 File open(const char *path, const char *mode);
+int open_descriptor(const char *path, int flags);
 
 // Storage-task file preparation and post-close metadata
 enum class ParentDirectoryStep : uint8_t { More, Done, Failed };
@@ -25,6 +26,7 @@ uint64_t file_modified(const char *path);
 
 // Bounded caller-owned write; temporary DMA staging is released on return.
 size_t write_buffer(File &file, const uint8_t *data, size_t size);
+size_t write_buffer(int descriptor, const uint8_t *data, size_t size);
 
 bool poll(bool allow_capacity_update);
 bool retry_mount();

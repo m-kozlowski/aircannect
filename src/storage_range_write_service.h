@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -33,7 +32,7 @@ private:
     struct Job {
         StorageRangeWriteCommand command;
         OperationTicket ticket;
-        File output;
+        int output = -1;
         size_t written = 0;
         size_t parent_cursor = 0;
         Phase phase = Phase::Open;

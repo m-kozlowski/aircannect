@@ -1,6 +1,8 @@
 #include "storage_internal.h"
 
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #include <freertos/FreeRTOS.h>
@@ -78,6 +80,22 @@ fs::FS *active_fs() {
         default:
             return nullptr;
     }
+}
+
+bool native_path(const char *path, char *full_path, size_t capacity) {
+    if (!path || path[0] != '/') {
+        errno = EINVAL;
+        return false;
+    }
+
+    const int length = snprintf(full_path, capacity, "%s%s",
+                                AC_STORAGE_MOUNT_POINT, path);
+    if (length <= 0 || static_cast<size_t>(length) >= capacity) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+
+    return true;
 }
 
 void set_state(StorageType type,
@@ -362,11 +380,20 @@ bool file_stat(const char *path, struct stat &info) {
     if (!fs) return false;
 
     char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
-    const int length = snprintf(full_path, sizeof(full_path), "%s%s",
-                                AC_STORAGE_MOUNT_POINT, path);
-
-    return length > 0 && static_cast<size_t>(length) < sizeof(full_path) &&
+    return native_path(path, full_path, sizeof(full_path)) &&
            ::stat(full_path, &info) == 0;
+}
+
+int open_descriptor(const char *path, int flags) {
+    if (!initialized || !active_fs()) {
+        errno = ENODEV;
+        return -1;
+    }
+
+    char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
+    if (!native_path(path, full_path, sizeof(full_path))) return -1;
+
+    return ::open(full_path, flags, 0666);
 }
 
 bool remove(const char *path) {
