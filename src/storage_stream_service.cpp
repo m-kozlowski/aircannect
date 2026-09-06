@@ -413,17 +413,6 @@ bool StorageStreamService::step_stream_locked(size_t index) {
         return true;
     }
 
-    if (stream.transfer.producer_done()) {
-        const bool complete = stream.transfer.consumed() == stream.size;
-        if (stream.transfer.consumer_closed()) {
-            retire_locked(index,
-                          complete ? StorageStreamState::Ready
-                                   : StorageStreamState::Cancelled);
-            return true;
-        }
-        return false;
-    }
-
     const bool inactive =
         stream.transfer.consumer_attached() &&
         !stream.transfer.consumer_closed() &&
@@ -434,6 +423,17 @@ bool StorageStreamService::step_stream_locked(size_t index) {
     if (inactive) {
         retire_locked(index, StorageStreamState::Cancelled);
         return true;
+    }
+
+    if (stream.transfer.producer_done()) {
+        const bool complete = stream.transfer.consumed() == stream.size;
+        if (stream.transfer.consumer_closed()) {
+            retire_locked(index,
+                          complete ? StorageStreamState::Ready
+                                   : StorageStreamState::Cancelled);
+            return true;
+        }
+        return false;
     }
 
     return produce_locked(stream);
