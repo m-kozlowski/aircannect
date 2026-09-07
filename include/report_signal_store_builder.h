@@ -58,6 +58,7 @@ private:
                         size_t begin,
                         size_t end);
     bool flush_blocks(bool include_partial);
+    bool flush_lod();
     Runtime *runtime_ = nullptr;
     ReportSignalStoreService *store_ = nullptr;
     const char *failure_reason_ = nullptr;

@@ -32,6 +32,11 @@ struct ReportSignalStoreStatus {
     bool terminal() const;
 };
 
+struct ReportSignalStoreLodBatch {
+    std::shared_ptr<const LargeByteBuffer> one_second;
+    std::shared_ptr<const LargeByteBuffer> ten_seconds;
+};
+
 class ReportSignalStoreService {
 public:
     static constexpr size_t MaxWriteBatchBlocks = REPORT_SIGNAL_STORE_MAX_BLOCKS;
@@ -71,7 +76,8 @@ public:
         StorageAtomicWriteLane lane,
         bool finalize_header = true);
 
-    // The service shares each raw block until terminal status, then resets.
+    // Only RAW is persisted here. LOD is computed from the same buffers and
+    // handed back for later, file-ordered publication.
     // Blocks must be new, present, and contiguous; existing blocks use
     // start_block() so their read/merge path stays single-block.
     OperationAdmission start_blocks(
@@ -79,6 +85,18 @@ public:
         size_t first_slot,
         const std::shared_ptr<LargeByteBuffer> *raw_blocks,
         size_t block_count,
+        bool existing_file,
+        uint32_t operation_generation,
+        StorageAtomicWriteLane lane,
+        bool finalize_header = true);
+
+    ReportSignalStoreLodBatch take_lod();
+    OperationAdmission start_lod(
+        const ReportSignalStoreTrack &track,
+        ReportSignalStoreLevel level,
+        size_t first_slot,
+        size_t block_count,
+        std::shared_ptr<const LargeByteBuffer> bytes,
         bool existing_file,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane,
@@ -157,7 +175,8 @@ private:
     std::shared_ptr<const LargeByteBuffer> block_bytes_;
     std::shared_ptr<const StorageWriteBuffers> block_buffers_;
     size_t write_size_ = 0;
-    std::shared_ptr<const LargeByteBuffer> one_second_bytes_;
+    std::shared_ptr<const LargeByteBuffer> encoded_lod_;
+    ReportSignalStoreLodBatch deferred_lod_;
     OperationTicket read_ticket_;
     StoragePreparedRead prepared_;
     size_t read_offset_ = 0;

@@ -178,6 +178,59 @@ OperationAdmission ReportSignalStoreService::start(
     return OperationAdmission::Accepted;
 }
 
+ReportSignalStoreLodBatch ReportSignalStoreService::take_lod() {
+    if (phase_ != Phase::Ready) return {};
+    return std::exchange(deferred_lod_, {});
+}
+
+OperationAdmission ReportSignalStoreService::start_lod(
+    const ReportSignalStoreTrack &track,
+    ReportSignalStoreLevel level,
+    size_t first_slot,
+    size_t block_count,
+    std::shared_ptr<const LargeByteBuffer> bytes,
+    bool existing_file,
+    uint32_t operation_generation,
+    StorageAtomicWriteLane lane,
+    bool finalize_header) {
+    if (phase_ != Phase::Idle) return OperationAdmission::Busy;
+
+    ReportSignalStorePlaneRange range;
+    if (!range_write_port_ || level == ReportSignalStoreLevel::Raw || !bytes ||
+        operation_generation == 0 ||
+        first_slot >= track.block_slot_count ||
+        (lane != StorageAtomicWriteLane::Foreground &&
+         lane != StorageAtomicWriteLane::Maintenance) ||
+        !ReportSignalStoreFileCodec::plane_range(
+            track, track.first_block_start_ms +
+                static_cast<int64_t>(first_slot) * REPORT_SIGNAL_STORE_BLOCK_MS,
+            block_count, level, range) ||
+        !range.length || bytes->size() != range.length ||
+        range.length > AC_STORAGE_RANGE_WRITE_MAX_BYTES -
+                           ReportSignalStoreFileCodec::HeaderBytes) {
+        copy_cstr(status_.error, sizeof(status_.error),
+                  "report_signal_store_lod_range_invalid");
+        return OperationAdmission::Rejected;
+    }
+
+    track_ = track;
+    level_ = level;
+    slot_ = first_slot;
+    block_count_ = block_count;
+    range_ = range;
+    encoded_lod_ = std::move(bytes);
+    existing_file_ = existing_file;
+    write_header_ = !existing_file || finalize_header;
+    operation_generation_ = operation_generation;
+    lane_ = lane;
+    status_ = {};
+    status_.state = ReportSignalStoreState::WritingBlock;
+    status_.sleep_day = track.sleep_day;
+    status_.signal_count = 1;
+    phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
+    return OperationAdmission::Accepted;
+}
+
 bool ReportSignalStoreService::submit_read() {
     char path[AC_STORAGE_PATH_MAX] = {};
 
@@ -270,6 +323,23 @@ bool ReportSignalStoreService::encode_current() {
         return true;
     }
 
+    if (!encoded_lod_ && level_ != ReportSignalStoreLevel::Raw) {
+        auto bytes = ReportSignalStoreFileCodec::encode_blocks(
+            track_, level_, slot_, raw_blocks_, block_count_, false,
+            deferred_lod_.one_second.get());
+        if (!bytes) {
+            fail("report_signal_store_lod_encode_failed");
+            return true;
+        }
+        if (level_ == ReportSignalStoreLevel::OneSecond) {
+            deferred_lod_.one_second = std::move(bytes);
+        } else {
+            deferred_lod_.ten_seconds = std::move(bytes);
+        }
+        advance_level();
+        return true;
+    }
+
     const bool include_header = phase_ == Phase::EncodeHeader &&
         range_.offset == ReportSignalStoreFileCodec::HeaderBytes;
     const bool separate_header = phase_ == Phase::EncodeHeader && !include_header;
@@ -277,8 +347,11 @@ bool ReportSignalStoreService::encode_current() {
     if (separate_header) {
         block_bytes_ = ReportSignalStoreFileCodec::encode_header(track_, level_);
     } else {
+        bool share_bytes = static_cast<bool>(encoded_lod_);
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-        if (level_ == ReportSignalStoreLevel::Raw) {
+        share_bytes = true;
+#endif
+        if (share_bytes) {
             block_bytes_ = include_header
                 ? ReportSignalStoreFileCodec::encode_header(track_, level_)
                 : nullptr;
@@ -286,24 +359,19 @@ bool ReportSignalStoreService::encode_current() {
             auto buffers = std::shared_ptr<StorageWriteBuffers>(
                 LargeObject::create<StorageWriteBuffers>(),
                 LargeObject::destroy<StorageWriteBuffers>);
-            if (!buffers || !buffers->allocate(block_count_) ||
+            const size_t parts = encoded_lod_ ? 1 : block_count_;
+            if (!buffers || !buffers->allocate(parts) ||
                 (include_header && !block_bytes_)) {
                 fail("report_signal_store_block_allocation_failed");
                 return true;
             }
-            for (size_t i = 0; i < block_count_; ++i) {
-                *buffers->append() = raw_buffers_[i];
+            for (size_t i = 0; i < parts; ++i) {
+                *buffers->append() = encoded_lod_ ? encoded_lod_ : raw_buffers_[i];
             }
             block_buffers_ = std::move(buffers);
-        } else
-#endif
-        {
+        } else {
             block_bytes_ = ReportSignalStoreFileCodec::encode_blocks(
-                track_, level_, slot_, raw_blocks_, block_count_, include_header,
-                one_second_bytes_.get());
-        }
-        if (level_ == ReportSignalStoreLevel::TenSeconds) {
-            one_second_bytes_.reset();
+                track_, level_, slot_, raw_blocks_, block_count_, include_header);
         }
         if (include_header) {
             range_.offset = 0;
@@ -326,10 +394,6 @@ bool ReportSignalStoreService::encode_current() {
 
     phase_ = separate_header
         ? Phase::SubmitHeader : Phase::SubmitBlock;
-    if (!separate_header && level_ == ReportSignalStoreLevel::OneSecond &&
-        (track_.lod_mask & REPORT_SIGNAL_STORE_LOD_10S)) {
-        one_second_bytes_ = block_bytes_;
-    }
     return true;
 }
 
@@ -422,10 +486,10 @@ bool ReportSignalStoreService::finish_writes() {
 }
 
 void ReportSignalStoreService::advance_level() {
-    if (level_ == ReportSignalStoreLevel::Raw &&
+    if (!encoded_lod_ && level_ == ReportSignalStoreLevel::Raw &&
         (track_.lod_mask & REPORT_SIGNAL_STORE_LOD_1S)) {
         level_ = ReportSignalStoreLevel::OneSecond;
-    } else if (level_ != ReportSignalStoreLevel::TenSeconds &&
+    } else if (!encoded_lod_ && level_ != ReportSignalStoreLevel::TenSeconds &&
                (track_.lod_mask & REPORT_SIGNAL_STORE_LOD_10S)) {
         level_ = ReportSignalStoreLevel::TenSeconds;
     } else {
@@ -648,9 +712,10 @@ void ReportSignalStoreService::release_io() {
     // The storage owner retains shared bytes if cancellation is still queued.
     block_bytes_.reset();
     block_buffers_.reset();
+    encoded_lod_.reset();
+    deferred_lod_ = {};
     write_size_ = 0;
     raw_ = nullptr;
-    one_second_bytes_.reset();
     for (size_t i = 0; i < MaxWriteBatchBlocks; ++i) {
         raw_blocks_[i] = nullptr;
         raw_buffers_[i].reset();

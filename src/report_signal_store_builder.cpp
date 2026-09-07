@@ -74,6 +74,11 @@ struct TrackWork {
     int newest_slot = -1;
     int append_slot = 0;
     bool file_exists = false;
+    std::shared_ptr<LargeByteBuffer> lod[2];
+    uint8_t lod_dirty[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
+    size_t lod_cursor[2] = {};
+    bool lod_file_exists[2] = {};
+    bool lod_header_written[2] = {};
     bool recount_samples = false;
     int64_t last_accepted_ms = -1;
     size_t last_slot = 0;
@@ -156,6 +161,8 @@ struct ReportSignalStoreBuilder::Runtime {
     size_t writing_count = 0;
     bool completed_blocks_pending = false;
     size_t buffered_raw_bytes = 0;
+    bool raw_finished = false;
+    size_t writing_lod_level = 0;
 
     void release_track_blocks(TrackWork &track) {
         for (size_t slot = 0;
@@ -204,6 +211,8 @@ struct ReportSignalStoreBuilder::Runtime {
         writing_count = 0;
         completed_blocks_pending = false;
         buffered_raw_bytes = 0;
+        raw_finished = false;
+        writing_lod_level = 0;
     }
 
     bool reserve_events(size_t required) {
@@ -512,6 +521,8 @@ bool ReportSignalStoreBuilder::begin_build(
         memcpy(work.written_blocks, work.track.present_blocks,
                sizeof(work.written_blocks));
         work.file_exists = true;
+        work.lod_file_exists[0] = true;
+        work.lod_file_exists[1] = true;
         work.recount_samples = !checkpoint_bytes;
         work.append_slot = static_cast<int>(
             (align_block_start(work.track.last_valid_sample_ms) - first_block) /
@@ -946,6 +957,24 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
         }
 
         TrackWork &work = runtime_->tracks[runtime_->writing_track];
+        const auto lod = store_->take_lod();
+        const std::shared_ptr<const LargeByteBuffer> planes[] = {
+            lod.one_second, lod.ten_seconds};
+        for (size_t level = 0; level < 2; ++level) {
+            if (!planes[level]) continue;
+            const size_t block_bytes =
+                planes[level]->size() / runtime_->writing_count;
+            if (!work.lod[level]) {
+                work.lod[level] = LargeByteBuffer::allocate_shared(
+                    block_bytes * runtime_->block_slot_count);
+            }
+            if (!work.lod[level]) {
+                failure_reason_ = "report_signal_store_lod_allocation_failed";
+                return false;
+            }
+            memcpy(work.lod[level]->data() + runtime_->writing_slot * block_bytes,
+                   planes[level]->data(), planes[level]->size());
+        }
         for (size_t i = 0; i < runtime_->writing_count; ++i) {
             const size_t slot = runtime_->writing_slot + i;
             work.raw_blocks[slot].reset();
@@ -953,6 +982,8 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
                 (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
                 sizeof(int16_t);
             work.written_blocks[slot / 8] |=
+                static_cast<uint8_t>(1u << (slot % 8));
+            work.lod_dirty[slot / 8] |=
                 static_cast<uint8_t>(1u << (slot % 8));
         }
         work.file_exists = true;
@@ -1043,6 +1074,79 @@ bool ReportSignalStoreBuilder::ready() {
 
 bool ReportSignalStoreBuilder::end_operation() { return ready(); }
 
+bool ReportSignalStoreBuilder::flush_lod() {
+    if (runtime_->writing_track != SIZE_MAX) {
+        store_->poll();
+        if (!store_->status().terminal()) return false;
+        if (store_->status().state != ReportSignalStoreState::Ready) {
+            failure_reason_ = store_->status().error;
+            return false;
+        }
+
+        TrackWork &work = runtime_->tracks[runtime_->writing_track];
+        const size_t level = runtime_->writing_lod_level;
+        work.lod_cursor[level] = runtime_->writing_slot + runtime_->writing_count;
+        work.lod_file_exists[level] = true;
+        work.lod_header_written[level] = true;
+        runtime_->writing_track = SIZE_MAX;
+        store_->reset();
+    }
+
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        TrackWork &work = runtime_->tracks[i];
+        for (size_t level = 0; level < 2; ++level) {
+            const auto &bytes = work.lod[level];
+            if (!bytes) continue;
+
+            size_t slot = work.lod_cursor[level];
+            while (slot < runtime_->block_slot_count &&
+                   !(work.lod_dirty[slot / 8] & (1u << (slot % 8)))) ++slot;
+            if (slot == runtime_->block_slot_count) {
+                work.lod[level].reset();
+                continue;
+            }
+
+            const size_t block_bytes = bytes->size() / runtime_->block_slot_count;
+            const size_t limit = (AC_STORAGE_RANGE_WRITE_MAX_BYTES -
+                ReportSignalStoreFileCodec::HeaderBytes) / block_bytes;
+            size_t count = 1;
+            while (count < limit && slot + count < runtime_->block_slot_count &&
+                   (work.lod_dirty[(slot + count) / 8] &
+                    (1u << ((slot + count) % 8)))) ++count;
+
+            const auto part = LargeByteBuffer::slice(
+                bytes, slot * block_bytes, count * block_bytes);
+            if (!part) {
+                failure_reason_ = "report_signal_store_lod_allocation_failed";
+                return false;
+            }
+
+            const auto lane =
+                runtime_->request.priority == ReportRequestPriority::Foreground
+                    ? StorageAtomicWriteLane::Foreground
+                    : StorageAtomicWriteLane::Maintenance;
+            const auto admitted = store_->start_lod(
+                work.track, level == 0 ? ReportSignalStoreLevel::OneSecond
+                                      : ReportSignalStoreLevel::TenSeconds,
+                slot, count, part, work.lod_file_exists[level],
+                runtime_->request.ticket.generation, lane,
+                !work.lod_header_written[level]);
+            if (admitted == OperationAdmission::Busy) return false;
+            if (admitted != OperationAdmission::Accepted) {
+                failure_reason_ = "report_signal_store_lod_write_rejected";
+                return false;
+            }
+
+            runtime_->writing_track = i;
+            runtime_->writing_slot = slot;
+            runtime_->writing_count = count;
+            runtime_->writing_lod_level = level;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ReportSignalStoreBuilder::accept_event(
     uint16_t session_index,
     const ReportEventRecord &event) {
@@ -1079,7 +1183,11 @@ bool ReportSignalStoreBuilder::finish_build() {
         return false;
     }
 
-    if (!flush_blocks(true)) return false;
+    if (!runtime_->raw_finished) {
+        if (!flush_blocks(true)) return false;
+        runtime_->raw_finished = true;
+    }
+    if (!flush_lod()) return false;
 
     if (runtime_->event_count > 1) {
         std::sort(runtime_->events,
