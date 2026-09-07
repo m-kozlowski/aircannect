@@ -58,8 +58,10 @@ std::unique_ptr<AsyncWebServerResponse> json_error_response(
              sizeof(body),
              "{\"ok\":false,\"error\":\"%s\"}",
              error ? error : "error");
-    return std::unique_ptr<AsyncWebServerResponse>(
+    auto response = std::unique_ptr<AsyncWebServerResponse>(
         new AsyncBasicResponse(status, "application/json", body));
+    response->addHeader("Cache-Control", "no-store");
+    return response;
 }
 
 void send_json_error(AsyncWebServerRequest *request,
@@ -196,10 +198,12 @@ bool request_etag_matches(AsyncWebServerRequest *request,
 void add_common_headers(AsyncWebServerResponse *response,
                         const char *etag,
                         SourceRevision source_revision,
-                        uint32_t generation) {
+                        uint32_t generation,
+                        bool versioned = false) {
     if (!response) return;
 
-    response->addHeader("Cache-Control", "no-cache");
+    response->addHeader("Cache-Control", versioned
+        ? "private, max-age=86400, immutable" : "no-cache");
     response->addHeader("Accept-Ranges", "none");
     if (etag && etag[0]) response->addHeader("ETag", etag);
 
@@ -266,15 +270,31 @@ void add_signal_headers(AsyncWebServerResponse *response,
 void send_not_modified(AsyncWebServerRequest *request,
                        const char *etag,
                        SourceRevision source_revision,
-                       uint32_t generation) {
+                       uint32_t generation,
+                       bool versioned = false) {
     AsyncWebServerResponse *response = request->beginResponse(304);
     if (!response) {
         request->send(304);
         return;
     }
 
-    add_common_headers(response, etag, source_revision, generation);
+    add_common_headers(response, etag, source_revision, generation, versioned);
     request->send(response);
+}
+
+bool plot_version_matches(AsyncWebServerRequest *request,
+                          SourceRevision revision,
+                          uint32_t generation) {
+    if (!request->hasArg("v")) return true;
+
+    char version[32] = {};
+    snprintf(version, sizeof(version), "%lu.%016llx",
+             static_cast<unsigned long>(generation),
+             static_cast<unsigned long long>(revision.value()));
+    if (request->arg("v") == version) return true;
+
+    send_json_error(request, 409, "report_version_changed");
+    return false;
 }
 
 bool format_night_etag(const ReportNightQuery &query,
@@ -533,6 +553,7 @@ struct ReportHttpController::PendingResponses {
         uint64_t response_size = 0;
         SourceRevision source_revision;
         uint32_t generation = 0;
+        bool versioned = false;
         uint16_t track_index = 0;
         uint32_t interval_ms = 0;
         float value_scale = 0;
@@ -708,7 +729,8 @@ void ReportHttpController::poll() {
         add_common_headers(response,
                            ready.etag,
                            ready.source_revision,
-                           ready.generation);
+                           ready.generation,
+                           ready.versioned);
         if (ready.kind == PendingKind::Signal) {
             add_signal_headers(response,
                                ready.track_index,
@@ -922,6 +944,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     }
 
     PendingResponses::Entry pending;
+    pending.versioned = request->hasArg("v");
     StorageStreamCommand command;
     command.lane = StorageStreamLane::Foreground;
     command.verification = StorageStreamVerification::Size;
@@ -944,11 +967,15 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         pending.generation = query.generation;
         (void)format_events_etag(query, pending.etag, sizeof(pending.etag));
 
+        if (!plot_version_matches(request, pending.source_revision,
+                                   pending.generation)) return;
+
         if (request_etag_matches(request, pending.etag)) {
             send_not_modified(request,
                               pending.etag,
                               query.source_revision,
-                              query.generation);
+                              query.generation,
+                              pending.versioned);
             return;
         }
 
@@ -1016,11 +1043,15 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
             return;
         }
 
+        if (!plot_version_matches(request, pending.source_revision,
+                                   pending.generation)) return;
+
         if (request_etag_matches(request, pending.etag)) {
             send_not_modified(request,
                               pending.etag,
                               pending.source_revision,
-                              pending.generation);
+                              pending.generation,
+                              pending.versioned);
             return;
         }
 
@@ -1033,7 +1064,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
             add_common_headers(response,
                                pending.etag,
                                pending.source_revision,
-                               pending.generation);
+                               pending.generation,
+                               pending.versioned);
             add_signal_headers(response,
                                pending.track_index,
                                pending.level,

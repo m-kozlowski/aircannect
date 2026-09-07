@@ -2418,14 +2418,14 @@
       let url = "/api/report/plot?night=" +
         encodeURIComponent(context.nightId) + "&part=signal&track=" +
         track.metadataIndex + "&from=" + from + "&to=" + to +
-        "&level=" + encodeURIComponent(level.name);
+        "&level=" + encodeURIComponent(level.name) +
+        "&v=" + context.generation + "." + encodeURIComponent(context.revision);
       const loaded = await pollReportFetch({
         active: context.active,
         waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         request: () => AirCANnect.http.requestBody(url, {
-          cache: "no-store",
           signal: context.signal,
         }),
         handle: async ({response, body}) => {
@@ -2655,14 +2655,14 @@
       if (cached) return cached;
 
       const url = "/api/report/plot?night=" +
-        encodeURIComponent(context.nightId) + "&part=events";
+        encodeURIComponent(context.nightId) + "&part=events&v=" +
+        context.generation + "." + encodeURIComponent(context.revision);
       const events = await pollReportFetch({
         active: context.active,
         waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         request: () => AirCANnect.http.requestBody(url, {
-          cache: "no-store",
           signal: context.signal,
         }),
         handle: async ({response, body}) => {
