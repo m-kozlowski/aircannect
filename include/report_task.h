@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "display_report_summary.h"
+#include "edf_session_metadata.h"
 #include "night_catalog_refresh_service.h"
 #include "night_catalog_store_service.h"
 #include "report_engine.h"
@@ -227,6 +228,7 @@ public:
         bool offset_valid,
         int32_t offset_minutes);
     void publish_activity(const ActivitySnapshot &activity);
+    void publish_capture_session(const EdfSessionMetadata &metadata);
 
     ReportTaskControlSnapshot control_snapshot() const;
     ReportTaskOperationalSnapshot operational_snapshot() const;

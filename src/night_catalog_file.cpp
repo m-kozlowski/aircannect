@@ -42,7 +42,8 @@ constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
                                  NIGHT_CATALOG_SOURCE_STR |
                                  NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
                                  NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
-                                 NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED;
+                                 NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED |
+                                 NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE;
 constexpr uint32_t METRIC_FLAGS =
     (1u << static_cast<uint8_t>(NightCatalogMetric::Count)) - 1u;
 constexpr int32_t TIMEZONE_OFFSET_MISSING = INT32_MIN;

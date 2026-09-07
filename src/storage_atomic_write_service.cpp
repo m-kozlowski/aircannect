@@ -9,6 +9,7 @@
 #include "debug_log.h"
 #include "large_object.h"
 #include "storage_internal.h"
+#include "storage_stream_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -93,6 +94,7 @@ bool remove_transaction_artifacts() {
 }  // namespace
 
 StorageAtomicWriteService::~StorageAtomicWriteService() {
+    release_write_reservation();
     if (job_) {
         if (job_->output) job_->output.close();
         LargeObject::destroy(job_);
@@ -118,6 +120,11 @@ bool StorageAtomicWriteService::begin(WakeCallback wake) {
 void StorageAtomicWriteService::set_task_available(bool available) {
     task_available_.store(available, std::memory_order_release);
     if (available) wake();
+}
+
+void StorageAtomicWriteService::set_stream_service(
+    StorageStreamService *stream_service) {
+    stream_service_ = stream_service;
 }
 
 bool StorageAtomicWriteService::ready() const {
@@ -471,6 +478,13 @@ void StorageAtomicWriteService::clear_job_locked() {
     new (job_) Job();
 }
 
+void StorageAtomicWriteService::release_write_reservation() {
+    if (!job_ || !job_->reserved) return;
+
+    if (stream_service_) stream_service_->end_write(job_);
+    job_->reserved = false;
+}
+
 void StorageAtomicWriteService::finish_locked(OperationOutcome outcome,
                                               const char *error) {
     const bool abandoned = job_->abandoned;
@@ -488,6 +502,7 @@ void StorageAtomicWriteService::finish_locked(OperationOutcome outcome,
                   error ? error : "");
         completion_ready_ = true;
     }
+    release_write_reservation();
     clear_job_locked();
 }
 
@@ -561,6 +576,14 @@ bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
             ok = record_locked(error);
             break;
         case Phase::Publish:
+            if (stream_service_ && !job_->reserved) {
+                if (!stream_service_->try_begin_write(
+                        job_, job_->path, 0, UINT64_MAX)) {
+                    unlock();
+                    return false;
+                }
+                job_->reserved = true;
+            }
             ok = publish_locked(error);
             if (ok) finish_locked(OperationOutcome::succeeded());
             break;

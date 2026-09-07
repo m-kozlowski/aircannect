@@ -1762,6 +1762,7 @@
         if (selected) {
           dateBtn.innerHTML = fmtReportDate(selected.start) +
             "<span class=\"np-dur\">" + fmtMinutes(selected.duration_min) +
+            (selected.active ? " · Recording" : "") +
             "</span>";
         } else {
           dateBtn.textContent = nights.length ? "Select night" : "No nights";
@@ -2170,6 +2171,7 @@
         requested_event_mask: requestedEventMask,
         missing_event_mask: missingEventMask,
         source_flags: sourceFlags,
+        active: !!(sourceFlags & 32),
         sessions,
         stream_details: [],
         hypopnea_count: view.getUint32(192, true),
@@ -3037,7 +3039,9 @@
 
         renderReportSummary();
         AirCANnect.ui.message("reportMsg",
-          reportResult.state === "partial"
+          reportResult.active
+            ? "Recording - data through " + fmtReportClock(reportResult.end)
+            : reportResult.state === "partial"
             ? "Report loaded (incomplete - some data missing)"
             : "Report loaded", true);
       } catch (error) {
@@ -3163,6 +3167,13 @@
       invalidateReportNightCache(nightId, !!data.forced);
       if (current) cancelReportRequests(!data.forced);
       if (reload) loadSelectedReportNight(current && !!reportResult);
+      if (active) {
+        loadReportSummary(false).then(() => {
+          if (!reload && !reportResult && selectedReportNight()?.id === nightId) {
+            loadSelectedReportNight();
+          }
+        });
+      }
     }
 
     AirCANnect.events.subscribe("report", handleReportCompletion);

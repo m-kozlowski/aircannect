@@ -7,6 +7,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <memory>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,6 +19,7 @@
 #include "edf_identification.h"
 #include "edf_storage_open_plan.h"
 #include "edf_str_storage_writer.h"
+#include "large_allocator.h"
 #include "memory_manager.h"
 #include "storage_archive_service.h"
 #include "storage_atomic_write_service.h"
@@ -106,10 +109,13 @@ struct OpenFile {
     bool open = false;
     StoredFileKind kind = StoredFileKind::Brp;
     File file;
+    uint32_t request_id = 0;
     uint32_t record_count = 0;
+    size_t header_size = 0;
     size_t record_size = 0;
     bool resumed = false;
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
+    std::shared_ptr<const LargeByteBuffer> header;
 };
 
 struct OpenRequestResult {
@@ -165,6 +171,9 @@ struct ReadCompletionSlot {
 
 void close_file(OpenFile &state);
 
+void publish_edf_progress();
+std::shared_ptr<const EdfStorageProgress> read_edf_progress_snapshot();
+
 StorageServiceState service_state;
 SemaphoreHandle_t queue_lock = nullptr;
 TaskHandle_t task = nullptr;
@@ -180,6 +189,8 @@ OpenFile open_files[AC_EDF_STORAGE_FILE_COUNT];
 OpenRequestResult open_results[AC_EDF_STORAGE_FILE_COUNT];
 uint32_t next_open_request_id = 0;
 bool processing_job = false;
+std::shared_ptr<EdfStorageProgress> edf_progress_state;
+std::shared_ptr<const EdfStorageProgress> published_edf_progress;
 
 ReadJob read_jobs[AC_STORAGE_PREPARED_READ_CAPACITY];
 PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
@@ -248,6 +259,10 @@ public:
     bool mounted() const override { return Storage::mounted(); }
     StorageWorkloadSnapshot workload_snapshot() const override {
         return StorageService::workload_snapshot();
+    }
+    std::shared_ptr<const EdfStorageProgress>
+    edf_progress_snapshot() const override {
+        return read_edf_progress_snapshot();
     }
 };
 
@@ -496,6 +511,59 @@ size_t open_header_size(const JobSlot &job) {
                                         : job.len;
 }
 
+EdfStorageProgressFile *progress_file(StoredFileKind kind) {
+    if (!edf_progress_state) return nullptr;
+    return &edf_progress_state->files[file_index(kind)];
+}
+
+void publish_progress_open(const OpenFile &state) {
+    EdfStorageProgressFile *progress = progress_file(state.kind);
+    if (!progress) return;
+
+    *progress = {};
+    progress->open = state.open;
+    copy_cstr(progress->path, sizeof(progress->path), state.path);
+    progress->request_id = state.request_id;
+    progress->record_count = state.record_count;
+    progress->header_size = state.header_size;
+    progress->record_size = state.record_size;
+    progress->byte_size = state.header_size +
+        static_cast<size_t>(state.record_count) * state.record_size;
+    progress->header = state.header;
+    progress->rewrite_min_record =
+        AC_EDF_STORAGE_PROGRESS_NO_REWRITE_RECORD;
+
+    publish_edf_progress();
+}
+
+bool mark_progress_closed(StoredFileKind kind) {
+    EdfStorageProgressFile *progress = progress_file(kind);
+    if (!progress || !progress->open) return false;
+
+    progress->open = false;
+    return true;
+}
+
+void publish_progress_write(const OpenFile &state,
+                            bool rewrite,
+                            uint32_t record_index) {
+    EdfStorageProgressFile *progress = progress_file(state.kind);
+    if (!progress || !progress->open) return;
+
+    progress->record_count = state.record_count;
+    progress->byte_size = state.header_size +
+        static_cast<size_t>(state.record_count) * state.record_size;
+    if (rewrite) {
+        if (progress->rewrite_revision != UINT64_MAX) {
+            progress->rewrite_revision++;
+        }
+        progress->rewrite_min_record = std::min(
+            progress->rewrite_min_record, record_index);
+    }
+
+    publish_edf_progress();
+}
+
 bool valid_path(const char *path) {
     if (!path || path[0] != '/') return false;
     const size_t len = strlen(path);
@@ -509,6 +577,48 @@ bool lock_queue(uint32_t timeout_ms = 10) {
 
 void unlock_queue() {
     if (queue_lock) xSemaphoreGive(queue_lock);
+}
+
+void initialize_edf_progress() {
+    if (edf_progress_state) return;
+
+    try {
+        edf_progress_state = std::allocate_shared<EdfStorageProgress>(
+            LargeAllocator<EdfStorageProgress>());
+    } catch (const std::bad_alloc &) {
+        edf_progress_state.reset();
+    }
+}
+
+void publish_edf_progress() {
+    if (!edf_progress_state ||
+        edf_progress_state->revision == UINT64_MAX) {
+        return;
+    }
+
+    std::shared_ptr<EdfStorageProgress> next;
+    try {
+        next = std::allocate_shared<EdfStorageProgress>(
+            LargeAllocator<EdfStorageProgress>(), *edf_progress_state);
+    } catch (const std::bad_alloc &) {
+        return;
+    }
+    next->revision = edf_progress_state->revision + 1;
+
+    if (!lock_queue(50)) return;
+
+    edf_progress_state->revision = next->revision;
+    published_edf_progress = std::move(next);
+    unlock_queue();
+}
+
+std::shared_ptr<const EdfStorageProgress> read_edf_progress_snapshot() {
+    if (!lock_queue()) return {};
+
+    const std::shared_ptr<const EdfStorageProgress> out =
+        published_edf_progress;
+    unlock_queue();
+    return out;
 }
 
 void wake_service_task() {
@@ -1018,6 +1128,8 @@ bool initialize_storage_resources() {
         ready = false;
     }
     if (!path_service.begin(wake_service_task)) ready = false;
+    atomic_write_service.set_stream_service(&stream_service);
+    range_write_service.set_stream_service(&stream_service);
     if (!atomic_write_service.begin(wake_service_task)) ready = false;
     if (!range_write_service.begin(wake_service_task)) ready = false;
     if (!upload_service.begin(wake_service_task,
@@ -1219,7 +1331,6 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
                                    file_size,
                                    job.record_size)
            : EdfResumeDecision{};
-    Memory::free(headers);
     EdfStorageOpenPlanRequest plan_request;
     plan_request.annotation = is_annotation_kind(job.kind);
     plan_request.recording_start_requested = job.recording_start;
@@ -1227,24 +1338,35 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     plan_request.resume = resume;
     const EdfStorageOpenPlan plan = edf_storage_plan_open(plan_request);
     if (!ok || !plan.resume_existing) {
+        Memory::free(headers);
         state.file.close();
         return false;
     }
 
+    const std::shared_ptr<const LargeByteBuffer> header =
+        LargeByteBuffer::copy_and_freeze(actual, header_size);
+    Memory::free(headers);
+
     state.kind = job.kind;
+    state.request_id = job.request_id;
     state.record_count = plan.record_count;
+    state.header_size = header_size;
     state.record_size = job.record_size;
     state.resumed = true;
     copy_cstr(state.path, sizeof(state.path), job.path);
+    state.header = header;
     state.open = true;
     if ((plan.patch_header_record_count && !patch_record_count(state)) ||
         !state.file.seek(state.file.size())) {
         state.file.close();
         state.open = false;
+        state.request_id = 0;
         state.record_count = 0;
+        state.header_size = 0;
         state.record_size = 0;
         state.resumed = false;
         state.path[0] = 0;
+        state.header.reset();
         return false;
     }
     return true;
@@ -1257,8 +1379,8 @@ bool write_header(OpenFile &state, const JobSlot &job) {
     const size_t header_size =
         annotation ? edf_annotation_header_size()
                    : edf_header_size(*numeric_schema);
-    uint8_t *header = static_cast<uint8_t *>(
-        Memory::alloc_large(header_size, false));
+    std::unique_ptr<LargeByteBuffer> header =
+        LargeByteBuffer::allocate(header_size);
     if (!header) {
         log_alloc_failed("open_header", header_size);
         return false;
@@ -1272,21 +1394,24 @@ bool write_header(OpenFile &state, const JobSlot &job) {
     info.record_count = job.record_count;
     size_t written = 0;
     const bool rendered =
-        annotation ? edf_render_annotation_header(info, header,
+        annotation ? edf_render_annotation_header(info, header->data(),
                                                   header_size, written)
-                   : edf_render_header(*numeric_schema, info, header,
+                   : edf_render_header(*numeric_schema, info, header->data(),
                                        header_size, written);
     bool ok = false;
     if (rendered && written == header_size) {
-        ok = state.file.write(header, header_size) == header_size;
+        ok = state.file.write(header->data(), header_size) == header_size;
     }
-    Memory::free(header);
+    if (ok) state.header = LargeByteBuffer::freeze(std::move(header));
     return ok;
 }
 
 bool write_open_header(OpenFile &state, const JobSlot &job) {
     if (!is_annotation_kind(job.kind) && job.len > 0) {
-        return state.file.write(job.bytes, job.len) == job.len;
+        if (state.file.write(job.bytes, job.len) != job.len) return false;
+
+        state.header = LargeByteBuffer::copy_and_freeze(job.bytes, job.len);
+        return true;
     }
     return write_header(state, job);
 }
@@ -1299,10 +1424,13 @@ void close_file(OpenFile &state) {
         state.file.close();
     }
     state.open = false;
+    state.request_id = 0;
     state.record_count = 0;
+    state.header_size = 0;
     state.record_size = 0;
     state.resumed = false;
     state.path[0] = 0;
+    state.header.reset();
 }
 
 bool write_recording_start(OpenFile &state) {
@@ -1368,10 +1496,15 @@ bool process_open(JobSlot &job) {
     }
 
     OpenFile &state = open_files[file_index(job.kind)];
+    const bool was_open = state.open;
     close_file(state);
+    if (was_open && mark_progress_closed(job.kind)) {
+        publish_edf_progress();
+    }
     refresh_open_file_count();
     if (try_resume_open_file(state, job)) {
         refresh_open_file_count();
+        publish_progress_open(state);
         mark_open_result(job, true, &state, nullptr);
         service_state.last_error[0] = 0;
         return true;
@@ -1402,12 +1535,14 @@ bool process_open(JobSlot &job) {
         return fail("open_failed");
     }
     state.kind = job.kind;
+    state.request_id = job.request_id;
     EdfStorageOpenPlanRequest plan_request;
     plan_request.annotation = is_annotation_kind(job.kind);
     plan_request.recording_start_requested = job.recording_start;
     plan_request.requested_record_count = job.record_count;
     const EdfStorageOpenPlan plan = edf_storage_plan_open(plan_request);
     state.record_count = plan.record_count;
+    state.header_size = open_header_size(job);
     state.record_size = job.record_size;
     state.resumed = false;
     copy_cstr(state.path, sizeof(state.path), job.path);
@@ -1420,15 +1555,19 @@ bool process_open(JobSlot &job) {
     if (plan.write_recording_start && !write_recording_start(state)) {
         state.file.close();
         state.open = false;
+        state.request_id = 0;
         state.record_count = 0;
+        state.header_size = 0;
         state.record_size = 0;
         state.resumed = false;
         state.path[0] = 0;
+        state.header.reset();
         log_worker_failure(LOG_WARN, "recording_start_write_failed", job.path);
         return fail("recording_start_write_failed");
     }
     state.file.flush();
     refresh_open_file_count();
+    publish_progress_open(state);
     mark_open_result(job, true, &state, nullptr);
     service_state.last_error[0] = 0;
     return true;
@@ -1468,6 +1607,7 @@ bool process_record(const JobSlot &job) {
         log_worker_failure(LOG_WARN, "patch_failed", state.path);
         return false;
     }
+    publish_progress_write(state, false, 0);
     service_state.last_error[0] = 0;
     return true;
 }
@@ -1595,6 +1735,7 @@ bool process_numeric_record(JobSlot &job) {
         if (!write_bytes(offset, job.len)) return fail("short_write");
 
         state.file.flush();
+        publish_progress_write(state, true, record.record_index);
         service_state.last_error[0] = 0;
         return true;
     }
@@ -1630,6 +1771,7 @@ bool process_numeric_record(JobSlot &job) {
         return fail("record_count_patch_failed");
     }
 
+    publish_progress_write(state, false, 0);
     service_state.last_error[0] = 0;
     return true;
 }
@@ -1734,14 +1876,28 @@ bool process_identification_files(const JobSlot &job) {
 
 bool process_close(const JobSlot &job) {
     OpenFile &state = open_files[file_index(job.kind)];
+    const bool was_open = state.open;
     close_file(state);
+    if (was_open && mark_progress_closed(job.kind)) {
+        publish_edf_progress();
+    }
     refresh_open_file_count();
     service_state.last_error[0] = 0;
     return true;
 }
 
 bool process_close_all() {
-    for (OpenFile &state : open_files) close_file(state);
+    bool progress_changed = false;
+    for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
+        OpenFile &state = open_files[i];
+        const bool was_open = state.open;
+        close_file(state);
+        if (was_open && mark_progress_closed(static_cast<StoredFileKind>(i))) {
+            progress_changed = true;
+        }
+    }
+
+    if (progress_changed) publish_edf_progress();
 
     refresh_open_file_count();
     service_state.last_error[0] = 0;
@@ -2185,6 +2341,8 @@ void process_job(JobSlot &job) {
 }
 
 void task_entry(void *) {
+    initialize_edf_progress();
+    publish_edf_progress();
     recover_str_storage_artifacts();
 
     uint32_t batch_started_us = micros();

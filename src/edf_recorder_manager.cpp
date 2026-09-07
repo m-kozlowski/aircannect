@@ -376,6 +376,14 @@ const EdfRecorderStatus &EdfRecorderManager::status() const {
     return status_;
 }
 
+bool EdfRecorderManager::active_segment_metadata(EdfSessionMetadata &out) const {
+    out = {};
+    if (!cold_ || !cold_->segment_metadata_active) return false;
+
+    out = cold_->segment_metadata;
+    return true;
+}
+
 bool EdfRecorderManager::latest_catalog_refresh_hint(
     EdfCatalogRefreshHint &out) const {
     out = {};

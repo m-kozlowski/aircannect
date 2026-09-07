@@ -24,6 +24,20 @@ static constexpr size_t STREAM_READ_BYTES = 16 * 1024;
 static constexpr size_t STREAM_READY_BYTES = 16 * 1024;
 static constexpr uint32_t STREAM_CONSUMER_TIMEOUT_MS = 60 * 1000;
 
+uint64_t range_end(uint64_t offset, uint64_t length) {
+    return length > UINT64_MAX - offset ? UINT64_MAX : offset + length;
+}
+
+bool ranges_overlap(uint64_t first_offset,
+                    uint64_t first_length,
+                    uint64_t second_offset,
+                    uint64_t second_length) {
+    if (!first_length || !second_length) return false;
+
+    return first_offset < range_end(second_offset, second_length) &&
+           second_offset < range_end(first_offset, first_length);
+}
+
 uint64_t file_modified(File &file) {
     const time_t modified = file.getLastWrite();
     return modified > 0 ? static_cast<uint64_t>(modified) : 0;
@@ -136,6 +150,14 @@ bool StorageStreamService::request_stream(
         return false;
     }
 
+    if (writer_conflicts_locked(command.path.c_str(),
+                                command.source_offset,
+                                command.source_length)) {
+        unlock();
+        copy_cstr(error_out, error_out_size, "stream_busy");
+        return false;
+    }
+
     size_t free_index = SIZE_MAX;
     size_t export_streams = 0;
     for (size_t i = 0; i < STREAM_CAPACITY; ++i) {
@@ -229,6 +251,85 @@ void StorageStreamService::finish(StorageByteStream &stream, bool complete) {
 
     stream.transfer.finish(complete);
     wake();
+}
+
+bool StorageStreamService::try_begin_write(const void *owner,
+                                           const char *path,
+                                           uint64_t offset,
+                                           uint64_t length) {
+    if (!owner || !lock(0)) return false;
+
+    if (write_owner_ == owner) {
+        unlock();
+        return true;
+    }
+
+    if (!path || !path[0] || length == 0 ||
+        strlen(path) >= sizeof(write_path_) || write_owner_ ||
+        read_conflicts_locked(path, offset, length)) {
+        unlock();
+        return false;
+    }
+
+    write_owner_ = owner;
+    copy_cstr(write_path_, sizeof(write_path_), path);
+    write_offset_ = offset;
+    write_length_ = length;
+    unlock();
+    return true;
+}
+
+void StorageStreamService::end_write(const void *owner) {
+    if (!owner || !lock_ ||
+        xSemaphoreTake(lock_, UINT32_MAX) != pdTRUE) {
+        return;
+    }
+
+    if (write_owner_ == owner) {
+        write_owner_ = nullptr;
+        write_path_[0] = '\0';
+        write_offset_ = 0;
+        write_length_ = 0;
+    }
+
+    unlock();
+    wake();
+}
+
+bool StorageStreamService::read_conflicts_locked(const char *path,
+                                                  uint64_t offset,
+                                                  uint64_t length) const {
+    if (!path || !path[0] || length == 0) return false;
+
+    for (const std::shared_ptr<StorageByteStream> &stream : streams_) {
+        if (!stream || stream->transfer.producer_done() ||
+            strcmp(stream->path, path) != 0) {
+            continue;
+        }
+
+        uint64_t read_length = stream->source_length;
+        if (read_length == 0) {
+            read_length = stream->metadata_ready
+                ? stream->source_size - stream->source_offset
+                : UINT64_MAX - stream->source_offset;
+        }
+
+        if (ranges_overlap(offset, length, stream->source_offset,
+                           read_length)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool StorageStreamService::writer_conflicts_locked(const char *path,
+                                                    uint64_t offset,
+                                                    uint64_t length) const {
+    return write_owner_ && strcmp(write_path_, path) == 0 &&
+           ranges_overlap(offset,
+                          length ? length : UINT64_MAX - offset,
+                          write_offset_, write_length_);
 }
 
 void StorageStreamService::close_input_locked(StorageByteStream &stream) {

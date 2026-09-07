@@ -62,6 +62,7 @@ struct NightCatalogEdfSessionInput {
     NightCatalogTimeRange raw_segment_window;
     NightCatalogTimeRange raw_therapy_window;
     bool has_clock_provenance = false;
+    bool active_capture = false;
 };
 
 struct NightCatalogStrInput {
@@ -118,6 +119,8 @@ struct NightCatalogFallbackInput {
     int32_t resolved_timezone_offset_minutes = 0;
     bool source_timezone_offset_valid = false;
     bool resolved_timezone_offset_valid = false;
+    bool coordinates_are_resolved = false;
+    bool retain_with_edf = false;
 };
 
 struct NightCatalogBuildInput {

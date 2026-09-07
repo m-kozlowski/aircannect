@@ -2,9 +2,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <memory>
 #include <string>
 
 #include "board.h"
+#include "edf_storage_progress.h"
 #include "edf_file_writer.h"
 #include "file_log_sink_port.h"
 #include "runtime_snapshots.h"
@@ -58,6 +60,9 @@ enum class EdfStorageFileIndex : uint8_t {
 
 static constexpr size_t AC_EDF_STORAGE_FILE_COUNT =
     static_cast<size_t>(EdfStorageFileIndex::Count);
+static_assert(AC_EDF_STORAGE_FILE_COUNT ==
+                  AC_EDF_STORAGE_PROGRESS_FILE_COUNT,
+              "EDF storage progress must cover every EDF file slot");
 
 constexpr size_t edf_storage_file_index(EdfStorageFileIndex index) {
     return static_cast<size_t>(index);
@@ -133,6 +138,9 @@ public:
 
     virtual bool mounted() const = 0;
     virtual StorageWorkloadSnapshot workload_snapshot() const = 0;
+
+    virtual std::shared_ptr<const EdfStorageProgress>
+    edf_progress_snapshot() const { return {}; }
 };
 
 namespace StorageService {

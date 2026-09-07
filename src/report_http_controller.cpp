@@ -551,6 +551,7 @@ struct ReportHttpController::PendingResponses {
         std::shared_ptr<StorageByteStream> stream;
         uint32_t deadline_ms = 0;
         uint64_t response_size = 0;
+        SleepDayId sleep_day;
         SourceRevision source_revision;
         uint32_t generation = 0;
         bool versioned = false;
@@ -655,7 +656,14 @@ void ReportHttpController::poll() {
             (void)stream_port_->status(*entry.stream, status);
         }
 
-        const bool waiting = !expired && !timed_out &&
+        // Admission now protects the source range. Check its version after
+        // admission so a concurrent append cannot enter under an old cache key.
+        const ReportNightQuery current = report_task_->query_night(entry.sleep_day);
+        const bool version_changed = current.state != ReportStoreQueryState::Ready ||
+            current.source_revision != entry.source_revision ||
+            current.generation != entry.generation;
+
+        const bool waiting = !expired && !timed_out && !version_changed &&
             status.state == StorageStreamState::Preparing;
 
         xSemaphoreTake(pending_->mutex, portMAX_DELAY);
@@ -666,6 +674,12 @@ void ReportHttpController::poll() {
         if (waiting || expired) continue;
 
         PendingResponses::Entry ready = std::move(entry);
+        if (version_changed) {
+            if (ready.stream) stream_port_->finish(*ready.stream, false);
+            ready.response->publish(
+                json_error_response(409, "report_version_changed"));
+            return;
+        }
         if (timed_out) {
             if (ready.stream) stream_port_->finish(*ready.stream, false);
             ready.response->publish(
@@ -824,6 +838,9 @@ void ReportHttpController::send_summary(
         *json += number;
         *json += ",\"materialized\":";
         *json += materialized ? "true" : "false";
+        *json += ",\"active\":";
+        *json += (night->source_flags & NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE)
+            ? "true" : "false";
         *json += ",\"report_generation\":";
         snprintf(number,
                  sizeof(number),
@@ -944,6 +961,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     }
 
     PendingResponses::Entry pending;
+    pending.sleep_day = sleep_day;
     pending.versioned = request->hasArg("v");
     StorageStreamCommand command;
     command.lane = StorageStreamLane::Foreground;

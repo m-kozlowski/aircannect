@@ -9,10 +9,12 @@
 
 #include "large_object.h"
 #include "storage_internal.h"
+#include "storage_stream_service.h"
 
 namespace aircannect {
 
 StorageRangeWriteService::~StorageRangeWriteService() {
+    release_write_reservation();
     Storage::release_write_handles();
     if (job_) {
         if (job_->output >= 0) ::close(job_->output);
@@ -37,6 +39,11 @@ bool StorageRangeWriteService::begin(WakeCallback wake) {
 void StorageRangeWriteService::set_task_available(bool available) {
     task_available_.store(available, std::memory_order_release);
     if (available) wake();
+}
+
+void StorageRangeWriteService::set_stream_service(
+    StorageStreamService *stream_service) {
+    stream_service_ = stream_service;
 }
 
 bool StorageRangeWriteService::ready() const {
@@ -201,6 +208,13 @@ const char *StorageRangeWriteService::write_locked() {
     return nullptr;
 }
 
+void StorageRangeWriteService::release_write_reservation() {
+    if (!job_ || !job_->reserved) return;
+
+    if (stream_service_) stream_service_->end_write(job_);
+    job_->reserved = false;
+}
+
 void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                                              const char *error) {
     if (job_->output >= 0 && !job_->command.retain_handle) {
@@ -241,6 +255,7 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                  error ? error : "");
     }
 
+    release_write_reservation();
     job_->~Job();
     new (job_) Job();
 }
@@ -261,6 +276,17 @@ bool StorageRangeWriteService::step(StorageAtomicWriteLane lane) {
         (!job_->abandoned && job_->command.lane != lane)) {
         unlock();
         return abandoned || released;
+    }
+
+    if (!job_->abandoned && job_->phase == Phase::Open && stream_service_ &&
+        !job_->reserved) {
+        if (!stream_service_->try_begin_write(
+                job_, job_->command.path.c_str(), job_->command.offset,
+                job_->command.truncate ? UINT64_MAX : job_->command.size())) {
+            unlock();
+            return released;
+        }
+        job_->reserved = true;
     }
 
     const char *error = nullptr;

@@ -155,6 +155,7 @@ public:
     const EdfRecorderStatus &status() const;
     uint32_t sessions_ended() const { return status_.sessions_ended; }
     bool latest_catalog_refresh_hint(EdfCatalogRefreshHint &out) const;
+    bool active_segment_metadata(EdfSessionMetadata &out) const;
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }

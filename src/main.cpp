@@ -870,6 +870,10 @@ static void apply_config_runtime_effects(void *,
 }
 
 static void publish_report_catalog_inputs() {
+    EdfSessionMetadata capture;
+    (void)edf_recorder_manager.active_segment_metadata(capture);
+    report_task.publish_capture_session(capture);
+
     const uint32_t sessions_ended = edf_recorder_manager.sessions_ended();
     EdfCatalogRefreshHint hint;
     NightCatalogRefreshTarget target;

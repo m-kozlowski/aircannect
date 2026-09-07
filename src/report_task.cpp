@@ -8,6 +8,7 @@
 
 #include "board_report.h"
 #include "night_catalog_builder.h"
+#include "night_catalog_capture.h"
 #include "report_fallback_artifact.h"
 #include "report_spool_availability.h"
 #include "storage_service.h"
@@ -262,6 +263,143 @@ struct ReportTask::Runtime {
         wake();
     }
 
+    void publish_capture_session(const EdfSessionMetadata &metadata) {
+        if (!lock()) return;
+
+        const bool changed =
+            pending_capture.raw_segment_start_ms != metadata.raw_segment_start_ms ||
+            pending_capture.capture_session_id != metadata.capture_session_id;
+        if (changed) {
+            pending_capture = metadata;
+            capture_pending = true;
+        }
+        unlock();
+        if (changed) wake();
+    }
+
+    bool apply_capture_session() {
+        if (!lock()) return false;
+        if (!capture_pending) {
+            unlock();
+            return false;
+        }
+
+        capture_session = pending_capture;
+        capture_pending = false;
+        unlock();
+
+        (void)engine.cancel_background();
+        capture_build = {};
+        capture_published_end_ms = 0;
+        capture_attempt_end_ms = 0;
+        capture_retry_at_ms = 0;
+        capture_checked_revision = 0;
+        capture_available_end_ms = 0;
+        capture_progress.reset();
+        capture_attempt_progress.reset();
+        return true;
+    }
+
+    bool capture_storage_ready() const {
+        if (!storage_status || activity.ota_install_active ||
+            activity.export_work_claimed) return false;
+
+        const StorageWorkloadSnapshot workload =
+            storage_status->workload_snapshot();
+        return workload.valid && workload.available && !workload.busy &&
+               workload.edf_queued == 0 && !workload.maintenance_active;
+    }
+
+    bool schedule_capture(uint32_t now_ms) {
+        if (!activity.therapy_active || !capture_session.raw_segment_start_ms ||
+            capture_build.valid() || catalog_load_pending ||
+            store_purpose != CatalogStorePurpose::None ||
+            engine.status().state != ReportEngineState::Idle ||
+            engine.status().queued != 0 || !capture_storage_ready() ||
+            !deadline_due(now_ms, capture_retry_at_ms)) return false;
+
+        const auto progress = storage_status->edf_progress_snapshot();
+        if (!progress) return false;
+
+        const bool progress_changed = capture_checked_revision != progress->revision;
+        if (progress_changed) {
+            capture_available_end_ms = NightCatalogCapture::closed_end(
+                capture_session, *progress);
+            capture_checked_revision = progress->revision;
+        }
+        const int64_t end_ms = capture_available_end_ms;
+        if (end_ms <= capture_session.canonical_segment_start_ms ||
+            (end_ms <= capture_published_end_ms && !progress_changed)) return false;
+
+        const auto next = NightCatalogCapture::build(
+            catalog, capture_session, *progress, end_ms);
+        if (!next) {
+            capture_checked_revision = 0;
+            capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+            return false;
+        }
+
+        const auto *night = next->find(capture_session.canonical_sleep_day);
+        if (!night) return false;
+
+        bool rewritten = false;
+        if (capture_progress) {
+            for (size_t i = 0; i < AC_EDF_STORAGE_PROGRESS_FILE_COUNT; ++i) {
+                const auto &before = capture_progress->files[i];
+                const auto &after = progress->files[i];
+                rewritten = rewritten ||
+                    (before.request_id == after.request_id &&
+                     strcmp(before.path, after.path) == 0 &&
+                     before.rewrite_revision != after.rewrite_revision);
+            }
+        }
+
+        const auto *previous = catalog ? catalog->find(night->sleep_day) : nullptr;
+        if (!rewritten && end_ms <= capture_published_end_ms && previous &&
+            previous->source_revision == night->source_revision) return false;
+
+        if (!rewritten && end_ms <= capture_published_end_ms && previous) {
+            // Later annotation records may lie beyond this quarter. Only a
+            // numeric source catching up warrants republishing the same window.
+            size_t next_count = 0;
+            size_t previous_count = 0;
+            const auto *next_files = next->files(*night, next_count);
+            const auto *previous_files = catalog->files(*previous, previous_count);
+            bool numeric_changed = false;
+            for (size_t i = 0; i < next_count && !numeric_changed; ++i) {
+                if (next_files[i].signal_layout_count == 0) continue;
+
+                const auto &file = next_files[i];
+                size_t j = 0;
+                while (j < previous_count && strcmp(next->path(file),
+                       catalog->path(previous_files[j])) != 0) ++j;
+                numeric_changed = j == previous_count ||
+                    file.complete_records != previous_files[j].complete_records;
+            }
+            if (!numeric_changed) return false;
+        }
+
+        const ReportArtifactKey key = ReportArtifactKey::result(
+            night->sleep_day, night->source_revision);
+        const uint32_t generation = next_catalog_generation();
+        accept_catalog(next, generation, false);
+        pending_catalog_save = next;
+        pending_catalog_save_generation = catalog_generation;
+        const auto request = engine.request(
+            key, ReportRequestPriority::Reconcile, generation, rewritten);
+        if (request.status == ReportRequestEnqueueStatus::Full ||
+            request.status == ReportRequestEnqueueStatus::Invalid) {
+            capture_checked_revision = 0;
+            capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+            return false;
+        }
+
+        capture_build = key;
+        capture_attempt_end_ms = end_ms;
+        capture_attempt_progress = progress;
+        return true;
+    }
+
     OperationAdmission publish_session_ended(
         uint32_t sessions_ended,
         const NightCatalogRefreshTarget &target) {
@@ -357,7 +495,8 @@ struct ReportTask::Runtime {
     }
 
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
-                        uint32_t generation) {
+                        uint32_t generation,
+                        bool discover_stored_nights = true) {
         if (!next || generation == 0) return;
 
         observe_catalog_generation(generation);
@@ -389,7 +528,7 @@ struct ReportTask::Runtime {
 
         store_catalog_loader.cancel();
         store_catalog_loader.reset();
-        store_catalog_load_pending = true;
+        store_catalog_load_pending = discover_stored_nights;
         store_catalog_load_generation = catalog_generation;
         store_catalog_load_retry_at_ms = 0;
         store_catalog_load_retry_attempt = 0;
@@ -516,6 +655,14 @@ struct ReportTask::Runtime {
         const bool rpc_became_available =
             !activity.as11_rpc_available && next.as11_rpc_available;
 
+        if (capture_build.valid() &&
+            (next.ota_install_active || next.export_work_claimed)) {
+            (void)engine.cancel_background();
+            capture_build = {};
+            capture_attempt_progress.reset();
+            capture_checked_revision = 0;
+        }
+
         activity = next;
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
@@ -527,6 +674,9 @@ struct ReportTask::Runtime {
         if (!became_blocked) return true;
 
         (void)engine.cancel_background();
+        capture_build = {};
+        capture_attempt_progress.reset();
+        capture_checked_revision = 0;
         summary_acquisition.cancel();
         spool_availability_probe.cancel();
         if (catalog_refresh.active()) {
@@ -1121,6 +1271,16 @@ struct ReportTask::Runtime {
             completion.outcome.disposition ==
             OperationDisposition::Succeeded;
 
+        if (completion.request.artifact == capture_build) {
+            if (succeeded) {
+                capture_published_end_ms = capture_attempt_end_ms;
+                capture_progress = std::move(capture_attempt_progress);
+            }
+            capture_retry_at_ms = succeeded ? 0 : now_ms + CATALOG_RETRY_MAX_MS;
+            if (!succeeded) capture_checked_revision = 0;
+            capture_build = {};
+        }
+
         if (completion.request.artifact == post_therapy_build &&
             completion.outcome.disposition != OperationDisposition::Cancelled) {
             post_therapy_build = {};
@@ -1354,6 +1514,18 @@ struct ReportTask::Runtime {
     bool pending_catalog_save_post_therapy = false;
     uint32_t catalog_store_save_generation = 0;
     ReportArtifactKey post_therapy_build;
+
+    EdfSessionMetadata capture_session;
+    EdfSessionMetadata pending_capture;
+    bool capture_pending = false;
+    ReportArtifactKey capture_build;
+    int64_t capture_published_end_ms = 0;
+    int64_t capture_attempt_end_ms = 0;
+    uint32_t capture_retry_at_ms = 0;
+    uint64_t capture_checked_revision = 0;
+    int64_t capture_available_end_ms = 0;
+    std::shared_ptr<const EdfStorageProgress> capture_progress;
+    std::shared_ptr<const EdfStorageProgress> capture_attempt_progress;
 
     PendingCatalogRefresh pending_refresh;
     PendingSessionEnded pending_session_ended;
@@ -1593,6 +1765,10 @@ void ReportTask::publish_activity(const ActivitySnapshot &activity) {
     if (runtime_ && runtime_->initialized) {
         runtime_->publish_activity(activity);
     }
+}
+
+void ReportTask::publish_capture_session(const EdfSessionMetadata &metadata) {
+    if (runtime_) runtime_->publish_capture_session(metadata);
 }
 
 ReportTaskControlSnapshot ReportTask::control_snapshot() const {
@@ -1848,6 +2024,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
     worked = runtime.apply_pending_activity() || worked;
+    worked = runtime.apply_capture_session() || worked;
     const bool startup_allowed = runtime.startup_idle_allowed(now_ms);
     const bool local_blocked = runtime.local_background_work_blocked();
 
@@ -2114,7 +2291,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.handle_fallback_replacement() || worked;
 
-    if (!local_blocked && runtime.pending_catalog_save &&
+    if ((!local_blocked || (runtime.capture_session.raw_segment_start_ms &&
+                           runtime.capture_storage_ready())) &&
+        runtime.pending_catalog_save &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
         const OperationAdmission admitted =
@@ -2157,8 +2336,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    worked = runtime.engine.poll(
-        now_ms, std::max<size_t>(record_budget, 1)) || worked;
+    worked = runtime.schedule_capture(now_ms) || worked;
+    if (!runtime.activity.therapy_active || runtime.capture_storage_ready()) {
+        worked = runtime.engine.poll(
+            now_ms, runtime.activity.therapy_active
+                ? 1 : std::max<size_t>(record_budget, 1)) || worked;
+    }
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
     runtime.publish_status();

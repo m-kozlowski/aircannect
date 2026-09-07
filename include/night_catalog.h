@@ -61,6 +61,7 @@ enum NightCatalogSourceFlag : uint8_t {
     NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK = 1u << 2,
     NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK = 1u << 3,
     NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED = 1u << 4,
+    NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE = 1u << 5,
 };
 
 struct NightCatalogTimeRange {

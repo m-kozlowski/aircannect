@@ -8,6 +8,8 @@
 
 namespace aircannect {
 
+class StorageStreamService;
+
 class StorageRangeWriteService final : public StorageRangeWritePort {
 public:
     using WakeCallback = void (*)();
@@ -16,6 +18,7 @@ public:
     bool begin(WakeCallback wake);
     void set_task_available(bool available);
     void set_retention_allowed(bool allowed);
+    void set_stream_service(StorageStreamService *stream_service);
 
     // Called only by the StorageService task, below EDF work.
     bool step(StorageAtomicWriteLane lane);
@@ -39,6 +42,7 @@ private:
         size_t parent_cursor = 0;
         Phase phase = Phase::Open;
         bool abandoned = false;
+        bool reserved = false;
     };
 
     // Lifecycle and cross-task admission
@@ -51,6 +55,7 @@ private:
     // Owner-task execution and completion
     const char *open_locked();
     const char *write_locked();
+    void release_write_reservation();
     void finish_locked(OperationOutcome outcome, const char *error = nullptr);
 
     SemaphoreHandle_t mutex_ = nullptr;
@@ -61,6 +66,7 @@ private:
     std::atomic<bool> retention_allowed_{true};
     uint32_t next_ticket_id_ = 0;
 
+    StorageStreamService *stream_service_ = nullptr;
     Job *job_ = nullptr;
     StorageRangeWriteCompletion completion_;
 };

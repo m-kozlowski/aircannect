@@ -34,6 +34,7 @@ struct BuildNight {
     size_t owner = 0;
     bool boundary_set = false;
     bool has_edf = false;
+    bool active_capture = false;
     bool has_str = false;
     bool has_summary = false;
     bool has_fallback = false;
@@ -697,7 +698,7 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
             input.fallback_records[i];
 
         BuildNight *night = find_night(nights, source.sleep_day);
-        if (night && night->has_edf) continue;
+        if (night && night->has_edf && !source.retain_with_edf) continue;
 
         if (!fallback_input_valid(source) || (night && night->has_fallback)) {
             ++invalid_fallback_records;
@@ -707,12 +708,13 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
         const NightCatalogSummaryInput *summary =
             find_summary(input, source.sleep_day);
         int32_t adjustment_ms = source.time_adjust_ms;
-        const bool use_summary_axis = summary &&
+        const bool use_summary_axis = !source.coordinates_are_resolved &&
+            summary &&
             resolve_fallback_adjustment(source, *summary, adjustment_ms);
 
         int64_t fallback_day_start_ms = source.day_start_ms;
         int64_t fallback_day_end_ms = source.day_end_ms;
-        if (!use_summary_axis &&
+        if (!source.coordinates_are_resolved && !use_summary_axis &&
             (!adjust_time(source.day_start_ms,
                           adjustment_ms,
                           fallback_day_start_ms) ||
@@ -735,6 +737,11 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
                 return false;
             }
             night->fallback_joins_summary = true;
+        } else if (night->has_edf) {
+            if (night->day_start_ms != fallback_day_start_ms ||
+                night->day_end_ms != fallback_day_end_ms) {
+                return false;
+            }
         } else {
             night->day_start_ms = fallback_day_start_ms;
             night->day_end_ms = fallback_day_end_ms;
@@ -773,7 +780,7 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
              session_index < source.session_count;
              ++session_index) {
             NightCatalogTimeRange session = source.sessions[session_index];
-            if (adjustment_ms != 0) {
+            if (!source.coordinates_are_resolved && adjustment_ms != 0) {
                 NightCatalogTimeRange adjusted;
                 if (!adjust_range(session, adjustment_ms, adjusted)) {
                     return false;
@@ -809,8 +816,8 @@ bool ingest_edf(const NightCatalogBuildInput &input,
                 LargeScratchArray<BuildFile> &files) {
     for (size_t i = 0; i < input.edf_session_count; ++i) {
         const NightCatalogEdfSessionInput &source = input.edf_sessions[i];
-        if (!source.display_window.valid() || !source.files ||
-            source.file_count == 0) {
+        if (!source.display_window.valid() ||
+            (source.file_count > 0 && !source.files)) {
             return false;
         }
 
@@ -826,6 +833,7 @@ bool ingest_edf(const NightCatalogBuildInput &input,
         }
 
         night->has_edf = true;
+        night->active_capture = night->active_capture || source.active_capture;
         for (size_t file_index = 0;
              file_index < source.file_count;
              ++file_index) {
@@ -1440,6 +1448,9 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
         record.timezone_offset_minutes = source.timezone_offset_minutes;
         record.timezone_offset_valid = source.timezone_offset_valid;
         if (source.has_edf) record.source_flags |= NIGHT_CATALOG_SOURCE_EDF;
+        if (source.active_capture) {
+            record.source_flags |= NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE;
+        }
         if (source.has_str) record.source_flags |= NIGHT_CATALOG_SOURCE_STR;
         if (source.has_fallback) {
             record.source_flags |= NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
@@ -1569,9 +1580,11 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                 section.record_count = source_section.record_count;
                 section.sample_interval_ms =
                     source_section.sample_interval_ms;
-                if (!adjust_range(source_section.coverage,
-                                  source_fallback.time_adjust_ms,
-                                  section.coverage)) {
+                if (source_fallback.source.coordinates_are_resolved) {
+                    section.coverage = source_section.coverage;
+                } else if (!adjust_range(source_section.coverage,
+                                         source_fallback.time_adjust_ms,
+                                         section.coverage)) {
                     return build_failed(
                         status,
                         NightCatalogBuildFailure::InvariantViolation,

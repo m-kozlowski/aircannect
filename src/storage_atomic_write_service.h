@@ -9,6 +9,8 @@
 
 namespace aircannect {
 
+class StorageStreamService;
+
 class StorageAtomicWriteService final : public StorageAtomicWritePort {
 public:
     using WakeCallback = void (*)();
@@ -17,6 +19,7 @@ public:
 
     bool begin(WakeCallback wake);
     void set_task_available(bool available);
+    void set_stream_service(StorageStreamService *stream_service);
     bool step(StorageAtomicWriteLane lane);
 
     OperationSubmission request_write(const StorageAtomicWriteCommand &command) override;
@@ -46,6 +49,7 @@ private:
         uint64_t published_modified = 0;
         bool staged_source = false;
         bool replace_existing = true;
+        bool reserved = false;
         char path[AC_STORAGE_PATH_MAX] = {};
         char staged_path[AC_STORAGE_PATH_MAX] = {};
     };
@@ -68,6 +72,7 @@ private:
     // Completion and job lifetime
     void fail_locked(const char *error);
     void finish_locked(OperationOutcome outcome, const char *error = nullptr);
+    void release_write_reservation();
     void close_output_locked();
     void clear_job_locked();
     bool apply_abandon_request_locked();
@@ -78,6 +83,7 @@ private:
     mutable SemaphoreHandle_t lock_ = nullptr;
     WakeCallback wake_ = nullptr;
     std::atomic<bool> task_available_{false};
+    StorageStreamService *stream_service_ = nullptr;
 
     bool recovery_needed_ = true;
     bool recovery_attempt_requested_ = true;

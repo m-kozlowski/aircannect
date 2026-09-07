@@ -34,11 +34,25 @@ public:
                            size_t offset) override;
     void finish(StorageByteStream &stream, bool complete) override;
 
+    // Internal writer admission. The owner token remains reserved until the
+    // writer calls end_write(). UINT64_MAX length covers the whole path.
+    bool try_begin_write(const void *owner,
+                         const char *path,
+                         uint64_t offset,
+                         uint64_t length);
+    void end_write(const void *owner);
+
 private:
     bool ready() const;
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void wake() const;
+    bool read_conflicts_locked(const char *path,
+                               uint64_t offset,
+                               uint64_t length) const;
+    bool writer_conflicts_locked(const char *path,
+                                 uint64_t offset,
+                                 uint64_t length) const;
 
     bool open_locked(StorageByteStream &stream);
     bool produce_locked(StorageByteStream &stream);
@@ -51,6 +65,12 @@ private:
     static constexpr size_t STREAM_CAPACITY = 4;
 
     mutable SemaphoreHandle_t lock_ = nullptr;
+
+    const void *write_owner_ = nullptr;
+    char write_path_[AC_STORAGE_PATH_MAX] = {};
+    uint64_t write_offset_ = 0;
+    uint64_t write_length_ = 0;
+
     std::shared_ptr<StorageByteStream> streams_[STREAM_CAPACITY];
     size_t next_stream_ = 0;
     WakeCallback wake_ = nullptr;
