@@ -12,7 +12,7 @@ namespace aircannect {
 
 static constexpr size_t AC_EDF_REPORT_FILE_SIGNAL_MAX = 16;
 static constexpr size_t AC_EDF_REPORT_PATH_MAX = 96;
-static constexpr size_t AC_EDF_REPORT_SESSION_FILE_MAX = 5;
+static constexpr size_t AC_EDF_REPORT_SESSION_FILE_MAX = 6;
 
 enum class EdfReportFileStatus : uint8_t {
     Ok,

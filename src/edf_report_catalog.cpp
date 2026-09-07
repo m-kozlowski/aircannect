@@ -59,6 +59,12 @@ const EdfReportSignalMappingDef REPORT_SIGNAL_MAP[] = {
      2000,
      true},
     {EdfInventoryFileKind::Pld,
+     "TgtVent.2s",
+     ReportSignalId::TargetMinuteVentilation,
+     ReportSourceId::TherapyOneMinute,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
      "IERatio.2s",
      ReportSignalId::IeRatio,
      ReportSourceId::TherapyOneMinute,
@@ -100,12 +106,19 @@ const EdfReportSignalMappingDef REPORT_SIGNAL_MAP[] = {
      ReportSourceId::OximetryOneSecond,
      1000,
      true},
+    {EdfInventoryFileKind::Tcv,
+     "TrigCycEvt.40ms",
+     ReportSignalId::TriggerCycleEvent,
+     ReportSourceId::TriggerCycleEvent,
+     40,
+     true},
 };
 
 bool report_kind(EdfInventoryFileKind kind) {
     return kind == EdfInventoryFileKind::Brp ||
            kind == EdfInventoryFileKind::Pld ||
            kind == EdfInventoryFileKind::Sa2 ||
+           kind == EdfInventoryFileKind::Tcv ||
            kind == EdfInventoryFileKind::Eve ||
            kind == EdfInventoryFileKind::Csl;
 }
@@ -119,6 +132,7 @@ size_t edf_report_session_file_slot(EdfInventoryFileKind kind) {
         case EdfInventoryFileKind::Sa2: return 2;
         case EdfInventoryFileKind::Eve: return 3;
         case EdfInventoryFileKind::Csl: return 4;
+        case EdfInventoryFileKind::Tcv: return 5;
         default:
             return AC_EDF_REPORT_SESSION_FILE_MAX;
     }

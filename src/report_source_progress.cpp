@@ -140,7 +140,7 @@ bool decode_entry(const uint8_t *data,
     out.path_length = static_cast<uint16_t>(path_length);
     if (!valid_storage(in[6]) ||
         in[8] >= static_cast<uint8_t>(ReportSignalId::Count) ||
-        in[9] > static_cast<uint8_t>(ReportSourceId::OximetryOneSecond) ||
+        in[9] > static_cast<uint8_t>(ReportSourceId::TriggerCycleEvent) ||
         (in[10] != 0) || (in[11] != 0) ||
         (in[7] & ~PROGRESS_PRIMARY) != 0 ||
         in[108] != 0 || in[109] != 0 || in[110] != 0 || in[111] != 0) {

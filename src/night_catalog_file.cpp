@@ -126,7 +126,7 @@ bool signal_layout_valid(const NightCatalogSourceFile &file,
         static_cast<uint64_t>(layout.samples_per_record) * 2u;
     return report_signal_bit(layout.signal) != 0 &&
            static_cast<uint8_t>(layout.source) <=
-               static_cast<uint8_t>(ReportSourceId::OximetryOneSecond) &&
+                static_cast<uint8_t>(ReportSourceId::TriggerCycleEvent) &&
            layout.samples_per_record > 0 &&
            layout.sample_interval_ms > 0 && signal_end <= file.record_size &&
            layout.scale.digital_max > layout.scale.digital_min &&
@@ -204,7 +204,7 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
         for (size_t file_index = 0; file_index < file_count; ++file_index) {
             const NightCatalogSourceFile &file = files[file_index];
             if (static_cast<uint8_t>(file.kind) >
-                    static_cast<uint8_t>(NightCatalogFileKind::Str) ||
+                    static_cast<uint8_t>(NightCatalogFileKind::Tcv) ||
                 file.path_offset != expected_path || file.path_length == 0 ||
                 (file.session_index != NIGHT_CATALOG_NO_SESSION &&
                  file.session_index >= session_count) ||
@@ -592,7 +592,7 @@ bool decode_file(const uint8_t *in, NightCatalogSourceFile &file) {
     const uint32_t session_index = get_le32(in + 12);
     const uint32_t coverage_count = get_le32(in + 20);
     const uint32_t signal_layout_count = get_le32(in + 92);
-    if (kind > static_cast<uint8_t>(NightCatalogFileKind::Str) ||
+    if (kind > static_cast<uint8_t>(NightCatalogFileKind::Tcv) ||
         path_length == 0 || path_length > UINT16_MAX ||
         (session_index != UINT32_MAX && session_index > UINT16_MAX) ||
         coverage_count == 0 || coverage_count > UINT16_MAX ||
@@ -655,7 +655,7 @@ bool decode_signal_layout(const uint8_t *in,
                           EdfReportSignalLayout &layout) {
     if (in[0] >= static_cast<uint8_t>(ReportSignalId::Count) ||
         in[0] == static_cast<uint8_t>(ReportSignalId::Invalid) ||
-        in[1] > static_cast<uint8_t>(ReportSourceId::OximetryOneSecond) ||
+        in[1] > static_cast<uint8_t>(ReportSourceId::TriggerCycleEvent) ||
         in[2] > 1 || in[3] != 0 || get_le32(in + 28) != 0) {
         return false;
     }

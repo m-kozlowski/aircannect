@@ -110,7 +110,7 @@ bool sessions_valid(const NightCatalogTimeRange *sessions,
 
 bool valid_source(ReportSourceId source) {
     return static_cast<uint8_t>(source) <=
-        static_cast<uint8_t>(ReportSourceId::OximetryOneSecond);
+        static_cast<uint8_t>(ReportSourceId::TriggerCycleEvent);
 }
 
 bool valid_series_source(ReportSourceId source) {

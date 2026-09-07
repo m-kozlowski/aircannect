@@ -19,7 +19,7 @@ constexpr ReportSourceId PROBED_SOURCES[] = {
 size_t source_index(ReportSourceId source) {
     const size_t index = static_cast<size_t>(source);
     const size_t count =
-        static_cast<size_t>(ReportSourceId::OximetryOneSecond) + 1;
+        static_cast<size_t>(ReportSourceId::TriggerCycleEvent) + 1;
     return index < count ? index : SIZE_MAX;
 }
 

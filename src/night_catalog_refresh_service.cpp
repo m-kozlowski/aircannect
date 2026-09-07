@@ -149,6 +149,9 @@ bool file_kind(NightCatalogFileKind &out, EdfInventoryFileKind kind) {
         case EdfInventoryFileKind::Sa2:
             out = NightCatalogFileKind::Sa2;
             return true;
+        case EdfInventoryFileKind::Tcv:
+            out = NightCatalogFileKind::Tcv;
+            return true;
         case EdfInventoryFileKind::Eve:
             out = NightCatalogFileKind::Eve;
             return true;
@@ -1623,7 +1626,8 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             }
             if ((kind == NightCatalogFileKind::Brp ||
                  kind == NightCatalogFileKind::Pld ||
-                 kind == NightCatalogFileKind::Sa2) &&
+                 kind == NightCatalogFileKind::Sa2 ||
+                 kind == NightCatalogFileKind::Tcv) &&
                 source.complete_records == 0) {
                 continue;
             }

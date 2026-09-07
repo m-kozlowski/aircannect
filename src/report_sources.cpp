@@ -48,6 +48,10 @@ const ReportSourceDef SOURCES[] = {
      nullptr,
      0,
      REPORT_SOURCE_HIGH_RES_SERIES},
+    {ReportSourceId::TriggerCycleEvent,
+     nullptr,
+     0,
+     REPORT_SOURCE_HIGH_RES_SERIES},
 };
 
 const ReportSignalDef SIGNALS[] = {
@@ -134,6 +138,18 @@ const ReportSignalDef SIGNALS[] = {
      "Pulse",
      ReportSourceId::OximetryOneSecond,
      ReportSourceId::OximetryOneSecond,
+     REPORT_SIGNAL_NO_FALLBACK},
+    {ReportSignalId::TargetMinuteVentilation,
+     "target_minute_ventilation",
+     "Target Minute Vent",
+     ReportSourceId::TherapyOneMinute,
+     ReportSourceId::TherapyOneMinute,
+     REPORT_SIGNAL_NO_FALLBACK},
+    {ReportSignalId::TriggerCycleEvent,
+     "trigger_cycle_event",
+     "Trigger / Cycle Event",
+     ReportSourceId::TriggerCycleEvent,
+     ReportSourceId::TriggerCycleEvent,
      REPORT_SIGNAL_NO_FALLBACK},
 };
 

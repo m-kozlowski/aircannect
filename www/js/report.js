@@ -3489,6 +3489,8 @@
       "tidal_volume",
       "spo2",
       "pulse",
+      "target_minute_ventilation",
+      "trigger_cycle_event",
     ];
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
     const REPORT_SIGNAL_POLL_MAX_ATTEMPTS = 120;
@@ -3520,6 +3522,13 @@
         color: "#a78bfa",
         unit: "L/min",
       },
+      {
+        key: "target_minute_ventilation",
+        title: "Target Minute Vent",
+        color: "#facc15",
+        unit: "L/min",
+        optional: true,
+      },
       {key: "snore", title: "Snore", color: "#38bdf8", unit: ""},
       {
         key: "tidal_volume",
@@ -3546,6 +3555,13 @@
         unit: "/min",
       },
       {key: "ie_ratio", title: "I:E", color: "#f43f5e", unit: ""},
+      {
+        key: "trigger_cycle_event",
+        title: "Trigger / Cycle Event",
+        color: "#2dd4bf",
+        unit: "",
+        optional: true,
+      },
       {
         key: "spo2",
         title: "SpO2",

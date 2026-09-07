@@ -37,7 +37,7 @@ public:
 
 private:
     static constexpr size_t SourceCount =
-        static_cast<size_t>(ReportSourceId::OximetryOneSecond) + 1;
+        static_cast<size_t>(ReportSourceId::TriggerCycleEvent) + 1;
 
     ReportSpoolBoundary boundaries_[SourceCount] = {};
 };

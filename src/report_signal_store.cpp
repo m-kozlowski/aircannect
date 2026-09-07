@@ -276,6 +276,7 @@ ReportSignalStoreUnit report_signal_store_unit(ReportSignalId signal) {
         case ReportSignalId::Flow:
         case ReportSignalId::Leak:
         case ReportSignalId::MinuteVentilation:
+        case ReportSignalId::TargetMinuteVentilation:
             return ReportSignalStoreUnit::LitresPerMinute;
         case ReportSignalId::InspiratoryPressure:
         case ReportSignalId::ExpiratoryPressure:
@@ -294,6 +295,7 @@ ReportSignalStoreUnit report_signal_store_unit(ReportSignalId signal) {
             return ReportSignalStoreUnit::BeatsPerMinute;
         case ReportSignalId::FlowLimitation:
         case ReportSignalId::Snore:
+        case ReportSignalId::TriggerCycleEvent:
         case ReportSignalId::Invalid:
         case ReportSignalId::Count:
             return ReportSignalStoreUnit::None;

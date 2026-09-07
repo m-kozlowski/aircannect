@@ -420,7 +420,7 @@ bool signal_layouts_valid(const NightCatalogSourceFileInput &file) {
         uint32_t &seen = layout.primary ? seen_primary : seen_fallback;
         if (bit == 0 ||
             static_cast<uint8_t>(layout.source) >
-                static_cast<uint8_t>(ReportSourceId::OximetryOneSecond) ||
+                static_cast<uint8_t>(ReportSourceId::TriggerCycleEvent) ||
             layout.samples_per_record == 0 ||
             layout.sample_interval_ms == 0 || signal_end > file.record_size ||
             layout.scale.digital_max <= layout.scale.digital_min ||

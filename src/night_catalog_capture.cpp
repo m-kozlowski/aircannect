@@ -120,6 +120,7 @@ bool matching_progress_file(const EdfStorageProgressFile &progress_file,
     return strcmp(suffix, "BRP.edf") == 0 ||
            strcmp(suffix, "PLD.edf") == 0 ||
            strcmp(suffix, "SA2.edf") == 0 ||
+           strcmp(suffix, "TCV.edf") == 0 ||
            strcmp(suffix, "EVE.edf") == 0 ||
            strcmp(suffix, "CSL.edf") == 0;
 }
@@ -204,6 +205,9 @@ bool map_file_kind(EdfInventoryFileKind source, NightCatalogFileKind &out) {
         case EdfInventoryFileKind::Sa2:
             out = NightCatalogFileKind::Sa2;
             return true;
+        case EdfInventoryFileKind::Tcv:
+            out = NightCatalogFileKind::Tcv;
+            return true;
         case EdfInventoryFileKind::Eve:
             out = NightCatalogFileKind::Eve;
             return true;
@@ -234,7 +238,8 @@ void signal_masks(const EdfReportSignalLayout *layouts,
 bool numeric_kind(NightCatalogFileKind kind) {
     return kind == NightCatalogFileKind::Brp ||
            kind == NightCatalogFileKind::Pld ||
-           kind == NightCatalogFileKind::Sa2;
+           kind == NightCatalogFileKind::Sa2 ||
+           kind == NightCatalogFileKind::Tcv;
 }
 
 bool bounds_file_kind(NightCatalogFileKind kind, uint8_t &group) {
@@ -244,6 +249,7 @@ bool bounds_file_kind(NightCatalogFileKind kind, uint8_t &group) {
             return true;
         case NightCatalogFileKind::Pld:
         case NightCatalogFileKind::Sa2:
+        case NightCatalogFileKind::Tcv:
             group = 1;
             return true;
         case NightCatalogFileKind::Eve:

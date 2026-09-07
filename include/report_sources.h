@@ -15,6 +15,7 @@ enum class ReportSourceId : uint8_t {
     InspiratoryPressure0p5Hz = 6,
     Leak0p5Hz = 7,
     OximetryOneSecond = 8,
+    TriggerCycleEvent = 9,
 };
 
 enum class ReportSignalId : uint8_t {
@@ -33,7 +34,9 @@ enum class ReportSignalId : uint8_t {
     TidalVolume = 12,
     SpO2 = 13,
     Pulse = 14,
-    Count = 15,
+    TargetMinuteVentilation = 15,
+    TriggerCycleEvent = 16,
+    Count = 17,
 };
 
 enum ReportSourcePurpose : uint16_t {
