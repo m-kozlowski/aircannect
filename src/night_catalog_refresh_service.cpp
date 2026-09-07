@@ -605,7 +605,7 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     }
 
     reset_transient();
-    runtime_->summary = std::move(summary);
+    runtime_->summary = target.valid() ? nullptr : std::move(summary);
     runtime_->previous_catalog = std::move(previous_catalog);
     runtime_->target = target;
     runtime_->current_offset_valid = current_offset_valid;
@@ -1316,9 +1316,10 @@ bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
-    runtime.str_records =
-        allocate_large_array<NightCatalogStrInput>(layout.record_count);
-    runtime.str_record_capacity = layout.record_count;
+    runtime.str_record_capacity = runtime.target.valid() ? 1 : layout.record_count;
+    runtime.str_records = allocate_large_array<NightCatalogStrInput>(
+        runtime.str_record_capacity);
+    runtime.str_next_record = runtime.target.valid() ? layout.record_count : 0;
     if (!runtime.str_records) {
         skip_str(runtime, status, "night_catalog_str_alloc_failed");
         return true;
@@ -1330,7 +1331,10 @@ bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
 bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
                       StorageReadPort &read_port,
                       NightCatalogRefreshStatus &status) {
-    if (runtime.str_next_record >= runtime.str_record_capacity) {
+    const bool targeted = runtime.target.valid();
+    const size_t remaining = targeted ? runtime.str_next_record :
+        runtime.str_record_capacity - runtime.str_next_record;
+    if (remaining == 0) {
         runtime.phase = NightCatalogRefreshRuntime::Phase::Build;
         status.state = NightCatalogRefreshState::Building;
         status.current_path[0] = '\0';
@@ -1345,16 +1349,19 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
-    const size_t max_chunk_records = SOURCE_READ_BUFFER_BYTES / record_size;
-    const size_t remaining =
-        runtime.str_record_capacity - runtime.str_next_record;
-    runtime.str_chunk_records = static_cast<uint32_t>(
+    // The ended day is normally the last record; older targets use batches.
+    const size_t max_chunk_records = targeted && runtime.str_chunk_records == 0
+        ? 1 : SOURCE_READ_BUFFER_BYTES / record_size;
+    const uint32_t chunk_records = static_cast<uint32_t>(
         std::min(remaining, max_chunk_records));
+    const uint32_t first_record = targeted
+        ? runtime.str_next_record - chunk_records
+        : runtime.str_next_record;
 
     StorageReadCommand command;
     command.path = "/STR.edf";
-    command.offset = edf_str_record_offset(runtime.str_next_record);
-    command.length = runtime.str_chunk_records * record_size;
+    command.offset = edf_str_record_offset(first_record);
+    command.length = chunk_records * record_size;
     command.lane = StorageReadLane::Report;
     command.generation = status.generation;
 
@@ -1365,6 +1372,8 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
+    runtime.str_next_record = first_record;
+    runtime.str_chunk_records = chunk_records;
     runtime.source_read.begin(submission.ticket);
     runtime.phase = NightCatalogRefreshRuntime::Phase::WaitStr;
     copy_cstr(status.current_path,
@@ -1390,13 +1399,16 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
-    for (size_t i = 0; i < runtime.str_chunk_records; ++i) {
+    const bool targeted = runtime.target.valid();
+    for (size_t index = 0; index < runtime.str_chunk_records; ++index) {
+        const size_t i = targeted ? runtime.str_chunk_records - index - 1 : index;
         NightStrRecord record;
         if (!night_str_record_parse(runtime.read_buffer + i * record_size,
                                     record_size,
                                     record)) {
             continue;
         }
+        if (targeted && record.sleep_day != runtime.target.sleep_day) continue;
 
         NightCatalogStrInput &out =
             runtime.str_records[runtime.str_record_count++];
@@ -1408,9 +1420,11 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
         out.record_offset = edf_str_record_offset(
             runtime.str_next_record + static_cast<uint32_t>(i));
         out.record_size = static_cast<uint32_t>(record_size);
+        if (targeted) break;
     }
 
-    runtime.str_next_record += runtime.str_chunk_records;
+    if (!targeted) runtime.str_next_record += runtime.str_chunk_records;
+    else if (runtime.str_record_count != 0) runtime.str_next_record = 0;
     status.str_records = static_cast<uint32_t>(std::min(
         runtime.str_record_count,
         static_cast<size_t>(UINT32_MAX)));

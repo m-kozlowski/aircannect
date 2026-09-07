@@ -668,6 +668,26 @@ struct ReportTask::Runtime {
                     true,
                     true);
             } else {
+                // Historical discovery must not widen the ended-night refresh.
+                if (catalog) {
+                    if (pending_refresh.valid() &&
+                        !pending_refresh.target.valid() &&
+                        !pending_refresh.post_therapy) {
+                        summary_acquisition.cancel();
+                        pending_refresh.clear();
+                    }
+
+                    if (refresh_generation != 0 &&
+                        !refresh_target.valid() && !refresh_post_therapy) {
+                        catalog_refresh.cancel();
+                        refresh_generation = 0;
+                    }
+
+                    if (!reconcile_post_therapy) {
+                        reconcile_due_ms = now_ms + CATALOG_RECONCILE_IDLE_MS;
+                    }
+                }
+
                 schedule_refresh(
                     now_ms + CATALOG_SESSION_SETTLE_MS,
                     offset_valid,
@@ -691,6 +711,8 @@ struct ReportTask::Runtime {
         if (!reconcile_pending ||
             !deadline_due(now_ms, reconcile_due_ms) ||
             pending_refresh.valid() || refresh_generation != 0 ||
+            (!reconcile_post_therapy &&
+             (pending_catalog_save_post_therapy || post_therapy_build.valid())) ||
             catalog_refresh.active() || catalog_load_pending) {
             return false;
         }
