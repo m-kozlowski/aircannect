@@ -18,7 +18,9 @@
 #endif
 
 #ifndef AC_STORAGE_MAX_OPEN_FILES
-#define AC_STORAGE_MAX_OPEN_FILES 4
+// Six EDF files, four prepared readers, the log, and transient storage work.
+// FatFs allocates this table in PSRAM on supported esp32-s3 targets.
+#define AC_STORAGE_MAX_OPEN_FILES 16
 #endif
 
 #ifndef AC_PROVISION_CONFIG_PATH
