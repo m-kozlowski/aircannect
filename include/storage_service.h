@@ -31,7 +31,13 @@ static constexpr uint32_t AC_STORAGE_SERVICE_TASK_STACK = 6144;
 static constexpr uint8_t AC_STORAGE_SERVICE_TASK_PRIO = 1;
 static constexpr uint8_t AC_STORAGE_SERVICE_TASK_CORE = 0;
 static constexpr uint32_t AC_STORAGE_SERVICE_IDLE_TICK_MS = 1000;
-static constexpr uint32_t AC_STORAGE_SERVICE_WORK_TICK_MS = 5;
+static constexpr size_t AC_STORAGE_SERVICE_BATCH_STEPS = 4;
+static constexpr uint32_t AC_STORAGE_SERVICE_BATCH_US = 8000;
+
+constexpr bool storage_work_batch_can_continue(size_t steps, uint32_t elapsed_us) {
+    return steps < AC_STORAGE_SERVICE_BATCH_STEPS &&
+           elapsed_us < AC_STORAGE_SERVICE_BATCH_US;
+}
 
 static constexpr size_t AC_STORAGE_PREPARED_READ_CAPACITY = 4;
 static constexpr size_t AC_STORAGE_READ_STEP_BYTES = 4096;

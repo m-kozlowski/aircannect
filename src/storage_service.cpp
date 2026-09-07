@@ -2187,6 +2187,9 @@ void process_job(JobSlot &job) {
 void task_entry(void *) {
     recover_str_storage_artifacts();
 
+    uint32_t batch_started_us = micros();
+    size_t batch_steps = 0;
+
     for (;;) {
         bool did_work = false;
         const uint32_t now_ms = millis();
@@ -2256,12 +2259,21 @@ void task_entry(void *) {
         }
 
         if (did_work) {
-            vTaskDelay(pdMS_TO_TICKS(AC_STORAGE_SERVICE_WORK_TICK_MS));
+            // Recheck EDF before every step; bound consecutive work, not an SD call.
+            if (storage_work_batch_can_continue(
+                    ++batch_steps, micros() - batch_started_us)) {
+                continue;
+            }
+
+            vTaskDelay(1);
         } else {
             ulTaskNotifyTake(pdTRUE,
                              pdMS_TO_TICKS(
                                  AC_STORAGE_SERVICE_IDLE_TICK_MS));
         }
+
+        batch_started_us = micros();
+        batch_steps = 0;
     }
 }
 
