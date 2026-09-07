@@ -1700,15 +1700,12 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             catalog.reset();
             return false;
         }
-        if (catalog->size() != 1) {
+        // Summary and STR may contain other days even after a targeted scan.
+        // Only the requested day is merged into the previous catalog below.
+        if (!catalog->find(runtime.target.sleep_day)) {
             error = catalog->size() == 0
                 ? "night_catalog_target_empty"
-                : "night_catalog_target_count_mismatch";
-            catalog.reset();
-            return false;
-        }
-        if (!catalog->find(runtime.target.sleep_day)) {
-            error = "night_catalog_target_day_mismatch";
+                : "night_catalog_target_day_mismatch";
             catalog.reset();
             return false;
         }

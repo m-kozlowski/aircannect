@@ -1610,10 +1610,8 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
     const NightCatalog &source,
     const NightCatalog &replacement,
     SleepDayId sleep_day) {
-    if (!sleep_day.valid() || replacement.record_count_ != 1 ||
-        replacement.records_[0].sleep_day != sleep_day) {
-        return {};
-    }
+    const NightCatalogRecord *replacement_record = replacement.find(sleep_day);
+    if (!replacement_record) return {};
 
     struct CatalogCounts {
         size_t records = 0;
@@ -1681,7 +1679,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
         if (source.records_[i].sleep_day == sleep_day) continue;
         if (!count_record(source, source.records_[i])) return {};
     }
-    if (!count_record(replacement, replacement.records_[0])) return {};
+    if (!count_record(replacement, *replacement_record)) return {};
 
     std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
     if (!catalog ||
@@ -1829,7 +1827,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
 
         if (source_record && source_record->sleep_day == sleep_day) {
             if (!replacement_added &&
-                !append_record(replacement, replacement.records_[0])) {
+                !append_record(replacement, *replacement_record)) {
                 return {};
             }
             replacement_added = true;
@@ -1839,7 +1837,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
 
         if (!replacement_added &&
             (!source_record || source_record->sleep_day < sleep_day)) {
-            if (!append_record(replacement, replacement.records_[0])) {
+            if (!append_record(replacement, *replacement_record)) {
                 return {};
             }
             replacement_added = true;

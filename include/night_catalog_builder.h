@@ -153,6 +153,7 @@ public:
     static std::shared_ptr<const NightCatalog> build(
         const NightCatalogBuildInput &input,
         NightCatalogBuildStatus *status = nullptr);
+    // Replace only sleep_day; other days in replacement are ignored.
     static std::shared_ptr<const NightCatalog> upsert_night(
         const NightCatalog &catalog,
         const NightCatalog &replacement,

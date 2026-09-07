@@ -859,7 +859,10 @@ void ReportEngine::cancel_active_work() {
             break;
         case ActivePhase::Executing:
             executor_.cancel();
-            builder_.discard_build();
+            // EDF reads may be complete while the builder is still writing.
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
             break;
         case ActivePhase::Publishing:
             store_.cancel();

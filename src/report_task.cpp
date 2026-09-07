@@ -716,7 +716,8 @@ struct ReportTask::Runtime {
         return pending_session_ended.pending ||
                (pending_refresh.valid() && pending_refresh.post_therapy) ||
                (reconcile_pending && reconcile_post_therapy) ||
-               refresh_post_therapy || pending_catalog_save_post_therapy;
+               refresh_post_therapy || pending_catalog_save_post_therapy ||
+               post_therapy_build.valid();
     }
 
     bool startup_idle_allowed(uint32_t now_ms) {
@@ -734,6 +735,7 @@ struct ReportTask::Runtime {
 
     bool start_store_catalog_load(uint32_t now_ms) {
         if (!store_catalog_load_pending || !catalog ||
+            post_therapy_build.valid() ||
             store_catalog_loader.status().active() ||
             !deadline_due(now_ms, store_catalog_load_retry_at_ms)) {
             return false;
@@ -842,8 +844,42 @@ struct ReportTask::Runtime {
         return true;
     }
 
+    bool schedule_post_therapy_build() {
+        if (!post_therapy_build.valid()) return false;
+
+        const NightCatalogRecord *night =
+            catalog->find(post_therapy_build.sleep_day);
+        if (!night || !local_source_available(*night)) {
+            post_therapy_build = {};
+            return true;
+        }
+
+        post_therapy_build.source_revision = night->source_revision;
+        if (store_catalog &&
+            store_catalog->ready(night->sleep_day, night->source_revision)) {
+            post_therapy_build = {};
+            return true;
+        }
+
+        const ReportEngineStatus status = engine.status();
+        if (status.state != ReportEngineState::Idle || status.queued != 0) {
+            return false;
+        }
+
+        const ReportRequestEnqueueResult queued = engine.request(
+            post_therapy_build, ReportRequestPriority::Reconcile,
+            catalog_generation);
+        if (queued.status == ReportRequestEnqueueStatus::Full) return false;
+        if (queued.status == ReportRequestEnqueueStatus::Invalid) {
+            post_therapy_build = {};
+            ++command_failures;
+        }
+        return true;
+    }
+
     bool schedule_background(uint32_t now_ms) {
         if (!catalog || store_catalog_load_pending ||
+            post_therapy_build.valid() ||
             store_catalog_loader.status().active() ||
             local_background_work_blocked()) {
             return false;
@@ -1062,6 +1098,20 @@ struct ReportTask::Runtime {
         const bool succeeded =
             completion.outcome.disposition ==
             OperationDisposition::Succeeded;
+
+        if (completion.request.artifact == post_therapy_build &&
+            completion.outcome.disposition != OperationDisposition::Cancelled) {
+            post_therapy_build = {};
+#ifdef ARDUINO
+            char day[9] = {};
+            completed_day.format_yyyymmdd(day, sizeof(day));
+            Log::logf(CAT_REPORT, succeeded ? LOG_INFO : LOG_WARN,
+                      "post-therapy report %s night=%s error=%s",
+                      succeeded ? "ready" : "failed", day,
+                      completion.error[0] ? completion.error : "--");
+#endif
+        }
+
         if (succeeded) {
             clear_failure(completed_day);
         } else if (completion.outcome.disposition !=
@@ -1209,7 +1259,8 @@ struct ReportTask::Runtime {
             store_catalog_loader.status().active() ||
             catalog_refresh.active() || summary_acquisition.active() ||
             spool_availability_probe.status().active() ||
-            pending_catalog_save != nullptr || pending_refresh.valid();
+            pending_catalog_save != nullptr || pending_refresh.valid() ||
+            post_therapy_build.valid();
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -1280,6 +1331,7 @@ struct ReportTask::Runtime {
     uint32_t pending_catalog_save_generation = 0;
     bool pending_catalog_save_post_therapy = false;
     uint32_t catalog_store_save_generation = 0;
+    ReportArtifactKey post_therapy_build;
 
     PendingCatalogRefresh pending_refresh;
     PendingSessionEnded pending_session_ended;
@@ -1869,8 +1921,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     const ReportEngineStatus engine_work = runtime.engine.status();
     if (runtime.store_catalog_loader.status().active() &&
-        (engine_work.state != ReportEngineState::Idle || engine_work.queued != 0)) {
-        // Foreground discovery reads only its night. Resume the inventory later,
+        (engine_work.state != ReportEngineState::Idle || engine_work.queued != 0 ||
+         runtime.post_therapy_build.valid())) {
+        // Requested-night discovery reads only its night. Resume inventory later,
         // so a late full-catalog snapshot cannot overwrite its publication.
         runtime.store_catalog_loader.cancel();
         runtime.store_catalog_loader.reset();
@@ -1931,6 +1984,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_catalog_save_post_therapy =
                     runtime.pending_catalog_save_post_therapy ||
                     runtime.refresh_post_therapy;
+
+                if (runtime.refresh_post_therapy) {
+                    const NightCatalogRecord *night =
+                        runtime.refresh_target.valid()
+                        ? runtime.catalog->find(runtime.refresh_target.sleep_day)
+                        : runtime.catalog->record(0);
+                    runtime.post_therapy_build =
+                        night && local_source_available(*night)
+                        ? ReportArtifactKey::result(
+                              night->sleep_day, night->source_revision)
+                        : ReportArtifactKey{};
+                }
+
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
             } else if (status.retryable) {
@@ -2059,12 +2125,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.refresh_generation == 0 &&
         !runtime.catalog_refresh.active() &&
         !runtime.summary_acquisition.active() &&
-        !runtime.store_catalog_load_pending &&
-        !runtime.store_catalog_loader.status().active() &&
         !runtime.engine.catalog_update_required();
     if (catalog_stable && !local_blocked && startup_allowed) {
-        worked = runtime.start_spool_probe(now_ms) || worked;
-        worked = runtime.schedule_background(now_ms) || worked;
+        worked = runtime.schedule_post_therapy_build() || worked;
+        if (!runtime.store_catalog_load_pending &&
+            !runtime.store_catalog_loader.status().active()) {
+            worked = runtime.start_spool_probe(now_ms) || worked;
+            worked = runtime.schedule_background(now_ms) || worked;
+        }
     }
 
     worked = runtime.engine.poll(
