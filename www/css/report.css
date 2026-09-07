@@ -170,6 +170,61 @@
       margin-top: 14px;
     }
 
+    .report-charts-dialog {
+      width: min(440px, calc(100vw - 32px));
+      max-height: calc(100dvh - 32px);
+      margin: auto;
+      padding: 18px;
+      overflow: hidden;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .report-charts-dialog::backdrop {
+      background: #000000a8;
+    }
+
+    .report-charts-dialog h2 {
+      font-size: 18px;
+    }
+
+    .report-chart-options {
+      display: grid;
+      gap: 6px;
+      max-height: calc(100dvh - 150px);
+      margin: 14px 0;
+      overflow-y: auto;
+    }
+
+    .report-chart-option {
+      display: grid;
+      grid-template-columns: 1fr 30px 30px;
+      gap: 6px;
+      align-items: center;
+      min-height: 34px;
+    }
+
+    .report-chart-option label {
+      display: flex;
+      gap: 9px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .report-chart-option .btn {
+      width: 30px;
+      height: 30px;
+      padding: 0;
+    }
+
+    .report-charts-dialog footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
     .report-chart {
       border: 1px solid var(--line);
       border-radius: 6px;

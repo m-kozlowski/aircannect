@@ -56,16 +56,9 @@
       if (nights.length) pickReportNight(nights[0].id);
     }
 
-    function loadReportChartPreferences() {
+    function normalizeReportChartPreferences(stored) {
       const known = reportChartDefs.map((definition) => definition.key);
       const knownSet = new Set(known);
-      let stored = null;
-      try {
-        stored = JSON.parse(localStorage.getItem(
-          REPORT_CHART_PREFERENCES_KEY) || "null");
-      } catch (error) {
-        stored = null;
-      }
 
       const order = [];
       const seen = new Set();
@@ -86,24 +79,160 @@
           if (knownSet.has(key)) collapsed.add(key);
         });
       }
-      reportChartPreferences = {order, collapsed};
+
+      const hidden = new Set();
+      if (stored && Array.isArray(stored.hidden)) {
+        stored.hidden.forEach((key) => {
+          if (knownSet.has(key)) hidden.add(key);
+        });
+      }
+      return {order, collapsed, hidden};
+    }
+
+    function loadLegacyReportChartPreferences() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(
+          REPORT_CHART_PREFERENCES_KEY) || "null");
+        return stored && typeof stored === "object" ? stored : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function clearLegacyReportChartPreferences() {
+      try {
+        localStorage.removeItem(REPORT_CHART_PREFERENCES_KEY);
+      } catch (error) {
+        // Browser storage may be disabled.
+      }
+    }
+
+    function reportPreferencesPayload() {
+      return {
+        version: 1,
+        base_revision: reportPreferencesRevision,
+        order: reportChartPreferences.order.slice(),
+        hidden: Array.from(reportChartPreferences.hidden || []),
+        collapsed: Array.from(reportChartPreferences.collapsed || []),
+      };
+    }
+
+    function applyReportPreferencesSnapshot(data, preserveDraft = false) {
+      if (!data || (data.state !== "ready" && data.state !== "saving")) {
+        return;
+      }
+
+      reportPreferencesRevision = Number(data.revision || 0);
+      if (!preserveDraft) {
+        reportChartPreferences = normalizeReportChartPreferences(data);
+        if (AirCANnect.pages.isActive("report")) {
+          renderReportCharts();
+          signalStoreExpandedChartKeys().forEach((key) =>
+            ensureSignalStoreChartLoaded(key));
+        }
+      }
+      if (data.stored) clearLegacyReportChartPreferences();
+    }
+
+    async function persistReportChartPreferences() {
+      reportPreferencesSaveQueued = true;
+      if (reportPreferencesSavePromise) return reportPreferencesSavePromise;
+
+      reportPreferencesSavePromise = (async () => {
+        while (reportPreferencesSaveQueued) {
+          reportPreferencesSaveQueued = false;
+          const payload = reportPreferencesPayload();
+          const afterSerial =
+            AirCANnect.snapshots.read("report_preferences").serial;
+          const response = await AirCANnect.http.requestOk(
+            "/api/report/preferences", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify(payload),
+            });
+          const accepted = await response.json();
+          const requestId = Number(accepted.request || 0);
+          const result = await AirCANnect.snapshots.wait(
+            "report_preferences",
+            (data) => Number(data.update || 0) === requestId,
+            afterSerial, 8000, "report preferences save timed out");
+
+          if (!result.update_ok) {
+            if (result.update_error === "revision_conflict") {
+              applyReportPreferencesSnapshot(result, true);
+              reportPreferencesSaveQueued = true;
+              continue;
+            }
+            applyReportPreferencesSnapshot(result);
+            throw new Error(result.update_error ||
+              "report preferences save failed");
+          }
+          applyReportPreferencesSnapshot(result, reportPreferencesSaveQueued);
+        }
+      })().catch((error) => {
+        const current = AirCANnect.snapshots.read("report_preferences").data;
+        applyReportPreferencesSnapshot(current);
+        AirCANnect.ui.message("reportMsg", error.message, false);
+      }).finally(() => {
+        reportPreferencesSavePromise = null;
+        if (reportPreferencesSaveQueued) persistReportChartPreferences();
+      });
+      return reportPreferencesSavePromise;
+    }
+
+    async function ensureReportChartPreferences() {
+      if (reportPreferencesLoaded) return;
+      if (reportPreferencesLoadPromise) return reportPreferencesLoadPromise;
+
+      reportPreferencesLoadPromise = (async () => {
+        try {
+          const response = await AirCANnect.http.requestOk(
+            "/api/report/preferences", {cache: "no-store"});
+          let data = await response.json();
+          AirCANnect.snapshots.publish("report_preferences", data);
+          if (data.state === "loading") {
+            const afterSerial =
+              AirCANnect.snapshots.read("report_preferences").serial;
+            data = await AirCANnect.snapshots.wait(
+              "report_preferences", (next) => next.state === "ready",
+              afterSerial, 5000, "report preferences load timed out");
+          }
+
+          const preserveDraft = !!reportPreferencesSavePromise;
+          applyReportPreferencesSnapshot(data, preserveDraft);
+          if (!data.stored && legacyReportChartPreferences &&
+              !preserveDraft) {
+            reportChartPreferences = normalizeReportChartPreferences(
+              legacyReportChartPreferences);
+            persistReportChartPreferences();
+          }
+        } catch (error) {
+          if (legacyReportChartPreferences) {
+            reportChartPreferences = normalizeReportChartPreferences(
+              legacyReportChartPreferences);
+          }
+        }
+        reportPreferencesLoaded = true;
+      })().finally(() => {
+        reportPreferencesLoadPromise = null;
+      });
+      return reportPreferencesLoadPromise;
     }
 
     function saveReportChartPreferences() {
-      try {
-        localStorage.setItem(REPORT_CHART_PREFERENCES_KEY, JSON.stringify({
-          order: reportChartPreferences.order,
-          collapsed: Array.from(reportChartPreferences.collapsed),
-        }));
-      } catch (error) {
-        // Browser storage can be disabled; preferences remain valid in memory.
-      }
+      persistReportChartPreferences();
+    }
+
+    function reportChartIsHidden(key) {
+      return reportChartPreferences.hidden instanceof Set &&
+        reportChartPreferences.hidden.has(key);
     }
 
     function visibleReportChartOrder() {
       const definitions = new Map(reportChartDefs.map((definition) =>
         [definition.key, definition]));
       return reportChartPreferences.order.filter((key) => {
+        if (reportChartIsHidden(key)) return false;
         const definition = definitions.get(key);
         if (!definition) return false;
         if (definition.type === "events") {
@@ -133,6 +262,7 @@
       [order[index], order[target]] = [order[target], order[index]];
       saveReportChartPreferences();
       renderReportCharts();
+      renderReportChartOptions();
     }
 
     function toggleReportChartCollapsed(key) {
@@ -143,6 +273,85 @@
         reportChartPreferences.collapsed.add(key);
       }
       saveReportChartPreferences();
+      renderReportCharts();
+    }
+
+    function setReportChartVisible(key, visible) {
+      if (!(reportChartPreferences.hidden instanceof Set)) {
+        reportChartPreferences.hidden = new Set();
+      }
+      if (visible) {
+        reportChartPreferences.hidden.delete(key);
+        ensureSignalStoreChartLoaded(key);
+      } else {
+        reportChartPreferences.hidden.add(key);
+      }
+      saveReportChartPreferences();
+      renderReportCharts();
+      renderReportChartOptions();
+    }
+
+    function moveReportChartOption(key, delta) {
+      const order = reportChartPreferences.order;
+      const index = order.indexOf(key);
+      const target = index + delta;
+      if (index < 0 || target < 0 || target >= order.length) return;
+
+      [order[index], order[target]] = [order[target], order[index]];
+      saveReportChartPreferences();
+      renderReportCharts();
+      renderReportChartOptions();
+    }
+
+    function renderReportChartOptions() {
+      const host = document.getElementById("reportChartOptions");
+      if (!host) return;
+
+      host.textContent = "";
+      const definitions = new Map(reportChartDefs.map((definition) =>
+        [definition.key, definition]));
+      reportChartPreferences.order.forEach((key, index) => {
+        const definition = definitions.get(key);
+        if (!definition) return;
+
+        const row = document.createElement("div");
+        row.className = "report-chart-option";
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = !reportChartIsHidden(key);
+        checkbox.onchange = () => setReportChartVisible(
+          key, checkbox.checked);
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(definition.title));
+        row.appendChild(label);
+
+        [-1, 1].forEach((delta) => {
+          const button = document.createElement("button");
+          button.className = "btn";
+          button.type = "button";
+          button.textContent = delta < 0 ? "\u2191" : "\u2193";
+          button.title = delta < 0 ? "Move chart up" : "Move chart down";
+          button.disabled = delta < 0 ? index === 0 :
+            index === reportChartPreferences.order.length - 1;
+          button.onclick = () => moveReportChartOption(key, delta);
+          row.appendChild(button);
+        });
+        host.appendChild(row);
+      });
+    }
+
+    function showReportChartOptions() {
+      const dialog = document.getElementById("reportChartsDialog");
+      if (!dialog) return;
+      renderReportChartOptions();
+      dialog.showModal();
+    }
+
+    function resetReportChartPreferences() {
+      reportChartPreferences = normalizeReportChartPreferences(null);
+      saveReportChartPreferences();
+      renderReportChartOptions();
       renderReportCharts();
     }
 
@@ -1596,6 +1805,7 @@
       const chartByKey = new Map(reportChartDefs.map((definition) =>
         [definition.key, definition]));
       reportChartPreferences.order.forEach((key) => {
+        if (reportChartIsHidden(key)) return;
         const def = chartByKey.get(key);
         if (!def) return;
         if (def.type === "events") {
@@ -3177,6 +3387,10 @@
     }
 
     AirCANnect.events.subscribe("report", handleReportCompletion);
+    AirCANnect.events.subscribe("report_preferences", (data) => {
+      const preserveDraft = !!reportPreferencesSavePromise;
+      applyReportPreferencesSnapshot(data, preserveDraft);
+    });
     AirCANnect.actions.register("report.step-night", (_event, element) =>
       stepReportNight(Number(element.dataset.value)));
     AirCANnect.actions.register("report.toggle-calendar", () =>
@@ -3188,13 +3402,19 @@
     AirCANnect.actions.register("report.zoom", (_event, element) =>
       zoomReportWindow(Number(element.dataset.value)));
     AirCANnect.actions.register("report.reset-zoom", () => resetReportZoom());
+    AirCANnect.actions.register("report.configure-charts", () =>
+      showReportChartOptions());
+    AirCANnect.actions.register("report.reset-charts", () =>
+      resetReportChartPreferences());
     AirCANnect.pages.onLoad("report", (refresh) => {
-      if (refresh) {
-        refreshReportSummary(true);
-      } else {
-        loadReportSummary(true);
-        scheduleReportDrawAfterReveal();
-      }
+      ensureReportChartPreferences().then(() => {
+        if (refresh) {
+          refreshReportSummary(true);
+        } else {
+          loadReportSummary(true);
+          scheduleReportDrawAfterReveal();
+        }
+      });
     });
     AirCANnect.pages.onLeave("report", () => cancelReportRequests());
     window.addEventListener("resize", () => scheduleReportDraw());
@@ -3234,6 +3454,11 @@
     let reportDrag = null;
     let reportSelectedNightId = "";
     let reportCalView = null;
+    let reportPreferencesRevision = 1;
+    let reportPreferencesLoaded = false;
+    let reportPreferencesLoadPromise = null;
+    let reportPreferencesSavePromise = null;
+    let reportPreferencesSaveQueued = false;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
@@ -3339,8 +3564,9 @@
     let reportChartPreferences = {
       order: reportChartDefs.map((definition) => definition.key),
       collapsed: new Set(),
+      hidden: new Set(),
     };
-    loadReportChartPreferences();
+    const legacyReportChartPreferences = loadLegacyReportChartPreferences();
 
     const reportEventDefs = [
       {code: 7, key: "CSR", label: "CSR", color: "#2563eb"},

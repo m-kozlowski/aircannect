@@ -56,6 +56,8 @@ void print_web_memory_detail(Print &out, WebUI &web_ui) {
     print_web_buffer_memory(out, "storage_operation",
                             web.storage_operation, total_capacity);
     print_web_buffer_memory(out, "report", web.report, total_capacity);
+    print_web_buffer_memory(out, "report_preferences",
+                            web.report_preferences, total_capacity);
     print_web_buffer_memory(out, "stream", web.stream, total_capacity);
     print_web_buffer_memory(out, "console", web.console, total_capacity);
     print_web_buffer_memory(out, "live", web.live, total_capacity);

@@ -191,6 +191,10 @@ void WebUI::bind_snapshot_channels(
          report_http.completion_snapshot(),
          "report", "web_ui.snapshots.report_copy",
          SNAPSHOT_REPORT, 384);
+    bind(SnapshotChannelId::ReportPreferences,
+         report_http.preferences_snapshot(),
+         "report_preferences", "web_ui.snapshots.report_preferences_copy",
+         SNAPSHOT_REPORT_PREFERENCES, 3072);
 }
 
 void WebUI::reserve_cached_json() {
@@ -265,6 +269,8 @@ WebUiMemoryStatus WebUI::memory_status() {
         snapshot_channel(SnapshotChannelId::StorageOperation).cached);
     out.report = capture(
         snapshot_channel(SnapshotChannelId::Report).cached);
+    out.report_preferences = capture(
+        snapshot_channel(SnapshotChannelId::ReportPreferences).cached);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
     out.console_log_length = console_log_length_;
@@ -894,7 +900,8 @@ void WebUI::mark_snapshots_dirty(uint16_t mask) {
     if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE |
                 SNAPSHOT_OXIMETRY | SNAPSHOT_SETTINGS | SNAPSHOT_OTA |
                 SNAPSHOT_RESMED_OTA | SNAPSHOT_RESMED_REPOSITORY |
-                SNAPSHOT_STORAGE_OPERATION | SNAPSHOT_REPORT)) {
+                SNAPSHOT_STORAGE_OPERATION | SNAPSHOT_REPORT |
+                SNAPSHOT_REPORT_PREFERENCES)) {
         request_sse_push();
     }
 }

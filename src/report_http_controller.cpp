@@ -15,9 +15,11 @@
 
 #include "async_prepared_response.h"
 #include "async_deferred_response.h"
+#include "http_request_utils.h"
 #include "json_util.h"
 #include "night_catalog.h"
 #include "report_signal_store.h"
+#include "report_preferences_service.h"
 #include "report_task.h"
 #include "runtime_clock.h"
 #include "storage_stream_port.h"
@@ -30,6 +32,7 @@ constexpr size_t REPORT_HTTP_ETAG_BYTES = 128;
 constexpr size_t REPORT_HTTP_PENDING_CAPACITY = 6;
 constexpr uint32_t REPORT_HTTP_PENDING_TIMEOUT_MS = 30000;
 constexpr size_t REPORT_COMPLETION_JSON_RESERVE = 320;
+constexpr size_t REPORT_PREFERENCES_MAX_BODY_BYTES = 2048;
 
 constexpr const char *REPORT_SOURCE_REVISION_HEADER =
     "X-Report-Source-Revision";
@@ -591,11 +594,23 @@ void ReportHttpController::register_routes(HttpRouteRegistry &server) {
               [this](AsyncWebServerRequest *request) {
         send_plot(request);
     });
+    server.on(AsyncURIMatcher::exact("/api/report/preferences"), HTTP_GET,
+              [this](AsyncWebServerRequest *request) {
+        send_preferences(request);
+    });
+    server.on(
+        AsyncURIMatcher::exact("/api/report/preferences"), HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            send_preferences_update(request);
+        },
+        nullptr, http_request_body_handler);
 }
 
 void ReportHttpController::begin(ReportTask &report_task,
+                                 ReportPreferencesService &preferences,
                                  StorageStreamPort &stream_port) {
     report_task_ = &report_task;
+    preferences_ = &preferences;
     stream_port_ = &stream_port;
     observed_completion_ = {};
     completion_serial_ = 0;
@@ -611,10 +626,12 @@ void ReportHttpController::begin(ReportTask &report_task,
         pending_->mutex =
             xSemaphoreCreateMutexStatic(&pending_->mutex_storage);
     }
+    (void)preference_commands_.begin();
 }
 
 void ReportHttpController::poll() {
     publish_completion();
+    poll_preference_commands();
 
     if (!stream_port_ || !pending_ || !pending_->mutex) return;
 
@@ -763,6 +780,88 @@ void ReportHttpController::poll() {
         return;
     }
 
+}
+
+const PublishedJsonSnapshot &
+ReportHttpController::preferences_snapshot() const {
+    return preferences_->snapshot();
+}
+
+uint32_t ReportHttpController::next_preference_request_id() {
+    uint32_t id = next_preference_request_.fetch_add(
+        1, std::memory_order_relaxed);
+    if (id != 0) return id;
+
+    id = next_preference_request_.fetch_add(1, std::memory_order_relaxed);
+    return id == 0 ? 1 : id;
+}
+
+void ReportHttpController::poll_preference_commands() {
+    if (!preferences_) return;
+
+    if (pending_preference_command_.request_id == 0 &&
+        !preference_commands_.pop(pending_preference_command_)) {
+        return;
+    }
+    if (!preferences_->ready_for_update()) return;
+
+    const OperationAdmission admission = preferences_->update(
+        pending_preference_command_.body.data(),
+        pending_preference_command_.body.size(),
+        pending_preference_command_.request_id);
+    if (admission == OperationAdmission::Busy) return;
+
+    pending_preference_command_ = {};
+}
+
+void ReportHttpController::send_preferences(
+    AsyncWebServerRequest *request) const {
+    if (!request || !preferences_) {
+        send_json_error(request, 503, "preferences_unavailable");
+        return;
+    }
+
+    AsyncResponseStream *response = nullptr;
+    const JsonSnapshotResponse result =
+        preferences_->snapshot().prepare_response(request, response);
+    if (result == JsonSnapshotResponse::Busy) {
+        send_json_error(request, 503, "preferences_busy");
+        return;
+    }
+    if (result != JsonSnapshotResponse::Ready) {
+        send_json_error(request, 503, "response_alloc");
+        return;
+    }
+
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void ReportHttpController::send_preferences_update(
+    AsyncWebServerRequest *request) {
+    JsonDocument document;
+    std::string body;
+    if (!http_parse_json_body(request, document, body) ||
+        !document.is<JsonObject>() || body.empty() ||
+        body.size() > REPORT_PREFERENCES_MAX_BODY_BYTES) {
+        send_json_error(request, 400, "bad_preferences");
+        return;
+    }
+
+    PreferenceCommand command;
+    command.request_id = next_preference_request_id();
+    command.body = std::move(body);
+    const uint32_t request_id = command.request_id;
+    if (!preference_commands_.push(std::move(command))) {
+        send_json_error(request, 503, "preferences_queue_full");
+        return;
+    }
+
+    char response[96] = {};
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"queued\":true,\"request\":%lu}",
+             static_cast<unsigned long>(request_id));
+    request->send(202, "application/json", response);
 }
 
 void ReportHttpController::send_summary(

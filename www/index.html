@@ -48,6 +48,21 @@
     </form>
   </dialog>
 
+  <dialog class="report-charts-dialog" id="reportChartsDialog"
+          aria-labelledby="reportChartsDialogTitle">
+    <header>
+      <h2 id="reportChartsDialogTitle">Report charts</h2>
+    </header>
+    <div class="report-chart-options" id="reportChartOptions"></div>
+    <footer>
+      <button class="btn" type="button"
+              data-action="report.reset-charts">Reset</button>
+      <form method="dialog">
+        <button class="btn primary">Close</button>
+      </form>
+    </footer>
+  </dialog>
+
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -347,6 +362,10 @@
               <button class="btn" id="reportZoomReset"
                       data-action="report.reset-zoom">
                 Reset Zoom
+              </button>
+              <button class="btn" id="reportChartsButton"
+                      data-action="report.configure-charts">
+                Charts
               </button>
             </div>
             <div class="report-metrics">

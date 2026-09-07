@@ -61,6 +61,7 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus resmed_repository;
     WebUiBufferMemoryStatus storage_operation;
     WebUiBufferMemoryStatus report;
+    WebUiBufferMemoryStatus report_preferences;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
@@ -174,11 +175,12 @@ private:
     static constexpr uint16_t SNAPSHOT_RESMED_REPOSITORY = 1u << 8;
     static constexpr uint16_t SNAPSHOT_STORAGE_OPERATION = 1u << 9;
     static constexpr uint16_t SNAPSHOT_REPORT = 1u << 10;
+    static constexpr uint16_t SNAPSHOT_REPORT_PREFERENCES = 1u << 11;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS | SNAPSHOT_AS11_BLE |
         SNAPSHOT_OXIMETRY | SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA |
         SNAPSHOT_RESMED_REPOSITORY | SNAPSHOT_STORAGE_OPERATION |
-        SNAPSHOT_REPORT;
+        SNAPSHOT_REPORT | SNAPSHOT_REPORT_PREFERENCES;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_EXPORTS;
 
@@ -192,6 +194,7 @@ private:
         ResmedRepository,
         StorageOperation,
         Report,
+        ReportPreferences,
         Count,
     };
 

@@ -52,6 +52,7 @@
 #include "plx_peripheral.h"
 #include "provisioning.h"
 #include "report_http_controller.h"
+#include "report_preferences_service.h"
 #include "report_spool_service.h"
 #include "report_task.h"
 #include "resmed_firmware_http_controller.h"
@@ -159,6 +160,7 @@ static BleSensorSource oximetry_sensor_source(ble_runtime);
 static PlxPeripheral plx_peripheral(ble_runtime);
 static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
+static ReportPreferencesService report_preferences_service;
 static ReportHttpController report_http_controller;
 static StorageHttpController storage_http_controller;
 static StorageUploadHttpController storage_upload_http_controller;
@@ -1370,8 +1372,15 @@ void setup() {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
+    if (!report_preferences_service.begin(
+            StorageService::read_port(),
+            StorageService::atomic_write_port())) {
+        Log::logf(CAT_REPORT, LOG_ERROR,
+                  "report preferences failed to start\n");
+    }
     report_http_controller.begin(
-        report_task, StorageService::stream_port());
+        report_task, report_preferences_service,
+        StorageService::stream_port());
     log_memory_profile_checkpoint("therapy_reports");
 
     if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,
@@ -1705,6 +1714,7 @@ void loop() {
     refresh_status_presentations(now_ms);
     drain_can_rx_after("status_http");
 
+    report_preferences_service.poll();
     report_http_controller.poll();
     drain_can_rx_after("report_http");
 
