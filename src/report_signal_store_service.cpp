@@ -46,6 +46,7 @@ void ReportSignalStoreService::begin(
     read_port_ = &read_port;
     range_write_port_ = &range_write_port;
     write_port_ = &write_port;
+    tile_writer_.begin(read_port, range_write_port);
 }
 
 void ReportSignalStoreService::begin(StorageAtomicWritePort &write_port) {
@@ -447,13 +448,21 @@ bool ReportSignalStoreService::finish_range() {
     }
 
     status_.bytes_written += completion.bytes_written;
-    block_bytes_.reset();
-    block_buffers_.reset();
     if (phase_ == Phase::WaitHeader) {
         phase_ = Phase::EncodeBlock;
     } else {
-        advance_level();
+        StorageRangeWriteCommand memory;
+        memory.bytes = block_bytes_;
+        memory.buffers = block_buffers_;
+        const size_t prefix = range_.offset == 0
+            ? ReportSignalStoreFileCodec::HeaderBytes : 0;
+
+        tile_writer_.start(track_, level_, slot_, block_count_,
+            std::move(memory), prefix, operation_generation_, lane_);
+        phase_ = Phase::PrepareTiles;
     }
+    block_bytes_.reset();
+    block_buffers_.reset();
     return true;
 }
 
@@ -653,6 +662,11 @@ bool ReportSignalStoreService::poll() {
         case Phase::WaitHeader:
         case Phase::WaitBlock:
             return finish_range();
+        case Phase::PrepareTiles: {
+            const bool worked = tile_writer_.poll();
+            if (!tile_writer_.active()) advance_level();
+            return worked;
+        }
         case Phase::SubmitFinish:
         case Phase::WaitFinish:
             return finish_writes();
@@ -696,6 +710,8 @@ void ReportSignalStoreService::cancel() {
 }
 
 void ReportSignalStoreService::release_io() {
+    tile_writer_.reset();
+
     if (read_ticket_.valid() && read_port_) {
         (void)read_port_->abandon(read_ticket_);
     }

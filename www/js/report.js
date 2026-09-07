@@ -2518,10 +2518,20 @@
         !!(track.presentBlocks[Math.floor(slot / 8)] & (1 << (slot % 8)));
     }
 
-    function signalStoreLevel(track, spanMs) {
+    function signalStoreChartWidth() {
       const chartHost = document.getElementById("reportCharts");
-      const width = Math.max(320,
+      return Math.max(320,
         chartHost ? chartHost.clientWidth : window.innerWidth || 800);
+    }
+
+    function signalStoreLevel(track, spanMs, from, to) {
+      const width = signalStoreChartWidth();
+      const alignedRawBytes = (to - from) / track.interval * 2;
+      if (spanMs <= SIGNAL_STORE_RAW_CURVE_MAX_SPAN_MS &&
+          alignedRawBytes <= SIGNAL_STORE_RAW_CURVE_MAX_BYTES) {
+        return {name: "raw", interval: track.interval};
+      }
+
       const targetCells = width * 2;
       const candidates = [{name: "raw", interval: track.interval}];
       if (track.lodMask & 1) candidates.push({name: "1s", interval: 1000});
@@ -2530,6 +2540,40 @@
       return candidates.find((candidate) =>
         spanMs / candidate.interval <= targetCells) ||
         candidates[candidates.length - 1];
+    }
+
+    function signalStoreRawDisplayInterval(track, spanMs) {
+      const targetBuckets = signalStoreChartWidth();
+      const interval = Math.ceil(
+        spanMs / targetBuckets / track.interval) * track.interval;
+      return Math.max(track.interval, interval);
+    }
+
+    function signalStoreLevelBlockBytes(track, level) {
+      return SIGNAL_STORE_BLOCK_MS / level.interval *
+        (level.name === "raw" ? 2 : 4);
+    }
+
+    function signalStoreTransportTileBlocks(track, level) {
+      const bytesPerBlock = signalStoreLevelBlockBytes(track, level);
+      let tileBlocks = 1;
+      while (tileBlocks < SIGNAL_STORE_MAX_TILE_BLOCKS &&
+             bytesPerBlock * tileBlocks * 2 <= SIGNAL_STORE_TILE_MAX_BYTES) {
+        tileBlocks *= 2;
+      }
+      return tileBlocks;
+    }
+
+    function signalStoreTransportTileRange(track, level, blockStart) {
+      const tileDuration = signalStoreTransportTileBlocks(track, level) *
+        SIGNAL_STORE_BLOCK_MS;
+      const tileStart = Math.floor(blockStart / tileDuration) * tileDuration;
+      const trackEnd = track.firstBlock +
+        track.blockSlots * SIGNAL_STORE_BLOCK_MS;
+      return {
+        from: Math.max(track.firstBlock, tileStart),
+        to: Math.min(trackEnd, tileStart + tileDuration),
+      };
     }
 
     function signalStoreCacheKey(track, level, blockStart, context) {
@@ -2577,8 +2621,84 @@
       return blockStart + delta;
     }
 
+    function newSignalStoreRawBucket(points, lo, interval) {
+      return {
+        points,
+        lo,
+        interval,
+        bucket: null,
+        firstTime: null,
+        firstValue: 0,
+        minimumTime: null,
+        minimumValue: 0,
+        maximumTime: null,
+        maximumValue: 0,
+        lastTime: null,
+        lastValue: 0,
+        haveValue: true,
+      };
+    }
+
+    function flushSignalStoreRawBucket(bucket) {
+      if (bucket.firstTime === null) return;
+
+      const selected = [
+        {t: bucket.firstTime, value: bucket.firstValue},
+        {t: bucket.minimumTime, value: bucket.minimumValue},
+        {t: bucket.maximumTime, value: bucket.maximumValue},
+        {t: bucket.lastTime, value: bucket.lastValue},
+      ];
+      selected.sort((a, b) => a.t - b.t);
+      selected.forEach((point, index) => {
+        if (!index || point.t !== selected[index - 1].t) {
+          bucket.points.push({t: point.t, value: point.value});
+        }
+      });
+      bucket.firstTime = null;
+      bucket.minimumTime = null;
+      bucket.maximumTime = null;
+      bucket.lastTime = null;
+    }
+
+    function addSignalStoreRawSample(bucket, t, value) {
+      const bucketIndex = Math.floor((t - bucket.lo) / bucket.interval);
+      if (bucket.firstTime !== null && bucket.bucket !== bucketIndex) {
+        flushSignalStoreRawBucket(bucket);
+      }
+      if (bucket.firstTime === null) {
+        bucket.bucket = bucketIndex;
+        bucket.firstTime = t;
+        bucket.firstValue = value;
+        bucket.minimumTime = t;
+        bucket.minimumValue = value;
+        bucket.maximumTime = t;
+        bucket.maximumValue = value;
+      } else {
+        if (value < bucket.minimumValue) {
+          bucket.minimumTime = t;
+          bucket.minimumValue = value;
+        }
+        if (value > bucket.maximumValue) {
+          bucket.maximumTime = t;
+          bucket.maximumValue = value;
+        }
+      }
+      bucket.lastTime = t;
+      bucket.lastValue = value;
+    }
+
+    function markSignalStoreRawGap(bucket, t) {
+      flushSignalStoreRawBucket(bucket);
+      if (bucket.haveValue) {
+        bucket.points.push({gap: true, t});
+      }
+      bucket.haveValue = false;
+    }
+
     function decodeSignalStoreBlock(buffer, byteOffset, track, level,
-                                    blockStart, blockBytes, lo, hi) {
+                                    blockStart, blockBytes, lo, hi,
+                                    rawDisplayInterval = 0,
+                                    rawBucketState = null) {
       const view = new DataView(buffer, byteOffset, blockBytes);
       const points = [];
       const cells = SIGNAL_STORE_BLOCK_MS / level.interval;
@@ -2591,6 +2711,11 @@
         Math.floor((hi - firstSample) / level.interval) + 1);
       // A leading missing cell must break the line from the preceding block.
       let haveValue = true;
+      const reducedRaw = level.name === "raw" &&
+        rawDisplayInterval > level.interval;
+      const rawBucket = reducedRaw ? (rawBucketState ||
+        newSignalStoreRawBucket(points, lo, rawDisplayInterval)) : null;
+      if (rawBucketState) haveValue = rawBucketState.haveValue;
 
       for (let i = firstCell; i < endCell; i++) {
         const offset = level.name === "raw" ? i * 2 : i * 4;
@@ -2601,14 +2726,20 @@
         if (minimum === track.missingValue ||
             maximum === track.missingValue ||
             t >= blockStart + SIGNAL_STORE_BLOCK_MS) {
-          if (haveValue) points.push({gap: true, t});
+          if (rawBucket) {
+            markSignalStoreRawGap(rawBucket, t);
+          } else if (haveValue) {
+            points.push({gap: true, t});
+          }
           haveValue = false;
           continue;
         }
 
         const min = minimum * track.scale + track.offset;
         const max = maximum * track.scale + track.offset;
-        if (level.name === "raw") {
+        if (rawBucket) {
+          addSignalStoreRawSample(rawBucket, t, min);
+        } else if (level.name === "raw") {
           points.push({t, value: min});
         } else {
           points.push({
@@ -2621,6 +2752,11 @@
           });
         }
         haveValue = true;
+        if (rawBucket) rawBucket.haveValue = true;
+      }
+      if (rawBucket) {
+        rawBucket.haveValue = haveValue;
+        if (!rawBucketState) flushSignalStoreRawBucket(rawBucket);
       }
       return points;
     }
@@ -2675,8 +2811,10 @@
 
           const blockBytes = SIGNAL_STORE_BLOCK_MS / level.interval *
             (envelope ? 4 : 2);
-          const presentCount = Array.from(present)
-            .filter((value) => value === "1").length;
+          let presentCount = 0;
+          for (let i = 0; i < present.length; i++) {
+            if (present[i] === "1") presentCount++;
+          }
           if (buffer.byteLength !== presentCount * blockBytes) {
             throw new Error("invalid report signal payload");
           }
@@ -2695,6 +2833,12 @@
 
             const blockStart = from + i * SIGNAL_STORE_BLOCK_MS;
             const key = signalStoreCacheKey(track, level, blockStart, context);
+            const cached = signalStoreTouchBlock(key, track, context);
+            if (cached && cached.closed &&
+                blockStart + SIGNAL_STORE_BLOCK_MS <= track.lastValid) {
+              packedOffset += blockBytes;
+              continue;
+            }
             reportSignalBlockCache.set(key, {
               buffer: buffer.slice(packedOffset, packedOffset + blockBytes),
               revision: context.revision,
@@ -2720,25 +2864,27 @@
                                                 context) {
       if (!context.active()) return;
 
+      const tileDuration = signalStoreTransportTileBlocks(track, level) *
+        SIGNAL_STORE_BLOCK_MS;
       const runs = [];
-      let run = null;
-      for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
-        const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
-        const key = signalStoreCacheKey(track, level, block, context);
-        if (!signalStoreBlockPresent(track, slot)) continue;
+      const firstTile = Math.floor(from / tileDuration) * tileDuration;
+      for (let tileStart = firstTile; tileStart < to;
+           tileStart += tileDuration) {
+        const tile = signalStoreTransportTileRange(track, level, tileStart);
+        const requestedFrom = Math.max(from, tile.from);
+        const requestedTo = Math.min(to, tile.to);
+        if (!(requestedTo > requestedFrom)) continue;
 
-        if (signalStoreTouchBlock(key, track, context)) {
-          run = null;
-          continue;
-        }
+        let missing = false;
+        for (let block = requestedFrom; block < requestedTo;
+             block += SIGNAL_STORE_BLOCK_MS) {
+          const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
+          if (!signalStoreBlockPresent(track, slot)) continue;
 
-        if (!run || block - run.from >=
-            SIGNAL_STORE_MAX_BLOCKS * SIGNAL_STORE_BLOCK_MS) {
-          run = {from: block, to: block + SIGNAL_STORE_BLOCK_MS};
-          runs.push(run);
-        } else {
-          run.to = block + SIGNAL_STORE_BLOCK_MS;
+          const key = signalStoreCacheKey(track, level, block, context);
+          if (!signalStoreTouchBlock(key, track, context)) missing = true;
         }
+        if (missing) runs.push(tile);
       }
 
       await runReportFetchJobs(runs.map((run) => () =>
@@ -2774,11 +2920,15 @@
         Math.ceil(hi / SIGNAL_STORE_BLOCK_MS) * SIGNAL_STORE_BLOCK_MS);
       if (!(to > from)) return [];
 
-      const level = signalStoreLevel(track, hi - lo);
+      const level = signalStoreLevel(track, hi - lo, from, to);
       await ensureSignalStoreTrackBlocks(track, level, from, to, context);
       if (!context.active()) return [];
 
       const points = [];
+      const rawDisplayInterval = level.name === "raw"
+        ? signalStoreRawDisplayInterval(track, hi - lo) : 0;
+      const rawBucketState = rawDisplayInterval > level.interval
+        ? newSignalStoreRawBucket(points, lo, rawDisplayInterval) : null;
       for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
         const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
         const present = signalStoreBlockPresent(track, slot);
@@ -2787,11 +2937,20 @@
 
         if (present && !entry) throw new Error("report signal block unavailable");
 
-        const visible = entry ? decodeSignalStoreBlock(
-          entry.buffer, 0, track, level, block, entry.buffer.byteLength, lo, hi) : [];
+        if (rawBucketState && !entry) {
+          markSignalStoreRawGap(rawBucketState, Math.max(block, lo));
+          continue;
+        }
 
-        appendSignalStorePoints(points, visible, Math.max(block, lo));
+        const visible = entry ? decodeSignalStoreBlock(
+          entry.buffer, 0, track, level, block, entry.buffer.byteLength, lo, hi,
+          rawDisplayInterval, rawBucketState) : [];
+
+        if (!rawBucketState) {
+          appendSignalStorePoints(points, visible, Math.max(block, lo));
+        }
       }
+      if (rawBucketState) flushSignalStoreRawBucket(rawBucketState);
 
       if (context.prefetchJobs) {
         const margin = SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS;
@@ -3473,6 +3632,10 @@
     const SIGNAL_STORE_BLOCK_CACHE_ENTRY_OVERHEAD = 256;
     const SIGNAL_STORE_EVENT_CACHE_MAX = 8;
     const SIGNAL_STORE_PREFETCH_BLOCKS = 2;
+    const SIGNAL_STORE_MAX_TILE_BLOCKS = 32;
+    const SIGNAL_STORE_TILE_MAX_BYTES = 45000;
+    const SIGNAL_STORE_RAW_CURVE_MAX_SPAN_MS = 30 * 60 * 1000;
+    const SIGNAL_STORE_RAW_CURVE_MAX_BYTES = 3 * 45000;
     const SIGNAL_STORE_SIGNAL_NAMES = [
       "flow",
       "inspiratory_pressure",

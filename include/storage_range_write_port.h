@@ -18,6 +18,8 @@ struct StorageRangeWriteCommand {
     std::shared_ptr<const StorageWriteBuffers> buffers;
     uint64_t offset = 0;
     bool truncate = false;
+    // Discardable files may skip the close-time fsync.
+    bool sync_on_close = true;
     // Retained writes complete after write(), and close at the build boundary.
     bool retain_handle = false;
     bool finish = false;

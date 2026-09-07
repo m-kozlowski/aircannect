@@ -109,7 +109,11 @@ bool ReportExecutor::poll(size_t record_budget) {
             continue;
         }
         if (state_ == ReportExecutorState::FinishingOperation) {
-            if (!poll_operation_end()) break;
+            bool sink_progressed = false;
+            if (!poll_operation_end(sink_progressed)) {
+                progressed = sink_progressed || progressed;
+                break;
+            }
             progressed = true;
             continue;
         }
@@ -119,7 +123,9 @@ bool ReportExecutor::poll(size_t record_budget) {
             break;
         }
 
-        if (!sink_->ready()) {
+        bool sink_progressed = false;
+        if (!sink_->ready(&sink_progressed)) {
+            progressed = sink_progressed || progressed;
             if (sink_->failure_reason()) {
                 finish(ReportExecutorState::Failed,
                        ReportExecutorError::SinkRejected);
@@ -668,8 +674,8 @@ void ReportExecutor::finish_operation() {
     state_ = ReportExecutorState::FinishingOperation;
 }
 
-bool ReportExecutor::poll_operation_end() {
-    if (!sink_->end_operation()) {
+bool ReportExecutor::poll_operation_end(bool &progressed) {
+    if (!sink_->end_operation(&progressed)) {
         if (!sink_->failure_reason()) return false;
 
         finish(ReportExecutorState::Failed, ReportExecutorError::SinkRejected);

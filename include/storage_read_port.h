@@ -68,6 +68,7 @@ struct StorageReadCompletion {
     OperationOutcome outcome;
     StoragePreparedRead prepared;
     uint64_t modified = 0;
+    uint64_t file_size = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 

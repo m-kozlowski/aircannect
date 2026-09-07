@@ -143,6 +143,7 @@ struct ReadJob {
     size_t target_length = 0;
     size_t bytes_read = 0;
     uint64_t modified = 0;
+    uint64_t file_size = 0;
     size_t tail_lines = 0;
     bool tail_scan_initialized = false;
     bool tail_suffix_initialized = false;
@@ -1933,6 +1934,7 @@ void finish_read_job(size_t index,
     completion.ticket = job.ticket;
     completion.outcome = outcome;
     completion.modified = job.modified;
+    completion.file_size = job.file_size;
     copy_cstr(completion.error, sizeof(completion.error), error ? error : "");
     const bool abandoned = job.abandon_requested;
     PreparedReadSlot *prepared_slot = nullptr;
@@ -2029,6 +2031,7 @@ bool open_read_job(size_t index, const char *&error) {
         size_t file_size = 0;
         {
             file_size = active_read_file.size();
+            job.file_size = file_size;
         }
 
         if (job.mode == StorageReadMode::TailLines) {

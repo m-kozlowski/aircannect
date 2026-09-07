@@ -59,6 +59,7 @@ struct StorageByteStream {
     uint64_t produced = 0;
     uint32_t ready_ms = 0;
     StorageStreamVerification verification = StorageStreamVerification::None;
+    bool missing_ok = false;
     bool metadata_ready = false;
     bool input_open = false;
 
@@ -144,6 +145,7 @@ bool StorageStreamService::request_stream(
     stream->source_offset = command.source_offset;
     stream->source_length = command.source_length;
     stream->verification = command.verification;
+    stream->missing_ok = command.missing_ok;
 
     if (!lock(0)) {
         copy_cstr(error_out, error_out_size, "stream_busy");
@@ -361,7 +363,8 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
         errno = 0;
         stream.input = Storage::open(stream.path, "r");
         const int open_error = errno;
-        if (!stream.input) {
+        if (!stream.input &&
+            !(stream.missing_ok && open_error == ENOENT)) {
             Log::logf(CAT_STORAGE, LOG_WARN,
                       "stream open failed errno=%d path=%s\n",
                       open_error, stream.path);

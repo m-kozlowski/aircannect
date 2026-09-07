@@ -937,7 +937,8 @@ bool ReportSignalStoreBuilder::accept_series_span(
 }
 
 
-bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
+bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
+                                             bool *progressed) {
     if (!runtime_ || failure_reason_) return false;
     if (!store_) {
         failure_reason_ = "report_signal_store_writer_unavailable";
@@ -948,7 +949,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
         runtime_->writing_track == SIZE_MAX) return true;
 
     if (runtime_->writing_track != SIZE_MAX) {
-        store_->poll();
+        if (store_->poll() && progressed) *progressed = true;
         if (!store_->status().terminal()) return false;
         if (store_->status().state != ReportSignalStoreState::Ready) {
             // The service retains the error until the engine resets it.
@@ -1057,6 +1058,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
                 return false;
             }
 
+            if (progressed) *progressed = true;
             runtime_->writing_track = i;
             runtime_->writing_slot = slot;
             runtime_->writing_count = block_count;
@@ -1067,16 +1069,20 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial) {
     return true;
 }
 
-bool ReportSignalStoreBuilder::ready() {
+bool ReportSignalStoreBuilder::ready(bool *progressed) {
+    if (progressed) *progressed = false;
     return flush_blocks(
-        runtime_ && runtime_->buffered_raw_bytes > RAW_BUFFER_BUDGET);
+        runtime_ && runtime_->buffered_raw_bytes > RAW_BUFFER_BUDGET,
+        progressed);
 }
 
-bool ReportSignalStoreBuilder::end_operation() { return ready(); }
+bool ReportSignalStoreBuilder::end_operation(bool *progressed) {
+    return ready(progressed);
+}
 
-bool ReportSignalStoreBuilder::flush_lod() {
+bool ReportSignalStoreBuilder::flush_lod(bool *progressed) {
     if (runtime_->writing_track != SIZE_MAX) {
-        store_->poll();
+        if (store_->poll() && progressed) *progressed = true;
         if (!store_->status().terminal()) return false;
         if (store_->status().state != ReportSignalStoreState::Ready) {
             failure_reason_ = store_->status().error;
@@ -1137,6 +1143,7 @@ bool ReportSignalStoreBuilder::flush_lod() {
                 return false;
             }
 
+            if (progressed) *progressed = true;
             runtime_->writing_track = i;
             runtime_->writing_slot = slot;
             runtime_->writing_count = count;
@@ -1177,17 +1184,19 @@ bool ReportSignalStoreBuilder::accept_event(
     return true;
 }
 
-bool ReportSignalStoreBuilder::finish_build() {
+bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     if (!runtime_ || !runtime_->active || !runtime_->plan) {
         failure_reason_ = "report_signal_store_finish_state_invalid";
         return false;
     }
 
+    if (progressed) *progressed = false;
+
     if (!runtime_->raw_finished) {
-        if (!flush_blocks(true)) return false;
+        if (!flush_blocks(true, progressed)) return false;
         runtime_->raw_finished = true;
     }
-    if (!flush_lod()) return false;
+    if (!flush_lod(progressed)) return false;
 
     if (runtime_->event_count > 1) {
         std::sort(runtime_->events,

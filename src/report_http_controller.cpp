@@ -10,7 +10,10 @@
 #include <memory>
 #include <new>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <string_view>
 #include <utility>
 
 #include "async_prepared_response.h"
@@ -18,6 +21,7 @@
 #include "http_request_utils.h"
 #include "json_util.h"
 #include "night_catalog.h"
+#include "report_signal_tile.h"
 #include "report_signal_store.h"
 #include "report_preferences_service.h"
 #include "report_task.h"
@@ -193,22 +197,102 @@ bool request_etag_matches(AsyncWebServerRequest *request,
         String candidate = values.substring(start, end);
         candidate.trim();
         if (candidate == "*" || candidate == etag) return true;
+
+        // If-None-Match uses weak comparison, so accept either spelling.
+        if (candidate.startsWith("W/") && candidate.substring(2) == etag) {
+            return true;
+        }
+        if (strncmp(etag, "W/", 2) == 0 && candidate == etag + 2) {
+            return true;
+        }
         start = end + 1;
     }
     return false;
+}
+
+std::string_view trim_view(std::string_view value) {
+    const size_t first = value.find_first_not_of(" \t");
+    if (first == std::string_view::npos) return {};
+
+    const size_t last = value.find_last_not_of(" \t");
+    return value.substr(first, last - first + 1);
+}
+
+bool encoding_token(std::string_view token, const char *expected) {
+    const size_t length = strlen(expected);
+    return token.size() == length &&
+        strncasecmp(token.data(), expected, length) == 0;
+}
+
+float encoding_quality(std::string_view parameters) {
+    while (!parameters.empty()) {
+        const size_t separator = parameters.find(';');
+        const std::string_view parameter = trim_view(
+            parameters.substr(0, separator));
+        const size_t equals = parameter.find('=');
+        if (equals != std::string_view::npos &&
+            encoding_token(trim_view(parameter.substr(0, equals)), "q")) {
+            const std::string quality(trim_view(parameter.substr(equals + 1)));
+            char *end = nullptr;
+            const float value = strtof(quality.c_str(), &end);
+            if (end != quality.c_str() && *end == '\0' &&
+                value >= 0.0f && value <= 1.0f) {
+                return value;
+            }
+            return 0.0f;
+        }
+        if (separator == std::string_view::npos) break;
+        parameters.remove_prefix(separator + 1);
+    }
+    return 1.0f;
+}
+
+bool accepts_deflate(AsyncWebServerRequest *request) {
+    if (!request || !request->hasHeader("Accept-Encoding")) return false;
+
+    const AsyncWebHeader *header = request->getHeader("Accept-Encoding");
+    if (!header) return false;
+
+    const String value = header->value();
+    std::string_view encodings(value.c_str(), value.length());
+    bool explicit_deflate = false;
+    bool deflate_accepted = false;
+    bool wildcard_accepted = false;
+    while (!encodings.empty()) {
+        const size_t separator = encodings.find(',');
+        const std::string_view item = encodings.substr(0, separator);
+        const size_t parameters = item.find(';');
+        const std::string_view token = trim_view(item.substr(0, parameters));
+        const float quality = encoding_quality(
+            parameters == std::string_view::npos ? std::string_view()
+                                                  : item.substr(parameters + 1));
+        if (encoding_token(token, "deflate")) {
+            explicit_deflate = true;
+            deflate_accepted = quality > 0.0f;
+        } else if (encoding_token(token, "*")) {
+            wildcard_accepted = quality > 0.0f;
+        }
+        if (separator == std::string_view::npos) break;
+        encodings.remove_prefix(separator + 1);
+    }
+    return explicit_deflate ? deflate_accepted : wildcard_accepted;
 }
 
 void add_common_headers(AsyncWebServerResponse *response,
                         const char *etag,
                         SourceRevision source_revision,
                         uint32_t generation,
-                        bool versioned = false) {
+                        bool versioned = false,
+                        bool vary_accept_encoding = false) {
     if (!response) return;
 
     response->addHeader("Cache-Control", versioned
         ? "private, max-age=86400, immutable" : "no-cache");
     response->addHeader("Accept-Ranges", "none");
     if (etag && etag[0]) response->addHeader("ETag", etag);
+    if (vary_accept_encoding) {
+        response->addHeader("Vary", "Accept-Encoding");
+    }
 
     if (source_revision.valid()) {
         char revision[17] = {};
@@ -274,14 +358,20 @@ void send_not_modified(AsyncWebServerRequest *request,
                        const char *etag,
                        SourceRevision source_revision,
                        uint32_t generation,
-                       bool versioned = false) {
+                       bool versioned = false,
+                       bool vary_accept_encoding = false) {
     AsyncWebServerResponse *response = request->beginResponse(304);
     if (!response) {
         request->send(304);
         return;
     }
 
-    add_common_headers(response, etag, source_revision, generation, versioned);
+    add_common_headers(response,
+                       etag,
+                       source_revision,
+                       generation,
+                       versioned,
+                       vary_accept_encoding);
     request->send(response);
 }
 
@@ -350,7 +440,7 @@ bool format_signal_etag(const ReportSignalRangeQuery &query,
     const int written = snprintf(
         out,
         out_size,
-        "\"signal-%s-%016llx-%08lx-%u-%u-%lu-%u-%lld-%u\"",
+        "W/\"signal-%s-%016llx-%08lx-%u-%u-%lu-%u-%lld-%u\"",
         day,
         static_cast<unsigned long long>(
             query.track.source_revision.value()),
@@ -533,6 +623,7 @@ struct HttpStreamRef {
     StorageStreamPort *port = nullptr;
     std::shared_ptr<StorageByteStream> stream;
     size_t size = 0;
+    size_t source_offset = 0;
     bool finished = false;
 
     ~HttpStreamRef() { finish(false); }
@@ -552,12 +643,18 @@ struct ReportHttpController::PendingResponses {
         std::shared_ptr<AsyncDeferredResponse::State> response;
         StorageStreamCommand command;
         std::shared_ptr<StorageByteStream> stream;
+        StorageStreamCommand sidecar_command;
+        std::shared_ptr<StorageByteStream> sidecar_stream;
         uint32_t deadline_ms = 0;
         uint64_t response_size = 0;
+        uint64_t raw_response_size = 0;
         SleepDayId sleep_day;
         SourceRevision source_revision;
         uint32_t generation = 0;
         bool versioned = false;
+        bool deflate_active = false;
+        bool sidecar_attached = false;
+        size_t header_used = 0;
         uint16_t track_index = 0;
         uint32_t interval_ms = 0;
         float value_scale = 0;
@@ -566,11 +663,13 @@ struct ReportHttpController::PendingResponses {
         int64_t first_block_start_ms = 0;
         size_t block_count = 0;
         bool envelope = false;
+        uint8_t tile_header[ReportSignalTile::HeaderBytes] = {};
+        uint8_t sidecar_header[ReportSignalTile::HeaderBytes] = {};
         char etag[REPORT_HTTP_ETAG_BYTES] = {};
         char level[8] = {};
         char present_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS + 1] = {};
 
-        bool used() const { return response_size != 0; }
+        bool used() const { return raw_response_size != 0; }
     };
 
     StaticSemaphore_t mutex_storage = {};
@@ -643,34 +742,142 @@ void ReportHttpController::poll() {
             continue;
         }
 
-        // Moving leaves response_size in the slot, reserving it while poll
+        // Moving leaves the raw response size in the slot, reserving it while poll
         // consults storage without holding the HTTP admission mutex.
         PendingResponses::Entry entry = std::move(slot);
         xSemaphoreGive(pending_->mutex);
 
+        auto finish_stream = [this](
+                                 std::shared_ptr<StorageByteStream> &stream) {
+            if (stream) stream_port_->finish(*stream, false);
+        };
+
         const bool expired = entry.response->cancelled();
         if (expired) {
-            if (entry.stream) stream_port_->finish(*entry.stream, false);
+            finish_stream(entry.stream);
+            finish_stream(entry.sidecar_stream);
         }
 
         const bool timed_out =
             millis_deadline_reached(now_ms, entry.deadline_ms);
         StorageStreamStatus status;
+        bool waiting = false;
 
-        if (!expired && !entry.stream && !timed_out) {
-            if (!stream_port_->request_stream(entry.command,
-                                              entry.stream,
-                                              status.error,
-                                              sizeof(status.error))) {
-                if (strcmp(status.error, "stream_busy") != 0 &&
-                    strcmp(status.error, "stream_slots_full") != 0) {
-                    status.state = StorageStreamState::Error;
+        auto fallback_to_raw = [&] {
+            finish_stream(entry.sidecar_stream);
+            entry.sidecar_stream.reset();
+            entry.sidecar_attached = false;
+            entry.sidecar_command = {};
+            entry.header_used = 0;
+            entry.response_size = entry.raw_response_size;
+            status = StorageStreamStatus();
+        };
+
+        if (!expired && !timed_out && !entry.sidecar_command.path.empty() &&
+            !entry.deflate_active) {
+            if (!entry.sidecar_stream) {
+                if (!stream_port_->request_stream(
+                        entry.sidecar_command,
+                        entry.sidecar_stream,
+                        status.error,
+                        sizeof(status.error))) {
+                    if (strcmp(status.error, "stream_busy") == 0 ||
+                        strcmp(status.error, "stream_slots_full") == 0) {
+                        waiting = true;
+                    } else {
+                        fallback_to_raw();
+                    }
+                }
+            }
+
+            if (!waiting && entry.sidecar_stream &&
+                !stream_port_->status(*entry.sidecar_stream, status)) {
+                waiting = true;
+            }
+
+            if (!waiting) {
+                if (status.state == StorageStreamState::Preparing) {
+                    waiting = true;
+                } else if (status.state == StorageStreamState::Error ||
+                           status.state == StorageStreamState::Cancelled) {
+                    fallback_to_raw();
+                } else if (status.state != StorageStreamState::Ready) {
+                    fallback_to_raw();
+                } else if (status.size <= ReportSignalTile::HeaderBytes) {
+                    fallback_to_raw();
+                } else if (!entry.sidecar_attached) {
+                    if (!stream_port_->attach(*entry.sidecar_stream)) {
+                        fallback_to_raw();
+                    } else {
+                        entry.sidecar_attached = true;
+                    }
+                }
+            }
+
+            if (!waiting && !entry.sidecar_command.path.empty() &&
+                entry.sidecar_attached) {
+                if (entry.header_used < ReportSignalTile::HeaderBytes) {
+                    const StorageStreamRead read = stream_port_->read(
+                        *entry.sidecar_stream,
+                        entry.sidecar_header + entry.header_used,
+                        ReportSignalTile::HeaderBytes - entry.header_used,
+                        entry.header_used);
+                    if (read.state == StorageStreamReadState::Data &&
+                        read.bytes > 0) {
+                        entry.header_used += read.bytes;
+                        if (entry.header_used < ReportSignalTile::HeaderBytes) {
+                            waiting = true;
+                        }
+                    } else if (read.state == StorageStreamReadState::Retry) {
+                        waiting = true;
+                    } else {
+                        StorageStreamStatus read_status;
+                        if (stream_port_->status(*entry.sidecar_stream,
+                                                 read_status)) {
+                            status = read_status;
+                        }
+                        fallback_to_raw();
+                    }
+                }
+
+                if (!waiting && !entry.sidecar_command.path.empty() &&
+                    entry.header_used == ReportSignalTile::HeaderBytes) {
+                    ReportSignalTile expected_tile;
+                    memcpy(expected_tile.header,
+                           entry.tile_header,
+                           ReportSignalTile::HeaderBytes);
+                    if (!expected_tile.matches(entry.sidecar_header,
+                                               entry.header_used,
+                                               status.size)) {
+                        fallback_to_raw();
+                    } else {
+                        entry.deflate_active = true;
+                        entry.response_size =
+                            status.size - entry.header_used;
+                    }
                 }
             }
         }
 
-        if (!expired && entry.stream && !timed_out) {
-            (void)stream_port_->status(*entry.stream, status);
+        if (!expired && !timed_out && !waiting &&
+            !entry.deflate_active) {
+            if (!entry.stream) {
+                if (!stream_port_->request_stream(entry.command,
+                                                  entry.stream,
+                                                  status.error,
+                                                  sizeof(status.error))) {
+                    if (strcmp(status.error, "stream_busy") != 0 &&
+                        strcmp(status.error, "stream_slots_full") != 0) {
+                        status.state = StorageStreamState::Error;
+                    }
+                }
+            }
+            if (entry.stream) {
+                (void)stream_port_->status(*entry.stream, status);
+            }
+            if (status.state == StorageStreamState::Preparing) {
+                waiting = true;
+            }
         }
 
         // Admission now protects the source range. Check its version after
@@ -680,40 +887,54 @@ void ReportHttpController::poll() {
             current.source_revision != entry.source_revision ||
             current.generation != entry.generation;
 
-        const bool waiting = !expired && !timed_out && !version_changed &&
-            status.state == StorageStreamState::Preparing;
+        const bool keep_pending = !expired && !timed_out &&
+            !version_changed && waiting;
 
         xSemaphoreTake(pending_->mutex, portMAX_DELAY);
-        if (waiting) slot = std::move(entry);
+        if (keep_pending) slot = std::move(entry);
         else slot = {};
         xSemaphoreGive(pending_->mutex);
 
-        if (waiting || expired) continue;
+        if (keep_pending || expired) continue;
 
         PendingResponses::Entry ready = std::move(entry);
         if (version_changed) {
-            if (ready.stream) stream_port_->finish(*ready.stream, false);
+            finish_stream(ready.stream);
+            finish_stream(ready.sidecar_stream);
             ready.response->publish(
                 json_error_response(409, "report_version_changed"));
             return;
         }
         if (timed_out) {
-            if (ready.stream) stream_port_->finish(*ready.stream, false);
+            finish_stream(ready.stream);
+            finish_stream(ready.sidecar_stream);
             ready.response->publish(
                 json_error_response(503, "report_stream_timeout"));
             return;
         }
         if (status.state == StorageStreamState::Error ||
             status.state == StorageStreamState::Cancelled) {
-            if (ready.stream) stream_port_->finish(*ready.stream, false);
+            finish_stream(ready.stream);
+            finish_stream(ready.sidecar_stream);
             ready.response->publish(json_error_response(
                 503, status.error[0] ? status.error : "report_stream_failed"));
             return;
         }
-        if (status.state != StorageStreamState::Ready ||
-            status.size != ready.response_size ||
-            !stream_port_->attach(*ready.stream)) {
-            stream_port_->finish(*ready.stream, false);
+        const bool use_deflate = ready.deflate_active;
+        const uint64_t source_size = use_deflate
+            ? ready.response_size + ready.header_used
+            : ready.raw_response_size;
+        std::shared_ptr<StorageByteStream> *output_stream = use_deflate
+            ? &ready.sidecar_stream : &ready.stream;
+        const bool output_attached = use_deflate
+            ? ready.sidecar_attached
+            : (ready.stream && stream_port_->attach(*ready.stream));
+        if (source_size > static_cast<uint64_t>(SIZE_MAX) ||
+            status.state != StorageStreamState::Ready ||
+            status.size != source_size || !*output_stream ||
+            !output_attached) {
+            finish_stream(ready.stream);
+            finish_stream(ready.sidecar_stream);
             ready.response->publish(
                 json_error_response(503, "report_stream_unavailable"));
             return;
@@ -721,13 +942,17 @@ void ReportHttpController::poll() {
 
         std::shared_ptr<HttpStreamRef> ref = std::make_shared<HttpStreamRef>();
         if (!ref) {
-            stream_port_->finish(*ready.stream, false);
+            finish_stream(ready.stream);
+            finish_stream(ready.sidecar_stream);
             ready.response->publish(json_error_response(503, "response_alloc"));
             return;
         }
         ref->port = stream_port_;
-        ref->stream = std::move(ready.stream);
+        ref->stream = use_deflate
+            ? std::move(ready.sidecar_stream)
+            : std::move(ready.stream);
         ref->size = static_cast<size_t>(ready.response_size);
+        ref->source_offset = use_deflate ? ReportSignalTile::HeaderBytes : 0;
 
         AsyncWebServerResponse *response = new (std::nothrow)
             AsyncPreparedResponse(
@@ -741,18 +966,24 @@ void ReportHttpController::poll() {
                     }
 
                     const StorageStreamRead read = ref->port->read(
-                        *ref->stream, buffer, max_length, offset);
+                        *ref->stream,
+                        buffer,
+                        max_length,
+                        ref->source_offset + offset);
                     if (read.state == StorageStreamReadState::Retry) {
                         return RESPONSE_TRY_AGAIN;
                     }
                     if (read.state != StorageStreamReadState::Data) return 0;
-                    if (offset + read.bytes >= ref->size) {
+                    if (offset <= ref->size &&
+                        read.bytes >= ref->size - offset) {
                         ref->finish(true);
                     }
                     return read.bytes;
                 });
         if (!response) {
             ref->finish(false);
+            finish_stream(ready.stream);
+            finish_stream(ready.sidecar_stream);
             ready.response->publish(json_error_response(503, "response_alloc"));
             return;
         }
@@ -761,7 +992,8 @@ void ReportHttpController::poll() {
                            ready.etag,
                            ready.source_revision,
                            ready.generation,
-                           ready.versioned);
+                           ready.versioned,
+                           ready.kind == PendingKind::Signal);
         if (ready.kind == PendingKind::Signal) {
             add_signal_headers(response,
                                ready.track_index,
@@ -774,6 +1006,9 @@ void ReportHttpController::poll() {
                                ready.value_offset,
                                ready.grid_phase_ms,
                                ready.envelope);
+            if (use_deflate) {
+                response->addHeader("Content-Encoding", "deflate");
+            }
         }
         ready.response->publish(
             std::unique_ptr<AsyncWebServerResponse>(response));
@@ -1080,6 +1315,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 
         pending.kind = PendingKind::Events;
         pending.response_size = query.file_size;
+        pending.raw_response_size = query.file_size;
         pending.source_revision = query.source_revision;
         pending.generation = query.generation;
         (void)format_events_etag(query, pending.etag, sizeof(pending.etag));
@@ -1092,7 +1328,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
                               pending.etag,
                               query.source_revision,
                               query.generation,
-                              pending.versioned);
+                              pending.versioned,
+                              false);
             return;
         }
 
@@ -1140,6 +1377,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 
         pending.kind = PendingKind::Signal;
         pending.response_size = query.range.length;
+        pending.raw_response_size = query.range.length;
         pending.source_revision = query.track.source_revision;
         pending.generation = query.track.generation;
         pending.track_index = query.track.track_index;
@@ -1168,7 +1406,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
                               pending.etag,
                               pending.source_revision,
                               pending.generation,
-                              pending.versioned);
+                              pending.versioned,
+                              true);
             return;
         }
 
@@ -1182,7 +1421,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
                                pending.etag,
                                pending.source_revision,
                                pending.generation,
-                               pending.versioned);
+                               pending.versioned,
+                               true);
             add_signal_headers(response,
                                pending.track_index,
                                pending.level,
@@ -1205,13 +1445,51 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         command.verification = StorageStreamVerification::None;
         command.source_offset = query.range.offset;
         command.source_length = query.range.length;
+
+        ReportSignalTile tile;
+        char sidecar_path[AC_STORAGE_PATH_MAX] = {};
+        const size_t first_slot = track_first_slot(
+            query.track, query.first_block_start_ms);
+        if (accepts_deflate(request) &&
+            ReportSignalTile::describe(
+                query.track, level, first_slot, tile) &&
+            tile.start_ms == static_cast<int64_t>(from) &&
+            tile.end_ms == static_cast<int64_t>(to) &&
+            tile.range.offset == query.range.offset &&
+            tile.range.length == query.range.length &&
+            query.range.length >= ReportSignalTile::MinRawBytes &&
+            tile.path(query.track,
+                      level,
+                      sidecar_path,
+                      sizeof(sidecar_path))) {
+            memcpy(pending.tile_header,
+                   tile.header,
+                   ReportSignalTile::HeaderBytes);
+            pending.sidecar_command.path = sidecar_path;
+            pending.sidecar_command.lane = StorageStreamLane::Foreground;
+            pending.sidecar_command.verification =
+                StorageStreamVerification::None;
+            pending.sidecar_command.missing_ok = true;
+        }
     } else {
         send_json_error(request, 400, "bad_plot_part");
         return;
     }
 
-    if (!pending_ || !pending_->mutex ||
-        xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
+    if (!pending_ || !pending_->mutex) {
+        send_json_error(request, 503, "report_stream_slots_full");
+        return;
+    }
+
+    pending.response = std::make_shared<AsyncDeferredResponse::State>();
+    auto *response = new (std::nothrow) AsyncDeferredResponse(pending.response);
+    if (!response) {
+        send_json_error(request, 503, "response_alloc");
+        return;
+    }
+
+    if (xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
+        delete response;
         send_json_error(request, 503, "report_stream_slots_full");
         return;
     }
@@ -1225,15 +1503,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     }
     if (!slot) {
         xSemaphoreGive(pending_->mutex);
+        delete response;
         send_json_error(request, 503, "report_stream_slots_full");
-        return;
-    }
-
-    pending.response = std::make_shared<AsyncDeferredResponse::State>();
-    auto *response = new (std::nothrow) AsyncDeferredResponse(pending.response);
-    if (!response) {
-        xSemaphoreGive(pending_->mutex);
-        send_json_error(request, 503, "response_alloc");
         return;
     }
 

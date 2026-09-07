@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "report_signal_store.h"
+#include "report_signal_tile_writer.h"
 #include "storage_atomic_write_port.h"
 #include "storage_range_write_port.h"
 #include "storage_read_port.h"
@@ -123,6 +124,7 @@ private:
         EncodeBlock,
         SubmitBlock,
         WaitBlock,
+        PrepareTiles,
         SubmitFinish,
         WaitFinish,
         SubmitEvents,
@@ -182,6 +184,7 @@ private:
     size_t read_offset_ = 0;
     uint8_t read_low_byte_ = 0;
     OperationTicket range_ticket_;
+    ReportSignalTileWriter tile_writer_;
 
     // Events and metadata publication
     std::shared_ptr<ReportSignalStoreBundle> bundle_;

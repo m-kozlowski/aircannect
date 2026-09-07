@@ -217,7 +217,8 @@ void StorageRangeWriteService::release_write_reservation() {
 
 void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                                              const char *error) {
-    if (job_->output >= 0 && !job_->command.retain_handle) {
+    if (job_->output >= 0 && !job_->command.retain_handle &&
+        job_->command.sync_on_close) {
         if (::fsync(job_->output) != 0 &&
             outcome.disposition == OperationDisposition::Succeeded) {
             outcome = OperationOutcome::failed();

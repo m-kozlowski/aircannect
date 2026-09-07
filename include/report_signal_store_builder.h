@@ -28,8 +28,8 @@ public:
                      std::shared_ptr<const LargeByteBuffer> checkpoint = {});
     bool configure_series(const ReportSeriesDescriptor &series,
                           const EdfSignalScale &scale) override;
-    bool ready() override;
-    bool end_operation() override;
+    bool ready(bool *progressed = nullptr) override;
+    bool end_operation(bool *progressed = nullptr) override;
     bool accept_series(uint16_t session_index,
                        const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;
@@ -39,7 +39,7 @@ public:
         const EdfReportSeriesSpan &span) override;
     bool accept_event(uint16_t session_index,
                       const ReportEventRecord &event) override;
-    bool finish_build();
+    bool finish_build(bool *progressed = nullptr);
     void discard_build();
 
     std::shared_ptr<ReportSignalStoreBundle> take_completed();
@@ -57,8 +57,8 @@ private:
                         const EdfReportSeriesSpan &span,
                         size_t begin,
                         size_t end);
-    bool flush_blocks(bool include_partial);
-    bool flush_lod();
+    bool flush_blocks(bool include_partial, bool *progressed);
+    bool flush_lod(bool *progressed);
     Runtime *runtime_ = nullptr;
     ReportSignalStoreService *store_ = nullptr;
     const char *failure_reason_ = nullptr;

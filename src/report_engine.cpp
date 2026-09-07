@@ -729,8 +729,9 @@ bool ReportEngine::finish_fallback_acquisition() {
 bool ReportEngine::finish_execution(uint32_t now_ms) {
     const ReportExecutorStatus status = executor_.status();
     if (status.state == ReportExecutorState::Complete) {
-        const bool finished = builder_.finish_build();
-        if (!finished && !builder_.failure_reason()) return false;
+        bool builder_progressed = false;
+        const bool finished = builder_.finish_build(&builder_progressed);
+        if (!finished && !builder_.failure_reason()) return builder_progressed;
 
         std::shared_ptr<ReportSignalStoreBundle> bundle =
             finished ? builder_.take_completed() : nullptr;

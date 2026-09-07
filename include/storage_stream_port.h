@@ -48,6 +48,10 @@ struct StorageStreamCommand {
     uint64_t source_length = 0;
     StorageStreamVerification verification = StorageStreamVerification::None;
 
+    // A probe may expect an optional file to be absent. This only changes
+    // logging for ENOENT; the stream still reports the open failure.
+    bool missing_ok = false;
+
     bool valid() const {
         return !path.empty() && path.front() == '/' &&
                (source_length == 0 ||

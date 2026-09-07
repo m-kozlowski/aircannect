@@ -10,6 +10,7 @@
 #include "night_catalog_builder.h"
 #include "night_catalog_capture.h"
 #include "report_fallback_artifact.h"
+#include "report_signal_tile_backfill.h"
 #include "report_spool_availability.h"
 #include "storage_service.h"
 #include "string_util.h"
@@ -617,7 +618,13 @@ struct ReportTask::Runtime {
                engine.status().foreground_active;
     }
 
+    void cancel_signal_tile_backfill() {
+        signal_tile_backfill.reset();
+        signal_tile_backfill_started = false;
+    }
+
     void reset_background_pass() {
+        cancel_signal_tile_backfill();
         idle_cursor = 0;
         idle_retry_at_ms = 0;
         idle_pass_failed = false;
@@ -811,6 +818,7 @@ struct ReportTask::Runtime {
         if (!session.pending && !timezone_changed) return false;
 
         (void)engine.cancel_background();
+        cancel_signal_tile_backfill();
         if (session.pending) {
             if (session.full_reconcile) {
                 schedule_reconcile(
@@ -1053,6 +1061,7 @@ struct ReportTask::Runtime {
         if (!catalog || store_catalog_load_pending ||
             post_therapy_build.valid() ||
             store_catalog_loader.status().active() ||
+            signal_tile_backfill_started ||
             local_background_work_blocked()) {
             return false;
         }
@@ -1080,7 +1089,18 @@ struct ReportTask::Runtime {
         }
         if (store_catalog &&
             store_catalog->ready(night->sleep_day, night->source_revision)) {
-            ++idle_cursor;
+            const ReportSignalStoreCatalogRecord *stored =
+                store_catalog->find(night->sleep_day);
+            if (!stored || !stored->metadata ||
+                !signal_tile_backfill.start(
+                    stored->metadata, idle_generation)) {
+                ++idle_cursor;
+                idle_pass_failed = true;
+                idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
+                ++command_failures;
+                return true;
+            }
+            signal_tile_backfill_started = true;
             return true;
         }
         if (spool_availability_needed &&
@@ -1105,6 +1125,24 @@ struct ReportTask::Runtime {
             ++idle_cursor;
             ++command_failures;
         }
+        return true;
+    }
+
+    bool observe_signal_tile_backfill(uint32_t now_ms) {
+        if (!signal_tile_backfill_started ||
+            signal_tile_backfill.active()) {
+            return false;
+        }
+
+        const bool succeeded = signal_tile_backfill.succeeded();
+        signal_tile_backfill_started = false;
+        ++idle_cursor;
+        if (!succeeded) {
+            idle_pass_failed = true;
+            idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
+            ++command_failures;
+        }
+        signal_tile_backfill.reset();
         return true;
     }
 
@@ -1358,6 +1396,11 @@ struct ReportTask::Runtime {
             out.sleep_day = refresh_target.sleep_day;
             return out;
         }
+        if (signal_tile_backfill_started) {
+            out.operation = ReportTaskOperation::Building;
+            out.sleep_day = signal_tile_backfill.sleep_day();
+            return out;
+        }
         if (spool_availability_probe.status().active()) {
             out.operation = ReportTaskOperation::CheckingSpools;
             return out;
@@ -1442,7 +1485,7 @@ struct ReportTask::Runtime {
             catalog_refresh.active() || summary_acquisition.active() ||
             spool_availability_probe.status().active() ||
             pending_catalog_save != nullptr || pending_refresh.valid() ||
-            post_therapy_build.valid();
+            post_therapy_build.valid() || signal_tile_backfill_started;
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -1467,7 +1510,8 @@ struct ReportTask::Runtime {
                     next.state = ReportTaskState::Queued;
                     break;
                 case ReportEngineState::Idle:
-                    next.state = ReportTaskState::Idle;
+                    next.state = signal_tile_backfill_started
+                        ? ReportTaskState::Building : ReportTaskState::Idle;
                     break;
             }
         }
@@ -1492,6 +1536,7 @@ struct ReportTask::Runtime {
     ReportEngine engine;
     ReportSummaryAcquisition summary_acquisition;
     ReportSpoolAvailabilityProbe spool_availability_probe;
+    ReportSignalTileBackfill signal_tile_backfill;
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
     ReportSignalStoreCatalogLoadService store_catalog_loader;
@@ -1563,6 +1608,7 @@ struct ReportTask::Runtime {
     uint8_t store_catalog_load_retry_attempt = 0;
 
     size_t idle_cursor = 0;
+    bool signal_tile_backfill_started = false;
     uint32_t idle_generation = 0x80000000u;
     uint32_t idle_retry_at_ms = 0;
     bool idle_pass_failed = false;
@@ -1651,6 +1697,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
+    runtime_->signal_tile_backfill.begin(read_port, range_write_port);
     runtime_->engine.begin(read_port, write_port, spool_port, range_write_port);
     runtime_->store_catalog = ReportSignalStoreCatalogBuilder::build(
         nullptr, 0);
@@ -2337,6 +2384,27 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     worked = runtime.schedule_capture(now_ms) || worked;
+
+    if (runtime.signal_tile_backfill_started) {
+        const ReportEngineStatus backfill_competitor =
+            runtime.engine.status();
+        const bool competing_work =
+            runtime.local_background_work_blocked() ||
+            backfill_competitor.state != ReportEngineState::Idle ||
+            backfill_competitor.queued != 0 ||
+            runtime.engine.catalog_update_required() ||
+            runtime.rebuild_catalog != nullptr ||
+            runtime.capture_build.valid() ||
+            runtime.post_therapy_build.valid();
+        if (competing_work) {
+            runtime.cancel_signal_tile_backfill();
+            worked = true;
+        } else if (runtime.signal_tile_backfill.active()) {
+            worked = runtime.signal_tile_backfill.poll() || worked;
+        }
+        worked = runtime.observe_signal_tile_backfill(now_ms) || worked;
+    }
+
     if (!runtime.activity.therapy_active || runtime.capture_storage_ready()) {
         worked = runtime.engine.poll(
             now_ms, runtime.activity.therapy_active

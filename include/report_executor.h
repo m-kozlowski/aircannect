@@ -61,7 +61,12 @@ public:
 
     // Polled before each complete EDF record or fallback batch. False yields
     // without consuming input. True admits the entire record, all mappings.
-    virtual bool ready() { return true; }
+    // When non-null, progressed reports bounded sink work that happened while
+    // the sink was still unable to accept another record.
+    virtual bool ready(bool *progressed = nullptr) {
+        if (progressed) *progressed = false;
+        return true;
+    }
 
     virtual bool accept_series(uint16_t session_index,
                                const ReportSeriesDescriptor &series,
@@ -93,9 +98,14 @@ public:
     // Polled after releasing the operation's prepared read, even if ready()
     // is false. Complete required source-boundary work; false yields, true
     // permits the next operation/source. Sinks may retain bounded buffers
-    // until final publication. Must tolerate repeated calls.
+    // until final publication. When non-null, progressed reports bounded
+    // work completed while the source boundary is still pending. Must
+    // tolerate repeated calls.
     // Cancellation/failure releases executor resources without draining.
-    virtual bool end_operation() { return true; }
+    virtual bool end_operation(bool *progressed = nullptr) {
+        if (progressed) *progressed = false;
+        return true;
+    }
 
     // Non-null distinguishes a failed ready()/end_operation() from a wait.
     virtual const char *failure_reason() const { return nullptr; }
@@ -132,7 +142,7 @@ private:
     bool decode_record();
     bool decode_fallback_operation();
     void finish_operation();
-    bool poll_operation_end();
+    bool poll_operation_end(bool &progressed);
     void finish(ReportExecutorState state, ReportExecutorError error);
     void release_run_resources();
     void release_prepared();
