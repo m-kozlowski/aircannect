@@ -1488,9 +1488,9 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         return;
     }
 
-    if (xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
+    if (xSemaphoreTake(pending_->mutex, pdMS_TO_TICKS(2)) != pdTRUE) {
         delete response;
-        send_json_error(request, 503, "report_stream_slots_full");
+        send_json_error(request, 503, "stream_busy");
         return;
     }
 
