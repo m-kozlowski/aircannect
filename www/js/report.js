@@ -89,6 +89,35 @@
       return {order, collapsed, hidden};
     }
 
+    function loadReportMarkerPreferences() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(
+          REPORT_MARKER_PREFERENCES_KEY) || "[]");
+        if (Array.isArray(stored)) {
+          const known = new Set(reportChartDefs.filter((def) =>
+            def.type !== "events").map((def) => def.key));
+          return new Set(stored.filter((key) => known.has(key)));
+        }
+      } catch (error) {
+        // Missing or unreadable browser preferences leave markers enabled.
+      }
+      return new Set();
+    }
+
+    function setReportMarkersVisible(key, visible) {
+      if (visible) reportMarkersHidden.delete(key);
+      else reportMarkersHidden.add(key);
+      drawReportItems();
+
+      try {
+        localStorage.setItem(REPORT_MARKER_PREFERENCES_KEY,
+          JSON.stringify(Array.from(reportMarkersHidden)));
+      } catch (error) {
+        AirCANnect.ui.message("reportMsg",
+          "Event marker preference could not be saved in this browser", false);
+      }
+    }
+
     function loadLegacyReportChartPreferences() {
       try {
         const stored = JSON.parse(localStorage.getItem(
@@ -360,6 +389,20 @@
       actions.className = "report-chart-actions";
       const visible = visibleReportChartOrder();
       const index = visible.indexOf(key);
+
+      if (key !== "events") {
+        const label = document.createElement("label");
+        label.className = "report-chart-markers";
+        label.title = "Show event markers on this chart";
+        const markers = document.createElement("input");
+        markers.type = "checkbox";
+        markers.checked = !reportMarkersHidden.has(key);
+        markers.setAttribute("aria-label", "Event markers: " +
+          reportChartDefinition(key).title);
+        markers.onchange = () => setReportMarkersVisible(key, markers.checked);
+        label.append(markers, document.createTextNode("Markers"));
+        actions.appendChild(label);
+      }
 
       const up = document.createElement("button");
       up.className = "btn report-chart-action";
@@ -1520,7 +1563,8 @@
         } else {
           retry = !drawReportChart(item.canvas,
                                    item.seriesList,
-                                   item.events,
+                                   reportMarkersHidden.has(item.key)
+                                     ? [] : item.events,
                                    item.minY,
                                    item.maxY,
                                    item.start,
@@ -3750,6 +3794,8 @@
       collapsed: new Set(),
       hidden: new Set(),
     };
+    const REPORT_MARKER_PREFERENCES_KEY = "aircannect.report.markers.v1";
+    const reportMarkersHidden = loadReportMarkerPreferences();
     const legacyReportChartPreferences = loadLegacyReportChartPreferences();
 
     const reportEventDefs = [

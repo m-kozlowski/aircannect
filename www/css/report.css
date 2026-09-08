@@ -283,6 +283,19 @@
       line-height: 1;
     }
 
+    .report-chart-markers {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-right: 6px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .report-chart-markers input {
+      margin: 0;
+    }
+
     .report-chart.collapsed {
       padding-top: 9px;
       padding-bottom: 9px;
