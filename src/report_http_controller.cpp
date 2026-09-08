@@ -762,6 +762,7 @@ void ReportHttpController::poll() {
             millis_deadline_reached(now_ms, entry.deadline_ms);
         StorageStreamStatus status;
         bool waiting = false;
+        bool raw_attached = false;
 
         auto fallback_to_raw = [&] {
             finish_stream(entry.sidecar_stream);
@@ -807,7 +808,7 @@ void ReportHttpController::poll() {
                     fallback_to_raw();
                 } else if (!entry.sidecar_attached) {
                     if (!stream_port_->attach(*entry.sidecar_stream)) {
-                        fallback_to_raw();
+                        waiting = true;
                     } else {
                         entry.sidecar_attached = true;
                     }
@@ -877,6 +878,10 @@ void ReportHttpController::poll() {
             }
             if (status.state == StorageStreamState::Preparing) {
                 waiting = true;
+            } else if (status.state == StorageStreamState::Ready &&
+                       entry.stream && status.size == entry.raw_response_size) {
+                raw_attached = stream_port_->attach(*entry.stream);
+                waiting = !raw_attached;
             }
         }
 
@@ -928,7 +933,7 @@ void ReportHttpController::poll() {
             ? &ready.sidecar_stream : &ready.stream;
         const bool output_attached = use_deflate
             ? ready.sidecar_attached
-            : (ready.stream && stream_port_->attach(*ready.stream));
+            : raw_attached;
         if (source_size > static_cast<uint64_t>(SIZE_MAX) ||
             status.state != StorageStreamState::Ready ||
             status.size != source_size || !*output_stream ||
