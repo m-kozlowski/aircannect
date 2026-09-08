@@ -5,12 +5,17 @@
 namespace aircannect {
 
 // A transport tile contains whole, present 15-minute storage blocks.
-// Slow planes share a larger UTC-aligned tile, independently of raw layout.
+// Slow raw signals and overview LOD cover the whole track; detail tiles remain
+// UTC-aligned. Neither policy changes the underlying raw layout.
 struct ReportSignalTile {
-    static constexpr size_t HeaderBytes = 36;
+    static constexpr size_t IdentityBytes =
+        28 + REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES;
+    static constexpr size_t HeaderBytes = IdentityBytes + 4;
     static constexpr size_t MinRawBytes = 1024;
-    static constexpr size_t MaxRawBytes = 45000;
-    static constexpr size_t MaxBlocks = 32;
+    static constexpr size_t DetailRawBytes = 45000;
+    static constexpr size_t MaxBlocks = REPORT_SIGNAL_STORE_MAX_BLOCKS;
+    static constexpr size_t MaxRawBytes =
+        MaxBlocks * REPORT_SIGNAL_STORE_BLOCK_MS / 1000 * 2;
 
     int64_t start_ms = 0;
     int64_t end_ms = 0;
@@ -19,6 +24,7 @@ struct ReportSignalTile {
     ReportSignalStorePlaneRange range;
     uint8_t header[HeaderBytes] = {};
 
+    static bool whole_track(uint32_t interval_ms, bool envelope);
     static size_t blocks(uint32_t interval_ms, bool envelope);
     static bool describe(const ReportSignalStoreTrack &track,
                          ReportSignalStoreLevel level, size_t slot,

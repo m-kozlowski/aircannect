@@ -16,13 +16,18 @@
 
 namespace aircannect {
 
+bool ReportSignalTile::whole_track(uint32_t interval_ms, bool envelope) {
+    return interval_ms >= (envelope ? 10000u : 1000u);
+}
+
 size_t ReportSignalTile::blocks(uint32_t interval_ms, bool envelope) {
     if (!interval_ms) return 1;
+    if (whole_track(interval_ms, envelope)) return MaxBlocks;
 
     const size_t bytes = REPORT_SIGNAL_STORE_BLOCK_MS / interval_ms *
         (envelope ? 4 : 2);
     size_t count = 1;
-    while (count < MaxBlocks && bytes * count * 2 <= MaxRawBytes) count *= 2;
+    while (count < MaxBlocks && bytes * count * 2 <= DetailRawBytes) count *= 2;
     return count;
 }
 
@@ -35,32 +40,38 @@ bool ReportSignalTile::describe(const ReportSignalStoreTrack &track,
     const uint32_t interval = level == ReportSignalStoreLevel::Raw
         ? track.sample_interval_ms
         : level == ReportSignalStoreLevel::OneSecond ? 1000 : 10000;
-    const int64_t duration = blocks(interval, level != ReportSignalStoreLevel::Raw)
-        * REPORT_SIGNAL_STORE_BLOCK_MS;
-    const int64_t position = track.first_block_start_ms +
-        slot * REPORT_SIGNAL_STORE_BLOCK_MS;
-    tile.start_ms = std::max(track.first_block_start_ms,
-                             position - position % duration);
-    tile.end_ms = std::min(position - position % duration + duration,
-        track.first_block_start_ms + track.block_slot_count *
-            REPORT_SIGNAL_STORE_BLOCK_MS);
+    tile.start_ms = track.first_block_start_ms;
+    tile.end_ms = track.first_block_start_ms +
+        track.block_slot_count * REPORT_SIGNAL_STORE_BLOCK_MS;
+
+    const bool envelope = level != ReportSignalStoreLevel::Raw;
+    if (!whole_track(interval, envelope)) {
+        const int64_t duration = blocks(interval, envelope) *
+            REPORT_SIGNAL_STORE_BLOCK_MS;
+        const int64_t position = track.first_block_start_ms +
+            slot * REPORT_SIGNAL_STORE_BLOCK_MS;
+        const int64_t aligned = position - position % duration;
+        tile.start_ms = std::max(tile.start_ms, aligned);
+        tile.end_ms = std::min(tile.end_ms, aligned + duration);
+    }
+
     tile.first_slot = (tile.start_ms - track.first_block_start_ms) /
         REPORT_SIGNAL_STORE_BLOCK_MS;
     tile.block_count = (tile.end_ms - tile.start_ms) / REPORT_SIGNAL_STORE_BLOCK_MS;
     if (!ReportSignalStoreFileCodec::plane_range(
             track, tile.start_ms, tile.block_count, level, tile.range)) return false;
 
-    uint32_t present = 0;
     for (size_t i = 0; i < tile.block_count; ++i) {
         const size_t s = tile.first_slot + i;
-        if (track.present_blocks[s / 8] & (1u << (s % 8))) present |= 1u << i;
+        if (track.present_blocks[s / 8] & (1u << (s % 8))) {
+            tile.header[28 + i / 8] |= 1u << (i % 8);
+        }
     }
-    memcpy(tile.header, "ACTILE01", 8);
+    memcpy(tile.header, "ACTILE02", 8);
     LittleEndian::put_le64(tile.header + 8, tile.start_ms);
     LittleEndian::put_le64(tile.header + 16, std::min(tile.end_ms,
         track.last_valid_sample_ms + track.sample_interval_ms));
     LittleEndian::put_le32(tile.header + 24, static_cast<uint32_t>(tile.range.length));
-    LittleEndian::put_le32(tile.header + 28, present);
     return true;
 }
 
@@ -82,8 +93,8 @@ bool ReportSignalTile::path(const ReportSignalStoreTrack &track,
 bool ReportSignalTile::matches(const uint8_t *data, size_t length,
                                uint64_t file_size) const {
     return data && length == HeaderBytes && file_size > HeaderBytes &&
-        file_size == LittleEndian::get_le32(data + 32) &&
-        memcmp(data, header, 32) == 0;
+        file_size == LittleEndian::get_le32(data + IdentityBytes) &&
+        memcmp(data, header, IdentityBytes) == 0;
 }
 
 namespace {
@@ -188,7 +199,7 @@ bool ReportSignalTileEncoder::poll() {
 
     succeeded_ = !failed;
     if (!failed && size + 256 < source_->size()) {
-        LittleEndian::put_le32(output_->data() + 32, size);
+        LittleEndian::put_le32(output_->data() + ReportSignalTile::IdentityBytes, size);
         output_->truncate(size);
         result_ = LargeByteBuffer::freeze(std::move(output_));
     }

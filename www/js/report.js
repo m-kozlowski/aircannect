@@ -2525,6 +2525,10 @@
     }
 
     function signalStoreLevel(track, spanMs, from, to) {
+      if (track.interval >= 1000) {
+        return {name: "raw", interval: track.interval};
+      }
+
       const width = signalStoreChartWidth();
       const alignedRawBytes = (to - from) / track.interval * 2;
       if (spanMs <= SIGNAL_STORE_RAW_CURVE_MAX_SPAN_MS &&
@@ -2565,11 +2569,15 @@
     }
 
     function signalStoreTransportTileRange(track, level, blockStart) {
+      const trackEnd = track.firstBlock +
+        track.blockSlots * SIGNAL_STORE_BLOCK_MS;
+      if (level.interval >= (level.name === "raw" ? 1000 : 10000)) {
+        return {from: track.firstBlock, to: trackEnd};
+      }
+
       const tileDuration = signalStoreTransportTileBlocks(track, level) *
         SIGNAL_STORE_BLOCK_MS;
       const tileStart = Math.floor(blockStart / tileDuration) * tileDuration;
-      const trackEnd = track.firstBlock +
-        track.blockSlots * SIGNAL_STORE_BLOCK_MS;
       return {
         from: Math.max(track.firstBlock, tileStart),
         to: Math.min(trackEnd, tileStart + tileDuration),
@@ -2864,13 +2872,10 @@
                                                 context) {
       if (!context.active()) return;
 
-      const tileDuration = signalStoreTransportTileBlocks(track, level) *
-        SIGNAL_STORE_BLOCK_MS;
       const runs = [];
-      const firstTile = Math.floor(from / tileDuration) * tileDuration;
-      for (let tileStart = firstTile; tileStart < to;
-           tileStart += tileDuration) {
-        const tile = signalStoreTransportTileRange(track, level, tileStart);
+      for (let cursor = from; cursor < to;) {
+        const tile = signalStoreTransportTileRange(track, level, cursor);
+        cursor = tile.to;
         const requestedFrom = Math.max(from, tile.from);
         const requestedTo = Math.min(to, tile.to);
         if (!(requestedTo > requestedFrom)) continue;
