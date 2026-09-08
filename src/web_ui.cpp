@@ -321,7 +321,6 @@ void WebUI::stop() {
     console_sse_pos_ = 0;
     last_console_sse_ms_ = 0;
     console_sse_reset_pending_ = false;
-    snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_status_revision_ = 0;
     for (SnapshotChannel &channel : snapshot_channels_) {
@@ -897,13 +896,6 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
 
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
-    if (mask & (SNAPSHOT_STATUS | SNAPSHOT_CONFIG | SNAPSHOT_AS11_BLE |
-                SNAPSHOT_OXIMETRY | SNAPSHOT_SETTINGS | SNAPSHOT_OTA |
-                SNAPSHOT_RESMED_OTA | SNAPSHOT_RESMED_REPOSITORY |
-                SNAPSHOT_STORAGE_OPERATION | SNAPSHOT_REPORT |
-                SNAPSHOT_REPORT_PREFERENCES)) {
-        request_sse_push();
-    }
 }
 
 void WebUI::request_sse_push() {
@@ -1004,8 +996,8 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
 
     uint16_t rebuild_mask = snapshots_dirty_mask_;
-    if (force || !snapshots_ready_) {
-        rebuild_mask = SNAPSHOT_ALL;
+    if (force) {
+        rebuild_mask |= SNAPSHOT_ALL;
     } else if (periodic_due) {
         rebuild_mask |= SNAPSHOT_PERIODIC;
     }
@@ -1017,11 +1009,12 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         channel.next.clear();
     }
     uint16_t completed_mask = 0;
+    uint32_t next_status_revision = observed_status_revision_;
+    uint32_t next_channel_revisions[SnapshotChannelCount] = {};
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
-        uint32_t revision = observed_status_revision_;
-        if (status_ && status_->copy_snapshot(next_status_json_, revision)) {
-            observed_status_revision_ = revision;
+        if (status_ && status_->copy_snapshot(next_status_json_,
+                                             next_status_revision)) {
             completed_mask |= SNAPSHOT_STATUS;
         }
         if (checkpoint) checkpoint("web_ui.snapshots.status_copy");
@@ -1034,13 +1027,12 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         if (checkpoint) checkpoint("web_ui.snapshots.exports_copy");
     }
 
-    for (SnapshotChannel &channel : snapshot_channels_) {
+    for (size_t i = 0; i < SnapshotChannelCount; ++i) {
+        SnapshotChannel &channel = snapshot_channels_[i];
         if (!(rebuild_mask & channel.mask)) continue;
 
-        uint32_t revision = channel.observed_revision;
         if (channel.source &&
-            channel.source->copy(channel.next, revision)) {
-            channel.observed_revision = revision;
+            channel.source->copy(channel.next, next_channel_revisions[i])) {
             completed_mask |= channel.mask;
         }
         if (checkpoint) checkpoint(channel.checkpoint);
@@ -1050,24 +1042,30 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         return;
     }
 
+    bool changed = false;
     if (completed_mask & SNAPSHOT_STATUS) {
         cached_status_json_.swap(next_status_json_);
+        changed = observed_status_revision_ != next_status_revision;
+        observed_status_revision_ = next_status_revision;
     }
     if (completed_mask & SNAPSHOT_EXPORTS) {
         cached_exports_json_.swap(next_exports_json_);
     }
 
-    for (SnapshotChannel &channel : snapshot_channels_) {
+    for (size_t i = 0; i < SnapshotChannelCount; ++i) {
+        SnapshotChannel &channel = snapshot_channels_[i];
         if (completed_mask & channel.mask) {
             channel.cached.swap(channel.next);
+            changed |= channel.observed_revision != next_channel_revisions[i];
+            channel.observed_revision = next_channel_revisions[i];
         }
     }
     snapshots_dirty_mask_ &= ~completed_mask;
-    snapshots_ready_ = snapshots_dirty_mask_ == 0;
     if (force || periodic_due || (completed_mask & SNAPSHOT_PERIODIC)) {
         last_snapshot_ms_ = now;
     }
     xSemaphoreGive(cache_mutex_);
+    if (changed) request_sse_push();
 }
 
 void WebUI::execute_command(WebCommand &command) {

@@ -281,7 +281,6 @@ private:
     // snapshot state
     uint32_t observed_status_revision_ = 0;
     uint32_t observed_live_generation_ = 0;
-    bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;
     uint32_t last_sse_push_ms_ = 0;
