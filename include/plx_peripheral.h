@@ -30,6 +30,9 @@ public:
                    OximetryAdvertiseMode advertise_mode, const char *name);
     void poll(const OximetryHubSnapshot &source, uint32_t now_ms);
 
+    void set_suspended(bool suspended);
+    bool suspended() const;
+
     bool request_advertising(bool enabled);
     bool request_pairing(bool enabled);
     bool forget_bonds();
@@ -82,6 +85,7 @@ private:
     BleRuntime &runtime_;
     PlxPeripheralStatus status_;
     bool initialized_ = false;
+    bool suspend_requested_ = false;
     bool advertising_data_dirty_ = true;
     bool advertising_wanted_ = false;
     std::atomic<bool> role_enabled_{false};

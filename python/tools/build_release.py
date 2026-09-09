@@ -87,6 +87,7 @@ def build_firmware(
     build_env = os.environ.copy()
     build_env["AIRCANNECT_VERSION"] = version
     build_env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
+
     subprocess.run(
         [pio, "run", "-e", environment_name, "-t", "initialbin"],
         cwd=PROJECT_DIR,

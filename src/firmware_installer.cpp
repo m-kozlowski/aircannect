@@ -180,6 +180,7 @@ bool FirmwareInstaller::request_prepare(size_t image_size,
     status_.source = source;
     status_.encoding = encoding;
     status_.prepare_pending = true;
+    prepare_started_ms_ = millis();
     status_.total_size = image_size;
     status_.wire_total_size = wire_size;
     status_.last_error = "";
@@ -221,32 +222,37 @@ bool FirmwareInstaller::request_prepare(size_t image_size,
 }
 
 void FirmwareInstaller::poll_prepare(bool as11_quiesced,
-                                     bool as11_quiesce_timed_out) {
+                                     bool as11_quiesce_timed_out,
+                                     bool oximetry_suspended) {
     if (!lock()) return;
     if (!status_.prepare_pending || status_.prepared) {
         unlock();
         return;
     }
 
-    if (as11_quiesced) {
+    if (as11_quiesced && oximetry_suspended) {
         status_.prepare_pending = false;
         status_.prepared = true;
         prepared_at_ms_ = millis();
         Log::logf(CAT_OTA, LOG_INFO,
-                  "ESP OTA prepared source=%s; AS11 traffic quiesced\n",
+                  "ESP OTA prepared source=%s; AS11 quiet, oximetry suspended\n",
                   firmware_install_source_name(status_.source));
         unlock();
         return;
     }
 
-    if (as11_quiesce_timed_out) {
+    const bool oximetry_timed_out = !oximetry_suspended &&
+        static_cast<uint32_t>(millis() - prepare_started_ms_) >= kPreparedTtlMs;
+    if (as11_quiesce_timed_out || oximetry_timed_out) {
         const FirmwareInstallSource source = status_.source;
+        const char *error = as11_quiesce_timed_out
+            ? "as11_quiesce_timeout" : "oximetry_suspend_timeout";
 
         clear_install_state_locked();
-        set_error_locked("as11_quiesce_timeout");
+        set_error_locked(error);
         Log::logf(CAT_OTA, LOG_ERROR,
-                  "ESP OTA prepare failed source=%s: AS11 quiesce timeout\n",
-                  firmware_install_source_name(source));
+                  "ESP OTA prepare failed source=%s error=%s\n",
+                  firmware_install_source_name(source), error);
     }
     unlock();
 }
@@ -685,6 +691,7 @@ bool FirmwareInstaller::finish() {
     prepared_wire_size_ = 0;
     prepared_encoding_ = OtaUploadEncoding::Auto;
     prepared_at_ms_ = 0;
+    prepare_started_ms_ = 0;
     write_last_activity_ms_ = 0;
     reset_zlib_decoder();
 
@@ -973,6 +980,7 @@ void FirmwareInstaller::clear_install_state_locked() {
     prepared_wire_size_ = 0;
     prepared_encoding_ = OtaUploadEncoding::Auto;
     prepared_at_ms_ = 0;
+    prepare_started_ms_ = 0;
     write_last_activity_ms_ = 0;
     write_encoding_ = OtaUploadEncoding::Auto;
     probe_size_ = 0;

@@ -180,13 +180,17 @@ bool BleRuntime::start_passive_observer_locked() {
 bool BleRuntime::stop_passive_observer_locked() {
     portENTER_CRITICAL(&observer_mux_);
     const bool running = observer_running_;
-    observer_running_ = false;
     portEXIT_CRITICAL(&observer_mux_);
     if (!running) return true;
 
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (!scan) return false;
     const bool stopped = scan->stop();
+    if (!stopped) return false;
+
+    portENTER_CRITICAL(&observer_mux_);
+    observer_running_ = false;
+    portEXIT_CRITICAL(&observer_mux_);
     scan->setScanCallbacks(nullptr, false);
     scan->clearResults();
     return stopped;

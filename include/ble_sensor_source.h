@@ -42,6 +42,9 @@ public:
     void set_auto_allowed(bool allowed);
     bool has_autoconnect() const;
 
+    void set_suspended(bool suspended);
+    bool suspended() const;
+
     bool request_scan();
     bool request_connect(const char *addr_or_index);
     bool request_connect(const OximetrySensorDevice &device);
@@ -140,6 +143,8 @@ private:
     TaskHandle_t task_ = nullptr;
 #endif
     bool task_started_ = false;
+    bool suspend_requested_ = false;
+    bool suspend_complete_ = false;
     bool scan_requested_ = false;
     bool manual_connect_requested_ = false;
     bool disconnect_requested_ = false;

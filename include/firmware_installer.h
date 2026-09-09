@@ -61,7 +61,8 @@ public:
                          OtaUploadEncoding encoding,
                          size_t wire_size,
                          FirmwareInstallSource source);
-    void poll_prepare(bool as11_quiesced, bool as11_quiesce_timed_out);
+    void poll_prepare(bool as11_quiesced, bool as11_quiesce_timed_out,
+                      bool oximetry_suspended);
     bool begin_write(const String &filename,
                      size_t image_size,
                      OtaUploadEncoding encoding,
@@ -116,6 +117,7 @@ private:
     size_t prepared_image_size_ = 0;
     size_t prepared_wire_size_ = 0;
     uint32_t prepared_at_ms_ = 0;
+    uint32_t prepare_started_ms_ = 0;
     uint32_t write_last_activity_ms_ = 0;
     OtaUploadEncoding prepared_encoding_ = OtaUploadEncoding::Auto;
     OtaUploadEncoding write_encoding_ = OtaUploadEncoding::Auto;

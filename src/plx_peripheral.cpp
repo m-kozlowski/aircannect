@@ -132,7 +132,8 @@ void PlxPeripheral::configure(bool enabled,
     status_.integration_available =
         integration_allowed && status_.ble_available;
     status_.enabled = enabled && status_.integration_available;
-    role_enabled_.store(status_.enabled, std::memory_order_release);
+    role_enabled_.store(status_.enabled && !suspend_requested_,
+                        std::memory_order_release);
     status_.advertise_mode = advertise_mode;
     if (set_name(name)) {
         advertising_data_dirty_ = true;
@@ -153,9 +154,34 @@ void PlxPeripheral::configure(bool enabled,
     }
 }
 
+void PlxPeripheral::set_suspended(bool suspended) {
+    if (suspend_requested_ == suspended) return;
+
+    suspend_requested_ = suspended;
+    role_enabled_.store(status_.enabled && !suspended,
+                        std::memory_order_release);
+    if (suspended) request_pairing(false);
+}
+
+bool PlxPeripheral::suspended() const {
+    if (!suspend_requested_) return false;
+#if AC_OXIMETRY_BLE_ENABLED
+    if (initialized_) {
+        return (!server_ || server_->getConnectedCount() == 0) &&
+               !NimBLEDevice::getAdvertising()->isAdvertising();
+    }
+#endif
+    return true;
+}
+
 void PlxPeripheral::poll(const OximetryHubSnapshot &source,
                          uint32_t now_ms) {
     drain_events();
+
+    if (suspend_requested_) {
+        if (initialized_) stop_roles();
+        return;
+    }
 
     if (!status_.enabled) {
         stop_roles();
@@ -171,6 +197,7 @@ void PlxPeripheral::poll(const OximetryHubSnapshot &source,
 }
 
 bool PlxPeripheral::request_advertising(bool enabled) {
+    if (enabled && suspend_requested_) return false;
     if (enabled && !status_.integration_available) return false;
 
     status_.manual_advertising_requested = enabled;
@@ -180,7 +207,7 @@ bool PlxPeripheral::request_advertising(bool enabled) {
 
 bool PlxPeripheral::request_pairing(bool enabled) {
     if (enabled) {
-        if (!status_.integration_available) return false;
+        if (!status_.integration_available || suspend_requested_) return false;
 
         pairing_until_ms_ = millis() + AC_OXIMETRY_PAIRING_WINDOW_MS;
         status_.pairing_active = true;
@@ -198,7 +225,7 @@ bool PlxPeripheral::request_pairing(bool enabled) {
 
 bool PlxPeripheral::forget_bonds() {
 #if AC_OXIMETRY_BLE_ENABLED
-    if (!status_.integration_available) return false;
+    if (!status_.integration_available || suspend_requested_) return false;
     if (!ensure_ble()) return false;
     if (!central_bond_peer_[0]) {
         set_error("no AirSense bond identity");

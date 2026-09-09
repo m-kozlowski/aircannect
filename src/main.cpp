@@ -1493,6 +1493,9 @@ void loop() {
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
         firmware_installer.as11_quiesce_required();
+    oximetry_sensor_source.set_suspended(esp_ota_quiesce_requested);
+    plx_peripheral.set_suspended(esp_ota_quiesce_requested);
+
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
@@ -1558,7 +1561,8 @@ void loop() {
             rpc_quiesce_coordinator.complete(),
         esp_ota_quiesce_requested &&
             !as11_service_exclusive &&
-            rpc_quiesce_coordinator.timed_out());
+            rpc_quiesce_coordinator.timed_out(),
+        oximetry_sensor_source.suspended() && plx_peripheral.suspended());
 
     drain_can_rx_after("rpc_ota_prepare");
 

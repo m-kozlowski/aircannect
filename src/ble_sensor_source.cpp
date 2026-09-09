@@ -405,30 +405,61 @@ bool BleSensorSource::resolve_target(
     return false;
 }
 
+void BleSensorSource::set_suspended(bool suspended) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    if (suspend_requested_ != suspended) {
+        suspend_requested_ = suspended;
+        suspend_complete_ = false;
+        if (suspended) {
+            scan_requested_ = false;
+            manual_connect_requested_ = false;
+            observed_target_pending_ = false;
+        }
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
+}
+
+bool BleSensorSource::suspended() const {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
+#endif
+    const bool complete =
+        suspend_requested_ && (!task_started_ || suspend_complete_);
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
+#endif
+    return complete;
+}
+
 bool BleSensorSource::request_scan() {
     bool enabled = false;
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    enabled = enabled_;
+    enabled = enabled_ && !suspend_requested_;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
     if (!enabled) {
         Log::logf(CAT_OXI, LOG_WARN,
-                  "Sensor scan ignored: oximetry disabled\n");
+                  "Sensor scan ignored: oximetry disabled or suspended\n");
         return false;
     }
     ensure_task();
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    scan_requested_ = true;
+    enabled = enabled_ && !suspend_requested_;
+    scan_requested_ = enabled;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
-    Log::logf(CAT_OXI, LOG_INFO, "Sensor scan queued\n");
-    return true;
+    if (enabled) Log::logf(CAT_OXI, LOG_INFO, "Sensor scan queued\n");
+    return enabled;
 }
 
 bool BleSensorSource::request_connect(const char *addr_or_index) {
@@ -436,7 +467,7 @@ bool BleSensorSource::request_connect(const char *addr_or_index) {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    enabled = enabled_;
+    enabled = enabled_ && !suspend_requested_;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -451,7 +482,8 @@ bool BleSensorSource::request_connect(const char *addr_or_index) {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    const bool ok = resolve_target(addr_or_index, target);
+    const bool ok = !suspend_requested_ &&
+                    resolve_target(addr_or_index, target);
     scan_count = scan_count_;
     for (const auto &known : known_) {
         if (known.addr[0]) known_count++;
@@ -486,7 +518,7 @@ bool BleSensorSource::request_connect(const OximetrySensorDevice &device) {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
-    enabled = enabled_;
+    enabled = enabled_ && !suspend_requested_;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -508,11 +540,15 @@ bool BleSensorSource::request_connect(const OximetrySensorDevice &device) {
         if (!target.rssi) target.rssi = resolved.rssi;
         target.addr_type = resolved.addr_type;
     }
-    manual_target_device_ = target;
-    manual_connect_requested_ = true;
+    enabled = enabled_ && !suspend_requested_;
+    if (enabled) {
+        manual_target_device_ = target;
+        manual_connect_requested_ = true;
+    }
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
+    if (!enabled) return false;
     ensure_task();
     Log::logf(CAT_OXI, LOG_INFO,
               "Sensor connect queued addr=%s type=%u name=\"%s\"\n",
@@ -584,7 +620,7 @@ bool BleSensorSource::set_autoconnect(const char *addr, bool enabled) {
 void BleSensorSource::ensure_task() {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
-    if (task_started_) {
+    if (task_started_ || suspend_requested_) {
         portEXIT_CRITICAL(&mux_);
         return;
     }
@@ -860,6 +896,7 @@ void BleSensorSource::task_loop() {
 
     while (true) {
         bool enabled = false;
+        bool suspend = false;
         bool reset_protocols = false;
         bool release_disconnected_client = false;
         char runtime_name[sizeof(runtime_name_)] = {};
@@ -867,6 +904,7 @@ void BleSensorSource::task_loop() {
         portENTER_CRITICAL(&mux_);
 #endif
         enabled = enabled_;
+        suspend = suspend_requested_;
         reset_protocols = protocol_reset_pending_;
         protocol_reset_pending_ = false;
         release_disconnected_client = client_release_pending_;
@@ -882,13 +920,26 @@ void BleSensorSource::task_loop() {
             release_client_services();
         }
 
-        if (!enabled) {
+        if (!enabled || suspend) {
             runtime_.request_passive_observation(false);
             if (client_ && client_->isConnected()) {
                 client_->disconnect();
             } else {
                 release_client();
             }
+
+            const bool quiet = !client_ &&
+                               !runtime_.passive_observation_active();
+            if (quiet) protocols_.reset();
+            portENTER_CRITICAL(&mux_);
+            suspend_complete_ = suspend_requested_ && quiet;
+            if (suspend_requested_) {
+                scan_requested_ = false;
+                manual_connect_requested_ = false;
+                observed_target_pending_ = false;
+            }
+            portEXIT_CRITICAL(&mux_);
+
             set_state(OximetrySensorState::Off);
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
