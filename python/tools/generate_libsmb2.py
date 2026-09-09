@@ -9,6 +9,8 @@ import tarfile
 import tempfile
 import urllib.request
 
+from library_patches import apply_patches, patch_files
+
 
 env = DefaultEnvironment()
 PROJECT_DIR = Path(env["PROJECT_DIR"]).resolve()
@@ -22,7 +24,7 @@ FETCHED_UPSTREAM_DIR = PROJECT_DIR / ".pio" / "downloaded-libs" / (
 GENERATED_DIR = PROJECT_DIR / ".pio" / "generated-libs" / "libsmb2"
 STAMP_PATH = GENERATED_DIR / ".aircannect-stamp"
 
-SCRIPT_VERSION = "4"
+SCRIPT_VERSION = "5"
 
 
 def fail(message):
@@ -79,12 +81,6 @@ def hash_tree(path):
     for item in sorted(p for p in path.rglob("*") if p.is_file()):
         hash_file(item, digest)
     return digest.hexdigest()
-
-
-def patch_files():
-    if not PATCH_DIR.exists():
-        return []
-    return sorted(PATCH_DIR.glob("*.patch"))
 
 
 def safe_extract_tar(tar, dst):
@@ -196,7 +192,7 @@ def desired_stamp():
     digest.update(SCRIPT_VERSION.encode("utf-8"))
     digest.update(upstream_identity().encode("utf-8"))
     digest.update(hash_tree(OVERLAY_DIR).encode("utf-8"))
-    for patch in patch_files():
+    for patch in patch_files(PATCH_DIR):
         hash_file(patch, digest)
     return digest.hexdigest()
 
@@ -227,8 +223,7 @@ def materialize():
 
     copy_dir(OVERLAY_DIR, GENERATED_DIR)
 
-    for patch in patch_files():
-        subprocess.check_call(["git", "apply", str(patch)], cwd=GENERATED_DIR)
+    apply_patches(GENERATED_DIR, patch_files(PATCH_DIR))
 
     STAMP_PATH.write_text(stamp + "\n")
 

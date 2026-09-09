@@ -1,0 +1,66 @@
+--- a/AsyncTCP.cpp
++++ b/AsyncTCP.cpp
+@@ -1,3 +1,4 @@
++#include <new>
+ // SPDX-License-Identifier: LGPL-3.0-or-later
+ // Copyright 2016-2026 Hristo Gochkov, Mathieu Carbou, Emil Muratov, Will Miles
+ 
+@@ -109,7 +110,8 @@
+   LWIP_TCP_POLL,
+   LWIP_TCP_ACCEPT,
+   LWIP_TCP_CONNECTED,
+-  LWIP_TCP_DNS
++  LWIP_TCP_DNS,
++  AC_ASYNC_CALLBACK
+ } lwip_tcp_event_t;
+ 
+ struct lwip_tcp_event_packet_t {
+@@ -117,6 +119,10 @@
+   lwip_tcp_event_t event;
+   AsyncClient *client;
+   union {
++    struct {
++      void (*run)(void *);
++      void *context;
++    } callback;
+     struct {
+       tcp_pcb *pcb;
+       int8_t err;
+@@ -214,6 +220,26 @@
+   xTaskNotifyGive(_async_service_task_handle);
+ }
+ 
++extern "C" bool ac_async_tcp_dispatch(void (*callback)(void *), void *context) {
++  if (!callback || !_async_service_task_handle || !_async_queue_mutex) return false;
++  auto *event = new (std::nothrow) lwip_tcp_event_packet_t(AC_ASYNC_CALLBACK, nullptr);
++  if (!event) return false;
++  event->callback.run = callback;
++  event->callback.context = context;
++  if (xSemaphoreTake(_async_queue_mutex, 0) != pdTRUE) {
++    delete event;
++    return false;
++  }
++  if (_async_queue.size() >= CONFIG_ASYNC_TCP_QUEUE_SIZE) {
++    xSemaphoreGive(_async_queue_mutex);
++    delete event;
++    return false;
++  }
++  _send_async_event(event);
++  xSemaphoreGive(_async_queue_mutex);
++  return true;
++}
++
+ static inline void _prepend_async_event(lwip_tcp_event_packet_t *e) {
+   if (e == nullptr) {
+     return;
+@@ -285,7 +311,9 @@
+ };
+ 
+ void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
+-  if (e->client == NULL) {
++  if (e->event == AC_ASYNC_CALLBACK) {
++    e->callback.run(e->callback.context);
++  } else if (e->client == NULL) {
+     // do nothing when arg is NULL
+     // ets_printf("event arg == NULL: 0x%08x\n", e->recv.pcb);
+   } else if (e->event == LWIP_TCP_RECV) {
