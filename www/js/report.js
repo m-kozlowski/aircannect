@@ -1426,7 +1426,7 @@
       hideReportSelectionRects();
       const lo = Math.min(drag.t0, drag.t1);
       const hi = Math.max(drag.t0, drag.t1);
-      if (hi - lo > 60000) {
+      if (hi > lo) {
         setReportZoomRange(lo, hi);
       }
     }
@@ -1434,7 +1434,7 @@
 
     function validReportRange(range) {
       return range && Number.isFinite(range.start) && Number.isFinite(range.end) &&
-        range.end - range.start >= 60000;
+        range.end - range.start >= REPORT_MIN_ZOOM_MS;
     }
 
     function updateReportZoomControls() {
@@ -1450,7 +1450,7 @@
     function setReportZoomRange(start, end) {
       const bounds = reportRange();
       if (!validReportRange(bounds)) return false;
-      let width = Math.max(60000, end - start);
+      let width = Math.max(REPORT_MIN_ZOOM_MS, end - start);
       const boundsWidth = bounds.end - bounds.start;
       if (width >= boundsWidth - 1000) {
         resetReportZoom();
@@ -1470,7 +1470,7 @@
       }
       lo = Math.max(bounds.start, lo);
       hi = Math.min(bounds.end, hi);
-      if (hi - lo < 60000) return false;
+      if (hi - lo < REPORT_MIN_ZOOM_MS) return false;
       reportZoom = {start: lo, end: hi};
       if (!updateRenderedReportRange()) renderReportCharts();
       return true;
@@ -3670,6 +3670,7 @@
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
+    const REPORT_MIN_ZOOM_MS = 10000;
     const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
     const SIGNAL_STORE_NIGHT_HEADER_BYTES = 224;
     const SIGNAL_STORE_SESSION_BYTES = 16;
