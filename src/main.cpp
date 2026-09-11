@@ -261,7 +261,6 @@ static bool export_config_pending = true;
 static bool local_poweroff_requested = false;
 static bool local_poweroff_attempted = false;
 static bool local_poweroff_backlight_was_on = false;
-static bool local_as11_disconnect_requested = false;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static bool is_rpc_event(RpcEventKind kind) {
@@ -336,13 +335,13 @@ static bool disconnect_cpap(void *, uint32_t) {
         firmware_installer.active() || resmed_ota_manager.active()) {
         return false;
     }
-    if (local_as11_disconnect_requested) return true;
+    if (rpc_quiesce_coordinator.connection_held()) return true;
     if (!rpc_link_selector.status().ready ||
         rpc_quiesce_coordinator.requested()) {
         return false;
     }
 
-    local_as11_disconnect_requested = true;
+    rpc_quiesce_coordinator.request_connection_hold();
     return true;
 }
 
@@ -351,12 +350,12 @@ static bool connect_cpap(void *, uint32_t) {
         local_poweroff_requested || firmware_installer.active() ||
         resmed_ota_manager.active() ||
         (rpc_quiesce_coordinator.requested() &&
-         !local_as11_disconnect_requested)) {
+         !rpc_quiesce_coordinator.connection_held())) {
         return false;
     }
     if (!as11_ble_rpc_link.request_reconnect()) return false;
 
-    local_as11_disconnect_requested = false;
+    rpc_quiesce_coordinator.release_connection_hold();
     return true;
 }
 
@@ -1284,6 +1283,11 @@ void setup() {
     // Device/session/report managers
     session_manager.begin();
 
+    if (!rpc_quiesce_coordinator.begin()) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] AS11 disconnect event observer unavailable\n");
+    }
+
     stream_broker.set_frame_observer(note_session_stream_frame,
                                      &session_manager);
     (void)event_broker.add_frame_observer(note_as11_device_event,
@@ -1499,15 +1503,15 @@ void loop() {
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
-    const bool local_shutdown_requested =
-        local_poweroff_requested || local_as11_disconnect_requested;
-    const bool as11_application_quiesce_requested =
-        esp_ota_quiesce_requested || as11_service_exclusive ||
-        local_shutdown_requested;
     rpc_quiesce_coordinator.update(
-        as11_application_quiesce_requested,
-        esp_reboot_pending || local_shutdown_requested,
+        esp_ota_quiesce_requested || as11_service_exclusive ||
+            local_poweroff_requested,
+        esp_reboot_pending || local_poweroff_requested,
+        rpc_link_selector.selected() == As11Transport::Ble,
         now_ms);
+
+    const bool as11_application_quiesce_requested =
+        rpc_quiesce_coordinator.requested();
 
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();

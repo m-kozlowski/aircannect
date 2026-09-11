@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "can_datagram.h"
+#include "can_control_port.h"
 #include "can_driver.h"
 #include "fixed_queue.h"
 #include "rpc_application_link.h"
@@ -24,21 +25,6 @@ struct CanSideEvent {
     CanSideEventKind kind = CanSideEventKind::DebugPayload;
     RpcPayloadRef payload;
     std::string detail;
-};
-
-struct CanQuiesceStatus {
-    bool debug_log_rx_enabled = true;
-    bool debug_log_filter_pending = false;
-};
-
-class CanControlPort {
-public:
-    virtual ~CanControlPort() = default;
-
-    virtual bool can_available() const = 0;
-    virtual bool recover_can(const char *reason) = 0;
-    virtual void request_debug_log_rx(bool enabled) = 0;
-    virtual CanQuiesceStatus can_quiesce_status() const = 0;
 };
 
 class CanRpcLink final : public RpcApplicationLink,

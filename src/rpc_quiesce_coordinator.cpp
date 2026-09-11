@@ -1,7 +1,9 @@
 #include "rpc_quiesce_coordinator.h"
 
 #include "board_can.h"
+#ifdef ARDUINO
 #include "debug_log.h"
+#endif
 #include "event_broker.h"
 #include "stream_broker.h"
 
@@ -13,9 +15,60 @@ RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcQuiescePort &transport,
                                              StreamBroker &streams)
     : transport_(transport), can_(can), events_(events), streams_(streams) {}
 
+bool RpcQuiesceCoordinator::begin() {
+    if (!event_observer_registered_) {
+        event_observer_registered_ = events_.add_frame_observer(event_observer, this);
+    }
+    return event_observer_registered_;
+}
+
+void RpcQuiesceCoordinator::configure_ble_control(bool selected) {
+    ble_selected_ = selected;
+
+    if (!selected) {
+        events_.release(ble_events_);
+        ble_events_ = EVENT_CONSUMER_INVALID;
+        release_connection_hold();
+    } else if (event_observer_registered_ &&
+               ble_events_ == EVENT_CONSUMER_INVALID) {
+        ble_events_ = events_.acquire("_SRM").handle;
+    }
+}
+
+void RpcQuiesceCoordinator::event_observer(
+    void *context, const As11EventFrame &frame, uint32_t) {
+    auto &self = *static_cast<RpcQuiesceCoordinator *>(context);
+    const EventBrokerStatus events = self.events_.status();
+
+    if (!self.ble_selected_ || self.connection_held_ ||
+        !events.subscription_active ||
+        frame.subscription_id != events.subscription_id || frame.data_id != "_SRM") {
+        return;
+    }
+
+    for (size_t i = 0; i < frame.event_count; ++i) {
+        int32_t value = 0;
+        if (!as11_event_record_value_change(frame.events[i], value) || value != 1) {
+            continue;
+        }
+
+        self.request_connection_hold();
+#ifdef ARDUINO
+        Log::logf(CAT_BLE, LOG_INFO, "AS11 requested disconnect (_SRM=1)\n");
+#endif
+        return;
+    }
+}
+
 void RpcQuiesceCoordinator::update(bool requested,
                                    bool controlled_disconnect_required,
+                                   bool ble_selected,
                                    uint32_t now_ms) {
+    configure_ble_control(ble_selected);
+    requested = requested || connection_held_;
+    controlled_disconnect_required =
+        controlled_disconnect_required || connection_held_;
+
     if (requested != requested_) {
         if (requested) {
             begin(now_ms);
@@ -85,8 +138,10 @@ void RpcQuiesceCoordinator::begin(uint32_t now_ms) {
     deadline_ms_ = now_ms + AC_RPC_QUIESCE_TIMEOUT_MS;
     if (deadline_ms_ == 0) deadline_ms_ = 1;
 
+#ifdef ARDUINO
     Log::logf(CAT_RPC, LOG_INFO,
               "quiescing AS11 push traffic\n");
+#endif
 
     transport_.set_quiesce_mode(true);
     streams_.request_quiesce(now_ms);
@@ -153,8 +208,10 @@ void RpcQuiesceCoordinator::poll_controlled_disconnect(
 
     disconnect_timed_out_ = true;
     disconnect_deadline_ms_ = 0;
+#ifdef ARDUINO
     Log::logf(CAT_RPC, LOG_WARN,
               "controlled AS11 link disconnect timed out\n");
+#endif
 }
 
 bool RpcQuiesceCoordinator::push_traffic_quiesced(
@@ -163,6 +220,7 @@ bool RpcQuiesceCoordinator::push_traffic_quiesced(
 }
 
 void RpcQuiesceCoordinator::log_timeout() {
+#ifdef ARDUINO
     const RpcQuiesceStatus transport = transport_.quiesce_status();
     const CanQuiesceStatus can = can_.can_quiesce_status();
     const EventBrokerStatus events = events_.status();
@@ -182,6 +240,7 @@ void RpcQuiesceCoordinator::log_timeout() {
               can.debug_log_filter_pending ? 1u : 0u,
               events.subscription_active ? 1u : 0u,
               events.subscribe_pending ? 1u : 0u);
+#endif
 }
 
 }  // namespace aircannect
