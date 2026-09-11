@@ -64,6 +64,7 @@ void As11ServiceManager::set_available(bool available) {
 const char *As11ServiceManager::state_name(State state) {
     switch (state) {
         case State::Idle: return "idle";
+        case State::RequestWaitingQuiesce: return "request_waiting_quiesce";
         case State::EntryWaitingQuiesce: return "entry_waiting_quiesce";
         case State::EntryWaitingResetDrain:
             return "entry_waiting_reset_drain";
@@ -141,10 +142,10 @@ bool As11ServiceManager::submit_packet(
     }
 
     if (header.command == AS11_SERVICE_COMMAND_ENTER) {
-        if (!enter_allowed || entry_session_owned_ ||
+        if (!enter_allowed || session_exclusive_ ||
             header.status != AS11_SERVICE_STATUS_OK ||
             header.payload_length != 0) {
-            error_ = enter_allowed && !entry_session_owned_
+            error_ = enter_allowed && !session_exclusive_
                 ? As11ServiceTransactionError::InvalidRequest
                 : As11ServiceTransactionError::Busy;
             return false;
@@ -156,7 +157,14 @@ bool As11ServiceManager::submit_packet(
         error_ = As11ServiceTransactionError::RequestStatus;
         return false;
     }
-    return begin_request(std::move(request), header, now_ms);
+    request_ = std::move(request);
+    request_command_ = header.command;
+    request_sequence_ = header.sequence;
+    request_started_ms_ = now_ms;
+    session_exclusive_ = true;
+    error_ = As11ServiceTransactionError::None;
+    state_ = State::RequestWaitingQuiesce;
+    return true;
 }
 
 bool As11ServiceManager::begin_enter(
@@ -168,7 +176,7 @@ bool As11ServiceManager::begin_enter(
     entry_deadline_ms_ = now_ms + AC_AS11_SERVICE_ENTRY_TIMEOUT_MS;
     if (entry_deadline_ms_ == 0) entry_deadline_ms_ = 1;
 
-    entry_session_owned_ = true;
+    session_exclusive_ = true;
     entry_info_pending_ = false;
     close_after_response_ = false;
     error_ = As11ServiceTransactionError::None;
@@ -180,11 +188,8 @@ bool As11ServiceManager::begin_enter(
     return true;
 }
 
-bool As11ServiceManager::begin_request(
-    std::unique_ptr<LargeByteBuffer> request,
-    const As11ServicePacketHeader &header,
-    uint32_t now_ms) {
-    const size_t request_size = request->size();
+bool As11ServiceManager::begin_request(uint32_t now_ms) {
+    const size_t request_size = request_->size();
     const size_t request_frames = as11_isotp_frame_count(request_size);
 
     reassembly_buffer_ =
@@ -194,7 +199,6 @@ bool As11ServiceManager::begin_request(
         return false;
     }
 
-    request_ = std::move(request);
     As11IsoTpCanFrame first_frame;
 
     if (!transmitter_.begin(request_->data(), request_->size(),
@@ -214,8 +218,6 @@ bool As11ServiceManager::begin_request(
         return false;
     }
 
-    request_command_ = header.command;
-    request_sequence_ = header.sequence;
     request_started_ms_ = now_ms;
     phase_activity_ms_ = now_ms;
     request_frame_count_ = 1;
@@ -241,6 +243,7 @@ bool As11ServiceManager::begin_request(
 
 bool As11ServiceManager::pending() const {
     switch (state_) {
+        case State::RequestWaitingQuiesce:
         case State::EntryWaitingQuiesce:
         case State::EntryWaitingResetDrain:
         case State::EntryProbing:
@@ -458,11 +461,20 @@ void As11ServiceManager::handle_request_flow_control(
     pump_request(now_ms);
 }
 
-void As11ServiceManager::poll_entry(RpcQuiescePort &rpc,
-                                    bool quiesce_ready,
-                                    bool quiesce_failed,
-                                    uint32_t now_ms) {
+void As11ServiceManager::poll_preparation(RpcQuiescePort &rpc,
+                                          bool quiesce_ready,
+                                          bool quiesce_failed,
+                                          uint32_t now_ms) {
     if (!available_) return;
+
+    if (state_ == State::RequestWaitingQuiesce) {
+        if (quiesce_failed) {
+            fail(As11ServiceTransactionError::Busy);
+        } else if (quiesce_ready && !begin_request(now_ms)) {
+            fail(error_);
+        }
+        return;
+    }
 
     if (state_ == State::EntryWaitingQuiesce) {
         if (quiesce_failed) {
@@ -806,6 +818,14 @@ void As11ServiceManager::note_device_boot(uint32_t now_ms) {
 void As11ServiceManager::poll(uint32_t now_ms) {
     if (!available_ && state_ != State::Failed) return;
 
+    if (state_ == State::RequestWaitingQuiesce) {
+        if (millis_elapsed_at_least(now_ms, request_started_ms_,
+                                    AC_RPC_QUIESCE_TIMEOUT_MS)) {
+            fail(As11ServiceTransactionError::Busy);
+        }
+        return;
+    }
+
     if (tcp_reset_boot_wait_ &&
         static_cast<int32_t>(now_ms - tcp_reset_deadline_ms_) >= 0) {
         const uint32_t elapsed_ms = now_ms - tcp_reset_started_ms_;
@@ -929,7 +949,7 @@ void As11ServiceManager::fail(As11ServiceTransactionError error) {
 void As11ServiceManager::cancel() {
     release_entry_can_policy();
     clear_transaction();
-    entry_session_owned_ = false;
+    session_exclusive_ = false;
     entry_protocol_version_ = 0;
     entry_sequence_ = 0;
     entry_started_ms_ = 0;

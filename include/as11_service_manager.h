@@ -55,10 +55,10 @@ public:
                        uint32_t now_ms);
     void poll(uint32_t now_ms);
     void note_device_boot(uint32_t now_ms);
-    void poll_entry(RpcQuiescePort &rpc,
-                    bool quiesce_ready,
-                    bool quiesce_failed,
-                    uint32_t now_ms);
+    void poll_preparation(RpcQuiescePort &rpc,
+                          bool quiesce_ready,
+                          bool quiesce_failed,
+                          uint32_t now_ms);
 
     // CAN ingress
     void accept_can_frame(const RawCanFrame &frame, uint32_t now_ms);
@@ -71,13 +71,14 @@ public:
                     As11ServiceTransactionError &error);
     bool pending() const;
     bool exclusive_requested() const {
-        return entry_session_owned_ || tcp_reset_boot_wait_;
+        return session_exclusive_ || tcp_reset_boot_wait_;
     }
     As11ServiceTransactionError last_error() const { return error_; }
 
 private:
     enum class State : uint8_t {
         Idle,
+        RequestWaitingQuiesce,
         EntryWaitingQuiesce,
         EntryWaitingResetDrain,
         EntryProbing,
@@ -92,9 +93,7 @@ private:
     // Request transmission
     bool begin_enter(const As11ServicePacketHeader &header,
                      uint32_t now_ms);
-    bool begin_request(std::unique_ptr<LargeByteBuffer> request,
-                       const As11ServicePacketHeader &header,
-                       uint32_t now_ms);
+    bool begin_request(uint32_t now_ms);
     bool enqueue_frame(const As11IsoTpCanFrame &frame);
     bool enqueue_entry_burst();
     bool begin_entry_probe(uint32_t now_ms);
@@ -153,7 +152,7 @@ private:
     uint8_t entry_protocol_version_ = 0;
     As11ServiceTransactionError error_ =
         As11ServiceTransactionError::None;
-    bool entry_session_owned_ = false;
+    bool session_exclusive_ = false;
     bool entry_info_pending_ = false;
     bool tcp_reset_boot_wait_ = false;
     bool close_after_response_ = false;

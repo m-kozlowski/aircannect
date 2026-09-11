@@ -1527,8 +1527,9 @@ void loop() {
     const bool as11_link_ready = rpc_link_selector.status().ready;
     poll_as11_ble_recovery(now_ms);
     drain_can_side_events();
-    as11_service_manager.poll_entry(
-        rpc_transport, rpc_quiesce_coordinator.complete(),
+    as11_service_manager.poll_preparation(
+        rpc_transport,
+        rpc_quiesce_coordinator.requested() && rpc_quiesce_coordinator.complete(),
         rpc_quiesce_coordinator.timed_out(), now_ms);
     as11_service_manager.poll(now_ms);
     sync_rpc_transport_generation(now_ms);
