@@ -1051,11 +1051,15 @@ void As11BleRpcLink::note_scan_result(const NimBLEAdvertisedDevice *device) {
 void As11BleRpcLink::note_disconnected(int reason) {
 #if AC_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
+    const bool was_authenticated = status_.authenticated;
     status_.connected = false;
     status_.authenticated = false;
     portEXIT_CRITICAL(&mux_);
-    Log::logf(CAT_BLE, LOG_INFO,
-              "AS11 disconnected reason=%d\n", reason);
+
+    if (was_authenticated) {
+        Log::logf(CAT_BLE, LOG_INFO,
+                  "AS11 disconnected reason=%d\n", reason);
+    }
 #else
     (void)reason;
 #endif
@@ -1506,6 +1510,9 @@ void As11BleRpcLink::set_status(As11BleLinkState state,
 #if AC_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
+    const bool error_changed = error && error[0] &&
+        strcmp(status_.error, error) != 0;
+
     status_.state = state;
     if (error) copy_text(status_.error, sizeof(status_.error), error);
     else if (state == As11BleLinkState::Ready ||
@@ -1515,6 +1522,11 @@ void As11BleRpcLink::set_status(As11BleLinkState state,
 #if AC_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
+
+    if (error_changed) {
+        Log::logf(CAT_BLE, LOG_WARN,
+                  "AS11 connection failed error=%s\n", error);
+    }
 }
 
 void As11BleRpcLink::set_connected(bool connected, int rssi) {
