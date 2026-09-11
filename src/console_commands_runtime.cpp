@@ -1,6 +1,7 @@
 #include "console_commands.h"
 
 #include "crash_diagnostics.h"
+#include "coredump_partition_update.h"
 #include "firmware_installer.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
@@ -10,6 +11,8 @@
 #include "therapy_telemetry_broker.h"
 #include "tls_memory.h"
 #include "web_ui.h"
+
+#include <algorithm>
 
 namespace aircannect {
 namespace {
@@ -68,14 +71,14 @@ void print_web_memory_detail(Print &out, WebUI &web_ui) {
 }  // namespace
 
 CoreDiagnosticsConsoleCommands::CoreDiagnosticsConsoleCommands(
-    CrashDiagnostics &crash)
-    : crash_(crash) {}
+    CrashDiagnostics &crash, FirmwareInstaller &installer)
+    : crash_(crash), installer_(installer) {}
 
 bool CoreDiagnosticsConsoleCommands::execute(
     const String &command,
     const String &rest_arg,
     Print &out,
-    ConsoleCommandSession &) {
+    ConsoleCommandSession &session) {
     if (command != "crash") return false;
 
     String rest = rest_arg;
@@ -174,6 +177,33 @@ bool CoreDiagnosticsConsoleCommands::execute(
         return true;
     }
 
+    if (rest == "partition" || rest == "partition create") {
+        if (partition_session_id_) {
+            out.println("[CRASH] partition operation busy");
+            return true;
+        }
+
+        bool exists = false;
+        const bool inspect = rest == "partition";
+        const bool accepted = installer_.request_coredump_partition(exists, inspect);
+        if (!accepted) {
+            out.print("[CRASH] partition request rejected error=");
+            out.println(installer_.status().last_error);
+        } else if (inspect) {
+            out.println("[CRASH] partition inspection queued; no changes");
+        } else if (exists) {
+            out.println("[CRASH] partition already exists; no changes");
+        } else {
+            out.println("[CRASH] partition create queued; keep power connected; "
+                        "restart on success");
+        }
+        if (accepted && !exists) {
+            partition_session_id_ = session.id;
+            partition_inspect_only_ = inspect;
+        }
+        return true;
+    }
+
     if (rest == "clear") {
         char error[AC_CRASH_ERROR_MAX] = {};
         if (!crash_.clear(error, sizeof(error))) {
@@ -187,8 +217,86 @@ bool CoreDiagnosticsConsoleCommands::execute(
     }
 
     print_unknown_command(out, "CRASH",
-                          "crash [status|summary|clear]");
+                          "crash [status|summary|clear|partition [create]]");
     return true;
+}
+
+void CoreDiagnosticsConsoleCommands::poll_pending(
+    Print &out, ConsoleCommandSession &session) {
+    if (!pending_output(session)) return;
+
+    if (partition_inspection_) {
+        const int count = partition_inspection_->layout().entry_count;
+        // Keep each page below the web/telnet pending-output limit of 512 B.
+        const int end = std::min(partition_entry_ + 4, count);
+        for (; partition_entry_ < end; ++partition_entry_) {
+            const auto &entry = partition_inspection_->entry(partition_entry_);
+            out.printf("[CRASH] %-16.16s %02x/%02x     0x%08x  0x%08x  0x%x\n",
+                       reinterpret_cast<const char *>(entry.label),
+                       entry.type, entry.subtype,
+                       static_cast<unsigned>(entry.pos.offset),
+                       static_cast<unsigned>(entry.pos.size),
+                       static_cast<unsigned>(entry.flags));
+        }
+        if (partition_entry_ == count) cancel_pending(session);
+        return;
+    }
+
+    PartitionOperationResult result;
+    if (!installer_.take_partition_result(result)) return;
+
+    if (result.error.length()) {
+        out.print(partition_inspect_only_
+                      ? "[CRASH] partition inspection: not eligible error="
+                      : "[CRASH] partition create failed error=");
+        out.println(result.error);
+    } else if (partition_inspect_only_) {
+        out.println("[CRASH] partition inspection complete; no changes");
+    } else {
+        out.println(result.created
+                        ? "[CRASH] partition created; reboot scheduled"
+                        : "[CRASH] partition already exists; no changes");
+    }
+
+    if (result.inspection) {
+        const auto &layout = result.inspection->layout();
+        out.printf("[CRASH] flash=%u MiB table=0x8000 entries=%d\n",
+                   static_cast<unsigned>(layout.flash_size / (1024 * 1024)),
+                   layout.entry_count);
+        if (layout.entry_count) {
+            out.printf("[CRASH] entries_match=%s md5=%s tail_erased=%s\n",
+                       layout.entries_match ? "yes" : "no",
+                       layout.md5_present ? "yes" : "no",
+                       layout.tail_erased ? "yes" : "no");
+            if (layout.extra_address) {
+                out.printf("[CRASH] extra_data address=0x%08x byte=0x%02x\n",
+                           static_cast<unsigned>(layout.extra_address),
+                           layout.extra_byte);
+            }
+            out.println("[CRASH] name             type/sub  offset      size        flags");
+            partition_inspection_ = std::move(result.inspection);
+            partition_entry_ = 0;
+            return;
+        }
+    }
+
+    cancel_pending(session);
+}
+
+bool CoreDiagnosticsConsoleCommands::pending_output(
+    const ConsoleCommandSession &session) const {
+    return partition_session_id_ && partition_session_id_ == session.id;
+}
+
+void CoreDiagnosticsConsoleCommands::cancel_pending(ConsoleCommandSession &session) {
+    if (!pending_output(session)) return;
+
+    partition_inspection_.reset();
+    partition_session_id_ = 0;
+}
+
+void CoreDiagnosticsConsoleCommands::stop(ConsoleCommandSession &session) {
+    cancel_pending(session);
 }
 
 void CoreDiagnosticsConsoleCommands::print_memory_detail(Print &out) {

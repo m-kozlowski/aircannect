@@ -6,6 +6,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stdint.h>
+#include <memory>
 
 namespace aircannect {
 
@@ -20,6 +21,7 @@ enum class FirmwareInstallSource : uint8_t {
     HttpUpload,
     Url,
     Arduino,
+    PartitionTable,
 };
 
 const char *ota_upload_encoding_name(OtaUploadEncoding encoding);
@@ -44,10 +46,23 @@ struct FirmwareInstallStatus {
     String last_error;
 };
 
+class CoredumpPartitionUpdate;
+
+struct PartitionOperationResult {
+    bool created = false;
+    String error;
+    std::shared_ptr<const CoredumpPartitionUpdate> inspection;
+};
+
 class FirmwareInstaller {
 public:
     void begin();
-    void poll(bool reboot_allowed = true);
+    void poll(bool reboot_allowed = true, bool therapy_active = false);
+
+    // Explicit maintenance of the known AirCANnect flash layout.
+    bool request_coredump_partition(bool &already_exists,
+                                   bool inspect_only = false);
+    bool take_partition_result(PartitionOperationResult &result);
 
     // Source admission
     bool reserve_source(FirmwareInstallSource source,
@@ -89,6 +104,8 @@ private:
     // Partition writer
     bool begin_zlib_decoder();
     void reset_zlib_decoder();
+    void install_coredump_partition();
+    void finish_partition_operation(const char *error, bool created = false);
     bool write_auto(size_t index, const uint8_t *data, size_t len);
     bool resolve_encoding(const uint8_t header[2]);
     bool write_plain(size_t index, const uint8_t *data, size_t len);
@@ -128,6 +145,11 @@ private:
     size_t zlib_output_offset_ = 0;
     bool zlib_finished_ = false;
     bool image_magic_checked_ = false;
+
+    CoredumpPartitionUpdate *partition_update_ = nullptr;
+    bool partition_inspect_only_ = false;
+    bool partition_result_ready_ = false;
+    PartitionOperationResult partition_result_;
 };
 
 }  // namespace aircannect

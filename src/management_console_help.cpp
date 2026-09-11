@@ -237,6 +237,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  crash                     show retained panic state");
         out.println("  crash summary             show panic details and backtrace");
         out.println("  crash clear               erase retained diagnostics");
+        out.println("  crash partition           inspect flash layout without changing it");
+        out.println("  crash partition create    add missing core dump partition; restarts device");
         out.println("  GET /api/crash/dump       download the retained core dump");
         return;
     }

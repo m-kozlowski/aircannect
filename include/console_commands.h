@@ -9,6 +9,8 @@
 #include "storage_path_port.h"
 #include "storage_read_port.h"
 
+#include <memory>
+
 namespace aircannect {
 
 static constexpr size_t AC_CONSOLE_COMMAND_SESSION_CAPACITY =
@@ -20,6 +22,7 @@ class As11SettingsManager;
 class CanDriver;
 class ConfigService;
 class CrashDiagnostics;
+class CoredumpPartitionUpdate;
 class EdfRecorderManager;
 class EventBroker;
 class ExportCoordinator;
@@ -114,16 +117,26 @@ private:
 
 class CoreDiagnosticsConsoleCommands final : public ConsoleCommandGroup {
 public:
-    explicit CoreDiagnosticsConsoleCommands(CrashDiagnostics &crash);
+    CoreDiagnosticsConsoleCommands(CrashDiagnostics &crash,
+                                   FirmwareInstaller &installer);
 
     bool execute(const String &command,
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    void poll_pending(Print &out, ConsoleCommandSession &session) override;
+    bool pending_output(const ConsoleCommandSession &session) const override;
+    void cancel_pending(ConsoleCommandSession &session) override;
+    void stop(ConsoleCommandSession &session) override;
     void print_memory_detail(Print &out) override;
 
 private:
     CrashDiagnostics &crash_;
+    FirmwareInstaller &installer_;
+    uint32_t partition_session_id_ = 0;
+    bool partition_inspect_only_ = false;
+    std::shared_ptr<const CoredumpPartitionUpdate> partition_inspection_;
+    int partition_entry_ = 0;
 };
 
 class SystemConsoleCommands final : public ConsoleCommandGroup {

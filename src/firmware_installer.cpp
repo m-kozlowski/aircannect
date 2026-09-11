@@ -8,6 +8,8 @@
 #include <miniz.h>
 
 #include "debug_log.h"
+#include "coredump_partition_update.h"
+#include "large_object.h"
 #include "memory_manager.h"
 
 namespace aircannect {
@@ -49,6 +51,7 @@ const char *firmware_install_source_name(FirmwareInstallSource source) {
         case FirmwareInstallSource::HttpUpload: return "http_upload";
         case FirmwareInstallSource::Url: return "url";
         case FirmwareInstallSource::Arduino: return "arduino";
+        case FirmwareInstallSource::PartitionTable: return "partition_table";
         case FirmwareInstallSource::None:
         default: return "none";
     }
@@ -59,10 +62,22 @@ void FirmwareInstaller::begin() {
     esp_ota_mark_app_valid_cancel_rollback();
 }
 
-void FirmwareInstaller::poll(bool reboot_allowed) {
+void FirmwareInstaller::poll(bool reboot_allowed, bool therapy_active) {
     if (!lock()) return;
 
     const uint32_t now = millis();
+    if (status_.source == FirmwareInstallSource::PartitionTable) {
+        if (therapy_active && (status_.prepare_pending || status_.prepared)) {
+            abort("therapy_active");
+        } else if (status_.prepare_pending &&
+                   static_cast<uint32_t>(now - prepare_started_ms_) >=
+                       kPreparedTtlMs) {
+            abort("partition_prepare_timeout");
+        } else if (status_.prepared) {
+            install_coredump_partition();
+        }
+    }
+
     const bool reboot_due =
         reboot_at_ms_ && static_cast<int32_t>(now - reboot_at_ms_) >= 0;
     bool log_reboot_wait = false;
@@ -84,6 +99,9 @@ void FirmwareInstaller::poll(bool reboot_allowed) {
             static_cast<int32_t>(kPreparedTtlMs)) {
         const FirmwareInstallSource source = status_.source;
 
+        if (source == FirmwareInstallSource::PartitionTable) {
+            finish_partition_operation("ota_prepare_expired");
+        }
         clear_install_state_locked();
         set_error_locked("ota_prepare_expired");
         Log::logf(CAT_OTA, LOG_WARN,
@@ -103,6 +121,125 @@ void FirmwareInstaller::poll(bool reboot_allowed) {
                   "reboot waiting for AS11 quiesce\n");
     }
     if (write_timed_out) abort("upload_timeout");
+}
+
+bool FirmwareInstaller::request_coredump_partition(bool &already_exists,
+                                                   bool inspect_only) {
+    already_exists = false;
+    if (!lock()) return false;
+
+    if (!source_available_locked()) {
+        set_error_locked("ota_busy");
+        unlock();
+        return false;
+    }
+
+    clear_install_state_locked();
+    status_.last_error = "";
+    // This uses the SDK's already-loaded table; direct flash reads wait for
+    // preparation too, since they also disable cache and enter IPC.
+    already_exists = !inspect_only && esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
+        nullptr) != nullptr;
+    if (already_exists) {
+        unlock();
+        return true;
+    }
+
+    status_.source = FirmwareInstallSource::PartitionTable;
+    partition_result_ = {};
+    partition_result_ready_ = false;
+    partition_inspect_only_ = inspect_only;
+    status_.prepare_pending = true;
+    status_.partition = "partition_table";
+    prepare_started_ms_ = millis();
+    Log::logf(CAT_GENERAL, LOG_WARN, "[CRASH] partition %s queued\n",
+              inspect_only ? "inspection" : "create; keep power connected");
+    unlock();
+    return true;
+}
+
+void FirmwareInstaller::install_coredump_partition() {
+    status_.prepared = false;
+    partition_update_ = LargeObject::create<CoredumpPartitionUpdate>();
+    const bool inspected = partition_update_ &&
+        partition_update_->prepare();
+    if (partition_inspect_only_) {
+        const char *error = partition_update_ ? partition_update_->error()
+                                             : "no_memory";
+        finish_partition_operation(inspected ? nullptr : error);
+        clear_install_state_locked();
+        if (!inspected) set_error_locked(error);
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[CRASH] partition inspection complete eligible=%u error=%s; "
+                  "no changes\n", inspected, inspected ? "--" : error);
+        return;
+    }
+    if (!inspected) {
+        const char *error = partition_update_ ? partition_update_->error()
+                                             : "no_memory";
+        finish_partition_operation(error);
+        clear_install_state_locked();
+        set_error_locked(error);
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[CRASH] partition create failed error=%s\n", error);
+        return;
+    }
+    if (partition_update_->exists()) {
+        finish_partition_operation(nullptr);
+        clear_install_state_locked();
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[CRASH] partition already exists; no changes\n");
+        return;
+    }
+
+    const bool installed = partition_update_->apply();
+    if (!installed) {
+        const char *error = partition_update_->error();
+        const bool safe = partition_update_->safe_to_reboot();
+        finish_partition_operation(error);
+        if (safe) {
+            clear_install_state_locked();
+        } else {
+            // Retain the reservation: no new OTA and no automatic reboot.
+            status_.source_reserved = true;
+        }
+        set_error_locked(error);
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[CRASH] partition create failed error=%s\n", error);
+        return;
+    }
+
+    finish_partition_operation(nullptr, true);
+    status_.ready = true;
+    status_.progress_percent = 100;
+    status_.last_error = "";
+    Log::logf(CAT_GENERAL, LOG_INFO,
+              "[CRASH] partition created; reboot scheduled\n");
+    schedule_reboot(2000);
+}
+
+void FirmwareInstaller::finish_partition_operation(const char *error,
+                                                   bool created) {
+    partition_result_.created = created;
+    partition_result_.error = error ? error : "";
+    partition_result_.inspection.reset(
+        partition_update_, LargeObject::destroy<CoredumpPartitionUpdate>);
+    partition_update_ = nullptr;
+    partition_result_ready_ = true;
+}
+
+bool FirmwareInstaller::take_partition_result(PartitionOperationResult &result) {
+    if (!lock()) return false;
+    if (!partition_result_ready_) {
+        unlock();
+        return false;
+    }
+
+    result = std::move(partition_result_);
+    partition_result_ready_ = false;
+    unlock();
+    return true;
 }
 
 bool FirmwareInstaller::reserve_source(FirmwareInstallSource source,
@@ -248,6 +385,9 @@ void FirmwareInstaller::poll_prepare(bool as11_quiesced,
         const char *error = as11_quiesce_timed_out
             ? "as11_quiesce_timeout" : "oximetry_suspend_timeout";
 
+        if (source == FirmwareInstallSource::PartitionTable) {
+            finish_partition_operation(error);
+        }
         clear_install_state_locked();
         set_error_locked(error);
         Log::logf(CAT_OTA, LOG_ERROR,
@@ -716,6 +856,9 @@ void FirmwareInstaller::abort(const char *reason, bool log_error) {
 
     const FirmwareInstallSource source = status_.source;
     if (ota_handle_) esp_ota_abort(ota_handle_);
+    if (source == FirmwareInstallSource::PartitionTable) {
+        finish_partition_operation(reason ? reason : "aborted");
+    }
     clear_install_state_locked();
     set_error_locked(reason ? reason : "aborted");
 
@@ -809,7 +952,9 @@ bool FirmwareInstaller::as11_quiesce_required() const {
     if (!lock()) return false;
     const bool required = status_.prepare_pending || status_.prepared ||
                           status_.writing || status_.ready ||
-                          status_.reboot_pending;
+                          status_.reboot_pending ||
+                          (status_.source == FirmwareInstallSource::PartitionTable &&
+                           status_.source_reserved);
     unlock();
     return required;
 }
@@ -973,7 +1118,11 @@ void FirmwareInstaller::set_error_locked(const char *error) {
 }
 
 void FirmwareInstaller::clear_install_state_locked() {
+    LargeObject::destroy(partition_update_);
+    partition_update_ = nullptr;
+
     reset_zlib_decoder();
+    partition_inspect_only_ = false;
     ota_handle_ = 0;
     partition_ = nullptr;
     prepared_image_size_ = 0;

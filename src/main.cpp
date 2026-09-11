@@ -204,7 +204,7 @@ static As11DeviceConsoleCommands as11_device_console_commands(
     connect_cpap, disconnect_cpap);
 static NetworkConsoleCommands network_console_commands(wifi_manager);
 static CoreDiagnosticsConsoleCommands core_console_commands(
-    crash_diagnostics);
+    crash_diagnostics, firmware_installer);
 static SystemConsoleCommands system_console_commands(firmware_installer);
 static StorageConsoleCommands storage_console_commands(
     config_service,
@@ -1674,7 +1674,11 @@ void loop() {
     arduino_ota_source.poll(runtime_network,
                             !resmed_ota_transport_active,
                             arduino_ota_poll_allowed);
-    firmware_installer.poll(esp_reboot_allowed);
+    firmware_installer.poll(
+        esp_reboot_allowed,
+        session_manager.status().state == SessionState::Active ||
+            as11_device_service.state().therapy_state() ==
+                As11TherapyState::Running);
 
     drain_can_rx_after("arduino_ota");
 
