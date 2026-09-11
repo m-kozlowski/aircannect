@@ -54,11 +54,15 @@ bool build_ble_pairing_json(LargeTextBuffer &json,
 bool DeviceHttpController::begin(RpcRequestPort &rpc,
                                  As11DeviceService &device,
                                  TimeSyncService &time_sync,
-                                 As11BleRpcLink &ble_link) {
+                                 As11BleRpcLink &ble_link,
+                                 BleConnectCommand connect_ble,
+                                 void *connect_context) {
     rpc_ = &rpc;
     device_ = &device;
     time_sync_ = &time_sync;
     ble_link_ = &ble_link;
+    connect_ble_ = connect_ble;
+    connect_context_ = connect_context;
     if (!commands_.begin()) return false;
 
     if (!ble_pairing_snapshot_.begin(
@@ -143,6 +147,11 @@ void DeviceHttpController::execute(Command command) {
             (void)device_->request_therapy(
                 *rpc_, As11TherapyTarget::Standby, RpcSource::HttpApi,
                 millis());
+            break;
+        case CommandKind::BleConnect:
+            if (!connect_ble_ || !connect_ble_(connect_context_, millis())) {
+                Log::logf(CAT_BLE, LOG_WARN, "HTTP BLE connect request rejected\n");
+            }
             break;
         case CommandKind::BlePairScan:
             (void)ble_link_->request_pairing_scan();
@@ -294,7 +303,9 @@ void DeviceHttpController::send_ble_action(
 
     const char *action = doc["action"] | "";
     Command command;
-    if (strcmp(action, "pair") == 0 || strcmp(action, "scan") == 0) {
+    if (strcmp(action, "connect") == 0) {
+        command.kind = CommandKind::BleConnect;
+    } else if (strcmp(action, "pair") == 0 || strcmp(action, "scan") == 0) {
         command.kind = CommandKind::BlePairScan;
     } else if (strcmp(action, "select") == 0) {
         command.kind = CommandKind::BlePairSelect;

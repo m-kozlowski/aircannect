@@ -21,10 +21,14 @@ class TimeSyncService;
 
 class DeviceHttpController final : public HttpRouteModule {
 public:
+    using BleConnectCommand = bool (*)(void *context, uint32_t now_ms);
+
     bool begin(RpcRequestPort &rpc,
                As11DeviceService &device,
                TimeSyncService &time_sync,
-               As11BleRpcLink &ble_link);
+               As11BleRpcLink &ble_link,
+               BleConnectCommand connect_ble,
+               void *connect_context = nullptr);
     void register_routes(HttpRouteRegistry &server) override;
     void poll();
 
@@ -40,6 +44,7 @@ private:
         TimeReset,
         TherapyStart,
         TherapyStop,
+        BleConnect,
         BlePairScan,
         BlePairSelect,
         BlePairPasskey,
@@ -68,6 +73,8 @@ private:
     As11DeviceService *device_ = nullptr;
     TimeSyncService *time_sync_ = nullptr;
     As11BleRpcLink *ble_link_ = nullptr;
+    BleConnectCommand connect_ble_ = nullptr;
+    void *connect_context_ = nullptr;
     MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
     std::atomic<bool> as11_unavailable_{false};
 

@@ -1423,7 +1423,8 @@ void setup() {
     if (!device_http_controller.begin(rpc_transport,
                                       as11_device_service,
                                       time_sync_service,
-                                      as11_ble_rpc_link)) {
+                                      as11_ble_rpc_link,
+                                      connect_cpap)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] device HTTP controller failed to start\n");
     }

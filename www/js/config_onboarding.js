@@ -405,7 +405,7 @@
       }
     }
 
-    async function as11BleAction(action, values) {
+    async function as11BleAction(action, values, showError = showAs11BlePairingError) {
       try {
         await AirCANnect.http.requestOk("/api/as11/ble", {
           method: "POST",
@@ -414,7 +414,7 @@
         });
         return true;
       } catch (error) {
-        showAs11BlePairingError(error.message);
+        showError(error.message);
         return false;
       }
     }
@@ -1101,6 +1101,14 @@
 
     AirCANnect.actions.register("as11.pair-dashboard", () =>
       startAs11PairingFromDashboard());
+    AirCANnect.actions.register("as11.connect-dashboard", async (_event, button) => {
+      button.disabled = true;
+      try {
+        await as11BleAction("connect", null, (message) => alert(message));
+      } finally {
+        button.disabled = false;
+      }
+    });
     AirCANnect.actions.register("config.save", () => saveConfig());
     AirCANnect.actions.register(
       "config.endpoint-toggle", (_event, element) =>

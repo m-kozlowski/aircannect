@@ -504,6 +504,12 @@
       }
       AirCANnect.ui.text("as11Connection", as11Connection);
 
+      const connectButton = document.getElementById("as11ConnectButton");
+      if (connectButton) {
+        connectButton.hidden = data.as11_transport !== "ble" ||
+          !["quiesced", "backoff"].includes(data.as11_link_state);
+      }
+
       const pairButton = document.getElementById("as11PairButton");
       if (pairButton) {
         pairButton.hidden = data.as11_transport !== "ble" ||
