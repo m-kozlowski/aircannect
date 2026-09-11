@@ -1807,6 +1807,11 @@ ReportPlanResult ReportPlanner::build(
         return result;
     }
 
+    if (night->sources_external) {
+        result.status = ReportPlanStatus::InvalidCatalog;
+        return result;
+    }
+
     const size_t session_count =
         requested_session_count(*catalog, *night, request);
     if (session_count == SIZE_MAX || session_count > UINT16_MAX) {

@@ -9,6 +9,7 @@
 
 #include "calendar_utils.h"
 #include "checked_size.h"
+#include "large_scratch_array.h"
 #include "memory_manager.h"
 #include "report_daily_metrics.h"
 #include "report_parser.h"
@@ -653,6 +654,51 @@ NightCatalogSummarySnapshot::from_catalog(const NightCatalog &catalog) {
     }
 
     return snapshot;
+}
+
+std::shared_ptr<const NightCatalogSummarySnapshot>
+NightCatalogSummarySnapshot::replace_night(
+    const NightCatalogSummarySnapshot &current,
+    const NightCatalog &single_night,
+    uint64_t expected_summary_identity) {
+    const NightCatalogRecord *night = single_night.size() == 1
+        ? single_night.record(0) : nullptr;
+    if (!night || !night->sleep_day.valid()) return {};
+
+    size_t retained_count = 0;
+    for (size_t i = 0; i < current.size(); ++i) {
+        const NightCatalogSummaryInput &record = current.records()[i];
+        if (record.sleep_day != night->sleep_day) {
+            ++retained_count;
+        } else if (record.identity != expected_summary_identity) {
+            return copy(current.records(), current.size());
+        }
+    }
+
+    const auto replacement = from_catalog(single_night);
+    if (!replacement ||
+        !CheckedSize::add_to(retained_count, replacement->size())) {
+        return {};
+    }
+
+    LargeScratchArray<NightCatalogSummaryInput> records;
+    if (!records.allocate(retained_count)) return {};
+
+    bool inserted = false;
+    for (size_t i = 0; i < current.size(); ++i) {
+        const NightCatalogSummaryInput &record = current.records()[i];
+        if (record.sleep_day != night->sleep_day) {
+            *records.append() = record;
+        } else if (!inserted && replacement->size() != 0) {
+            *records.append() = replacement->records()[0];
+            inserted = true;
+        }
+    }
+    if (!inserted && replacement->size() != 0) {
+        *records.append() = replacement->records()[0];
+    }
+
+    return copy(records.data(), records.size());
 }
 
 std::shared_ptr<const NightCatalogSummarySnapshot>

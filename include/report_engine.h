@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "night_catalog_store_service.h"
 #include "report_executor.h"
 #include "report_fallback_acquisition_service.h"
 #include "report_planner.h"
@@ -83,10 +84,16 @@ public:
     ReportEngineStatus status() const;
     ReportSignalStoreCatalogInput take_published();
 
+    // Owner recovery must still match the index contract captured at admission.
+    std::shared_ptr<const NightCatalog> take_loaded_sources(
+        SourceRevision &expected_revision,
+        uint8_t &expected_source_flags);
+
 private:
     enum class ActivePhase : uint8_t {
         Idle,
         LoadingMetadata,
+        LoadingSources,
         LoadingCheckpoint,
         AcquiringFallback,
         WaitingForCatalog,
@@ -100,7 +107,9 @@ private:
     bool finish_metadata_load(uint32_t now_ms);
     bool start_known_request(const ReportSignalStoreCatalogRecord *stored,
                              uint32_t now_ms);
-    bool start_build(uint32_t now_ms);
+    bool finish_sources_load(uint32_t now_ms);
+    bool start_build(uint32_t now_ms,
+                     std::shared_ptr<const NightCatalog> sources = {});
     bool finish_checkpoint_load(uint32_t now_ms);
     bool start_execution(uint32_t now_ms);
     bool finish_fallback_acquisition();
@@ -125,6 +134,15 @@ private:
     StorageBoundedFileLoader metadata_loader_;
     std::shared_ptr<const LargeByteBuffer> previous_metadata_;
     std::shared_ptr<const LargeByteBuffer> previous_checkpoint_;
+
+    NightCatalogStoreService sources_loader_;
+    SourceRevision sources_expected_revision_;
+    uint8_t sources_expected_flags_ = 0;
+    bool sources_requested_ = false;
+
+    std::shared_ptr<const NightCatalog> loaded_sources_;
+    SourceRevision loaded_sources_expected_revision_;
+    uint8_t loaded_sources_expected_flags_ = 0;
 
     std::shared_ptr<const NightCatalog> catalog_;
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog_;

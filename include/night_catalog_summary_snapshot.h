@@ -36,6 +36,13 @@ public:
         size_t error_size = 0);
     static std::shared_ptr<const NightCatalogSummarySnapshot> from_catalog(
         const NightCatalog &catalog);
+
+    // Repair one recovered day without replacing newer retained Summary data.
+    static std::shared_ptr<const NightCatalogSummarySnapshot> replace_night(
+        const NightCatalogSummarySnapshot &current,
+        const NightCatalog &single_night,
+        uint64_t expected_summary_identity);
+
     static std::shared_ptr<const NightCatalogSummarySnapshot>
     preserve_expired_history(
         const NightCatalogSummarySnapshot &current,

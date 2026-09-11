@@ -13,6 +13,7 @@
 #include "edf_session_metadata.h"
 #include "edf_str_file_layout.h"
 #include "night_catalog_clock.h"
+#include "night_catalog_store_service.h"
 #include "night_str_record.h"
 #include "report_fallback_artifact.h"
 #include "memory_manager.h"
@@ -397,6 +398,11 @@ struct NightCatalogRefreshRuntime {
     }
 
     void clear_sources() {
+        previous_source_loader.cancel();
+        (void)previous_source_loader.take_snapshot();
+        previous_sources_requested = false;
+        previous_fallback.reset();
+
         scan.reset();
         destroy_large_array(edf_sessions, edf_session_capacity);
         edf_sessions = nullptr;
@@ -455,6 +461,7 @@ struct NightCatalogRefreshRuntime {
         target = {};
         datalog_root[0] = '\0';
         metadata_root[0] = '\0';
+        fallback_root[0] = '\0';
     }
 
     Phase phase = Phase::Idle;
@@ -464,9 +471,13 @@ struct NightCatalogRefreshRuntime {
 
     std::shared_ptr<const NightCatalogSummarySnapshot> summary;
     std::shared_ptr<const NightCatalog> previous_catalog;
+    NightCatalogStoreService previous_source_loader;
+    std::shared_ptr<const NightCatalog> previous_fallback;
+    bool previous_sources_requested = false;
     NightCatalogRefreshTarget target;
     char datalog_root[AC_STORAGE_PATH_MAX] = {};
     char metadata_root[AC_STORAGE_PATH_MAX] = {};
+    char fallback_root[AC_STORAGE_PATH_MAX] = {};
 
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_capacity = 0;
@@ -519,6 +530,7 @@ void NightCatalogRefreshService::begin(StorageScanPort &scan_port,
     if (!runtime_) runtime_ = new (std::nothrow) NightCatalogRefreshRuntime();
     scan_port_ = &scan_port;
     read_port_ = &read_port;
+    if (runtime_) runtime_->previous_source_loader.begin(read_port);
 }
 
 bool NightCatalogRefreshService::active() const {
@@ -641,6 +653,22 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
         roots[root_count++] = {runtime_->datalog_root, true};
         roots[root_count++] = {runtime_->metadata_root, true};
         roots[root_count++] = {"/STR.edf", false};
+
+        const NightCatalogRecord *previous_night =
+            runtime_->previous_catalog->find(target.sleep_day);
+
+        if (previous_night &&
+            (previous_night->source_flags &
+             NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) {
+            if (!report_fallback_artifact_path(target.sleep_day,
+                                               runtime_->fallback_root,
+                                               sizeof(runtime_->fallback_root))) {
+                reset_transient();
+                return OperationAdmission::Rejected;
+            }
+
+            roots[root_count++] = {runtime_->fallback_root, false};
+        }
     } else {
         roots[root_count++] = {"/DATALOG", true};
         roots[root_count++] = {EDF_SESSION_METADATA_ROOT, true};
@@ -1063,6 +1091,9 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
 void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
                            NightCatalogRefreshStatus &status,
                            const char *warning) {
+    runtime.previous_fallback.reset();
+    runtime.previous_sources_requested = false;
+
     ++status.files_skipped;
     ++runtime.scan_index;
     runtime.phase = NightCatalogRefreshRuntime::Phase::SelectFallback;
@@ -1075,7 +1106,8 @@ void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
 
 bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
                           StorageReadPort &read_port,
-                          NightCatalogRefreshStatus &status) {
+                          NightCatalogRefreshStatus &status,
+                          const char *&error) {
     StorageScanEntryView entry;
     while (runtime.scan_index < runtime.scan->size()) {
         if (!runtime.scan->entry(runtime.scan_index, entry) ||
@@ -1084,6 +1116,58 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
             ++runtime.scan_index;
             continue;
         }
+
+        char day_text[9] = {};
+        memcpy(day_text, entry.path + strlen(REPORT_FALLBACK_ARTIFACT_ROOT) + 1,
+               8);
+
+        SleepDayId day;
+        const NightCatalogRecord *previous_night =
+            runtime.previous_catalog && SleepDayId::from_yyyymmdd(day_text, day)
+                ? runtime.previous_catalog->find(day)
+                : nullptr;
+
+        // The index cannot reconstruct a fallback's saved clock correction.
+        // Hydrate just this night before interpreting its retained artifact.
+        if (previous_night && previous_night->sources_external &&
+            (previous_night->source_flags &
+             NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0 &&
+            !runtime.previous_fallback) {
+            NightCatalogStoreService &loader = runtime.previous_source_loader;
+            if (!runtime.previous_sources_requested) {
+                const OperationAdmission admission =
+                    loader.request_load_night(day, status.generation);
+
+                if (admission == OperationAdmission::Busy) return false;
+                if (admission != OperationAdmission::Accepted) {
+                    error = "night_catalog_previous_sources_read_rejected";
+                    return true;
+                }
+
+                runtime.previous_sources_requested = true;
+                copy_cstr(status.current_path, sizeof(status.current_path),
+                          entry.path);
+
+                return true;
+            }
+
+            const bool progressed = loader.poll();
+            if (loader.active()) return progressed;
+
+            if (loader.status().state != NightCatalogStoreState::Ready) {
+                error = "night_catalog_previous_sources_unavailable";
+                return true;
+            }
+
+            // Sources may have been published before an interrupted index save.
+            // Their fallback identity, not the index revision, owns clock reuse.
+            runtime.previous_fallback = loader.take_snapshot();
+            if (!runtime.previous_fallback) {
+                error = "night_catalog_previous_sources_invalid";
+                return true;
+            }
+        }
+
         if (entry.size < ReportFallbackArtifactCodec::HeaderBytes ||
             entry.size > ReportFallbackArtifactCodec::MaxFileBytes ||
             entry.size > SIZE_MAX ||
@@ -1204,18 +1288,21 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
     out.metadata_bytes = static_cast<uint32_t>(info.metadata_bytes);
     out.source_timezone_offset_minutes = info.timezone_offset_minutes;
     out.source_timezone_offset_valid = info.timezone_offset_valid;
-    if (runtime.previous_catalog) {
+    const NightCatalog *previous_catalog = runtime.previous_fallback
+        ? runtime.previous_fallback.get()
+        : runtime.previous_catalog.get();
+
+    if (previous_catalog) {
         const NightCatalogRecord *previous_night =
-            runtime.previous_catalog->find(info.sleep_day);
+            previous_catalog->find(info.sleep_day);
         size_t previous_count = 0;
         const NightCatalogFallbackFile *previous_files = previous_night
-            ? runtime.previous_catalog->fallback_files(*previous_night,
-                                                        previous_count)
+            ? previous_catalog->fallback_files(*previous_night, previous_count)
             : nullptr;
         for (size_t i = 0; previous_files && i < previous_count; ++i) {
             const NightCatalogFallbackFile &previous = previous_files[i];
             const char *previous_path =
-                runtime.previous_catalog->path(previous);
+                previous_catalog->path(previous);
             if (previous.identity == out.identity && previous_path &&
                 strcmp(previous_path, out.path) == 0) {
                 out.time_adjust_ms = previous.time_adjust_ms;
@@ -1267,6 +1354,9 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
 
     runtime.fallback_session_count += info.session_count;
     runtime.fallback_section_count += info.section_count;
+    runtime.previous_fallback.reset();
+    runtime.previous_sources_requested = false;
+
     ++runtime.fallback_record_count;
     ++status.files_indexed;
     ++runtime.scan_index;
@@ -1712,6 +1802,52 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         set_warning(status, "night_catalog_fallback_invalid");
     }
 
+    // An external index cannot rebuild a missing fallback's clock metadata.
+    // Preserve only that night during reconciliation, without blocking others.
+    if (runtime.previous_catalog) {
+        for (size_t i = 0; i < runtime.previous_catalog->size(); ++i) {
+            const NightCatalogRecord *previous =
+                runtime.previous_catalog->record(i);
+
+            if (!previous || !previous->sources_external ||
+                (runtime.target.valid() &&
+                 previous->sleep_day != runtime.target.sleep_day) ||
+                (previous->source_flags &
+                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
+                continue;
+            }
+
+            const NightCatalogRecord *rebuilt = catalog->find(previous->sleep_day);
+
+            if (rebuilt &&
+                (rebuilt->source_flags &
+                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) {
+                continue;
+            }
+
+            if (runtime.target.valid()) {
+                error = "night_catalog_previous_fallback_unavailable";
+                retryable = true;
+                catalog.reset();
+                return false;
+            }
+
+            std::shared_ptr<const NightCatalog> preserved =
+                NightCatalogBuilder::upsert_night(
+                    *catalog, *runtime.previous_catalog, previous->sleep_day);
+
+            if (!preserved) {
+                error = "night_catalog_previous_night_preserve_failed";
+                retryable = true;
+                catalog.reset();
+                return false;
+            }
+
+            catalog = std::move(preserved);
+            set_warning(status, "night_catalog_previous_night_preserved");
+        }
+    }
+
     if (runtime.target.valid()) {
         if (!runtime.previous_catalog) {
             error = "night_catalog_target_base_missing";
@@ -1804,8 +1940,22 @@ bool NightCatalogRefreshService::poll() {
             }
             return true;
 
-        case NightCatalogRefreshRuntime::Phase::SelectFallback:
-            return submit_next_fallback(*runtime_, *read_port_, status_);
+        case NightCatalogRefreshRuntime::Phase::SelectFallback: {
+            const bool progressed =
+                submit_next_fallback(*runtime_, *read_port_, status_, error);
+
+            if (error) {
+                if (runtime_->target.valid()) {
+                    fail(error, true);
+                } else {
+                    // Do not interpret fallback timestamps without their clock.
+                    // The build will retain this external-index night unchanged.
+                    skip_current_fallback(*runtime_, status_, error);
+                }
+            }
+
+            return progressed;
+        }
 
         case NightCatalogRefreshRuntime::Phase::WaitFallback:
             if (!finish_fallback_read(*runtime_, *read_port_, status_)) {

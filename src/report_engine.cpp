@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "night_catalog_builder.h"
 #include "report_sources.h"
 #include "report_build_checkpoint.h"
 #include "string_util.h"
@@ -114,6 +115,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
     store_.begin(read_port, range_write_port, write_port);
     builder_.begin(store_);
     metadata_loader_.begin(read_port);
+    sources_loader_.begin(read_port);
 }
 
 void ReportEngine::publish_catalog(
@@ -124,9 +126,13 @@ void ReportEngine::publish_catalog(
     const NightCatalogRecord *night =
         catalog_->find(active_request_.artifact.sleep_day);
     if (phase_ == ActivePhase::WaitingForCatalog) {
-        if (!night ||
-            !catalog_contains_fallback(
-                *catalog_, *night, awaited_fallback_identity_)) {
+        if (!night) return;
+
+        if (night->sources_external) {
+            if (night->source_revision ==
+                active_request_.artifact.source_revision) return;
+        } else if (!catalog_contains_fallback(
+                       *catalog_, *night, awaited_fallback_identity_)) {
             return;
         }
 
@@ -136,7 +142,8 @@ void ReportEngine::publish_catalog(
         resumed.force_rebuild = false;
         fallback_acquisition_.reset();
         active_plan_.reset();
-        awaited_fallback_identity_ = 0;
+        // An external record must prove the replacement identity after loading.
+        if (!night->sources_external) awaited_fallback_identity_ = 0;
         phase_ = ActivePhase::Idle;
         (void)start_request(resumed, 0);
         return;
@@ -244,6 +251,9 @@ size_t ReportEngine::cancel_background() {
 void ReportEngine::clear() {
     queue_.clear();
     published_ = {};
+    loaded_sources_.reset();
+    loaded_sources_expected_revision_ = {};
+    loaded_sources_expected_flags_ = 0;
 
     if (phase_ == ActivePhase::AcquiringFallback) {
         fallback_acquisition_.cancel();
@@ -272,6 +282,19 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             worked = metadata_loader_.poll() || worked;
             if (metadata_loader_.status().terminal()) {
                 worked = finish_metadata_load(now_ms) || worked;
+            }
+            break;
+
+        case ActivePhase::LoadingSources:
+            if (!sources_requested_) {
+                worked = start_build(now_ms) || worked;
+            } else {
+                worked = sources_loader_.poll() || worked;
+            }
+
+            if (phase_ == ActivePhase::LoadingSources &&
+                sources_requested_ && !sources_loader_.active()) {
+                worked = finish_sources_load(now_ms) || worked;
             }
             break;
 
@@ -328,6 +351,7 @@ ReportEngineStatus ReportEngine::status() const {
 
     switch (phase_) {
         case ActivePhase::LoadingMetadata:
+        case ActivePhase::LoadingSources:
         case ActivePhase::LoadingCheckpoint:
             out.state = ReportEngineState::Executing;
             break;
@@ -358,6 +382,16 @@ ReportSignalStoreCatalogInput ReportEngine::take_published() {
     ReportSignalStoreCatalogInput out = std::move(published_);
     published_ = {};
     return out;
+}
+
+std::shared_ptr<const NightCatalog> ReportEngine::take_loaded_sources(
+    SourceRevision &expected_revision,
+    uint8_t &expected_source_flags) {
+    expected_revision = loaded_sources_expected_revision_;
+    expected_source_flags = loaded_sources_expected_flags_;
+    loaded_sources_expected_revision_ = {};
+    loaded_sources_expected_flags_ = 0;
+    return std::move(loaded_sources_);
 }
 
 bool ReportEngine::source_current(const ReportArtifactKey &artifact) const {
@@ -478,13 +512,129 @@ bool ReportEngine::start_known_request(
     return start_build(now_ms);
 }
 
-bool ReportEngine::start_build(uint32_t now_ms) {
+bool ReportEngine::finish_sources_load(uint32_t now_ms) {
+    sources_requested_ = false;
+    const NightCatalogStoreStatus status = sources_loader_.status();
+    if (status.state != NightCatalogStoreState::Ready) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::InvalidCatalog,
+                        ReportExecutorError::None,
+                        status.error[0] ? status.error
+                                        : "report_sources_read_failed");
+        return true;
+    }
+
+    auto sources = sources_loader_.take_snapshot();
+    sources_loader_.cancel();
+    const NightCatalogRecord *night = sources
+        ? sources->find(active_request_.artifact.sleep_day) : nullptr;
+
+    if (!night || sources->size() != 1 || night->sources_external) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::InvalidCatalog,
+                        ReportExecutorError::None,
+                        "report_sources_invalid");
+        return true;
+    }
+
+    const auto *current = catalog_
+        ? catalog_->find(active_request_.artifact.sleep_day) : nullptr;
+
+    if (!current || current->source_revision != sources_expected_revision_ ||
+        current->source_flags != sources_expected_flags_) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::StaleRevision,
+                        ReportExecutorError::None,
+                        "report_sources_index_changed");
+        return true;
+    }
+
+    loaded_sources_ = sources;
+    loaded_sources_expected_revision_ = sources_expected_revision_;
+    loaded_sources_expected_flags_ = sources_expected_flags_;
+    if (night->source_revision != active_request_.artifact.source_revision) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::StaleRevision,
+                        ReportExecutorError::None,
+                        "report_sources_revision_mismatch");
+        return true;
+    }
+
+    return start_build(now_ms, std::move(sources));
+}
+
+bool ReportEngine::start_build(
+    uint32_t now_ms,
+    std::shared_ptr<const NightCatalog> sources) {
+    if (!source_current(active_request_.artifact)) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::StaleRevision,
+                        ReportExecutorError::None,
+                        "report_source_revision_stale");
+        return true;
+    }
+
+    if (!sources) {
+        const auto *night = catalog_->find(active_request_.artifact.sleep_day);
+        if (night->sources_external) {
+            const OperationAdmission admitted = sources_loader_.request_load_night(
+                night->sleep_day, active_request_.ticket.generation,
+                read_lane(active_request_.priority));
+
+            if (admitted == OperationAdmission::Rejected) {
+                complete_active(OperationOutcome::failed(),
+                                ReportPlanStatus::InvalidCatalog,
+                                ReportExecutorError::None,
+                                "report_sources_read_rejected");
+                return true;
+            }
+
+            sources_requested_ = admitted == OperationAdmission::Accepted;
+            if (sources_requested_) {
+                sources_expected_revision_ = night->source_revision;
+                sources_expected_flags_ = night->source_flags;
+            }
+            phase_ = ActivePhase::LoadingSources;
+            return sources_requested_;
+        }
+
+        sources = catalog_->size() == 1 ? catalog_
+            : NightCatalogBuilder::select_night(*catalog_, night->sleep_day);
+
+        if (!sources) {
+            if (retry_active(now_ms, PLAN_RETRY_DELAY_MS)) return true;
+
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::AllocationFailed,
+                            ReportExecutorError::None);
+            return true;
+        }
+        loaded_sources_ = sources;
+        loaded_sources_expected_revision_ = night->source_revision;
+        loaded_sources_expected_flags_ = night->source_flags;
+    }
+
+    if (awaited_fallback_identity_ != 0) {
+        const auto *night = sources->find(active_request_.artifact.sleep_day);
+        if (!night || !catalog_contains_fallback(
+                          *sources, *night, awaited_fallback_identity_)) {
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::InvalidCatalog,
+                            ReportExecutorError::None,
+                            "report_sources_fallback_mismatch");
+            return true;
+        }
+        awaited_fallback_identity_ = 0;
+    }
+
     ReportPlanRequest plan_request;
     plan_request.artifact = active_request_.artifact;
     plan_request.signal_mask = report_signal_mask_all();
     plan_request.event_mask = REPORT_EVENT_ALL;
 
-    ReportPlanResult planned = ReportPlanner::build(plan_request, catalog_);
+    ReportPlanResult planned = ReportPlanner::build(
+        plan_request, std::move(sources));
+
     if (!planned.ready()) {
         if (planned.status == ReportPlanStatus::AllocationFailed &&
             retry_active(now_ms, PLAN_RETRY_DELAY_MS)) {
@@ -843,6 +993,12 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
 
 void ReportEngine::cancel_active_work() {
     switch (phase_) {
+        case ActivePhase::LoadingSources:
+            sources_loader_.cancel();
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            break;
         case ActivePhase::LoadingMetadata:
         case ActivePhase::LoadingCheckpoint:
             metadata_loader_.cancel();
@@ -894,6 +1050,12 @@ void ReportEngine::complete_active(OperationOutcome outcome,
 
 void ReportEngine::reset_active() {
     metadata_loader_.reset();
+    (void)sources_loader_.take_snapshot();
+    sources_loader_.cancel();
+    sources_requested_ = false;
+    sources_expected_revision_ = {};
+    sources_expected_flags_ = 0;
+
     executor_.reset();
     builder_.discard_build();
     store_.reset();

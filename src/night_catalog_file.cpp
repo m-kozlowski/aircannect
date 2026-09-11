@@ -9,6 +9,7 @@
 #include "little_endian.h"
 #include "report_records.h"
 #include "report_fallback_payload_layout.h"
+#include "report_signal_store.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -26,6 +27,9 @@ constexpr uint8_t FILE_MAGIC_V11[8] = {
 };
 constexpr uint8_t FILE_MAGIC_V12[8] = {
     'A', 'C', 'N', 'C', 'A', 'T', '1', '2',
+};
+constexpr uint8_t FILE_MAGIC_V13[8] = {
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '3',
 };
 
 constexpr size_t RECORD_BYTES_V11 = 120;
@@ -188,6 +192,15 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
             !ranges_valid(masks, mask_count) ||
             !add_u32(expected_mask, mask_count)) {
             return false;
+        }
+
+        if (record->sources_external) {
+            if (record->file_count != 0 || record->fallback_file_count != 0 ||
+                record->file_offset != expected_file ||
+                record->fallback_file_offset != expected_fallback_file) {
+                return false;
+            }
+            continue;
         }
 
         size_t file_count = 0;
@@ -491,6 +504,7 @@ void decode_metrics_v11(const uint8_t *in, NightCatalogMetrics &metrics) {
 void encode_record(uint8_t *out, const NightCatalogRecord &record) {
     put_le32(out, static_cast<uint32_t>(record.sleep_day.epoch_days()));
     out[4] = record.source_flags;
+    out[5] = record.sources_external ? 1 : 0;
     put_le64(out + 8, record.source_revision.value());
     put_le64(out + 16, static_cast<uint64_t>(record.day_start_ms));
     put_le64(out + 24, static_cast<uint64_t>(record.day_end_ms));
@@ -530,6 +544,7 @@ bool decode_record(const uint8_t *in,
         static_cast<int32_t>(get_le32(in + timezone_field_offset));
     if (session_count > UINT16_MAX || mask_count > UINT16_MAX ||
         file_count > UINT16_MAX || fallback_file_count > UINT16_MAX ||
+        in[5] > (version == NightCatalogFileCodec::Version ? 1 : 0) ||
         !timezone_offset_valid(timezone_minutes != TIMEZONE_OFFSET_MISSING,
                                timezone_minutes)) {
         return false;
@@ -537,6 +552,7 @@ bool decode_record(const uint8_t *in,
 
     record.sleep_day = day;
     record.source_flags = in[4];
+    record.sources_external = in[5] != 0;
     record.source_revision = SourceRevision(get_le64(in + 8));
     record.day_start_ms = static_cast<int64_t>(get_le64(in + 16));
     record.day_end_ms = static_cast<int64_t>(get_le64(in + 24));
@@ -770,8 +786,10 @@ bool parse_header(const uint8_t *header,
     const uint16_t revision_policy = legacy
         ? SOURCE_REVISION_POLICY_V11
         : NIGHT_CATALOG_SOURCE_REVISION_POLICY;
-    const uint8_t *magic = legacy ? FILE_MAGIC_V11 : FILE_MAGIC_V12;
-    if ((!legacy && version != NightCatalogFileCodec::Version) ||
+    const uint8_t *magic = legacy ? FILE_MAGIC_V11
+        : version == 12 ? FILE_MAGIC_V12 : FILE_MAGIC_V13;
+
+    if ((!legacy && version != 12 && version != NightCatalogFileCodec::Version) ||
         memcmp(header, magic, sizeof(FILE_MAGIC_V11)) != 0 ||
         get_le16(header + 12) != record_bytes ||
         get_le16(header + 26) != revision_policy) {
@@ -819,6 +837,22 @@ bool parse_header(const uint8_t *header,
 }
 
 }  // namespace
+
+bool NightCatalogFileCodec::sources_path(SleepDayId sleep_day,
+                                        char *out,
+                                        size_t out_size) {
+    char day[9] = {};
+    char directory[AC_STORAGE_PATH_MAX] = {};
+    if (!sleep_day.format_yyyymmdd(day, sizeof(day)) ||
+        !storage_append_child_path(REPORT_SIGNAL_STORE_ROOT,
+                                   day,
+                                   directory,
+                                   sizeof(directory))) {
+        return false;
+    }
+
+    return storage_append_child_path(directory, "sources.bin", out, out_size);
+}
 
 bool NightCatalogFileCodec::inspect(const uint8_t *header,
                                     size_t header_length,
@@ -947,7 +981,7 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         return {};
     }
 
-    memcpy(header, FILE_MAGIC_V12, sizeof(FILE_MAGIC_V12));
+    memcpy(header, FILE_MAGIC_V13, sizeof(FILE_MAGIC_V13));
     put_le16(header + 8, Version);
     put_le16(header + 10, HeaderBytes);
     put_le16(header + 12, RECORD_BYTES);

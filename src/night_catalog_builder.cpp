@@ -1619,12 +1619,44 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     return catalog;
 }
 
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::index(
+    const NightCatalog &source) {
+    return project(source, Projection::Index, SleepDayId());
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::select_night(
+    const NightCatalog &source,
+    SleepDayId sleep_day) {
+    if (!source.find(sleep_day)) return {};
+
+    return project(source, Projection::Night, sleep_day);
+}
+
 std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
     const NightCatalog &source,
     const NightCatalog &replacement,
     SleepDayId sleep_day) {
-    const NightCatalogRecord *replacement_record = replacement.find(sleep_day);
-    if (!replacement_record) return {};
+    if (!replacement.find(sleep_day)) return {};
+
+    return project(source, Projection::Upsert, sleep_day, &replacement);
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::project(
+    const NightCatalog &source,
+    Projection projection,
+    SleepDayId sleep_day,
+    const NightCatalog *replacement) {
+    const NightCatalogRecord *replacement_record =
+        replacement ? replacement->find(sleep_day) : nullptr;
+    const bool externalize = projection == Projection::Index;
+
+    auto include_source = [&](const NightCatalogRecord &record) {
+        if (projection == Projection::Night) {
+            return record.sleep_day == sleep_day;
+        }
+
+        return !replacement_record || record.sleep_day != sleep_day;
+    };
 
     struct CatalogCounts {
         size_t records = 0;
@@ -1639,12 +1671,21 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
     };
 
     CatalogCounts counts;
-    auto count_record = [&counts](const NightCatalog &catalog,
-                                  const NightCatalogRecord &record) {
+    auto count_record = [&](const NightCatalog &catalog,
+                             const NightCatalogRecord &record) {
         if (!add_count(counts.records, 1) ||
             !add_count(counts.sessions, record.session_count) ||
-            !add_count(counts.mask_windows, record.mask_window_count) ||
-            !add_count(counts.files, record.file_count) ||
+            !add_count(counts.mask_windows, record.mask_window_count)) {
+            return false;
+        }
+
+        if (record.sources_external &&
+            (record.file_count != 0 || record.fallback_file_count != 0)) {
+            return false;
+        }
+        if (externalize || record.sources_external) return true;
+
+        if (!add_count(counts.files, record.file_count) ||
             !add_count(counts.fallback_files,
                        record.fallback_file_count)) {
             return false;
@@ -1689,10 +1730,13 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
     };
 
     for (size_t i = 0; i < source.record_count_; ++i) {
-        if (source.records_[i].sleep_day == sleep_day) continue;
+        if (!include_source(source.records_[i])) continue;
         if (!count_record(source, source.records_[i])) return {};
     }
-    if (!count_record(replacement, *replacement_record)) return {};
+    if (replacement_record &&
+        !count_record(*replacement, *replacement_record)) {
+        return {};
+    }
 
     std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
     if (!catalog ||
@@ -1749,6 +1793,13 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
         }
         for (size_t i = 0; i < mask_window_count; ++i) {
             catalog->mask_windows_[next_mask_window++] = mask_windows[i];
+        }
+
+        if (externalize || old_record.sources_external) {
+            record.sources_external = true;
+            record.file_count = 0;
+            record.fallback_file_count = 0;
+            return true;
         }
 
         size_t file_count = 0;
@@ -1830,7 +1881,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
         return true;
     };
 
-    bool replacement_added = false;
+    bool replacement_added = !replacement_record;
     size_t source_index = 0;
     while (source_index < source.record_count_ || !replacement_added) {
         const NightCatalogRecord *source_record =
@@ -1838,9 +1889,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
                 ? &source.records_[source_index]
                 : nullptr;
 
-        if (source_record && source_record->sleep_day == sleep_day) {
+        if (replacement_record && source_record &&
+            source_record->sleep_day == sleep_day) {
             if (!replacement_added &&
-                !append_record(replacement, *replacement_record)) {
+                !append_record(*replacement, *replacement_record)) {
                 return {};
             }
             replacement_added = true;
@@ -1850,14 +1902,16 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
 
         if (!replacement_added &&
             (!source_record || source_record->sleep_day < sleep_day)) {
-            if (!append_record(replacement, *replacement_record)) {
+            if (!append_record(*replacement, *replacement_record)) {
                 return {};
             }
             replacement_added = true;
             continue;
         }
 
-        if (!source_record || !append_record(source, *source_record)) {
+        if (!source_record) return {};
+        if (include_source(*source_record) &&
+            !append_record(source, *source_record)) {
             return {};
         }
         source_index++;
@@ -1895,7 +1949,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
 
     const NightCatalogRecord *source_night =
         source.find(replacement.info.sleep_day);
-    if (!source_night ||
+    if (!source_night || source_night->sources_external ||
         (source_night->source_flags & NIGHT_CATALOG_SOURCE_EDF) != 0 ||
         source_night->day_start_ms != replacement.info.day_start_ms ||
         source_night->day_end_ms != replacement.info.day_end_ms ||
@@ -2105,8 +2159,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
             }
         }
 
-        record.source_revision =
-            SourceRevision(calculate_revision(*catalog, record));
+        if (record.sleep_day == replacement.info.sleep_day) {
+            record.source_revision =
+                SourceRevision(calculate_revision(*catalog, record));
+        }
     }
 
     if (next_file != source.file_count_ ||

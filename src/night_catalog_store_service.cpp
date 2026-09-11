@@ -1,10 +1,11 @@
 #include "night_catalog_store_service.h"
 
-#include <new>
 #include <string.h>
 #include <utility>
 
 #include "large_byte_buffer.h"
+#include "large_object.h"
+#include "night_catalog_builder.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -15,6 +16,7 @@ struct NightCatalogStoreRuntime {
         WaitHeader,
         SubmitBody,
         WaitBody,
+        PrepareWrite,
         SubmitWrite,
         WaitWrite,
         Ready,
@@ -26,22 +28,36 @@ struct NightCatalogStoreRuntime {
     OperationTicket write_ticket;
     StoragePreparedRead prepared;
     NightCatalogFileInfo file_info;
+    SleepDayId loading_day;
+    StorageReadLane read_lane = StorageReadLane::Report;
+    char path[AC_STORAGE_PATH_MAX] = {};
     uint8_t header[NightCatalogFileCodec::HeaderBytes] = {};
     std::unique_ptr<LargeByteBuffer> body;
+
     std::shared_ptr<const LargeByteBuffer> encoded;
     std::shared_ptr<const NightCatalog> saving;
+    std::shared_ptr<const NightCatalog> index;
+    size_t next_record = 0;
+    bool writing_index = false;
 };
 
 NightCatalogStoreService::~NightCatalogStoreService() {
     cancel();
-    delete runtime_;
+    LargeObject::destroy(runtime_);
+}
+
+void NightCatalogStoreService::begin(StorageReadPort &read_port) {
+    cancel();
+    if (!runtime_) runtime_ = LargeObject::create<NightCatalogStoreRuntime>();
+
+    read_port_ = &read_port;
+    write_port_ = nullptr;
 }
 
 void NightCatalogStoreService::begin(
     StorageReadPort &read_port,
     StorageAtomicWritePort &write_port) {
-    if (!runtime_) runtime_ = new (std::nothrow) NightCatalogStoreRuntime();
-    read_port_ = &read_port;
+    begin(read_port);
     write_port_ = &write_port;
 }
 
@@ -69,10 +85,16 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->write_ticket = {};
     runtime_->prepared = {};
     runtime_->file_info = {};
+    runtime_->loading_day = {};
+    runtime_->read_lane = StorageReadLane::Report;
+    runtime_->path[0] = '\0';
     memset(runtime_->header, 0, sizeof(runtime_->header));
     runtime_->body.reset();
     runtime_->encoded.reset();
     runtime_->saving.reset();
+    runtime_->index.reset();
+    runtime_->next_record = 0;
+    runtime_->writing_index = false;
 }
 
 void NightCatalogStoreService::fail(const char *error) {
@@ -102,7 +124,32 @@ OperationAdmission NightCatalogStoreService::reject_save(
 
 OperationAdmission NightCatalogStoreService::request_load(
     uint32_t generation) {
-    if (!runtime_ || !read_port_ || !write_port_ || active()) {
+    return start_load(NIGHT_CATALOG_STORE_PATH, {}, generation,
+                      StorageReadLane::Report);
+}
+
+OperationAdmission NightCatalogStoreService::request_load_night(
+    SleepDayId sleep_day,
+    uint32_t generation,
+    StorageReadLane lane) {
+    if (active()) return OperationAdmission::Busy;
+
+    char path[AC_STORAGE_PATH_MAX] = {};
+
+    if (!sleep_day.valid() ||
+        !NightCatalogFileCodec::sources_path(sleep_day, path, sizeof(path))) {
+        return OperationAdmission::Rejected;
+    }
+
+    return start_load(path, sleep_day, generation, lane);
+}
+
+OperationAdmission NightCatalogStoreService::start_load(
+    const char *path,
+    SleepDayId sleep_day,
+    uint32_t generation,
+    StorageReadLane lane) {
+    if (!runtime_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
     if (generation == 0) return OperationAdmission::Rejected;
@@ -110,20 +157,65 @@ OperationAdmission NightCatalogStoreService::request_load(
     reset_operation();
 
     StorageReadCommand command;
-    command.path = NIGHT_CATALOG_STORE_PATH;
+    command.path = path;
     command.length = NightCatalogFileCodec::HeaderBytes;
-    command.lane = StorageReadLane::Report;
+    command.lane = lane;
     command.generation = generation;
 
     const OperationSubmission submission = read_port_->request_read(command);
     if (!submission.accepted()) return submission.admission;
 
+    copy_cstr(runtime_->path, sizeof(runtime_->path), path);
+    runtime_->loading_day = sleep_day;
+    runtime_->read_lane = lane;
     runtime_->read_ticket = submission.ticket;
     runtime_->phase = NightCatalogStoreRuntime::Phase::WaitHeader;
     status_ = {};
     status_.state = NightCatalogStoreState::Loading;
     status_.generation = generation;
     return OperationAdmission::Accepted;
+}
+
+void NightCatalogStoreService::finish_load(
+    std::shared_ptr<const NightCatalog> catalog) {
+    if (!catalog) {
+        fail("night_catalog_load_decode_failed");
+        return;
+    }
+
+    if (runtime_->loading_day.valid()) {
+        const NightCatalogRecord *record =
+            catalog->find(runtime_->loading_day);
+
+        if (catalog->size() != 1 || !record) {
+            fail("night_catalog_load_night_mismatch");
+            return;
+        }
+
+        if (record->sources_external) {
+            fail("night_catalog_load_night_sources_external");
+            return;
+        }
+    } else {
+        stored_ = catalog;
+    }
+
+    published_ = std::move(catalog);
+    reset_operation();
+    runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
+    status_.state = NightCatalogStoreState::Ready;
+    status_.error[0] = '\0';
+}
+
+bool NightCatalogStoreService::sources_stored(
+    const NightCatalogRecord &record) const {
+    const NightCatalogRecord *previous =
+        stored_ ? stored_->find(record.sleep_day) : nullptr;
+
+    // A legacy full snapshot does not prove that sources.bin exists yet.
+    return previous && previous->sources_external &&
+           previous->source_revision == record.source_revision &&
+           previous->source_flags == record.source_flags;
 }
 
 OperationAdmission NightCatalogStoreService::request_save(
@@ -139,20 +231,24 @@ OperationAdmission NightCatalogStoreService::request_save(
 
     reset_operation();
 
-    std::shared_ptr<const LargeByteBuffer> encoded =
-        NightCatalogFileCodec::encode(*catalog);
-    if (!encoded) {
-        return reject_save(generation,
-                           "night_catalog_save_encode_failed");
+    // Reject dangling references before submitting any persistent writes.
+    for (size_t i = 0; i < catalog->size(); ++i) {
+        const NightCatalogRecord *record = catalog->record(i);
+        if (!record) {
+            return reject_save(generation, "night_catalog_save_invalid");
+        }
+
+        if (record->sources_external && !sources_stored(*record)) {
+            return reject_save(generation,
+                               "night_catalog_save_sources_missing_or_stale");
+        }
     }
 
-    runtime_->encoded = std::move(encoded);
     runtime_->saving = std::move(catalog);
-    runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
+    runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareWrite;
     status_ = {};
     status_.state = NightCatalogStoreState::Saving;
     status_.generation = generation;
-    status_.bytes = runtime_->encoded->size();
     return OperationAdmission::Accepted;
 }
 
@@ -173,7 +269,7 @@ PreparedByteRead read_exact(StorageReadPort &read_port,
 }  // namespace
 
 bool NightCatalogStoreService::poll() {
-    if (!runtime_ || !read_port_ || !write_port_) return false;
+    if (!runtime_ || !read_port_) return false;
 
     switch (runtime_->phase) {
         case NightCatalogStoreRuntime::Phase::Idle:
@@ -196,7 +292,9 @@ bool NightCatalogStoreService::poll() {
                     if (completion.prepared.valid()) {
                         read_port_->release_prepared(completion.prepared);
                     }
-                    fail("night_catalog_load_header_invalid");
+                    fail(completion.error[0]
+                             ? completion.error
+                             : "night_catalog_load_header_invalid");
                     return true;
                 }
                 runtime_->prepared = completion.prepared;
@@ -231,24 +329,16 @@ bool NightCatalogStoreService::poll() {
                         sizeof(runtime_->header),
                         nullptr,
                         0);
-                if (!catalog) {
-                    fail("night_catalog_load_decode_failed");
-                    return true;
-                }
 
-                published_ = std::move(catalog);
-                reset_operation();
-                runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
-                status_.state = NightCatalogStoreState::Ready;
-                status_.error[0] = '\0';
+                finish_load(std::move(catalog));
                 return true;
             }
 
             StorageReadCommand command;
-            command.path = NIGHT_CATALOG_STORE_PATH;
+            command.path = runtime_->path;
             command.offset = NightCatalogFileCodec::HeaderBytes;
             command.length = runtime_->file_info.body_bytes;
-            command.lane = StorageReadLane::Report;
+            command.lane = runtime_->read_lane;
             command.generation = status_.generation;
 
             const OperationSubmission submission =
@@ -281,7 +371,9 @@ bool NightCatalogStoreService::poll() {
                     if (completion.prepared.valid()) {
                         read_port_->release_prepared(completion.prepared);
                     }
-                    fail("night_catalog_load_body_failed");
+                    fail(completion.error[0]
+                             ? completion.error
+                             : "night_catalog_load_body_failed");
                     return true;
                 }
                 runtime_->prepared = completion.prepared;
@@ -314,16 +406,70 @@ bool NightCatalogStoreService::poll() {
                                               sizeof(runtime_->header),
                                               runtime_->body->data(),
                                               runtime_->body->size());
-            if (!catalog) {
-                fail("night_catalog_load_decode_failed");
+
+            finish_load(std::move(catalog));
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::PrepareWrite: {
+            if (!runtime_->saving) {
+                fail("night_catalog_save_not_ready");
                 return true;
             }
 
-            published_ = std::move(catalog);
-            reset_operation();
-            runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
-            status_.state = NightCatalogStoreState::Ready;
-            status_.error[0] = '\0';
+            const NightCatalogRecord *record = nullptr;
+            while (runtime_->next_record < runtime_->saving->size()) {
+                record = runtime_->saving->record(runtime_->next_record++);
+
+                if (!record) {
+                    fail("night_catalog_save_invalid");
+                    return true;
+                }
+
+                if (!sources_stored(*record)) break;
+                record = nullptr;
+            }
+
+            std::shared_ptr<const NightCatalog> next;
+            if (record) {
+                if (record->sources_external) {
+                    fail("night_catalog_save_sources_missing_or_stale");
+                    return true;
+                }
+
+                if (!NightCatalogFileCodec::sources_path(
+                        record->sleep_day, runtime_->path,
+                        sizeof(runtime_->path))) {
+                    fail("night_catalog_save_path_invalid");
+                    return true;
+                }
+
+                next = NightCatalogBuilder::select_night(
+                    *runtime_->saving, record->sleep_day);
+            } else {
+                // The index is the commit point: every sources write has
+                // completed successfully before reaching this phase.
+                runtime_->index = NightCatalogBuilder::index(*runtime_->saving);
+                next = runtime_->index;
+                runtime_->writing_index = true;
+
+                copy_cstr(runtime_->path, sizeof(runtime_->path),
+                          NIGHT_CATALOG_STORE_PATH);
+            }
+
+            if (!next) {
+                fail("night_catalog_save_prepare_failed");
+                return true;
+            }
+
+            runtime_->encoded = NightCatalogFileCodec::encode(*next);
+            if (!runtime_->encoded) {
+                fail("night_catalog_save_encode_failed");
+                return true;
+            }
+
+            status_.bytes += runtime_->encoded->size();
+            runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
             return true;
         }
 
@@ -334,7 +480,7 @@ bool NightCatalogStoreService::poll() {
             }
 
             StorageAtomicWriteCommand command;
-            command.path = NIGHT_CATALOG_STORE_PATH;
+            command.path = runtime_->path;
             command.bytes = runtime_->encoded;
             command.lane = StorageAtomicWriteLane::Foreground;
             command.generation = status_.generation;
@@ -370,7 +516,14 @@ bool NightCatalogStoreService::poll() {
                 return true;
             }
 
-            published_ = runtime_->saving;
+            if (!runtime_->writing_index) {
+                runtime_->encoded.reset();
+                runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareWrite;
+                return true;
+            }
+
+            published_ = runtime_->index;
+            stored_ = published_;
             reset_operation();
             runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
             status_.state = NightCatalogStoreState::Ready;

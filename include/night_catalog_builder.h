@@ -152,10 +152,21 @@ struct NightCatalogBuildStatus {
 };
 
 class NightCatalogBuilder {
+    enum class Projection { Index, Night, Upsert };
+
 public:
     static std::shared_ptr<const NightCatalog> build(
         const NightCatalogBuildInput &input,
         NightCatalogBuildStatus *status = nullptr);
+
+    // Retain descriptive state while externalizing every record's sources.
+    static std::shared_ptr<const NightCatalog> index(
+        const NightCatalog &catalog);
+    // Preserve the selected record's full or external source state.
+    static std::shared_ptr<const NightCatalog> select_night(
+        const NightCatalog &catalog,
+        SleepDayId sleep_day);
+
     // Replace only sleep_day; other days in replacement are ignored.
     static std::shared_ptr<const NightCatalog> upsert_night(
         const NightCatalog &catalog,
@@ -166,6 +177,13 @@ public:
         const char *path,
         const std::shared_ptr<const LargeByteBuffer> &artifact,
         int64_t last_write_ms = 0);
+
+private:
+    static std::shared_ptr<const NightCatalog> project(
+        const NightCatalog &catalog,
+        Projection projection,
+        SleepDayId sleep_day,
+        const NightCatalog *replacement = nullptr);
 };
 
 }  // namespace aircannect

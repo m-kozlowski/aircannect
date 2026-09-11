@@ -28,8 +28,12 @@ struct NightCatalogFileInfo {
 class NightCatalogFileCodec {
 public:
     static constexpr uint16_t LegacyVersion = 11;
-    static constexpr uint16_t Version = 12;
+    static constexpr uint16_t Version = 13;
     static constexpr size_t HeaderBytes = 88;
+
+    static bool sources_path(SleepDayId sleep_day,
+                             char *out,
+                             size_t out_size);
 
     static bool inspect(const uint8_t *header,
                         size_t header_length,

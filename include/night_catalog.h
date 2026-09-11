@@ -181,6 +181,8 @@ struct NightCatalogRecord {
     uint16_t fallback_file_count = 0;
 
     uint8_t source_flags = 0;
+    // Source tables are unloaded, not known to be absent.
+    bool sources_external = false;
     uint64_t summary_identity = 0;
     int32_t timezone_offset_minutes = 0;
     bool timezone_offset_valid = false;

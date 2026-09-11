@@ -332,6 +332,8 @@ struct ReportTask::Runtime {
         if (end_ms <= capture_session.canonical_segment_start_ms ||
             (end_ms <= capture_published_end_ms && !progress_changed)) return false;
 
+        if (!capture_sources_ready(now_ms)) return false;
+
         const auto next = NightCatalogCapture::build(
             catalog, capture_session, *progress, end_ms);
         if (!next) {
@@ -539,6 +541,112 @@ struct ReportTask::Runtime {
         if (!publish_state()) ++command_failures;
     }
 
+    bool merge_loaded_sources(std::shared_ptr<const NightCatalog> loaded,
+                              SourceRevision expected_revision,
+                              uint8_t expected_source_flags) {
+        const auto *night = loaded && loaded->size() == 1
+            ? loaded->record(0) : nullptr;
+        const auto *current = night && catalog
+            ? catalog->find(night->sleep_day) : nullptr;
+        if (!current || !current->sources_external || night->sources_external ||
+            current->source_revision != expected_revision ||
+            current->source_flags != expected_source_flags) {
+            return false;
+        }
+
+        const bool changed = current->source_revision != night->source_revision ||
+                             current->source_flags != night->source_flags;
+        const auto merged = NightCatalogBuilder::upsert_night(
+            *catalog, *loaded, night->sleep_day);
+        if (!merged) {
+            ++command_failures;
+            return false;
+        }
+
+        if (changed) {
+            const auto summary = summary_acquisition.snapshot();
+            const auto repaired_summary = summary
+                ? NightCatalogSummarySnapshot::replace_night(
+                      *summary, *loaded, current->summary_identity)
+                : NightCatalogSummarySnapshot::from_catalog(*merged);
+            if (!repaired_summary) {
+                ++command_failures;
+                return false;
+            }
+
+            // A sources write can complete before a reboot interrupts the index
+            // write. Recover that night from its complete, atomic source file.
+            const bool post_therapy = post_therapy_build.sleep_day == night->sleep_day;
+            summary_acquisition.seed(repaired_summary);
+            accept_catalog(merged, next_catalog_generation(), false);
+            pending_catalog_save = catalog;
+            pending_catalog_save_generation = catalog_generation;
+            if (post_therapy) {
+                post_therapy_build = ReportArtifactKey::result(
+                    night->sleep_day, night->source_revision);
+            }
+        } else {
+            catalog = merged;
+            engine.publish_catalog(catalog);
+            if (!publish_state()) ++command_failures;
+        }
+        return true;
+    }
+
+    bool capture_sources_ready(uint32_t now_ms) {
+        const auto *night = catalog
+            ? catalog->find(capture_session.canonical_sleep_day) : nullptr;
+        if (!night || !night->sources_external) return true;
+        if (capture_sources_pending) return false;
+
+        const auto admitted = capture_sources.request_load_night(
+            night->sleep_day, catalog_generation);
+        if (admitted == OperationAdmission::Accepted) {
+            capture_sources_pending = true;
+            capture_sources_revision = night->source_revision;
+            capture_sources_flags = night->source_flags;
+        } else if (admitted == OperationAdmission::Rejected) {
+            capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+            ++command_failures;
+        }
+        return false;
+    }
+
+    bool observe_capture_sources(uint32_t now_ms) {
+        if (!capture_sources_pending) return false;
+        if (capture_sources.active()) return capture_sources.poll();
+
+        capture_sources_pending = false;
+        capture_checked_revision = 0;
+        const auto *current = catalog
+            ? catalog->find(capture_session.canonical_sleep_day) : nullptr;
+        auto loaded = capture_sources.take_snapshot();
+        if (!current || !current->sources_external ||
+            current->source_revision != capture_sources_revision ||
+            current->source_flags != capture_sources_flags) return true;
+
+        if (capture_sources.status().state != NightCatalogStoreState::Ready ||
+            !merge_loaded_sources(std::move(loaded), capture_sources_revision,
+                                  capture_sources_flags)) {
+            capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+            ++command_failures;
+        }
+        return true;
+    }
+
+    void release_loaded_sources() {
+        if (pending_catalog_save || catalog_store.active() ||
+            catalog_store.status().generation != catalog_generation) return;
+
+        const auto index = catalog_store.snapshot();
+        if (!index || index == catalog ||
+            (index->size() && !index->record(0)->sources_external)) return;
+
+        catalog = index;
+        engine.publish_catalog(catalog);
+        if (!publish_state()) ++command_failures;
+    }
+
     void clear_failures() {
         if (!lock(20)) return;
         for (ReportNightFailureEntry &failure : failures) failure = {};
@@ -671,6 +779,13 @@ struct ReportTask::Runtime {
         }
 
         activity = next;
+        if (capture_sources_pending &&
+            (!next.therapy_active || next.ota_install_active ||
+             next.export_work_claimed)) {
+            capture_sources.cancel();
+            capture_sources_pending = false;
+        }
+
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
             activity.foreground_report_demand ||
@@ -1271,6 +1386,7 @@ struct ReportTask::Runtime {
             return worked;
         }
         observed_engine_completion = completion.request.ticket;
+        release_loaded_sources();
         if (rebuild_catalog) {
             if (!lock()) {
                 observed_engine_completion = {};
@@ -1550,6 +1666,7 @@ struct ReportTask::Runtime {
     ReportSignalTileBackfill signal_tile_backfill;
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
+    NightCatalogStoreService capture_sources;
     ReportSignalStoreCatalogLoadService store_catalog_loader;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
@@ -1574,6 +1691,9 @@ struct ReportTask::Runtime {
     EdfSessionMetadata capture_session;
     EdfSessionMetadata pending_capture;
     bool capture_pending = false;
+    bool capture_sources_pending = false;
+    SourceRevision capture_sources_revision;
+    uint8_t capture_sources_flags = 0;
     ReportArtifactKey capture_build;
     int64_t capture_published_end_ms = 0;
     int64_t capture_attempt_end_ms = 0;
@@ -1705,6 +1825,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
 
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(read_port, write_port);
+    runtime_->capture_sources.begin(read_port);
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
@@ -2134,6 +2255,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.record_durable_catalog_generation(status.generation);
                     publish_catalog(runtime.catalog_store.snapshot(),
                                     status.generation);
+                    for (size_t i = 0; i < runtime.catalog->size(); ++i) {
+                        if (runtime.catalog->record(i)->sources_external) continue;
+
+                        runtime.pending_catalog_save = runtime.catalog;
+                        runtime.pending_catalog_save_generation =
+                            runtime.catalog_generation;
+                        break;
+                    }
                 } else if (!runtime.catalog) {
                     runtime.schedule_reconcile(now_ms, false);
                 }
@@ -2145,6 +2274,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         runtime.catalog_store_save_generation &&
                     status.generation == runtime.catalog_store_save_generation;
                 if (saved_latest) {
+                    if (runtime.engine.status().state == ReportEngineState::Idle) {
+                        runtime.catalog = runtime.catalog_store.snapshot();
+                        runtime.engine.publish_catalog(runtime.catalog);
+                        if (!runtime.publish_state()) ++runtime.command_failures;
+                    }
                     runtime.pending_catalog_save.reset();
                     runtime.pending_catalog_save_generation = 0;
                     runtime.pending_catalog_save_post_therapy = false;
@@ -2176,6 +2310,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
+    worked = runtime.observe_capture_sources(now_ms) || worked;
     const ReportEngineStatus engine_work = runtime.engine.status();
     if (runtime.store_catalog_loader.status().active() &&
         (engine_work.state != ReportEngineState::Idle || engine_work.queued != 0 ||
@@ -2376,18 +2511,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
     worked = runtime.observe_spool_probe(now_ms) || worked;
 
-    const bool catalog_stable = runtime.catalog &&
+    const bool catalog_current = runtime.catalog &&
         !runtime.catalog_load_pending &&
-        runtime.store_purpose == CatalogStorePurpose::None &&
-        !runtime.pending_catalog_save &&
         !runtime.pending_refresh.valid() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_refresh.active() &&
         !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required();
-    if (catalog_stable && !local_blocked && startup_allowed) {
+    if (catalog_current && !local_blocked && startup_allowed) {
         worked = runtime.schedule_post_therapy_build() || worked;
-        if (!runtime.store_catalog_load_pending &&
+        if (runtime.store_purpose == CatalogStorePurpose::None &&
+            !runtime.pending_catalog_save && !runtime.store_catalog_load_pending &&
             !runtime.store_catalog_loader.status().active()) {
             worked = runtime.start_spool_probe(now_ms) || worked;
             worked = runtime.schedule_background(now_ms) || worked;
@@ -2421,6 +2555,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             now_ms, runtime.activity.therapy_active
                 ? 1 : std::max<size_t>(record_budget, 1)) || worked;
     }
+    SourceRevision loaded_revision;
+    uint8_t loaded_flags = 0;
+    if (auto loaded = runtime.engine.take_loaded_sources(loaded_revision, loaded_flags)) {
+        worked = runtime.merge_loaded_sources(
+            std::move(loaded), loaded_revision, loaded_flags) || worked;
+    }
+
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
     runtime.publish_status();

@@ -846,6 +846,8 @@ std::shared_ptr<const NightCatalog> NightCatalogCapture::build(
     if (previous) {
         const NightCatalogRecord *old_night =
             previous->find(metadata.canonical_sleep_day);
+        if (old_night && old_night->sources_external) return {};
+
         if (old_night) {
             size_t count = 0;
             (void)previous->sessions(*old_night, count);
