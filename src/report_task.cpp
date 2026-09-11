@@ -1434,6 +1434,17 @@ struct ReportTask::Runtime {
             return out;
         }
 
+        if (pending_catalog_save) {
+            out.operation = ReportTaskOperation::SavingCatalog;
+            const NightCatalogStoreStatus status = catalog_store.status();
+            out.wait_reason = status.state == NightCatalogStoreState::Error
+                ? ReportTaskWaitReason::Retry : ReportTaskWaitReason::Catalog;
+            out.retry_in_ms = deadline_remaining(
+                last_step_ms, catalog_store_retry_at_ms);
+            copy_cstr(out.error, sizeof(out.error), status.error);
+            return out;
+        }
+
         out.wait_reason = activity_wait_reason();
         if (out.wait_reason != ReportTaskWaitReason::None) return out;
         if (!startup_idle_grace_complete) {

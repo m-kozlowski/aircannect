@@ -30,7 +30,6 @@ public:
     static constexpr uint16_t LegacyVersion = 11;
     static constexpr uint16_t Version = 12;
     static constexpr size_t HeaderBytes = 88;
-    static constexpr size_t MaximumFileBytes = 512 * 1024;
 
     static bool inspect(const uint8_t *header,
                         size_t header_length,

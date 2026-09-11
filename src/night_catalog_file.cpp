@@ -389,9 +389,7 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
                   layout.fallback_sections,
                   FALLBACK_SECTION_BYTES) ||
         !CheckedSize::add_array(body_bytes, layout.path_bytes, 1) ||
-        body_bytes >
-            NightCatalogFileCodec::MaximumFileBytes -
-                NightCatalogFileCodec::HeaderBytes) {
+        body_bytes > SIZE_MAX - NightCatalogFileCodec::HeaderBytes) {
         return false;
     }
 
@@ -810,8 +808,7 @@ bool parse_header(const uint8_t *header,
                   FALLBACK_SECTION_BYTES) ||
         !CheckedSize::add_array(body_bytes, info.path_bytes, 1) ||
         get_le64(header + 68) != body_bytes ||
-        body_bytes > NightCatalogFileCodec::MaximumFileBytes -
-                         NightCatalogFileCodec::HeaderBytes) {
+        body_bytes > SIZE_MAX - NightCatalogFileCodec::HeaderBytes) {
         return false;
     }
 
