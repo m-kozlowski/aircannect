@@ -202,6 +202,7 @@ private:
     uint32_t missing_signal_masks_[
         ReportFallbackArtifactCodec::MaxSessions] = {};
     bool rebuild_events_[ReportFallbackArtifactCodec::MaxSessions] = {};
+    size_t preserved_event_count_ = 0;
     SeriesCoverage added_series_[
         ReportFallbackArtifactCodec::MaxSections] = {};
     size_t added_series_count_ = 0;

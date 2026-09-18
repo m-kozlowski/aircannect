@@ -2481,12 +2481,14 @@
             url, conditionalRequestOptions(cached, signal));
         },
         handle: async ({response, body}) => {
+          const update = response.headers.get("X-Report-Update") || "";
           if (response.status === 304) {
             const cached = lruGet(reportResultClientCache, url);
             if (!cached) throw new Error("report cache revalidation failed");
             return {done: true, value: {
               status: 304,
               result: cached.decoded,
+              update,
             }};
           }
           if (response.status === 200) {
@@ -2507,7 +2509,7 @@
               etag: response.headers.get("ETag") || "",
               decoded,
             }, REPORT_RESULT_CLIENT_CACHE_MAX);
-            return {done: true, value: {status: 200, result: decoded}};
+            return {done: true, value: {status: 200, result: decoded, update}};
           }
           if (response.status === 202) {
             timeoutValue.status = 202;
@@ -3457,11 +3459,15 @@
 
         renderReportSummary();
         AirCANnect.ui.message("reportMsg",
-          reportResult.active
+          res.update
+            ? res.update === "pending"
+              ? "Showing saved report; update pending"
+              : "Showing saved report; update failed: " + res.update
+            : reportResult.active
             ? "Recording - data through " + fmtReportClock(reportResult.end)
             : reportResult.state === "partial"
             ? "Report loaded (incomplete - some data missing)"
-            : "Report loaded", true);
+            : "Report loaded", !res.update || res.update === "pending", !!res.update);
       } catch (error) {
         if (token !== reportLoadToken) return;
         AirCANnect.ui.message("reportMsg", error.message, false, true);
@@ -3561,10 +3567,11 @@
       const selected = selectedReportNight();
       const selectedNightId = selected ? String(selected.id) : "";
       if (!data.success) {
-        if (active && !reportResult && nightId === selectedNightId &&
+        if (active && nightId === selectedNightId &&
             data.error !== "cancelled") {
           AirCANnect.ui.message(
-            "reportMsg", data.error || "Report failed", false, true);
+            "reportMsg", (reportResult ? "Report update failed: " : "") +
+              (data.error || "Report failed"), false, true);
         }
         return;
       }

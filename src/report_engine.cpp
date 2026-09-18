@@ -25,20 +25,6 @@ StorageAtomicWriteLane write_lane(ReportRequestPriority priority) {
         : StorageAtomicWriteLane::Maintenance;
 }
 
-bool catalog_contains_fallback(const NightCatalog &catalog,
-                               const NightCatalogRecord &night,
-                               uint64_t identity) {
-    if (identity == 0) return false;
-
-    size_t count = 0;
-    const NightCatalogFallbackFile *files =
-        catalog.fallback_files(night, count);
-    for (size_t i = 0; files && i < count; ++i) {
-        if (files[i].identity == identity) return true;
-    }
-    return false;
-}
-
 const char *plan_status_error(ReportPlanStatus status) {
     switch (status) {
         case ReportPlanStatus::InvalidRequest:
@@ -126,25 +112,16 @@ void ReportEngine::publish_catalog(
     const NightCatalogRecord *night =
         catalog_->find(active_request_.artifact.sleep_day);
     if (phase_ == ActivePhase::WaitingForCatalog) {
-        if (!night) return;
-
-        if (night->sources_external) {
-            if (night->source_revision ==
-                active_request_.artifact.source_revision) return;
-        } else if (!catalog_contains_fallback(
-                       *catalog_, *night, awaited_fallback_identity_)) {
-            return;
-        }
+        const auto *replacement = catalog_replacement_
+            ? catalog_replacement_->find(active_request_.artifact.sleep_day)
+            : nullptr;
+        if (!night || !replacement ||
+            night->source_revision != replacement->source_revision) return;
 
         ReportArtifactRequest resumed = active_request_;
         resumed.artifact = ReportArtifactKey::result(
             night->sleep_day, night->source_revision);
-        resumed.force_rebuild = false;
-        fallback_acquisition_.reset();
-        active_plan_.reset();
-        // An external record must prove the replacement identity after loading.
-        if (!night->sources_external) awaited_fallback_identity_ = 0;
-        phase_ = ActivePhase::Idle;
+        reset_active();
         (void)start_request(resumed, 0);
         return;
     }
@@ -172,10 +149,10 @@ bool ReportEngine::catalog_update_required() const {
     return phase_ == ActivePhase::WaitingForCatalog;
 }
 
-std::shared_ptr<const LargeByteBuffer>
-ReportEngine::fallback_replacement() const {
+std::shared_ptr<const NightCatalog>
+ReportEngine::catalog_replacement() const {
     return catalog_update_required()
-        ? fallback_acquisition_.replacement()
+        ? catalog_replacement_
         : nullptr;
 }
 
@@ -305,6 +282,13 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             }
             break;
 
+        case ActivePhase::LoadingFallbackMetadata:
+            worked = metadata_loader_.poll() || worked;
+            if (metadata_loader_.status().terminal()) {
+                worked = finish_fallback_metadata_load(now_ms) || worked;
+            }
+            break;
+
         case ActivePhase::AcquiringFallback:
             worked = fallback_acquisition_.poll() || worked;
             if (fallback_acquisition_.status().terminal()) {
@@ -346,12 +330,12 @@ ReportEngineStatus ReportEngine::status() const {
     out.fallback = fallback_acquisition_.status();
     out.executor = executor_.status();
     out.store = store_.status();
-    out.awaited_fallback_identity = awaited_fallback_identity_;
     out.last_completion = last_completion_;
 
     switch (phase_) {
         case ActivePhase::LoadingMetadata:
         case ActivePhase::LoadingSources:
+        case ActivePhase::LoadingFallbackMetadata:
         case ActivePhase::LoadingCheckpoint:
             out.state = ReportEngineState::Executing;
             break;
@@ -507,7 +491,12 @@ bool ReportEngine::start_known_request(
 
     active_store_generation_ = stored
         ? increment_generation(stored->generation) : 1;
-    previous_metadata_ = !active_request_.force_rebuild && stored
+    retained_metadata_ = stored ? stored->metadata : nullptr;
+    const auto *source = catalog_->find(active_request_.artifact.sleep_day);
+    const bool edf_append = source && stored &&
+        (source->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
+        (stored->view.night.source_flags & NIGHT_CATALOG_SOURCE_EDF);
+    previous_metadata_ = !active_request_.force_rebuild && edf_append
         ? stored->metadata : nullptr;
     if (previous_metadata_) active_store_generation_ = stored->generation;
     return start_build(now_ms);
@@ -517,6 +506,13 @@ bool ReportEngine::finish_sources_load(uint32_t now_ms) {
     sources_requested_ = false;
     const NightCatalogStoreStatus status = sources_loader_.status();
     if (status.state != NightCatalogStoreState::Ready) {
+        const auto *source = catalog_->find(active_request_.artifact.sleep_day);
+        if (source && !(source->source_flags & NIGHT_CATALOG_SOURCE_EDF)) {
+            auto indexed = NightCatalogBuilder::select_night(
+                *catalog_, source->sleep_day);
+            if (indexed) return start_build(now_ms, std::move(indexed));
+        }
+
         complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::InvalidCatalog,
                         ReportExecutorError::None,
@@ -554,10 +550,9 @@ bool ReportEngine::finish_sources_load(uint32_t now_ms) {
     loaded_sources_expected_revision_ = sources_expected_revision_;
     loaded_sources_expected_flags_ = sources_expected_flags_;
     if (night->source_revision != active_request_.artifact.source_revision) {
-        complete_active(OperationOutcome::failed(),
-                        ReportPlanStatus::StaleRevision,
-                        ReportExecutorError::None,
-                        "report_sources_revision_mismatch");
+        loaded_sources_.reset();
+        catalog_replacement_ = std::move(sources);
+        phase_ = ActivePhase::WaitingForCatalog;
         return true;
     }
 
@@ -615,17 +610,25 @@ bool ReportEngine::start_build(
         loaded_sources_expected_flags_ = night->source_flags;
     }
 
-    if (awaited_fallback_identity_ != 0) {
-        const auto *night = sources->find(active_request_.artifact.sleep_day);
-        if (!night || !catalog_contains_fallback(
-                          *sources, *night, awaited_fallback_identity_)) {
-            complete_active(OperationOutcome::failed(),
-                            ReportPlanStatus::InvalidCatalog,
-                            ReportExecutorError::None,
-                            "report_sources_fallback_mismatch");
+    const auto *source_night = sources->find(active_request_.artifact.sleep_day);
+    if (!(source_night->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
+        !fallback_checked_) {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        metadata_loader_.reset();
+        if (!report_fallback_artifact_path(source_night->sleep_day, path,
+                                           sizeof(path)) ||
+            metadata_loader_.start(
+                path, ReportFallbackArtifactCodec::MaxMetadataBytes,
+                active_request_.ticket.generation,
+                read_lane(active_request_.priority)) != OperationAdmission::Accepted) {
+            complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                            ReportExecutorError::None, "report_fallback_read_rejected");
             return true;
         }
-        awaited_fallback_identity_ = 0;
+
+        build_sources_ = std::move(sources);
+        phase_ = ActivePhase::LoadingFallbackMetadata;
+        return true;
     }
 
     ReportPlanRequest plan_request;
@@ -672,6 +675,30 @@ bool ReportEngine::start_build(
             previous_metadata_.reset();
             active_store_generation_ = increment_generation(
                 active_store_generation_);
+        }
+    }
+
+    if (retained_metadata_ && !previous_metadata_) {
+        ReportSignalStoreNightView previous;
+        ReportSignalStoreNightCodec::decode(
+            retained_metadata_->data(), retained_metadata_->size(), previous);
+        const uint32_t missing = active_plan_->missing_required_signal_mask() |
+            active_plan_->missing_optional_signal_mask();
+        bool lost_source =
+            (previous.night.available_event_mask & active_plan_->missing_event_mask()) != 0;
+        for (size_t i = 0; !lost_source && i < previous.night.track_count; ++i) {
+            ReportSignalStoreTrack track;
+            previous.track(i, track);
+            lost_source = track.valid_sample_count &&
+                (missing & report_signal_bit(track.signal));
+        }
+        if (lost_source) {
+            // Local recovery has already run. Keep the published generation
+            // when its input has disappeared, rather than replacing it with less data.
+            complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                            ReportExecutorError::None,
+                            "report_source_changed_incomplete");
+            return true;
         }
     }
 
@@ -752,6 +779,57 @@ bool ReportEngine::finish_checkpoint_load(uint32_t now_ms) {
 
     previous_checkpoint_ = metadata_loader_.take_completed();
     return start_execution(now_ms);
+}
+
+bool ReportEngine::finish_fallback_metadata_load(uint32_t now_ms) {
+    const auto load = metadata_loader_.status();
+    const auto *night = build_sources_->find(active_request_.artifact.sleep_day);
+    if (load.state == StorageBoundedFileLoadState::Failed) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                        ReportExecutorError::None, load.error);
+        return true;
+    }
+
+    if (load.state == StorageBoundedFileLoadState::Missing &&
+        !night->sources_external && night->fallback_file_count == 0) {
+        fallback_checked_ = true;
+        metadata_loader_.reset();
+        return start_build(now_ms, std::move(build_sources_));
+    }
+
+    const auto bytes = metadata_loader_.take_completed();
+    ReportFallbackArtifactView view;
+    if (load.state != StorageBoundedFileLoadState::Ready || !bytes ||
+        !ReportFallbackArtifactCodec::decode_metadata(bytes->data(), bytes->size(), view) ||
+        view.info.sleep_day != night->sleep_day ||
+        view.info.total_bytes != load.file_size) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                        ReportExecutorError::None, "report_local_fallback_unavailable");
+        return true;
+    }
+
+    char path[AC_STORAGE_PATH_MAX] = {};
+    report_fallback_artifact_path(night->sleep_day, path, sizeof(path));
+    const auto restored = NightCatalogBuilder::restore_fallback(
+        *build_sources_, path, view, static_cast<int64_t>(load.modified));
+    if (!restored) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                        ReportExecutorError::None, "report_fallback_clock_or_sessions_changed");
+        return true;
+    }
+
+    fallback_checked_ = true;
+    metadata_loader_.reset();
+    if (restored->record(0)->source_revision != night->source_revision ||
+        night->sources_external) {
+        catalog_replacement_ = restored;
+        build_sources_.reset();
+        phase_ = ActivePhase::WaitingForCatalog;
+        return true;
+    }
+
+    build_sources_.reset();
+    return start_build(now_ms, restored);
 }
 
 bool ReportEngine::start_execution(uint32_t now_ms) {
@@ -854,7 +932,16 @@ bool ReportEngine::finish_fallback_acquisition() {
 
     if (status.state == ReportFallbackAcquisitionState::Ready &&
         status.replacement_identity != 0) {
-        awaited_fallback_identity_ = status.replacement_identity;
+        char path[AC_STORAGE_PATH_MAX] = {};
+        report_fallback_artifact_path(active_request_.artifact.sleep_day,
+                                     path, sizeof(path));
+        catalog_replacement_ = NightCatalogBuilder::replace_fallback(
+            active_plan_->catalog(), path, fallback_acquisition_.replacement());
+        if (!catalog_replacement_) {
+            complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                            ReportExecutorError::None, "fallback_catalog_replace_failed");
+            return true;
+        }
         active_plan_.reset();
         phase_ = ActivePhase::WaitingForCatalog;
         return true;
@@ -1001,6 +1088,7 @@ void ReportEngine::cancel_active_work() {
                             ReportExecutorError::None);
             break;
         case ActivePhase::LoadingMetadata:
+        case ActivePhase::LoadingFallbackMetadata:
         case ActivePhase::LoadingCheckpoint:
             metadata_loader_.cancel();
             complete_active(OperationOutcome::cancelled(),
@@ -1056,6 +1144,9 @@ void ReportEngine::reset_active() {
     sources_requested_ = false;
     sources_expected_revision_ = {};
     sources_expected_flags_ = 0;
+    fallback_checked_ = false;
+    build_sources_.reset();
+    catalog_replacement_.reset();
 
     executor_.reset();
     builder_.discard_build();
@@ -1064,9 +1155,9 @@ void ReportEngine::reset_active() {
     fallback_acquisition_.reset();
     active_plan_.reset();
     active_request_ = {};
-    awaited_fallback_identity_ = 0;
     active_store_generation_ = 0;
     previous_metadata_.reset();
+    retained_metadata_.reset();
     previous_checkpoint_.reset();
     phase_ = ActivePhase::Idle;
     clear_after_fallback_cancel_ = false;

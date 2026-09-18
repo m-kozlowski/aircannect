@@ -149,6 +149,7 @@ enum class ReportStoreQueryState : uint8_t {
 
 struct ReportNightQuery {
     ReportStoreQueryState state = ReportStoreQueryState::Unavailable;
+    bool outdated = false;
     SleepDayId sleep_day;
     SourceRevision source_revision;
     uint32_t generation = 0;

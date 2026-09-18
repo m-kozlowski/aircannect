@@ -95,6 +95,7 @@ enum class CatalogStorePurpose : uint8_t {
     None,
     Load,
     Save,
+    SourceUpdate,
 };
 
 uint32_t increment_generation(uint32_t generation) {
@@ -514,7 +515,6 @@ struct ReportTask::Runtime {
         store_catalog_load_retry_at_ms = 0;
         store_catalog_load_retry_attempt = 0;
 
-        clear_failures();
         reset_background_pass();
         if (!publish_state()) ++command_failures;
     }
@@ -625,13 +625,6 @@ struct ReportTask::Runtime {
         if (!publish_state()) ++command_failures;
     }
 
-    void clear_failures() {
-        if (!lock(20)) return;
-        for (ReportNightFailureEntry &failure : failures) failure = {};
-        failure_cursor = 0;
-        unlock();
-    }
-
     void remember_failure(const ReportEngineCompletion &completion,
                           uint32_t now_ms) {
         if (!completion.valid() || completion.error[0] == '\0' ||
@@ -658,7 +651,10 @@ struct ReportTask::Runtime {
             completion.request.artifact.source_revision;
         copy_cstr(entry->error, sizeof(entry->error), completion.error);
         entry->retryable =
-            strcmp(completion.error, "report_source_expired") != 0;
+            strcmp(completion.error, "report_source_expired") != 0 &&
+            strcmp(completion.error, "report_source_changed_incomplete") != 0 &&
+            strcmp(completion.error, "report_local_fallback_unavailable") != 0 &&
+            strcmp(completion.error, "report_fallback_clock_or_sessions_changed") != 0;
         entry->retry_at_ms = entry->retryable
             ? now_ms + MATERIALIZE_RETRY_MS : 0;
         unlock();
@@ -1201,6 +1197,12 @@ struct ReportTask::Runtime {
             signal_tile_backfill_started = true;
             return true;
         }
+        ReportNightFailureStatus failure;
+        if (find_failure(night->sleep_day, failure, 0) &&
+            (!failure.retryable || failure.retry_after_ms != 0)) {
+            ++idle_cursor;
+            return true;
+        }
         if (spool_availability_needed &&
             !local_source_available(*night)) {
             return false;
@@ -1244,27 +1246,22 @@ struct ReportTask::Runtime {
         return true;
     }
 
-    bool handle_fallback_replacement() {
-        if (!engine.catalog_update_required()) return false;
+    bool handle_source_update() {
+        if (!engine.catalog_update_required() ||
+            store_purpose != CatalogStorePurpose::None || pending_catalog_save ||
+            catalog_refresh.active() || capture_sources_pending) return false;
 
-        const std::shared_ptr<const LargeByteBuffer> replacement =
-            engine.fallback_replacement();
+        const auto replacement = engine.catalog_replacement();
         const ReportEngineStatus status = engine.status();
-        char path[AC_STORAGE_PATH_MAX] = {};
         std::shared_ptr<const NightCatalog> updated;
         const char *error = nullptr;
         if (!catalog) {
             error = "fallback_catalog_missing";
         } else if (!replacement) {
             error = "fallback_replacement_missing";
-        } else if (!report_fallback_artifact_path(
-                       status.active_request.artifact.sleep_day,
-                       path,
-                       sizeof(path))) {
-            error = "fallback_replacement_path_invalid";
         } else {
-            updated = NightCatalogBuilder::replace_fallback(
-                *catalog, path, replacement);
+            updated = NightCatalogBuilder::upsert_night(
+                *catalog, *replacement, status.active_request.artifact.sleep_day);
             if (!updated) error = "fallback_catalog_replace_failed";
         }
 
@@ -1274,12 +1271,18 @@ struct ReportTask::Runtime {
             return true;
         }
 
-        const uint32_t generation = increment_generation(catalog_generation);
-        accept_catalog(std::move(updated), generation);
-        pending_catalog_save = catalog;
-        pending_catalog_save_generation = catalog_generation;
-        catalog_store_retry_at_ms = 0;
-        catalog_store_retry_attempt = 0;
+        const uint32_t generation = next_catalog_generation();
+        const auto admitted = catalog_store.request_save(updated, generation);
+        if (admitted == OperationAdmission::Busy) return false;
+        if (admitted != OperationAdmission::Accepted) {
+            engine.catalog_update_failed("fallback_catalog_save_rejected");
+            return true;
+        }
+
+        store_purpose = CatalogStorePurpose::SourceUpdate;
+        pending_source_update = replacement;
+        source_update_from_rpc =
+            status.fallback.state == ReportFallbackAcquisitionState::Ready;
         return true;
     }
 
@@ -1481,7 +1484,7 @@ struct ReportTask::Runtime {
 
         out.condition = ReportTaskCondition::Working;
         if (catalog_store.active()) {
-            out.operation = store_purpose == CatalogStorePurpose::Save
+            out.operation = store_purpose != CatalogStorePurpose::Load
                 ? ReportTaskOperation::SavingCatalog
                 : ReportTaskOperation::LoadingCatalog;
             return out;
@@ -1684,6 +1687,8 @@ struct ReportTask::Runtime {
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportPublishedState> published;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
+    std::shared_ptr<const NightCatalog> pending_source_update;
+    bool source_update_from_rpc = false;
     uint32_t pending_catalog_save_generation = 0;
     bool pending_catalog_save_post_therapy = false;
     uint32_t catalog_store_save_generation = 0;
@@ -2092,13 +2097,26 @@ ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
 
     const ReportSignalStoreCatalogRecord *stored = state->store_catalog
         ? state->store_catalog->find(sleep_day) : nullptr;
-    if (!stored || stored->source_revision != source->source_revision ||
-        !stored->metadata) {
+    if (!stored || !stored->metadata) {
         out.state = ReportStoreQueryState::StorePending;
         return out;
     }
 
+    out.outdated = stored->source_revision != source->source_revision;
+    if (out.outdated && (source->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
+        (stored->view.night.source_flags & NIGHT_CATALOG_SOURCE_EDF)) {
+        // An EDF append may update the published generation's tail in place.
+        // This failure is detected before any write, so its old data is intact.
+        ReportNightFailureStatus failure;
+        if (!runtime_->find_failure(sleep_day, failure, 0) ||
+            strcmp(failure.error, "report_source_changed_incomplete") != 0) {
+            out.state = ReportStoreQueryState::StorePending;
+            return out;
+        }
+    }
+
     out.state = ReportStoreQueryState::Ready;
+    out.source_revision = stored->source_revision;
     out.generation = stored->generation;
     out.metadata = stored->metadata;
     out.view = stored->view;
@@ -2268,6 +2286,47 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 } else if (!runtime.catalog) {
                     runtime.schedule_reconcile(now_ms, false);
                 }
+            } else if (completed == CatalogStorePurpose::SourceUpdate) {
+                const auto replacement = std::move(runtime.pending_source_update);
+                const SleepDayId day = replacement->record(0)->sleep_day;
+                const auto *prior = runtime.catalog ? runtime.catalog->find(day) : nullptr;
+#ifdef ARDUINO
+                const SourceRevision prior_revision = prior ? prior->source_revision : SourceRevision{};
+#endif
+                if (status.state == NightCatalogStoreState::Ready) {
+                    runtime.record_durable_catalog_generation(status.generation);
+                    const auto saved = runtime.catalog_store.snapshot();
+                    const auto *night = saved->find(day);
+                    const auto summary = runtime.summary_acquisition.snapshot();
+                    if (summary && prior) {
+                        const auto repaired = NightCatalogSummarySnapshot::replace_night(
+                            *summary, *replacement, prior->summary_identity);
+                        if (repaired) runtime.summary_acquisition.seed(repaired);
+                        else ++runtime.command_failures;
+                    }
+
+                    if (night && runtime.post_therapy_build.sleep_day == day) {
+                        runtime.post_therapy_build = ReportArtifactKey::result(
+                            day, night->source_revision);
+                    }
+                    runtime.accept_catalog(saved, status.generation, false);
+                } else if (runtime.engine.catalog_replacement() == replacement) {
+                    runtime.engine.catalog_update_failed(status.error);
+                }
+#ifdef ARDUINO
+                char text[9] = "--";
+                day.format_yyyymmdd(text, sizeof(text));
+                const auto *updated = replacement->record(0);
+                Log::logf(CAT_REPORT, status.state == NightCatalogStoreState::Ready
+                              ? LOG_INFO : LOG_WARN,
+                          "sources night=%s revision=%016llx->%016llx via=%s error=%s",
+                          text,
+                          static_cast<unsigned long long>(prior_revision.value()),
+                          static_cast<unsigned long long>(
+                              updated ? updated->source_revision.value() : 0),
+                          runtime.source_update_from_rpc ? "rpc" : "local",
+                          status.error[0] ? status.error : "--");
+#endif
             } else if (status.state == NightCatalogStoreState::Ready) {
                 runtime.record_durable_catalog_generation(status.generation);
                 const bool saved_latest =
@@ -2454,6 +2513,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     if (runtime.pending_refresh.valid() &&
         runtime.pending_refresh.summary_attempted &&
+        runtime.store_purpose != CatalogStorePurpose::SourceUpdate &&
         !runtime.summary_acquisition.active() &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
@@ -2503,9 +2563,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
-    worked = runtime.handle_fallback_replacement() || worked;
+    worked = runtime.handle_source_update() || worked;
 
-    if ((!local_blocked || (runtime.capture_session.raw_segment_start_ms &&
+    if ((!local_blocked || runtime.engine.catalog_update_required() ||
+         (runtime.capture_session.raw_segment_start_ms &&
                            runtime.capture_storage_ready())) &&
         runtime.pending_catalog_save &&
         runtime.store_purpose == CatalogStorePurpose::None &&

@@ -359,7 +359,8 @@ void send_not_modified(AsyncWebServerRequest *request,
                        SourceRevision source_revision,
                        uint32_t generation,
                        bool versioned = false,
-                       bool vary_accept_encoding = false) {
+                       bool vary_accept_encoding = false,
+                       const char *update = nullptr) {
     AsyncWebServerResponse *response = request->beginResponse(304);
     if (!response) {
         request->send(304);
@@ -372,6 +373,7 @@ void send_not_modified(AsyncWebServerRequest *request,
                        generation,
                        versioned,
                        vary_accept_encoding);
+    if (update) response->addHeader("X-Report-Update", update);
     request->send(response);
 }
 
@@ -1098,11 +1100,19 @@ void ReportHttpController::send_result(AsyncWebServerRequest *request) {
         return;
     }
 
+    ReportNightFailureStatus failure;
+    const bool failed = report_task_->night_failure(sleep_day, failure);
+    const char *update = failed ? failure.error : query.outdated ? "pending" : "";
+    if (query.outdated && !failed) {
+        (void)report_task_->request_night(
+            sleep_day, ReportRequestPriority::Foreground, next_generation(), false);
+    }
+
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
     (void)format_night_etag(query, etag, sizeof(etag));
     if (request_etag_matches(request, etag)) {
         send_not_modified(
-            request, etag, query.source_revision, query.generation);
+            request, etag, query.source_revision, query.generation, false, false, update);
         return;
     }
 
@@ -1128,6 +1138,7 @@ void ReportHttpController::send_result(AsyncWebServerRequest *request) {
 
     add_common_headers(
         response, etag, query.source_revision, query.generation);
+    response->addHeader("X-Report-Update", update);
     request->send(response);
 }
 

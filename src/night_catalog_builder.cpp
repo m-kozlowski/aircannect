@@ -1958,9 +1958,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
     int64_t last_write_ms) {
     if (!path || !path[0] || !artifact || artifact->size() == 0) return {};
 
-    const size_t path_length = strlen(path);
-    if (path_length > UINT16_MAX) return {};
-
     ReportFallbackArtifactView replacement;
     if (!ReportFallbackArtifactCodec::decode_metadata(
             artifact->data(), artifact->size(), replacement) ||
@@ -1968,38 +1965,79 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
         return {};
     }
 
+    const auto *night = source.find(replacement.info.sleep_day);
+    if (!night || night->sources_external) return {};
+
+    return restore_fallback(source, path, replacement, last_write_ms);
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
+    const NightCatalog &source,
+    const char *path,
+    const ReportFallbackArtifactView &replacement,
+    int64_t last_write_ms) {
+    if (!path || !path[0]) return {};
+
+    const size_t path_length = strlen(path);
+    if (path_length > UINT16_MAX) return {};
+
     const NightCatalogRecord *source_night =
         source.find(replacement.info.sleep_day);
-    if (!source_night || source_night->sources_external ||
-        (source_night->source_flags & NIGHT_CATALOG_SOURCE_EDF) != 0 ||
-        source_night->day_start_ms != replacement.info.day_start_ms ||
-        source_night->day_end_ms != replacement.info.day_end_ms ||
+    if (!source_night ||
+        (source_night->source_flags & NIGHT_CATALOG_SOURCE_EDF) != 0) return {};
+
+    size_t removed_file_count = 0;
+    const NightCatalogFallbackFile *removed_files =
+        source.fallback_files(*source_night, removed_file_count);
+    if (removed_file_count > 0 && !removed_files) return {};
+
+    int32_t adjustment = 0;
+    for (size_t i = 0; i < removed_file_count; ++i) {
+        const auto &file = removed_files[i];
+        const char *old_path = source.path(file);
+        if (old_path && strcmp(old_path, path) == 0 &&
+            file.identity == replacement.info.content_identity) {
+            adjustment = file.time_adjust_ms;
+            break;
+        }
+    }
+
+    int64_t day_start = 0;
+    int64_t day_end = 0;
+    if (!adjust_time(replacement.info.day_start_ms, adjustment, day_start) ||
+        !adjust_time(replacement.info.day_end_ms, adjustment, day_end) ||
+        source_night->day_start_ms != day_start ||
+        source_night->day_end_ms != day_end ||
         (source_night->timezone_offset_valid &&
          (!replacement.info.timezone_offset_valid ||
-          source_night->timezone_offset_minutes !=
-              replacement.info.timezone_offset_minutes))) {
+          static_cast<int64_t>(source_night->timezone_offset_minutes) * 60000 !=
+              static_cast<int64_t>(replacement.info.timezone_offset_minutes) *
+                  60000 - adjustment))) {
         return {};
     }
 
     size_t source_session_count = 0;
     const NightCatalogTimeRange *source_sessions =
         source.sessions(*source_night, source_session_count);
-    if (!source_sessions ||
-        source_session_count != replacement.info.session_count) {
-        return {};
-    }
-    for (size_t i = 0; i < source_session_count; ++i) {
+    if (!source_sessions) return {};
+
+    for (size_t i = 0; i < replacement.info.session_count; ++i) {
         NightCatalogTimeRange replacement_session;
         if (!replacement.session(i, replacement_session) ||
-            !same_range(source_sessions[i], replacement_session)) {
+            !adjust_range(replacement_session, adjustment, replacement_session)) {
             return {};
         }
-    }
 
-    size_t removed_file_count = 0;
-    const NightCatalogFallbackFile *removed_files =
-        source.fallback_files(*source_night, removed_file_count);
-    if (removed_file_count > 0 && !removed_files) return {};
+        bool retained = false;
+        for (size_t j = 0; j < source_session_count; ++j) {
+            if (source_sessions[j].start_ms <= replacement_session.start_ms &&
+                source_sessions[j].end_ms >= replacement_session.end_ms) {
+                retained = true;
+                break;
+            }
+        }
+        if (!retained) return {};
+    }
 
     size_t removed_section_count = 0;
     size_t removed_path_bytes = 0;
@@ -2098,9 +2136,11 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
         }
 
         if (old_record.sleep_day == replacement.info.sleep_day) {
+            record.sources_external = false;
             record.source_flags |= NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
             record.fallback_file_count = 1;
-            if (replacement.info.timezone_offset_valid) {
+            if (!record.timezone_offset_valid &&
+                replacement.info.timezone_offset_valid && adjustment == 0) {
                 record.timezone_offset_minutes =
                     replacement.info.timezone_offset_minutes;
                 record.timezone_offset_valid = true;
@@ -2114,12 +2154,12 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
                 static_cast<uint32_t>(next_fallback_section);
             file.section_count = static_cast<uint16_t>(
                 replacement.info.section_count);
-            file.file_size = artifact->size();
+            file.file_size = replacement.info.total_bytes;
             file.last_write_ms = last_write_ms;
             file.identity = replacement.info.content_identity;
             file.metadata_bytes = static_cast<uint32_t>(
                 replacement.info.metadata_bytes);
-            file.time_adjust_ms = 0;
+            file.time_adjust_ms = adjustment;
 
             for (size_t i = 0;
                  i < replacement.info.section_count;
@@ -2137,7 +2177,8 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
                 section.record_count = replacement_section.record_count;
                 section.sample_interval_ms =
                     replacement_section.sample_interval_ms;
-                section.coverage = replacement_section.coverage;
+                if (!adjust_range(replacement_section.coverage, adjustment,
+                                  section.coverage)) return {};
                 section.data_offset = replacement_section.data_offset;
                 section.data_size = replacement_section.data_size;
                 section.data_crc32 = replacement_section.data_crc32;

@@ -46,7 +46,6 @@ struct ReportEngineStatus {
     ReportFallbackAcquisitionStatus fallback;
     ReportExecutorStatus executor;
     ReportSignalStoreStatus store;
-    uint64_t awaited_fallback_identity = 0;
     ReportEngineCompletion last_completion;
 };
 
@@ -69,7 +68,7 @@ public:
         const ReportSpoolAvailability &availability,
         bool complete);
     bool catalog_update_required() const;
-    std::shared_ptr<const LargeByteBuffer> fallback_replacement() const;
+    std::shared_ptr<const NightCatalog> catalog_replacement() const;
     void catalog_update_failed(const char *error);
 
     ReportRequestEnqueueResult request(
@@ -94,6 +93,7 @@ private:
         Idle,
         LoadingMetadata,
         LoadingSources,
+        LoadingFallbackMetadata,
         LoadingCheckpoint,
         AcquiringFallback,
         WaitingForCatalog,
@@ -108,6 +108,7 @@ private:
     bool start_known_request(const ReportSignalStoreCatalogRecord *stored,
                              uint32_t now_ms);
     bool finish_sources_load(uint32_t now_ms);
+    bool finish_fallback_metadata_load(uint32_t now_ms);
     bool start_build(uint32_t now_ms,
                      std::shared_ptr<const NightCatalog> sources = {});
     bool finish_checkpoint_load(uint32_t now_ms);
@@ -133,12 +134,16 @@ private:
 
     StorageBoundedFileLoader metadata_loader_;
     std::shared_ptr<const LargeByteBuffer> previous_metadata_;
+    std::shared_ptr<const LargeByteBuffer> retained_metadata_;
     std::shared_ptr<const LargeByteBuffer> previous_checkpoint_;
 
     NightCatalogStoreService sources_loader_;
     SourceRevision sources_expected_revision_;
     uint8_t sources_expected_flags_ = 0;
     bool sources_requested_ = false;
+    bool fallback_checked_ = false;
+    std::shared_ptr<const NightCatalog> build_sources_;
+    std::shared_ptr<const NightCatalog> catalog_replacement_;
 
     std::shared_ptr<const NightCatalog> loaded_sources_;
     SourceRevision loaded_sources_expected_revision_;
@@ -152,7 +157,6 @@ private:
     ReportArtifactRequest active_request_;
     ReportEngineCompletion last_completion_;
     ReportSignalStoreCatalogInput published_;
-    uint64_t awaited_fallback_identity_ = 0;
     uint32_t active_store_generation_ = 0;
     ActivePhase phase_ = ActivePhase::Idle;
     bool clear_after_fallback_cancel_ = false;

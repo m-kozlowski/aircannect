@@ -190,6 +190,7 @@ void ReportFallbackAcquisitionService::reset() {
               SeriesCoverage{});
     target_count_ = 0;
     target_index_ = 0;
+    preserved_event_count_ = 0;
     added_series_count_ = 0;
     session_count_ = 0;
     preserve_file_index_ = 0;
@@ -413,6 +414,8 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
         return true;
     }
 
+    preserved_event_count_ = event_records_.size() /
+        report_event_record_wire_size();
     status_.state = ReportFallbackAcquisitionState::Fetching;
     return true;
 }
@@ -462,7 +465,29 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
              read.bytes,
              preserve_section_->record_count,
              preserve_file_->time_adjust_ms));
-    if (!adjusted || !builder_.commit_reserved_section()) {
+    if (!adjusted) {
+        fail("fallback_preserved_read_failed");
+        return true;
+    }
+
+    if (preserve_section_->kind == ReportFallbackSectionKind::Events) {
+        const size_t record_bytes = report_event_record_wire_size();
+        const size_t record_count = read.bytes / record_bytes;
+        for (size_t i = 0; i < record_count; ++i) {
+            ReportEventRecord event;
+            if (!report_read_event_record(preserve_payload_,
+                                          read.bytes,
+                                          i,
+                                          event) ||
+                report_event_source_mask(event) == 0 ||
+                !report_append_event_record(event_records_, event)) {
+                fail("fallback_preserved_event_invalid");
+                return true;
+            }
+        }
+    }
+
+    if (!builder_.commit_reserved_section()) {
         fail("fallback_preserved_read_failed");
         return true;
     }
@@ -476,7 +501,10 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
 
 bool ReportFallbackAcquisitionService::should_preserve(
     const NightCatalogFallbackSection &section) const {
-    if (section.kind == ReportFallbackSectionKind::Series) return true;
+    if (section.kind == ReportFallbackSectionKind::Series ||
+        section.kind == ReportFallbackSectionKind::Events) {
+        return true;
+    }
 
     size_t count = 0;
     const NightCatalogTimeRange *sessions =
@@ -486,10 +514,6 @@ bool ReportFallbackAcquisitionService::should_preserve(
     for (size_t i = 0; i < count; ++i) {
         if (!ranges_overlap(section.coverage, sessions[i])) continue;
 
-        if (section.kind == ReportFallbackSectionKind::Events &&
-            event_session_targeted(i)) {
-            return false;
-        }
         if (section.kind == ReportFallbackSectionKind::Unavailable &&
             signal_targeted(i, section.signal, section.source)) {
             return false;
@@ -1071,7 +1095,7 @@ bool ReportFallbackAcquisitionService::append_event_sections() {
         if (!event_session_targeted(session_index)) continue;
 
         uint32_t selected = 0;
-        for (size_t i = 0; i < record_count; ++i) {
+        for (size_t i = preserved_event_count_; i < record_count; ++i) {
             ReportEventRecord event;
             if (!report_read_event_record(event_records_.data(),
                                           event_records_.size(),
@@ -1101,7 +1125,7 @@ bool ReportFallbackAcquisitionService::append_event_sections() {
         }
 
         size_t write = 0;
-        for (size_t i = 0; i < record_count; ++i) {
+        for (size_t i = preserved_event_count_; i < record_count; ++i) {
             ReportEventRecord event;
             if (!report_read_event_record(event_records_.data(),
                                           event_records_.size(),

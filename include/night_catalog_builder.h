@@ -12,6 +12,7 @@
 namespace aircannect {
 
 class LargeByteBuffer;
+struct ReportFallbackArtifactView;
 
 struct NightCatalogSourceFileInput {
     NightCatalogFileKind kind = NightCatalogFileKind::Brp;
@@ -176,6 +177,13 @@ public:
         const NightCatalog &catalog,
         const char *path,
         const std::shared_ptr<const LargeByteBuffer> &artifact,
+        int64_t last_write_ms = 0);
+
+    // Restore physical coverage without reading the sample payload.
+    static std::shared_ptr<const NightCatalog> restore_fallback(
+        const NightCatalog &catalog,
+        const char *path,
+        const ReportFallbackArtifactView &artifact,
         int64_t last_write_ms = 0);
 
 private:
