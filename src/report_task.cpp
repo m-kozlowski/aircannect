@@ -1536,8 +1536,25 @@ struct ReportTask::Runtime {
             return out;
         }
 
+        if (pending_refresh.valid() &&
+            catalog_refresh.status().state == NightCatalogRefreshState::Error) {
+            out.operation = ReportTaskOperation::RefreshingCatalog;
+            out.sleep_day = pending_refresh.target.sleep_day;
+            out.wait_reason = ReportTaskWaitReason::Retry;
+            out.retry_in_ms = deadline_remaining(
+                last_step_ms, catalog_refresh_retry_at_ms);
+            copy_cstr(out.error, sizeof(out.error), catalog_refresh.status().error);
+            return out;
+        }
+
         out.wait_reason = activity_wait_reason();
         if (out.wait_reason != ReportTaskWaitReason::None) return out;
+        if (pending_refresh.valid()) {
+            out.operation = ReportTaskOperation::RefreshingCatalog;
+            out.sleep_day = pending_refresh.target.sleep_day;
+            out.wait_reason = ReportTaskWaitReason::Catalog;
+            return out;
+        }
         if (!startup_idle_grace_complete) {
             out.wait_reason = ReportTaskWaitReason::Startup;
             return out;
@@ -1697,6 +1714,7 @@ struct ReportTask::Runtime {
     bool refresh_post_therapy = false;
     uint32_t catalog_refresh_retry_at_ms = 0;
     uint8_t catalog_refresh_retry_attempt = 0;
+    char catalog_refresh_logged_error[AC_STORAGE_ERROR_MAX] = {};
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
@@ -2366,6 +2384,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
+                runtime.catalog_refresh_logged_error[0] = '\0';
             } else if (status.retryable) {
                 if (!runtime.pending_refresh.valid()) {
                     runtime.pending_refresh.generation =
@@ -2399,6 +2418,24 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
                 ++runtime.command_failures;
             }
+
+            if (status.state == NightCatalogRefreshState::Error &&
+                strcmp(runtime.catalog_refresh_logged_error, status.error) != 0) {
+#ifdef ARDUINO
+                char day[9] = "--";
+                if (runtime.refresh_target.valid()) {
+                    runtime.refresh_target.sleep_day.format_yyyymmdd(day, sizeof(day));
+                }
+                Log::logf(CAT_REPORT, LOG_WARN,
+                          "catalog refresh failed night=%s error=%s retry_ms=%lu",
+                          day, status.error,
+                          static_cast<unsigned long>(deadline_remaining(
+                              now_ms, runtime.catalog_refresh_retry_at_ms)));
+#endif
+                copy_cstr(runtime.catalog_refresh_logged_error,
+                          sizeof(runtime.catalog_refresh_logged_error), status.error);
+            }
+
             runtime.refresh_generation = 0;
             runtime.refresh_target = {};
             runtime.refresh_post_therapy = false;

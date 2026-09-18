@@ -708,8 +708,10 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
         const NightCatalogSummaryInput *summary =
             find_summary(input, source.sleep_day);
         int32_t adjustment_ms = source.time_adjust_ms;
+        // EDF already owns this night's clock and sessions. Keep the saved
+        // fallback transform even when Summary is present during a full scan.
         const bool use_summary_axis = !source.coordinates_are_resolved &&
-            summary &&
+            !(night && night->has_edf) && summary &&
             resolve_fallback_adjustment(source, *summary, adjustment_ms);
 
         int64_t fallback_day_start_ms = source.day_start_ms;

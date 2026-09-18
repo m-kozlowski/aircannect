@@ -1305,6 +1305,9 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
                 previous_catalog->path(previous);
             if (previous.identity == out.identity && previous_path &&
                 strcmp(previous_path, out.path) == 0) {
+                // Keep an indexed source when later EDF takes ownership of
+                // the night, just as online capture does.
+                out.retain_with_edf = true;
                 out.time_adjust_ms = previous.time_adjust_ms;
                 out.resolved_timezone_offset_minutes =
                     previous_night->timezone_offset_minutes;
