@@ -9,6 +9,7 @@
 
 static constexpr uint16_t AC_BLE_SCAN_DUP_CACHE = 16;
 static constexpr size_t AC_BLE_DEVICE_NAME_MAX = 22;
+static constexpr size_t AC_BLE_OBSERVER_MAX_TARGETS = 4;
 static constexpr uint16_t AC_BLE_OBSERVER_SCAN_INTERVAL_MS = 1000;
 static constexpr uint16_t AC_BLE_OBSERVER_SCAN_WINDOW_MS = 20;
 static constexpr uint32_t AC_BLE_OBSERVER_RETRY_MS = 1000;

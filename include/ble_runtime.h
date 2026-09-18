@@ -9,6 +9,11 @@
 
 namespace aircannect {
 
+struct BleObserverTarget {
+    char address[18] = {};
+    uint8_t address_type = 0;
+};
+
 struct BleAdvertisement {
     char address[18] = {};
     uint8_t address_type = 0;
@@ -43,11 +48,16 @@ public:
 
     bool begin();
     bool ensure_started(const char *name);
+
+    // Exclusive scanning
     ScanLease acquire_scan(TickType_t timeout_ticks);
     bool scan_in_progress() const;
 
+    // Passive observation between exclusive scans
     void set_passive_observer(BleAdvertisementHandler handler,
                               void *context);
+    void set_passive_observer_targets(const BleObserverTarget *targets,
+                                      size_t count);
     void request_passive_observation(bool enabled);
     bool passive_observation_active() const;
 
@@ -55,6 +65,7 @@ private:
     friend class BleRuntimeScanCallbacks;
 
     void release_scan();
+
     bool start_passive_observer_locked();
     bool stop_passive_observer_locked();
     void note_advertisement(const void *device);
@@ -71,6 +82,12 @@ private:
     bool observer_requested_ = false;
     bool observer_running_ = false;
     uint32_t observer_retry_ms_ = 0;
+    BleObserverTarget observer_targets_[AC_BLE_OBSERVER_MAX_TARGETS] = {};
+    size_t observer_target_count_ = 0;
+    uint32_t observer_targets_revision_ = 0;
+
+    // Only accessed with the scan lease held.
+    uint32_t observer_applied_revision_ = 0;
 #if AC_BLE_ENABLED
     BleRuntimeScanCallbacks *observer_callbacks_ = nullptr;
 #endif

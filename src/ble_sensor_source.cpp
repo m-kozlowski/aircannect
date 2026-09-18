@@ -15,6 +15,9 @@ namespace {
 static constexpr const char *SENSOR_NS = "oxi_sensor";
 static constexpr const char *SENSOR_KNOWN_COUNT_KEY = "known_count";
 
+static_assert(AC_OXIMETRY_SENSOR_MAX_KNOWN <= AC_BLE_OBSERVER_MAX_TARGETS,
+              "Observer filter must cover every known sensor");
+
 void known_key(char *out, size_t out_len, size_t index, const char *field) {
     snprintf(out, out_len, "known%u_%s",
              static_cast<unsigned>(index),
@@ -1001,20 +1004,31 @@ void BleSensorSource::task_loop() {
             now_ms, runtime_.passive_observation_active());
 
         bool auto_allowed = false;
+        BleObserverTarget observer_targets[AC_BLE_OBSERVER_MAX_TARGETS] = {};
+        size_t observer_target_count = 0;
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
 #endif
         auto_allowed = auto_allowed_;
+        for (const auto &known : known_) {
+            if (!known.addr[0] || !known.autoconnect) continue;
+
+            auto &target = observer_targets[observer_target_count++];
+            memcpy(target.address, known.addr, sizeof(target.address));
+            target.address_type = known.addr_type;
+        }
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
 #endif
         const bool connected = client_ && client_->isConnected();
         const bool observer_wanted =
             auto_allowed &&
-            has_autoconnect() &&
+            observer_target_count > 0 &&
             !connected &&
             !manual_scan &&
             !manual_connect;
+        runtime_.set_passive_observer_targets(observer_targets,
+                                             observer_target_count);
         runtime_.request_passive_observation(observer_wanted);
 
         OximetrySensorDevice observed_target;
