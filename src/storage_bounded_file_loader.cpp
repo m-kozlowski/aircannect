@@ -92,7 +92,7 @@ bool StorageBoundedFileLoader::finish_read() {
         if (completion.prepared.valid()) {
             read_port_->release_prepared(completion.prepared);
         }
-        finish(strcmp(completion.error, "read_open_failed") == 0
+        finish(strcmp(completion.error, "read_not_found") == 0
                    ? StorageBoundedFileLoadState::Missing
                    : StorageBoundedFileLoadState::Failed,
                completion.error[0]
@@ -119,6 +119,7 @@ bool StorageBoundedFileLoader::finish_read() {
     }
 
     prepared_ = completion.prepared;
+    status_.file_size = completion.file_size;
     status_.modified = completion.modified;
     status_.state = StorageBoundedFileLoadState::Copying;
     return copy();

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <errno.h>
 #include <Arduino.h>
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
@@ -2014,10 +2015,12 @@ bool open_read_job(size_t index, const char *&error) {
     if (active_read_index != index) {
         close_active_read_file();
 
+        errno = 0;
         active_read_file = Storage::open(job.path, "r");
         if (!active_read_file || active_read_file.isDirectory()) {
+            const bool missing = !active_read_file && errno == ENOENT;
             if (active_read_file) active_read_file.close();
-            error = "read_open_failed";
+            error = missing ? "read_not_found" : "read_open_failed";
             return false;
         }
         const time_t modified = active_read_file.getLastWrite();
