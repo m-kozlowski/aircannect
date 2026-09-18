@@ -200,7 +200,7 @@ bool StatusHttpController::publish_snapshot(
 
 void StatusHttpController::send_snapshot(
     AsyncWebServerRequest *request) const {
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     const JsonSnapshotResponse result =
         snapshot_.prepare_response(request, response);
     if (result == JsonSnapshotResponse::Busy) {

@@ -13,6 +13,7 @@
 #include "board.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "rpc_request_port.h"
 
@@ -235,18 +236,6 @@ void build_catalog_json(LargeTextBuffer &json,
     json += "]}";
 }
 
-bool send_json_buffer(AsyncWebServerRequest *request,
-                      const LargeTextBuffer &json) {
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) return false;
-
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    request->send(response);
-    return true;
-}
-
 }  // namespace
 
 bool SettingsHttpController::begin(RpcRequestPort &rpc,
@@ -466,13 +455,19 @@ void SettingsHttpController::send_catalog(
                       "{\"ok\":false,\"error\":\"catalog unavailable\"}");
         return;
     }
-    if (!send_json_buffer(request, catalog_json_)) {
-        xSemaphoreGive(cache_mutex_);
+
+    AsyncWebServerResponse *response = nullptr;
+    const bool prepared =
+        http_prepare_json_response(request, catalog_json_, response);
+    xSemaphoreGive(cache_mutex_);
+
+    if (!prepared) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response alloc\"}");
         return;
     }
-    xSemaphoreGive(cache_mutex_);
+
+    request->send(response);
 }
 
 void SettingsHttpController::send_settings(
@@ -503,7 +498,7 @@ void SettingsHttpController::send_settings(
     const uint32_t catalog_revision = cached_catalog_revision_;
     if (!snapshot_pending && !refresh_queued &&
         settings_snapshot_.revision() != 0) {
-        AsyncResponseStream *response = nullptr;
+        AsyncWebServerResponse *response = nullptr;
         const JsonSnapshotResponse result =
             settings_snapshot_.prepare_response(request, response);
         if (result != JsonSnapshotResponse::Ready) {

@@ -8,7 +8,7 @@
 
 #include "large_text_buffer.h"
 
-class AsyncResponseStream;
+class AsyncWebServerResponse;
 class AsyncWebServerRequest;
 
 namespace aircannect {
@@ -33,7 +33,7 @@ public:
     bool copy(LargeTextBuffer &out, uint32_t &revision) const;
     JsonSnapshotResponse prepare_response(
         AsyncWebServerRequest *request,
-        AsyncResponseStream *&response,
+        AsyncWebServerResponse *&response,
         uint32_t timeout_ms = 50) const;
 
 private:

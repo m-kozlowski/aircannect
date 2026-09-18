@@ -13,6 +13,7 @@
 #include "export_http_controller.h"
 #include "http_route_module.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "live_http_controller.h"
 #include "memory_manager.h"
@@ -880,17 +881,16 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"console alloc\"}");
         return;
     }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
+
+    AsyncWebServerResponse *response = nullptr;
+    if (!http_prepare_json_response(request, json, response)) {
         xSemaphoreGive(cache_mutex_);
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response alloc\"}");
         return;
     }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
     xSemaphoreGive(cache_mutex_);
+
     request->send(response);
 }
 

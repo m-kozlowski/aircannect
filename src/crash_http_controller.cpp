@@ -115,7 +115,7 @@ void CrashHttpController::send_status(
         return;
     }
 
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");

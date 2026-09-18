@@ -255,7 +255,7 @@ void DeviceHttpController::send_ble_status(
         return;
     }
 
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     const JsonSnapshotResponse result =
         ble_pairing_snapshot_.prepare_response(request, response);
     if (result == JsonSnapshotResponse::Busy) {

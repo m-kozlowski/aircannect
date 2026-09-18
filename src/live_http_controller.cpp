@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "http_route_registry.h"
+#include "http_response_utils.h"
 
 #include "json_util.h"
 #include "live_chart_service.h"
@@ -328,16 +329,13 @@ void LiveHttpController::send_stream_snapshot(
         return;
     }
 
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (response) {
-        response->write(
-            reinterpret_cast<const uint8_t *>(stream_json_.c_str()),
-            stream_json_.length());
-    }
+    AsyncWebServerResponse *response = nullptr;
+    const bool prepared = http_prepare_json_response(
+        request, stream_json_, response);
+
     xSemaphoreGive(cache_mutex_);
 
-    if (!response) {
+    if (!prepared) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;

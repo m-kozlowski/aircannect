@@ -10,6 +10,7 @@
 #include "board_net.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "large_text_buffer.h"
 #include "resmed_firmware_catalog.h"
@@ -53,17 +54,14 @@ bool send_json(AsyncWebServerRequest *request,
         return false;
     }
 
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
+    AsyncWebServerResponse *response = nullptr;
+    if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return false;
     }
 
     response->setCode(status);
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
     request->send(response);
     return true;
 }

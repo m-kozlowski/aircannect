@@ -143,7 +143,7 @@ void WifiHttpController::send_snapshot(
         return;
     }
 
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     const bool prepared =
         http_prepare_json_response(request, snapshot_json_, response);
     xSemaphoreGive(cache_mutex_);

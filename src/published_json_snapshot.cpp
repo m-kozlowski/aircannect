@@ -61,7 +61,7 @@ bool PublishedJsonSnapshot::copy(LargeTextBuffer &out,
 
 JsonSnapshotResponse PublishedJsonSnapshot::prepare_response(
     AsyncWebServerRequest *request,
-    AsyncResponseStream *&response,
+    AsyncWebServerResponse *&response,
     uint32_t timeout_ms) const {
     response = nullptr;
     if (!mutex_ ||

@@ -795,15 +795,14 @@ void StorageHttpController::send_storage_list(AsyncWebServerRequest *request) co
                       "{\"ok\":false,\"error\":\"list_alloc\"}");
         return;
     }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
+
+    AsyncWebServerResponse *response = nullptr;
+    if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
+
     request->send(response);
 }
 
@@ -1140,7 +1139,7 @@ void StorageHttpController::send_storage_archive_status(
         return;
     }
 
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
@@ -1283,7 +1282,7 @@ void StorageHttpController::send_storage_delete_status(
         return;
     }
 
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");

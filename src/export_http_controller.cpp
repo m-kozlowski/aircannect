@@ -3,6 +3,7 @@
 #include "http_route_registry.h"
 
 #include "export_coordinator.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "large_text_buffer.h"
 
@@ -114,16 +115,13 @@ bool send_status_json(AsyncWebServerRequest *request, LargeTextBuffer &json) {
         return false;
     }
 
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
+    AsyncWebServerResponse *response = nullptr;
+    if (!http_prepare_json_response(request, json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return false;
     }
 
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
     request->send(response);
     return true;
 }
