@@ -97,6 +97,15 @@ bool build_status_json(LargeTextBuffer &json,
     motor_hours(as11.motor_run_meter, hours, sizeof(hours));
     json_add_string(json, "motor_hours", hours);
 
+    json += ",\"edf\":{";
+    json_add_bool(json, "ready", snap.edf.ready, false);
+    json_add_bool(json, "refreshing", snap.edf.refreshing);
+    json_add_string(json, "session", snap.edf.session);
+    json_add_int(json, "file_count", snap.edf.file_count);
+    json_add_uint64(json, "bytes", snap.edf.bytes);
+    json_add_string(json, "error", snap.edf.error);
+    json += '}';
+
     json += ",\"oximetry\":{";
     json_add_bool(json, "enabled", oxi.enabled, false);
     json_add_bool(json, "airsense_integration_available",

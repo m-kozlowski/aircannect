@@ -280,6 +280,9 @@ StoragePathService path_service;
 StorageAtomicWriteService atomic_write_service;
 StorageRangeWriteService range_write_service;
 StorageScanService scan_service;
+EdfRecordingOverview edf_overview(scan_service);
+EdfRecordingOverviewSnapshot published_edf_overview;
+std::atomic<bool> overview_scan_allowed{true};
 StorageStreamService stream_service;
 StorageUploadService upload_service;
 StorageFileLogSink file_log_sink;
@@ -520,6 +523,11 @@ EdfStorageProgressFile *progress_file(StoredFileKind kind) {
 }
 
 void mark_progress_open(const OpenFile &state) {
+    if (state.open) {
+        edf_overview.note_file(state.path, state.header_size +
+            static_cast<uint64_t>(state.record_count) * state.record_size);
+    }
+
     EdfStorageProgressFile *progress = progress_file(state.kind);
     if (!progress) return;
 
@@ -550,6 +558,9 @@ void mark_progress_closed(StoredFileKind kind) {
 void mark_progress_write(const OpenFile &state,
                          bool rewrite,
                          uint32_t record_index) {
+    edf_overview.note_file(state.path, state.header_size +
+        static_cast<uint64_t>(state.record_count) * state.record_size);
+
     EdfStorageProgressFile *progress = progress_file(state.kind);
     if (!progress || !progress->open) return;
 
@@ -627,6 +638,17 @@ std::shared_ptr<const EdfStorageProgress> read_edf_progress_snapshot() {
         published_edf_progress;
     unlock_queue();
     return out;
+}
+
+void publish_edf_overview() {
+    const auto &snapshot = edf_overview.snapshot();
+    if (snapshot.revision == published_edf_overview.revision ||
+        !lock_queue(0)) {
+        return;
+    }
+
+    published_edf_overview = snapshot;
+    unlock_queue();
 }
 
 void wake_service_task() {
@@ -2388,6 +2410,14 @@ void task_entry(void *) {
                 // Reports wait for queued EDF writes, including across yields.
                 if (edf_queue_drained) publish_edf_progress();
 
+                if (edf_queue_drained || !storage_mounted) {
+                    did_work = edf_overview.poll(
+                        storage_mounted,
+                        overview_scan_allowed.load(std::memory_order_acquire),
+                        now_ms);
+                    publish_edf_overview();
+                }
+
                 const bool foreground_due =
                     file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
                 const bool tail_read_active = file_log_tail_read_active();
@@ -2561,6 +2591,10 @@ void begin() {
             : 0;
 
     if (!task) {
+        Storage::set_path_change_callback([](const char *path) {
+            edf_overview.path_changed(path);
+        });
+
         const BaseType_t created =
             xTaskCreatePinnedToCore(task_entry, "ac_storage",
                                     AC_STORAGE_SERVICE_TASK_STACK, nullptr,
@@ -2840,6 +2874,7 @@ void publish_activity(const ActivitySnapshot &activity,
     const bool scan_paused =
         activity.therapy_active || activity.realtime_stream_active ||
         activity.ota_install_active;
+    overview_scan_allowed.store(!scan_paused, std::memory_order_release);
     const bool maintenance_paused =
         scan_paused || activity.foreground_report_demand ||
         activity.export_work_claimed;
@@ -2899,6 +2934,14 @@ StorageAdmissionResult storage_request_admission(
         workload,
         archive_service.active(),
         delete_service.active());
+}
+
+bool try_edf_overview_snapshot(EdfRecordingOverviewSnapshot &out) {
+    if (!lock_queue(0)) return false;
+
+    out = published_edf_overview;
+    unlock_queue();
+    return true;
 }
 
 StorageEdfStatusSnapshot edf_status_snapshot() {

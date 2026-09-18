@@ -6,6 +6,7 @@
 #include <string>
 
 #include "board.h"
+#include "edf_recording_overview.h"
 #include "edf_storage_progress.h"
 #include "edf_file_writer.h"
 #include "file_log_sink_port.h"
@@ -215,6 +216,7 @@ void publish_activity(const ActivitySnapshot &activity,
 StorageStatusPort &status_port();
 StorageWorkloadSnapshot workload_snapshot();
 StorageEdfStatusSnapshot edf_status_snapshot();
+bool try_edf_overview_snapshot(EdfRecordingOverviewSnapshot &out);
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();
 #endif

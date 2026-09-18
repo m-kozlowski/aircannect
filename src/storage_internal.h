@@ -19,6 +19,10 @@ bool rename(const char *from, const char *to);
 File open(const char *path, const char *mode);
 int open_descriptor(const char *path, int flags);
 
+// Registered before the worker starts; callbacks run on the storage task.
+using PathChangeCallback = void (*)(const char *path);
+void set_path_change_callback(PathChangeCallback callback);
+
 // Storage-task-only reuse of range-write descriptors, at most three
 // including the current write. Other mutations discard idle descriptors.
 // take reserves room before an open; finish reports errors from earlier closes.

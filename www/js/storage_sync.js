@@ -22,7 +22,6 @@
     let sleepHqSyncBusy = false;
     let sleepHqSyncConfigured = false;
     let sleepHqSyncCompleteMessage = "SleepHQ sync complete";
-    let edfOverviewLoading = false;
 
     function storageErrorText(text, status) {
       try {
@@ -65,22 +64,6 @@
       throw new Error("list_prepare_timeout");
     }
 
-    async function fetchStorageEntries(path, maxPages) {
-      let offset = 0;
-      const entries = [];
-      const pages = maxPages || 4;
-      for (let page = 0; page < pages; page++) {
-        const data = await fetchStorageList(path, offset, 128);
-        if (data && Array.isArray(data.entries)) {
-          data.entries.forEach((entry) => entries.push(entry));
-        }
-        if (!data || data.next_offset === null || data.next_offset === undefined) break;
-        offset = Number(data.next_offset);
-        if (!Number.isFinite(offset)) break;
-      }
-      return entries;
-    }
-
     function storageParentPath(path) {
       if (!path || path === "/") return "/";
       const index = path.lastIndexOf("/");
@@ -101,68 +84,30 @@
         match[4] + ":" + match[5] + ":" + match[6];
     }
 
-    function edfFileKind(name) {
-      const match = String(name || "").match(/^(\d{8}_\d{6})_(BRP|PLD|SA2|EVE|CSL)\.edf$/i);
-      if (!match) return null;
-      return {prefix: match[1], kind: match[2].toUpperCase()};
-    }
-
-    async function loadEdfOverview() {
-      if (edfOverviewLoading) return;
-      edfOverviewLoading = true;
-      AirCANnect.ui.text("edfLastSession", "Loading");
-      AirCANnect.ui.text("edfLastFiles", "--");
-      try {
-        let datalogEntries = [];
-        try {
-          datalogEntries = await fetchStorageEntries("/DATALOG", 1);
-        } catch (error) {
-          if (String(error && error.message || "") !== "not_found") throw error;
-        }
-        const days = datalogEntries
-          .filter((entry) => entry.type === "dir" && /^\d{8}$/.test(entry.name || ""))
-          .map((entry) => entry.name)
-          .sort()
-          .reverse();
-
-        let bestPrefix = "";
-        let bestFiles = null;
-        for (const day of days.slice(0, 8)) {
-          const entries = await fetchStorageEntries("/DATALOG/" + day, 8);
-          const sessions = new Map();
-          entries.forEach((entry) => {
-            const parsed = edfFileKind(entry.name);
-            if (!parsed) return;
-            if (!sessions.has(parsed.prefix)) sessions.set(parsed.prefix, []);
-            sessions.get(parsed.prefix).push(entry);
-          });
-          Array.from(sessions.keys()).sort().reverse().some((prefix) => {
-            if (!bestPrefix || prefix > bestPrefix) {
-              bestPrefix = prefix;
-              bestFiles = sessions.get(prefix);
-            }
-            return true;
-          });
-          if (bestPrefix) break;
-        }
-
-        if (!bestPrefix || !bestFiles) {
-          AirCANnect.ui.text("edfLastSession", "No EDF sessions");
-          AirCANnect.ui.text("edfLastFiles", "--");
-          return;
-        }
-
-        const totalBytes = bestFiles.reduce((sum, entry) =>
-          sum + (Number(entry.size) || 0), 0);
-        AirCANnect.ui.text("edfLastSession", edfSessionLabel(bestPrefix));
-        AirCANnect.ui.text("edfLastFiles", bestFiles.length + " file" +
-          (bestFiles.length === 1 ? "" : "s") + ", " + AirCANnect.format.bytes(totalBytes));
-      } catch (error) {
-        AirCANnect.ui.text("edfLastSession", "Unavailable");
-        AirCANnect.ui.text("edfLastFiles", error.message || "Storage error");
-      } finally {
-        edfOverviewLoading = false;
+    function renderEdfOverview(status) {
+      const edf = status && status.edf;
+      const error = String(edf && edf.error || "").trim();
+      if (!edf || !edf.ready) {
+        AirCANnect.ui.text("edfLastSession", error ? "Unavailable" :
+          (!edf || edf.refreshing ? "Loading" : "Unavailable"));
+        AirCANnect.ui.text("edfLastFiles", error || "--");
+        return;
       }
+
+      const session = String(edf.session || "");
+      AirCANnect.ui.text("edfLastSession", session ?
+        edfSessionLabel(session) : "No EDF sessions");
+      if (!session) {
+        AirCANnect.ui.text("edfLastFiles", error || "--");
+        return;
+      }
+
+      const fileCount = Number(edf.file_count) || 0;
+      let recorded = fileCount + " file" +
+        (fileCount === 1 ? "" : "s") + ", " +
+        AirCANnect.format.bytes(Number(edf.bytes) || 0);
+      if (error) recorded += "; " + error;
+      AirCANnect.ui.text("edfLastFiles", recorded);
     }
 
     function storageSelectionUi() {
@@ -1187,7 +1132,7 @@
     AirCANnect.actions.register("sync.sleephq-check", () =>
       sleepHqCheckAccount());
     AirCANnect.pages.onLoad("edf", () => {
-      loadEdfOverview();
+      renderEdfOverview(AirCANnect.snapshots.read("status").data);
       loadSmbSyncStatus();
       loadSleepHqSyncStatus();
     });
@@ -1201,4 +1146,5 @@
     });
     AirCANnect.events.subscribe(
       "storage_operation", applyStorageOperationSnapshot);
+    AirCANnect.snapshots.subscribe("status", renderEdfOverview, true);
 })();

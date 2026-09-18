@@ -7,6 +7,7 @@
 #include "app_config.h"
 #include "as11_device_service.h"
 #include "board.h"
+#include "edf_recording_overview.h"
 #include "firmware_installer.h"
 #include "memory_manager.h"
 #include "oximetry_status.h"
@@ -77,6 +78,7 @@ struct SystemStatusSnapshot {
     bool onboarding_complete = false;
     MemoryStatus memory;
     StorageStatus storage;
+    EdfRecordingOverviewSnapshot edf;
     WifiStatusSnapshot wifi;
     bool ota_active = false;
     OtaUpdateNotification update;

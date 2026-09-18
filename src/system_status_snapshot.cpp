@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "plx_peripheral.h"
+#include "storage_service.h"
 #include "udp_oximeter_source.h"
 #include "version.h"
 
@@ -13,6 +14,7 @@ namespace {
 
 StorageStatus cached_storage_status;
 bool cached_storage_status_valid = false;
+EdfRecordingOverviewSnapshot cached_edf_overview;
 
 StorageStatus collect_storage_status_snapshot() {
     StorageStatus storage;
@@ -65,6 +67,8 @@ SystemStatusSnapshot collect_system_status(
     out.memory = Memory::status(false);
     if (service_pending_work) service_pending_work();
     out.storage = collect_storage_status_snapshot();
+    (void)StorageService::try_edf_overview_snapshot(cached_edf_overview);
+    out.edf = cached_edf_overview;
     if (service_pending_work) service_pending_work();
 
     out.wifi.state = sources.wifi_manager.state_name();

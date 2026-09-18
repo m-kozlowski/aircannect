@@ -32,6 +32,7 @@ namespace {
 StorageStatus owner_status;
 StorageStatus published_status;
 bool initialized = false;
+PathChangeCallback path_change_callback = nullptr;
 
 SemaphoreHandle_t status_mutex() {
     static SemaphoreHandle_t m = xSemaphoreCreateMutex();
@@ -402,13 +403,20 @@ int open_descriptor(const char *path, int flags) {
     return descriptor;
 }
 
+void set_path_change_callback(PathChangeCallback callback) {
+    path_change_callback = callback;
+}
+
 bool remove(const char *path) {
     if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
 
     release_write_handles();
-    if (fs->remove(path)) return true;
+    if (fs->remove(path)) {
+        if (path_change_callback) path_change_callback(path);
+        return true;
+    }
     return !fs->exists(path);
 }
 
@@ -418,7 +426,10 @@ bool rmdir(const char *path) {
     if (!fs) return false;
 
     release_write_handles();
-    if (fs->rmdir(path)) return true;
+    if (fs->rmdir(path)) {
+        if (path_change_callback) path_change_callback(path);
+        return true;
+    }
     return !fs->exists(path);
 }
 
@@ -427,7 +438,13 @@ bool rename(const char *from, const char *to) {
     fs::FS *fs = active_fs();
 
     release_write_handles();
-    return fs && fs->rename(from, to);
+    if (!fs || !fs->rename(from, to)) return false;
+
+    if (path_change_callback) {
+        path_change_callback(from);
+        path_change_callback(to);
+    }
+    return true;
 }
 
 File open(const char *path, const char *mode) {
