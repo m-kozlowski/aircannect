@@ -21,12 +21,15 @@ PreparedByteRead PreparedByteTransfer::read(uint8_t *buffer, size_t max_length,
     }
 
     consumer_activity_ms_.store(now_ms, std::memory_order_release);
+    // Observe completion before reading: its release publishes the final bytes.
+    // An empty read followed by a newly published completion is not EOF.
+    const bool producer_finished = producer_done();
     result.bytes = ring_.read(buffer, max_length);
     if (result.bytes > 0) {
         consumed_.store(consumed + static_cast<uint32_t>(result.bytes),
                         std::memory_order_release);
         result.state = PreparedByteReadState::Data;
-    } else if (!producer_done()) {
+    } else if (!producer_finished) {
         result.state = PreparedByteReadState::Retry;
     }
     return result;
