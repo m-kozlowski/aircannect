@@ -295,7 +295,7 @@ struct ReportTask::Runtime {
         capture_attempt_end_ms = 0;
         capture_retry_at_ms = 0;
         capture_checked_revision = 0;
-        capture_available_end_ms = 0;
+        capture_input.reset();
         capture_progress.reset();
         capture_attempt_progress.reset();
         return true;
@@ -324,18 +324,25 @@ struct ReportTask::Runtime {
 
         const bool progress_changed = capture_checked_revision != progress->revision;
         if (progress_changed) {
-            capture_available_end_ms = NightCatalogCapture::closed_end(
-                capture_session, *progress);
+            if (!capture_input.prepare(capture_session, progress)) {
+                capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+                return false;
+            }
             capture_checked_revision = progress->revision;
         }
-        const int64_t end_ms = capture_available_end_ms;
+        const int64_t end_ms = capture_input.closed_end();
         if (end_ms <= capture_session.canonical_segment_start_ms ||
             (end_ms <= capture_published_end_ms && !progress_changed)) return false;
 
         if (!capture_sources_ready(now_ms)) return false;
 
-        const auto next = NightCatalogCapture::build(
-            catalog, capture_session, *progress, end_ms);
+        bool rewritten = false;
+        if (!capture_input.publication_due(catalog, capture_published_end_ms,
+                                           capture_progress.get(), rewritten)) {
+            return false;
+        }
+
+        const auto next = capture_input.build(catalog, end_ms);
         if (!next) {
             capture_checked_revision = 0;
             capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
@@ -344,43 +351,6 @@ struct ReportTask::Runtime {
 
         const auto *night = next->find(capture_session.canonical_sleep_day);
         if (!night) return false;
-
-        bool rewritten = false;
-        if (capture_progress) {
-            for (size_t i = 0; i < AC_EDF_STORAGE_PROGRESS_FILE_COUNT; ++i) {
-                const auto &before = capture_progress->files[i];
-                const auto &after = progress->files[i];
-                rewritten = rewritten ||
-                    (before.request_id == after.request_id &&
-                     strcmp(before.path, after.path) == 0 &&
-                     before.rewrite_revision != after.rewrite_revision);
-            }
-        }
-
-        const auto *previous = catalog ? catalog->find(night->sleep_day) : nullptr;
-        if (!rewritten && end_ms <= capture_published_end_ms && previous &&
-            previous->source_revision == night->source_revision) return false;
-
-        if (!rewritten && end_ms <= capture_published_end_ms && previous) {
-            // Later annotation records may lie beyond this quarter. Only a
-            // numeric source catching up warrants republishing the same window.
-            size_t next_count = 0;
-            size_t previous_count = 0;
-            const auto *next_files = next->files(*night, next_count);
-            const auto *previous_files = catalog->files(*previous, previous_count);
-            bool numeric_changed = false;
-            for (size_t i = 0; i < next_count && !numeric_changed; ++i) {
-                if (next_files[i].signal_layout_count == 0) continue;
-
-                const auto &file = next_files[i];
-                size_t j = 0;
-                while (j < previous_count && strcmp(next->path(file),
-                       catalog->path(previous_files[j])) != 0) ++j;
-                numeric_changed = j == previous_count ||
-                    file.complete_records != previous_files[j].complete_records;
-            }
-            if (!numeric_changed) return false;
-        }
 
         const ReportArtifactKey key = ReportArtifactKey::result(
             night->sleep_day, night->source_revision);
@@ -769,6 +739,11 @@ struct ReportTask::Runtime {
              next.export_work_claimed);
         const bool rpc_became_available =
             !activity.as11_rpc_available && next.as11_rpc_available;
+
+        if (therapy_ended || next.ota_install_active || next.export_work_claimed) {
+            capture_input.reset();
+            capture_checked_revision = 0;
+        }
 
         if (capture_build.valid() &&
             (next.ota_install_active || next.export_work_claimed)) {
@@ -1699,7 +1674,7 @@ struct ReportTask::Runtime {
     int64_t capture_attempt_end_ms = 0;
     uint32_t capture_retry_at_ms = 0;
     uint64_t capture_checked_revision = 0;
-    int64_t capture_available_end_ms = 0;
+    NightCatalogCapture capture_input;
     std::shared_ptr<const EdfStorageProgress> capture_progress;
     std::shared_ptr<const EdfStorageProgress> capture_attempt_progress;
 

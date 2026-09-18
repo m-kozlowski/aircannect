@@ -968,13 +968,25 @@ bool selected_session(const BuildNight &night,
             session.origin == SessionOrigin::Summary);
 }
 
+template <typename T>
+size_t first_owned_index(const LargeScratchArray<T> &entries, size_t owner) {
+    if (entries.size() == 0) return 0;
+
+    return static_cast<size_t>(std::lower_bound(
+        entries.data(), entries.data() + entries.size(), owner,
+        [](const T &entry, size_t value) { return entry.owner < value; }
+    ) - entries.data());
+}
+
 size_t count_unique_sessions(const BuildNight &night,
                              const LargeScratchArray<BuildSession> &sessions) {
     size_t count = 0;
     NightCatalogTimeRange previous;
     bool have_previous = false;
-    for (size_t i = 0; i < sessions.size(); ++i) {
+    for (size_t i = first_owned_index(sessions, night.owner);
+         i < sessions.size(); ++i) {
         const BuildSession &session = sessions.data()[i];
+        if (session.owner != night.owner) break;
         if (!selected_session(night, session)) continue;
         if (have_previous && same_range(previous, session.range)) continue;
         previous = session.range;
@@ -988,9 +1000,10 @@ size_t count_files(const BuildNight &night,
                    const LargeScratchArray<BuildFile> &files,
                    size_t &path_bytes) {
     size_t count = 0;
-    for (size_t i = 0; i < files.size(); ++i) {
+    for (size_t i = first_owned_index(files, night.owner);
+         i < files.size(); ++i) {
         const BuildFile &file = files.data()[i];
-        if (file.owner != night.owner) continue;
+        if (file.owner != night.owner) break;
 
         const size_t len = strlen(file.source.path);
         if (len > UINT16_MAX || path_bytes > UINT32_MAX - len - 1) {
@@ -1007,9 +1020,10 @@ size_t count_fallback_files(const BuildNight &night,
                             size_t &section_count,
                             size_t &path_bytes) {
     size_t count = 0;
-    for (size_t i = 0; i < fallbacks.size(); ++i) {
+    for (size_t i = first_owned_index(fallbacks, night.owner);
+         i < fallbacks.size(); ++i) {
         const BuildFallback &fallback = fallbacks.data()[i];
-        if (fallback.owner != night.owner) continue;
+        if (fallback.owner != night.owner) break;
 
         const size_t len = strlen(fallback.source.path);
         if (len > UINT16_MAX || path_bytes > UINT32_MAX - len - 1 ||
@@ -1386,9 +1400,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                                 "night_catalog_output_count_invalid");
         }
 
-        for (size_t file_index = 0; file_index < files.size(); ++file_index) {
+        for (size_t file_index = first_owned_index(files, night.owner);
+             file_index < files.size(); ++file_index) {
             const BuildFile &file = files.data()[file_index];
-            if (file.owner != night.owner) continue;
+            if (file.owner != night.owner) break;
             if (file.source.signal_layout_count > UINT16_MAX ||
                 !add_count(final_signal_layouts,
                            file.source.signal_layout_count)) {
@@ -1480,8 +1495,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
 
         NightCatalogTimeRange previous;
         bool have_previous = false;
-        for (size_t i = 0; i < sessions.size(); ++i) {
+        for (size_t i = first_owned_index(sessions, source.owner);
+             i < sessions.size(); ++i) {
             const BuildSession &session = sessions.data()[i];
+            if (session.owner != source.owner) break;
             if (!selected_session(source, session)) continue;
             if (have_previous && same_range(previous, session.range)) continue;
 
@@ -1491,9 +1508,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             ++record.session_count;
         }
 
-        for (size_t i = 0; i < files.size(); ++i) {
+        for (size_t i = first_owned_index(files, source.owner);
+             i < files.size(); ++i) {
             const BuildFile &source_file = files.data()[i];
-            if (source_file.owner != source.owner) continue;
+            if (source_file.owner != source.owner) break;
 
             const size_t path_len = strlen(source_file.source.path);
             NightCatalogSourceFile &file = catalog->files_[next_file];
@@ -1546,9 +1564,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             ++record.file_count;
         }
 
-        for (size_t i = 0; i < fallbacks.size(); ++i) {
+        for (size_t i = first_owned_index(fallbacks, source.owner);
+             i < fallbacks.size(); ++i) {
             const BuildFallback &source_fallback = fallbacks.data()[i];
-            if (source_fallback.owner != source.owner) continue;
+            if (source_fallback.owner != source.owner) break;
 
             const size_t path_len = strlen(source_fallback.source.path);
             NightCatalogFallbackFile &file =

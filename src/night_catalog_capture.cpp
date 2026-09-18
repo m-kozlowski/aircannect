@@ -23,13 +23,28 @@ constexpr int64_t CAPTURE_MINUTE_MS = 60LL * 1000LL;
 
 struct CaptureFiles {
     NightCatalogSourceFileInput files[AC_EDF_REPORT_SESSION_FILE_MAX] = {};
-    EdfReportSignalLayout layouts[AC_EDF_REPORT_SESSION_FILE_MAX]
-        [AC_EDF_REPORT_FILE_SIGNAL_MAX] = {};
     size_t file_count = 0;
     int64_t earliest_start_ms = 0;
     int64_t latest_brp_end_ms = 0;
     int64_t latest_pld_end_ms = 0;
     int64_t latest_primary_end_ms = 0;
+};
+
+struct CachedCaptureFile {
+    EdfStorageProgressFile source;
+    int32_t timezone_offset_minutes = 0;
+    EdfReportSignalLayout layouts[AC_EDF_REPORT_FILE_SIGNAL_MAX] = {};
+    NightCatalogSourceFileInput described;
+    bool usable = false;
+
+    bool matches(const EdfStorageProgressFile &file, int32_t timezone) const {
+        return source.header && source.header == file.header &&
+               source.request_id == file.request_id &&
+               source.header_size == file.header_size &&
+               source.record_size == file.record_size &&
+               timezone_offset_minutes == timezone &&
+               strcmp(source.path, file.path) == 0;
+    }
 };
 
 using CaptureFilesPtr = std::unique_ptr<
@@ -290,8 +305,59 @@ bool session_bounds_start(const NightCatalogSourceFileInput *files,
     return start_ms > 0;
 }
 
+bool describe_capture_file(const EdfStorageProgressFile &source,
+                           int32_t timezone_offset_minutes,
+                           CachedCaptureFile &cached) {
+    cached.usable = false;
+    std::unique_ptr<LargeByteBuffer> header;
+    if (!normalized_header(source, header)) return false;
+
+    cached.source = source;
+    cached.timezone_offset_minutes = timezone_offset_minutes;
+    EdfReportFileDescriptor described;
+    if (edf_report_describe_file(source.path, header->data(), header->size(),
+                                source.byte_size, 0, timezone_offset_minutes,
+                                described) != EdfReportFileStatus::Ok ||
+        described.header_size != source.header_size ||
+        described.record_size != source.record_size) {
+        return true;
+    }
+
+    NightCatalogFileKind kind;
+    if (!map_file_kind(described.inventory.kind, kind)) return true;
+
+    size_t layout_count = 0;
+    if (!edf_report_file_signal_layouts(described, cached.layouts,
+                                        AC_EDF_REPORT_FILE_SIGNAL_MAX,
+                                        layout_count)) return true;
+
+    uint32_t primary_mask = 0;
+    uint32_t fallback_mask = 0;
+    signal_masks(cached.layouts, layout_count, primary_mask, fallback_mask);
+    if (numeric_kind(kind) && primary_mask == 0) return true;
+
+    auto &file = cached.described;
+    file = {};
+    file.kind = kind;
+    file.path = cached.source.path;
+    file.coverage.range = {described.header_start_ms,
+        std::max(described.header_start_ms, described.header_end_ms)};
+    file.coverage.primary_signal_mask = primary_mask;
+    file.coverage.fallback_signal_mask = fallback_mask;
+    file.data_offset = described.header_size;
+    file.record_start_ms = described.header_start_ms;
+    file.header_size = described.header_size;
+    file.record_size = described.record_size;
+    file.record_duration_ms = described.record_duration_ms;
+    file.signal_layouts = cached.layouts;
+    file.signal_layout_count = layout_count;
+    cached.usable = true;
+    return true;
+}
+
 bool capture_files(const EdfSessionMetadata &metadata,
                    const EdfStorageProgress &progress,
+                   CachedCaptureFile *cached_files,
                    CaptureFiles &out) {
     out.file_count = 0;
     out.earliest_start_ms = 0;
@@ -311,104 +377,60 @@ bool capture_files(const EdfSessionMetadata &metadata,
 
     for (size_t i = 0; i < AC_EDF_STORAGE_PROGRESS_FILE_COUNT; ++i) {
         const EdfStorageProgressFile &progress_file = progress.files[i];
+        auto &cached = cached_files[i];
         if (!matching_progress_file(progress_file, prefix, prefix_length) ||
+            !progress_file.header || progress_file.header_size == 0 ||
             progress_file.byte_size < progress_file.header_size ||
             progress_file.record_size == 0 ||
             out.file_count >= AC_EDF_REPORT_SESSION_FILE_MAX) {
+            cached.source.header.reset();
+            cached.usable = false;
             continue;
         }
-
-        std::unique_ptr<LargeByteBuffer> header;
-        if (!normalized_header(progress_file, header)) continue;
-
-        EdfReportFileDescriptor described;
-        if (edf_report_describe_file(progress_file.path,
-                                     header->data(),
-                                     header->size(),
-                                     progress_file.byte_size,
-                                     0,
-                                     metadata.timezone_offset_minutes,
-                                     described) != EdfReportFileStatus::Ok ||
-            described.record_size != progress_file.record_size) {
-            continue;
-        }
-
-        NightCatalogFileKind kind;
-        if (!map_file_kind(described.inventory.kind, kind)) continue;
 
         const size_t available_records = std::min(
             static_cast<size_t>(progress_file.record_count),
-            described.inventory.complete_records_from_size);
-        const size_t successful_records = available_records;
-        if (successful_records == 0) continue;
+            (progress_file.byte_size - progress_file.header_size) /
+                progress_file.record_size);
+        if (available_records == 0) continue;
 
-        const bool annotation = kind == NightCatalogFileKind::Eve ||
-            kind == NightCatalogFileKind::Csl;
-
-        EdfReportSignalLayout *layouts = out.layouts[out.file_count];
-        size_t layout_count = 0;
-        if (!edf_report_file_signal_layouts(described,
-                                            layouts,
-                                            AC_EDF_REPORT_FILE_SIGNAL_MAX,
-                                            layout_count)) {
-            continue;
+        if (!cached.matches(progress_file, metadata.timezone_offset_minutes) &&
+            !describe_capture_file(progress_file,
+                                   metadata.timezone_offset_minutes, cached)) {
+            return false;
         }
+        if (!cached.usable) continue;
 
-        int64_t complete_end_ms = described.header_end_ms;
+        NightCatalogSourceFileInput file = cached.described;
+        const bool annotation = !numeric_kind(file.kind);
+        int64_t complete_end_ms = file.coverage.range.end_ms;
         if (!annotation &&
-            !add_duration(described.header_start_ms,
-                          successful_records,
-                          described.record_duration_ms,
+            !add_duration(file.record_start_ms,
+                          available_records,
+                          file.record_duration_ms,
                           complete_end_ms)) {
             continue;
         }
 
-        uint32_t primary_mask = 0;
-        uint32_t fallback_mask = 0;
-        signal_masks(layouts,
-                     layout_count,
-                     primary_mask,
-                     fallback_mask);
-        if (numeric_kind(kind) && primary_mask == 0) continue;
-
-        const uint64_t data_size = static_cast<uint64_t>(successful_records) *
-            described.record_size;
-        if (data_size > UINT64_MAX - described.header_size) continue;
+        const uint64_t data_size = static_cast<uint64_t>(available_records) *
+            file.record_size;
+        if (data_size > UINT64_MAX - file.header_size) continue;
 
         if (out.earliest_start_ms == 0 ||
-            described.header_start_ms < out.earliest_start_ms) {
-            out.earliest_start_ms = described.header_start_ms;
+            file.record_start_ms < out.earliest_start_ms) {
+            out.earliest_start_ms = file.record_start_ms;
         }
 
-        NightCatalogSourceFileInput &file = out.files[out.file_count++];
-        file.kind = kind;
-        file.path = progress_file.path;
-        file.coverage.range = {
-            described.header_start_ms,
-            annotation && described.header_end_ms < described.header_start_ms
-                ? described.header_start_ms
-                : complete_end_ms,
-        };
-        file.coverage.primary_signal_mask = primary_mask;
-        file.coverage.fallback_signal_mask = fallback_mask;
-        file.file_size = static_cast<uint64_t>(described.header_size) +
-            data_size;
-        file.last_write_ms = 0;
-        file.data_offset = described.header_size;
+        file.coverage.range.end_ms = complete_end_ms;
+        file.file_size = static_cast<uint64_t>(file.header_size) + data_size;
         file.data_size = data_size;
-        file.identity = 0;
-        file.record_start_ms = described.header_start_ms;
-        file.header_size = described.header_size;
-        file.record_size = described.record_size;
-        file.record_duration_ms = described.record_duration_ms;
-        file.complete_records = static_cast<uint32_t>(successful_records);
-        file.signal_layouts = layouts;
-        file.signal_layout_count = layout_count;
+        file.complete_records = static_cast<uint32_t>(available_records);
+        out.files[out.file_count++] = file;
 
-        if (kind == NightCatalogFileKind::Brp &&
+        if (file.kind == NightCatalogFileKind::Brp &&
             complete_end_ms > out.latest_brp_end_ms) {
             out.latest_brp_end_ms = complete_end_ms;
-        } else if (kind == NightCatalogFileKind::Pld &&
+        } else if (file.kind == NightCatalogFileKind::Pld &&
                    complete_end_ms > out.latest_pld_end_ms) {
             out.latest_pld_end_ms = complete_end_ms;
         }
@@ -801,25 +823,104 @@ bool build_capture_input(const std::shared_ptr<const NightCatalog> &previous,
 
 }  // namespace
 
-int64_t NightCatalogCapture::closed_end(
+struct NightCatalogCapture::Runtime {
+    EdfSessionMetadata metadata;
+    std::shared_ptr<const EdfStorageProgress> progress;
+    CachedCaptureFile cached_files[AC_EDF_STORAGE_PROGRESS_FILE_COUNT];
+    CaptureFiles files;
+    bool prepared = false;
+};
+
+NightCatalogCapture::~NightCatalogCapture() {
+    reset();
+}
+
+void NightCatalogCapture::reset() {
+    LargeObject::destroy(runtime_);
+    runtime_ = nullptr;
+}
+
+bool NightCatalogCapture::prepare(
     const EdfSessionMetadata &metadata,
-    const EdfStorageProgress &progress) {
-    CaptureFilesPtr files = make_capture_files();
-    if (!files || !capture_files(metadata, progress, *files)) {
-        return 0;
+    std::shared_ptr<const EdfStorageProgress> progress) {
+    if (!runtime_) runtime_ = LargeObject::create<Runtime>();
+    if (!runtime_) return false;
+
+    runtime_->prepared = false;
+    runtime_->metadata = metadata;
+    runtime_->progress = std::move(progress);
+    runtime_->prepared = runtime_->progress &&
+        capture_files(metadata, *runtime_->progress,
+                      runtime_->cached_files, runtime_->files);
+    return runtime_->prepared;
+}
+
+int64_t NightCatalogCapture::closed_end() const {
+    return runtime_ && runtime_->prepared
+        ? closed_end_for_capture(runtime_->metadata, runtime_->files) : 0;
+}
+
+bool NightCatalogCapture::publication_due(
+    const std::shared_ptr<const NightCatalog> &previous,
+    int64_t published_end_ms,
+    const EdfStorageProgress *published_progress,
+    bool &rewritten) const {
+    rewritten = false;
+    const int64_t end_ms = closed_end();
+    if (!runtime_ || end_ms <= runtime_->metadata.canonical_segment_start_ms) {
+        return false;
     }
-    return closed_end_for_capture(metadata, *files);
+
+    if (published_progress) {
+        for (size_t i = 0; i < AC_EDF_STORAGE_PROGRESS_FILE_COUNT; ++i) {
+            const auto &before = published_progress->files[i];
+            const auto &after = runtime_->progress->files[i];
+            rewritten = rewritten ||
+                (before.request_id == after.request_id &&
+                 strcmp(before.path, after.path) == 0 &&
+                 before.rewrite_revision != after.rewrite_revision);
+        }
+    }
+    if (rewritten || end_ms > published_end_ms) return true;
+
+    const auto *night = previous
+        ? previous->find(runtime_->metadata.canonical_sleep_day) : nullptr;
+    if (!night) return true;
+
+    size_t previous_count = 0;
+    const auto *previous_files = previous->files(*night, previous_count);
+    const auto &files = runtime_->files;
+    for (size_t i = 0; i < files.file_count; ++i) {
+        const auto &file = files.files[i];
+        if (file.signal_layout_count == 0) continue;
+
+        size_t retained_records = 0;
+        if (!records_through(file.record_start_ms, file.record_duration_ms,
+                             end_ms, retained_records)) continue;
+
+        retained_records = std::min(retained_records,
+                                    static_cast<size_t>(file.complete_records));
+        size_t j = 0;
+        while (j < previous_count &&
+               strcmp(file.path, previous->path(previous_files[j])) != 0) ++j;
+
+        if (j == previous_count ||
+            retained_records != previous_files[j].complete_records) return true;
+    }
+    return false;
 }
 
 std::shared_ptr<const NightCatalog> NightCatalogCapture::build(
     const std::shared_ptr<const NightCatalog> &previous,
-    const EdfSessionMetadata &metadata,
-    const EdfStorageProgress &progress,
     int64_t publication_end_ms) {
+    if (!runtime_ || !runtime_->prepared) return {};
+
+    const auto &metadata = runtime_->metadata;
     CaptureFilesPtr files = make_capture_files();
-    if (!files ||
-        !capture_files(metadata, progress, *files) ||
-        publication_end_ms <= 0 ||
+    if (!files) return {};
+    *files = runtime_->files;
+
+    if (publication_end_ms <= 0 ||
         publication_end_ms % CAPTURE_QUARTER_MS != 0 ||
         publication_end_ms > closed_end_for_capture(metadata, *files) ||
         !clip_capture_files(*files, publication_end_ms) ||
