@@ -1,0 +1,20 @@
+--- a/AsyncTCP.cpp
++++ b/AsyncTCP.cpp
+@@ -757,7 +757,7 @@
+ AsyncClient::AsyncClient(tcp_pcb *pcb)
+   : _connect_cb(0), _connect_cb_arg(0), _discard_cb(0), _discard_cb_arg(0), _sent_cb(0), _sent_cb_arg(0), _error_cb(0), _error_cb_arg(0), _recv_cb(0),
+     _recv_cb_arg(0), _pb_cb(0), _pb_cb_arg(0), _timeout_cb(0), _timeout_cb_arg(0), _poll_cb(0), _poll_cb_arg(0), _ack_pcb(true), _tx_last_packet(0),
+-    _rx_timeout(0), _rx_last_ack(0), _ack_timeout(CONFIG_ASYNC_TCP_MAX_ACK_TIME), _connect_port(0) {
++    _rx_ack_len(0), _rx_timeout(0), _rx_last_ack(0), _ack_timeout(CONFIG_ASYNC_TCP_MAX_ACK_TIME), _connect_port(0) {
+   _pcb = pcb;
+   if (_pcb) {
+     _rx_last_packet = millis();
+@@ -920,7 +920,7 @@
+ }
+ 
+ void AsyncClient::close() {
+-  if (_pcb) {
++  if (_pcb && _rx_ack_len != 0) {
+     _tcp_recved(&_pcb, _rx_ack_len);
+   }
+   _close();
