@@ -640,9 +640,12 @@ void EdfRecorderManager::close_recording_gate(const char *end_time,
 bool EdfRecorderManager::close_recording_segment() {
     release_stream();
     drain_local_sa2();
-    if (!assembler_.end_session()) return false;
 
-    if (!close_session_files()) return false;
+    const bool assembled = assembler_.end_session();
+    if (!assembled) return false;
+
+    const bool closed = close_session_files();
+    if (!closed) return false;
 
     annotation_start_epoch_ms_ = 0;
     next_annotation_open_ms_ = 0;
@@ -1287,7 +1290,6 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
     }
 
     if (!ensure_annotation_files_open(now_ms)) {
-        next_numeric_open_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
         return false;
     }
 
