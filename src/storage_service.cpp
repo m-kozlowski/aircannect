@@ -192,6 +192,7 @@ OpenRequestResult open_results[AC_EDF_STORAGE_FILE_COUNT];
 uint32_t next_open_request_id = 0;
 bool processing_job = false;
 std::shared_ptr<EdfStorageProgress> edf_progress_state;
+bool edf_progress_dirty = false;
 std::shared_ptr<const EdfStorageProgress> published_edf_progress;
 
 ReadJob read_jobs[AC_STORAGE_PREPARED_READ_CAPACITY];
@@ -518,7 +519,7 @@ EdfStorageProgressFile *progress_file(StoredFileKind kind) {
     return &edf_progress_state->files[file_index(kind)];
 }
 
-void publish_progress_open(const OpenFile &state) {
+void mark_progress_open(const OpenFile &state) {
     EdfStorageProgressFile *progress = progress_file(state.kind);
     if (!progress) return;
 
@@ -535,20 +536,20 @@ void publish_progress_open(const OpenFile &state) {
     progress->rewrite_min_record =
         AC_EDF_STORAGE_PROGRESS_NO_REWRITE_RECORD;
 
-    publish_edf_progress();
+    edf_progress_dirty = true;
 }
 
-bool mark_progress_closed(StoredFileKind kind) {
+void mark_progress_closed(StoredFileKind kind) {
     EdfStorageProgressFile *progress = progress_file(kind);
-    if (!progress || !progress->open) return false;
+    if (!progress || !progress->open) return;
 
     progress->open = false;
-    return true;
+    edf_progress_dirty = true;
 }
 
-void publish_progress_write(const OpenFile &state,
-                            bool rewrite,
-                            uint32_t record_index) {
+void mark_progress_write(const OpenFile &state,
+                         bool rewrite,
+                         uint32_t record_index) {
     EdfStorageProgressFile *progress = progress_file(state.kind);
     if (!progress || !progress->open) return;
 
@@ -563,7 +564,7 @@ void publish_progress_write(const OpenFile &state,
             progress->rewrite_min_record, record_index);
     }
 
-    publish_edf_progress();
+    edf_progress_dirty = true;
 }
 
 bool valid_path(const char *path) {
@@ -587,13 +588,14 @@ void initialize_edf_progress() {
     try {
         edf_progress_state = std::allocate_shared<EdfStorageProgress>(
             LargeAllocator<EdfStorageProgress>());
+        edf_progress_dirty = true;
     } catch (const std::bad_alloc &) {
         edf_progress_state.reset();
     }
 }
 
 void publish_edf_progress() {
-    if (!edf_progress_state ||
+    if (!edf_progress_state || !edf_progress_dirty ||
         edf_progress_state->revision == UINT64_MAX) {
         return;
     }
@@ -606,12 +608,16 @@ void publish_edf_progress() {
         return;
     }
     next->revision = edf_progress_state->revision + 1;
+    std::shared_ptr<const EdfStorageProgress> snapshot = std::move(next);
 
     if (!lock_queue(50)) return;
 
-    edf_progress_state->revision = next->revision;
-    published_edf_progress = std::move(next);
+    edf_progress_state->revision = snapshot->revision;
+    // The swap leaves destruction of the old snapshot outside the lock.
+    published_edf_progress.swap(snapshot);
     unlock_queue();
+
+    edf_progress_dirty = false;
 }
 
 std::shared_ptr<const EdfStorageProgress> read_edf_progress_snapshot() {
@@ -1498,15 +1504,12 @@ bool process_open(JobSlot &job) {
     }
 
     OpenFile &state = open_files[file_index(job.kind)];
-    const bool was_open = state.open;
     close_file(state);
-    if (was_open && mark_progress_closed(job.kind)) {
-        publish_edf_progress();
-    }
+    mark_progress_closed(job.kind);
     refresh_open_file_count();
     if (try_resume_open_file(state, job)) {
         refresh_open_file_count();
-        publish_progress_open(state);
+        mark_progress_open(state);
         mark_open_result(job, true, &state, nullptr);
         service_state.last_error[0] = 0;
         return true;
@@ -1569,7 +1572,7 @@ bool process_open(JobSlot &job) {
     }
     state.file.flush();
     refresh_open_file_count();
-    publish_progress_open(state);
+    mark_progress_open(state);
     mark_open_result(job, true, &state, nullptr);
     service_state.last_error[0] = 0;
     return true;
@@ -1609,7 +1612,7 @@ bool process_record(const JobSlot &job) {
         log_worker_failure(LOG_WARN, "patch_failed", state.path);
         return false;
     }
-    publish_progress_write(state, false, 0);
+    mark_progress_write(state, false, 0);
     service_state.last_error[0] = 0;
     return true;
 }
@@ -1737,7 +1740,7 @@ bool process_numeric_record(JobSlot &job) {
         if (!write_bytes(offset, job.len)) return fail("short_write");
 
         state.file.flush();
-        publish_progress_write(state, true, record.record_index);
+        mark_progress_write(state, true, record.record_index);
         service_state.last_error[0] = 0;
         return true;
     }
@@ -1773,7 +1776,7 @@ bool process_numeric_record(JobSlot &job) {
         return fail("record_count_patch_failed");
     }
 
-    publish_progress_write(state, false, 0);
+    mark_progress_write(state, false, 0);
     service_state.last_error[0] = 0;
     return true;
 }
@@ -1878,28 +1881,19 @@ bool process_identification_files(const JobSlot &job) {
 
 bool process_close(const JobSlot &job) {
     OpenFile &state = open_files[file_index(job.kind)];
-    const bool was_open = state.open;
     close_file(state);
-    if (was_open && mark_progress_closed(job.kind)) {
-        publish_edf_progress();
-    }
+    mark_progress_closed(job.kind);
     refresh_open_file_count();
     service_state.last_error[0] = 0;
     return true;
 }
 
 bool process_close_all() {
-    bool progress_changed = false;
     for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
         OpenFile &state = open_files[i];
-        const bool was_open = state.open;
         close_file(state);
-        if (was_open && mark_progress_closed(static_cast<StoredFileKind>(i))) {
-            progress_changed = true;
-        }
+        mark_progress_closed(static_cast<StoredFileKind>(i));
     }
-
-    if (progress_changed) publish_edf_progress();
 
     refresh_open_file_count();
     service_state.last_error[0] = 0;
@@ -2362,6 +2356,7 @@ void task_entry(void *) {
             did_work = true;
         } else {
             bool have_job = false;
+            bool edf_queue_drained = false;
             size_t slot_index = SIZE_MAX;
             const bool storage_mounted = Storage::mounted();
             if (lock_queue(50)) {
@@ -2373,6 +2368,7 @@ void task_entry(void *) {
                     processing_job = true;
                     have_job = true;
                 }
+                edf_queue_drained = queued == 0 && !processing_job;
                 unlock_queue();
             }
 
@@ -2389,6 +2385,9 @@ void task_entry(void *) {
                 did_work = true;
                 file_log_burst = 0;
             } else {
+                // Reports wait for queued EDF writes, including across yields.
+                if (edf_queue_drained) publish_edf_progress();
+
                 const bool foreground_due =
                     file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
                 const bool tail_read_active = file_log_tail_read_active();
