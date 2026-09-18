@@ -53,6 +53,8 @@ class StorageAtomicWritePort {
 public:
     virtual ~StorageAtomicWritePort() = default;
 
+    // Admission and completion never wait for filesystem I/O. Busy leaves
+    // submission with the caller; false completion leaves the ticket pending.
     virtual OperationSubmission request_write(const StorageAtomicWriteCommand &command) = 0;
     // Acceptance transfers cancellation to the storage owner. The caller may
     // release the ticket without waiting for in-progress filesystem I/O.

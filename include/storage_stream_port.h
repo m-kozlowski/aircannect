@@ -81,10 +81,11 @@ public:
         char *error_out = nullptr,
         size_t error_out_size = 0) = 0;
 
-    // False means that a status snapshot is temporarily unavailable. Stream
+    // Nonblocking: false means a snapshot is temporarily unavailable. Stream
     // failures are reported through StorageStreamState::Error or Cancelled.
     virtual bool status(const StorageByteStream &stream,
                         StorageStreamStatus &status_out) const = 0;
+    // Nonblocking: an unattached Ready stream may be retried after contention.
     virtual bool attach(StorageByteStream &stream) = 0;
     virtual StorageStreamRead read(StorageByteStream &stream,
                                    uint8_t *buffer,

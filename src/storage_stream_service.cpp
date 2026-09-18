@@ -191,7 +191,7 @@ bool StorageStreamService::status(
     const StorageByteStream &stream,
     StorageStreamStatus &status_out) const {
     status_out = StorageStreamStatus();
-    if (!ready() || !lock(20)) return false;
+    if (!ready() || !lock(0)) return false;
 
     status_out.state = stream.state.load(std::memory_order_acquire);
     status_out.size = stream.size;
@@ -202,7 +202,7 @@ bool StorageStreamService::status(
 }
 
 bool StorageStreamService::attach(StorageByteStream &stream) {
-    if (!ready() || !lock(20)) return false;
+    if (!ready() || !lock(0)) return false;
 
     const bool can_attach =
         stream.state.load(std::memory_order_acquire) ==

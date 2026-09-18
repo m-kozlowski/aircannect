@@ -189,7 +189,7 @@ OperationSubmission StorageAtomicWriteService::request_write(
          reserved_transaction_path(command.staged_path.c_str()))) {
         return OperationSubmission::rejected();
     }
-    if (!ready() || !lock()) return OperationSubmission::busy();
+    if (!ready() || !lock(0)) return OperationSubmission::busy();
     (void)apply_abandon_request_locked();
     if (job_->active || completion_ready_) {
         unlock();
@@ -236,7 +236,7 @@ bool StorageAtomicWriteService::abandon(OperationTicket ticket) {
 
 bool StorageAtomicWriteService::take_completion(OperationTicket ticket,
                                                 StorageAtomicWriteCompletion &completion) {
-    if (!ticket.valid() || !lock()) return false;
+    if (!ticket.valid() || !lock(0)) return false;
     (void)apply_abandon_request_locked();
     if (!completion_ready_ || completion_.ticket != ticket) {
         unlock();
