@@ -40,25 +40,34 @@ void begin() {
 #endif
 }
 
-MemoryStatus status() {
+MemoryStatus status(bool include_largest_free_block) {
 #ifdef ARDUINO
     ensure_begin();
     MemoryStatus out;
     out.heap_total = ESP.getHeapSize();
     out.heap_free = ESP.getFreeHeap();
-    out.heap_max_alloc =
-        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
-                                         MALLOC_CAP_8BIT);
+
+    if (include_largest_free_block) {
+        out.heap_max_alloc =
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                             MALLOC_CAP_8BIT);
+    }
+
     out.psram_available = psram_detected && detect_psram();
     if (out.psram_available) {
         out.psram_total = ESP.getPsramSize();
         out.psram_free = ESP.getFreePsram();
-        out.psram_max_alloc =
-            heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM |
-                                             MALLOC_CAP_8BIT);
+
+        if (include_largest_free_block) {
+            out.psram_max_alloc =
+                heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM |
+                                                 MALLOC_CAP_8BIT);
+        }
     }
+
     return out;
 #else
+    (void)include_largest_free_block;
     return {};
 #endif
 }
@@ -138,7 +147,9 @@ void *realloc_large(void *ptr,
                     bool allow_internal_fallback) {
 #ifdef ARDUINO
     ensure_begin();
-    if (!ptr) return alloc_large(size, allow_internal_fallback);
+    if (!ptr) {
+        return alloc_large(size, allow_internal_fallback);
+    }
     if (size == 0) {
         ::free(ptr);
         return nullptr;
@@ -153,9 +164,7 @@ void *realloc_large(void *ptr,
     }
 
     if (!allow_internal_fallback) return nullptr;
-    return heap_caps_realloc(ptr,
-                             size,
-                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return heap_caps_realloc(ptr, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 #else
     (void)allow_internal_fallback;
     return realloc(ptr, size);

@@ -36,7 +36,10 @@ struct MemoryDetailStatus {
 namespace Memory {
 
 void begin();
-MemoryStatus status();
+
+// Largest-block queries walk matching heaps under their spinlocks.
+// Pass false to skip these queries and leave the largest-block fields zero.
+MemoryStatus status(bool include_largest_free_block = true);
 MemoryDetailStatus detail_status();
 bool psram_available();
 

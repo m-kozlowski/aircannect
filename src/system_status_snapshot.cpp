@@ -61,7 +61,8 @@ SystemStatusSnapshot collect_system_status(
     out.onboarding_complete = sources.app_config.onboarding_complete;
     if (checkpoint) checkpoint("web_ui.snapshots.status.core");
 
-    out.memory = Memory::status();
+    // Periodic presentation does not use largest-block sizes.
+    out.memory = Memory::status(false);
     if (checkpoint) checkpoint("web_ui.snapshots.status.memory");
     out.storage = collect_storage_status_snapshot();
     if (checkpoint) checkpoint("web_ui.snapshots.status.storage");
