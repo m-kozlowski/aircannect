@@ -49,7 +49,8 @@ public:
     void begin(const AppConfigData &config, ExportTask &exports);
     void poll(const NetworkSnapshot &network,
               bool check_allowed,
-              bool install_active);
+              bool install_active,
+              bool therapy_active);
     void mark_config_dirty();
 
     bool request_check(bool install_active);
@@ -100,6 +101,7 @@ private:
     bool manual_requested_ = false;
     bool cancel_requested_ = false;
     bool export_preempted_ = false;
+    bool therapy_preempted_ = false;
     uint32_t network_since_ms_ = 0;
     uint32_t next_check_ms_ = 0;
     uint32_t heap_retry_at_ms_ = 0;

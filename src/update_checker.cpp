@@ -41,7 +41,8 @@ void UpdateChecker::begin(const AppConfigData &config, ExportTask &exports) {
 
 void UpdateChecker::poll(const NetworkSnapshot &network,
                          bool check_allowed,
-                         bool install_active) {
+                         bool install_active,
+                         bool therapy_active) {
     bool start = false;
     bool log_heap_deferred = false;
     const uint32_t now = millis();
@@ -74,6 +75,10 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         manual_requested_ = false;
         unlock();
         return;
+    }
+
+    if (therapy_active && task_ && check_url_) {
+        therapy_preempted_ = true;
     }
 
     if (!network.ipv4_ready) {
@@ -111,8 +116,8 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     log_heap_deferred = heap_retry_at_ms_ == 0;
     const bool heap_retry_ready = heap_retry_at_ms_ == 0 ||
         deadline_due(now, heap_retry_at_ms_);
-    start = status_.pending && schedule_ready && check_allowed && !task_ &&
-        heap_retry_ready;
+    start = status_.pending && schedule_ready && check_allowed &&
+        !therapy_active && !task_ && heap_retry_ready;
     unlock();
 
     if (!start) return;
@@ -281,6 +286,7 @@ bool UpdateChecker::start_check() {
     task_generation_ = config_generation_;
     cancel_requested_ = false;
     export_preempted_ = false;
+    therapy_preempted_ = false;
     status_.pending = false;
     status_.active = true;
     status_.error = "";
@@ -491,15 +497,18 @@ void UpdateChecker::finish_task(
     bool retry_soon,
     const OtaUrlError *transport_error) {
     bool publish = false;
-    bool deferred = false;
+    const char *deferred_reason = nullptr;
     const uint32_t now = millis();
 
     if (lock()) {
         publish = generation == config_generation_;
         if (check_url_ == url) check_url_ = nullptr;
-        deferred = publish && export_preempted_ && !cancel_requested_;
+        if (publish && !cancel_requested_) {
+            if (therapy_preempted_) deferred_reason = "therapy active";
+            else if (export_preempted_) deferred_reason = "export pending";
+        }
 
-        if (deferred) {
+        if (deferred_reason) {
             status_.pending = true;
             status_.error = "";
         } else if (publish) {
@@ -538,9 +547,9 @@ void UpdateChecker::finish_task(
     if (artifact.url) Memory::free(artifact.url);
     if (!publish) return;
 
-    if (deferred) {
+    if (deferred_reason) {
         Log::logf(CAT_OTA, LOG_DEBUG,
-                  "firmware update check deferred: export pending\n");
+                  "firmware update check deferred: %s\n", deferred_reason);
         return;
     }
 
@@ -585,6 +594,7 @@ bool UpdateChecker::cancelled(uint32_t generation) {
 
     if (exports_->endpoint_work_claimed()) export_preempted_ = true;
     const bool result = cancel_requested_ || export_preempted_ ||
+                        therapy_preempted_ ||
                         generation != config_generation_;
     unlock();
     return result;

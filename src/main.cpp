@@ -1622,28 +1622,28 @@ void loop() {
         }
     }
 
+    const bool therapy_active =
+        session_manager.status().state == SessionState::Active ||
+        as11_device_service.state().therapy_state() ==
+            As11TherapyState::Running;
     const bool arduino_ota_poll_allowed =
         as11_device_service.state().therapy_state() !=
             As11TherapyState::Running;
     const ReportTaskControlSnapshot report_status =
         report_task.control_snapshot();
     const bool update_check_allowed =
-        arduino_ota_poll_allowed &&
         !export_coordinator.endpoint_work_claimed() &&
         !report_status.foreground_active;
 
     update_checker.poll(runtime_network,
                         update_check_allowed &&
                             !resmed_ota_transport_active,
-                        firmware_installer.active());
+                        firmware_installer.active(),
+                        therapy_active);
     arduino_ota_source.poll(runtime_network,
                             !resmed_ota_transport_active,
                             arduino_ota_poll_allowed);
-    firmware_installer.poll(
-        esp_reboot_allowed,
-        session_manager.status().state == SessionState::Active ||
-            as11_device_service.state().therapy_state() ==
-                As11TherapyState::Running);
+    firmware_installer.poll(esp_reboot_allowed, therapy_active);
 
     drain_can_rx();
 
@@ -1665,10 +1665,6 @@ void loop() {
         esp_ota_install_active || resmed_ota_manager.transport_active();
     const bool ota_storage_upload_active =
         resmed_ota_manager.storage_upload_active();
-    const bool therapy_active =
-        session_manager.status().state == SessionState::Active ||
-        as11_device_service.state().therapy_state() ==
-            As11TherapyState::Running;
 
     publish_runtime_activity(foreground_report_active,
                              stream_activity_active,
