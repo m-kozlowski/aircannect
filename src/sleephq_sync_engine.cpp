@@ -1069,7 +1069,8 @@ bool SleepHqSyncEngine::cancel_post_therapy_locked() {
                          current_run_kind_ == RunKind::PostTherapySync;
     const bool pending = pending_run_kind_ == RunKind::PostTherapySync &&
                          (status_.pending ||
-                          status_.state == SleepHqSyncState::Error);
+                          (status_.state == SleepHqSyncState::Error &&
+                           retry_due_ms_ != 0));
     if (!current && !pending) return false;
 
     reset_run_locked(false);
