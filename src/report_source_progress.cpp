@@ -181,10 +181,9 @@ bool decode_entry(const uint8_t *data,
 }  // namespace
 
 bool ReportSourceProgressReader::open(const uint8_t *data, size_t length) {
-    data_ = nullptr;
-    length_ = 0;
-    entries_offset_ = 0;
-    count_ = 0;
+    decltype(entries_) decoded;
+    entries_.swap(decoded);
+    decoded.clear();
     if (!data || length < PROGRESS_HEADER_BYTES ||
         LittleEndian::get_le32(data) != PROGRESS_MAGIC ||
         LittleEndian::get_le16(data + 4) != PROGRESS_VERSION ||
@@ -200,38 +199,32 @@ bool ReportSourceProgressReader::open(const uint8_t *data, size_t length) {
         return false;
     }
 
-    data_ = data;
-    length_ = length;
-    entries_offset_ = PROGRESS_HEADER_BYTES;
-    count_ = count;
-    size_t offset = entries_offset_;
-    for (size_t i = 0; i < count_; ++i) {
-        ReportSourceProgressEntry ignored;
+    try {
+        decoded.reserve(count);
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+
+    size_t offset = PROGRESS_HEADER_BYTES;
+    for (size_t i = 0; i < count; ++i) {
+        ReportSourceProgressEntry entry;
         size_t next = 0;
-        if (!decode_entry(data_, length_, offset, ignored, next)) {
-            data_ = nullptr;
-            length_ = 0;
-            entries_offset_ = 0;
-            count_ = 0;
-            return false;
-        }
+        if (!decode_entry(data, length, offset, entry, next)) return false;
+
+        decoded.push_back(entry);
         offset = next;
     }
-    return offset == length_;
+    if (offset != length) return false;
+
+    entries_.swap(decoded);
+    return true;
 }
 
 bool ReportSourceProgressReader::entry(
     size_t index, ReportSourceProgressEntry &out) const {
-    if (!data_ || index >= count_) return false;
-
-    size_t offset = entries_offset_;
-    for (size_t i = 0; i < index; ++i) {
-        const size_t entry_bytes = LittleEndian::get_le32(data_ + offset);
-        if (entry_bytes > length_ - offset) return false;
-        offset += entry_bytes;
-    }
-    size_t ignored_next = 0;
-    return decode_entry(data_, length_, offset, out, ignored_next);
+    if (index >= entries_.size()) return false;
+    out = entries_[index];
+    return true;
 }
 
 std::shared_ptr<const LargeByteBuffer> encode_report_source_progress(

@@ -3,8 +3,10 @@
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
 
 #include "edf_report_catalog.h"
+#include "large_allocator.h"
 #include "large_byte_buffer.h"
 #include "report_sources.h"
 
@@ -42,14 +44,14 @@ class ReportSourceProgressReader {
 public:
     bool open(const uint8_t *data, size_t length);
 
-    size_t count() const { return count_; }
+    size_t count() const { return entries_.size(); }
+    const ReportSourceProgressEntry *data() const { return entries_.data(); }
     bool entry(size_t index, ReportSourceProgressEntry &out) const;
 
 private:
-    const uint8_t *data_ = nullptr;
-    size_t length_ = 0;
-    size_t entries_offset_ = 0;
-    size_t count_ = 0;
+    // Decoded fields are owned here; paths borrow the immutable input buffer.
+    std::vector<ReportSourceProgressEntry,
+                LargeAllocator<ReportSourceProgressEntry>> entries_;
 };
 
 std::shared_ptr<const LargeByteBuffer> encode_report_source_progress(
