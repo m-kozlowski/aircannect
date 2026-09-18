@@ -25,6 +25,9 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#else
+#include <chrono>
+#include <mutex>
 #endif
 
 namespace aircannect {
@@ -165,14 +168,16 @@ struct ReportTask::Runtime {
         return mutex &&
                xSemaphoreTake(mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 #else
-        (void)timeout_ms;
-        return true;
+        return timeout_ms == 0 ? mutex.try_lock()
+            : mutex.try_lock_for(std::chrono::milliseconds(timeout_ms));
 #endif
     }
 
     void unlock() const {
 #ifdef ARDUINO
         if (mutex) xSemaphoreGive(mutex);
+#else
+        mutex.unlock();
 #endif
     }
 
@@ -1476,7 +1481,8 @@ struct ReportTask::Runtime {
         return ReportTaskWaitReason::None;
     }
 
-    ReportTaskOperationalSnapshot operational() const {
+    ReportTaskOperationalSnapshot operational(
+        const ReportEngineStatus &engine_status, size_t queued_commands) const {
         ReportTaskOperationalSnapshot out;
         out.catalog_nights = catalog ? catalog->size() : 0;
         out.materialized_nights = store_catalog ? store_catalog->size() : 0;
@@ -1508,7 +1514,6 @@ struct ReportTask::Runtime {
             return out;
         }
 
-        const ReportEngineStatus engine_status = engine.status();
         out.sleep_day = engine_status.active_request.artifact.sleep_day;
         switch (engine_status.state) {
             case ReportEngineState::AcquiringFallback:
@@ -1531,7 +1536,7 @@ struct ReportTask::Runtime {
         }
 
         out.condition = ReportTaskCondition::Waiting;
-        if (command_count > 0) {
+        if (queued_commands > 0) {
             out.wait_reason = ReportTaskWaitReason::Queue;
             return out;
         }
@@ -1594,7 +1599,63 @@ struct ReportTask::Runtime {
         return out;
     }
 
+    ReportTaskDiagnosticSnapshot diagnostic(
+        const ReportEngineStatus &engine_status) const {
+        const auto &fallback = engine_status.fallback;
+        const auto &catalog_status = catalog_refresh.status();
+        const auto &store_status = store_catalog_loader.status();
+
+        ReportTaskDiagnosticSnapshot out;
+        out.task_started = task_started;
+        out.catalog_nights = catalog ? catalog->size() : 0;
+        out.materialized_nights = store_catalog ? store_catalog->size() : 0;
+        out.command_failures = command_failures;
+        out.catalog_generation = catalog_generation;
+        out.durable_catalog_generation = durable_catalog_generation;
+        out.foreground_active = engine_status.foreground_active;
+        out.background_suspended = background_suspended;
+
+        out.engine_state = engine_status.state;
+        out.engine_queued = engine_status.queued;
+        out.engine_sleep_day = engine_status.active_request.artifact.sleep_day;
+        out.executor_state = engine_status.executor.state;
+        out.executor_operation_index = engine_status.executor.operation_index;
+        out.executor_operation_count = engine_status.executor.operation_count;
+        out.executor_record_index = engine_status.executor.record_index;
+        out.executor_record_count = engine_status.executor.record_count;
+        copy_cstr(out.engine_error, sizeof(out.engine_error),
+                  engine_status.last_completion.error);
+
+        out.fallback_state = fallback.state;
+        out.fallback_source = fallback.source;
+        out.fallback_sources_total = fallback.sources_total;
+        out.fallback_sources_completed = fallback.sources_completed;
+        out.fallback_sections_added = fallback.sections_added;
+        out.fallback_unavailable_added = fallback.unavailable_added;
+        copy_cstr(out.fallback_error, sizeof(out.fallback_error), fallback.error);
+
+        out.catalog_state = catalog_status.state;
+        out.catalog_files_seen = catalog_status.files_seen;
+        out.catalog_files_indexed = catalog_status.files_indexed;
+        out.catalog_sessions = catalog_status.sessions;
+        copy_cstr(out.catalog_error, sizeof(out.catalog_error), catalog_status.error);
+
+        out.store_catalog_state = store_status.state;
+        out.store_catalog_checked = store_status.nights_checked;
+        out.store_catalog_loaded = store_status.nights_loaded;
+        out.store_catalog_skipped = store_status.nights_skipped;
+        copy_cstr(out.store_catalog_error, sizeof(out.store_catalog_error),
+                  store_status.error);
+
+        return out;
+    }
+
     void publish_status() {
+        if (!lock(0)) return;
+        const size_t queued_commands = command_count;
+        const uint32_t drops = command_drops;
+        unlock();
+
         ReportTaskControlSnapshot next;
         next.initialized = initialized;
         next.task_started = task_started;
@@ -1646,7 +1707,12 @@ struct ReportTask::Runtime {
             }
         }
 
-        if (!lock()) return;
+        const auto next_operational = operational(engine_status, queued_commands);
+        auto next_diagnostic = diagnostic(engine_status);
+        next_diagnostic.commands_queued = queued_commands;
+        next_diagnostic.command_drops = drops;
+
+        if (!lock(0)) return;
         if (next.state == ReportTaskState::Idle && command_count != 0) {
             next.state = ReportTaskState::Queued;
         }
@@ -1658,7 +1724,12 @@ struct ReportTask::Runtime {
         }
         next.post_therapy_settle_pending =
             post_therapy_settle_pending();
+        next_diagnostic.state = next.state;
+        next_diagnostic.background_active = next.background_active;
+
         control = next;
+        published_operational = next_operational;
+        published_diagnostic = next_diagnostic;
         published_completion = engine_status.last_completion;
         unlock();
     }
@@ -1770,12 +1841,16 @@ struct ReportTask::Runtime {
     bool initialized = false;
     bool task_started = false;
     ReportTaskControlSnapshot control;
+    ReportTaskOperationalSnapshot published_operational;
+    ReportTaskDiagnosticSnapshot published_diagnostic;
     ReportEngineCompletion published_completion;
 
 #ifdef ARDUINO
     mutable SemaphoreHandle_t mutex = nullptr;
     TaskHandle_t task = nullptr;
     bool task_stack_external = false;
+#else
+    mutable std::timed_mutex mutex;
 #endif
 };
 
@@ -1965,79 +2040,20 @@ ReportTaskControlSnapshot ReportTask::control_snapshot() const {
     return out;
 }
 
-ReportTaskOperationalSnapshot ReportTask::operational_snapshot() const {
-    if (!runtime_ || !runtime_->lock(20)) return {};
-    const ReportTaskOperationalSnapshot out = runtime_->operational();
+bool ReportTask::operational_snapshot(ReportTaskOperationalSnapshot &out) const {
+    if (!runtime_ || !runtime_->lock(0)) return false;
+
+    out = runtime_->published_operational;
     runtime_->unlock();
-    return out;
+    return true;
 }
 
-ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
-    if (!runtime_ || !runtime_->lock(20)) return {};
+bool ReportTask::diagnostic_snapshot(ReportTaskDiagnosticSnapshot &out) const {
+    if (!runtime_ || !runtime_->lock(0)) return false;
 
-    const ReportEngineStatus engine = runtime_->engine.status();
-    const ReportFallbackAcquisitionStatus fallback = engine.fallback;
-    const NightCatalogRefreshStatus catalog =
-        runtime_->catalog_refresh.status();
-    const ReportSignalStoreCatalogLoadStatus store =
-        runtime_->store_catalog_loader.status();
-
-    ReportTaskDiagnosticSnapshot out;
-    out.task_started = runtime_->task_started;
-    out.state = runtime_->control.state;
-    out.commands_queued = runtime_->command_count;
-    out.catalog_nights = runtime_->catalog ? runtime_->catalog->size() : 0;
-    out.materialized_nights = runtime_->store_catalog
-        ? runtime_->store_catalog->size() : 0;
-    out.command_drops = runtime_->command_drops;
-    out.command_failures = runtime_->command_failures;
-    out.catalog_generation = runtime_->catalog_generation;
-    out.durable_catalog_generation =
-        runtime_->durable_catalog_generation;
-    out.foreground_active = engine.foreground_active;
-    out.background_active = runtime_->control.background_active;
-    out.background_suspended = runtime_->background_suspended;
-
-    out.engine_state = engine.state;
-    out.engine_queued = engine.queued;
-    out.engine_sleep_day = engine.active_request.artifact.sleep_day;
-    out.executor_state = engine.executor.state;
-    out.executor_operation_index = engine.executor.operation_index;
-    out.executor_operation_count = engine.executor.operation_count;
-    out.executor_record_index = engine.executor.record_index;
-    out.executor_record_count = engine.executor.record_count;
-    copy_cstr(out.engine_error,
-              sizeof(out.engine_error),
-              engine.last_completion.error);
-
-    out.fallback_state = fallback.state;
-    out.fallback_source = fallback.source;
-    out.fallback_sources_total = fallback.sources_total;
-    out.fallback_sources_completed = fallback.sources_completed;
-    out.fallback_sections_added = fallback.sections_added;
-    out.fallback_unavailable_added = fallback.unavailable_added;
-    copy_cstr(out.fallback_error,
-              sizeof(out.fallback_error),
-              fallback.error);
-
-    out.catalog_state = catalog.state;
-    out.catalog_files_seen = catalog.files_seen;
-    out.catalog_files_indexed = catalog.files_indexed;
-    out.catalog_sessions = catalog.sessions;
-    copy_cstr(out.catalog_error,
-              sizeof(out.catalog_error),
-              catalog.error);
-
-    out.store_catalog_state = store.state;
-    out.store_catalog_checked = store.nights_checked;
-    out.store_catalog_loaded = store.nights_loaded;
-    out.store_catalog_skipped = store.nights_skipped;
-    copy_cstr(out.store_catalog_error,
-              sizeof(out.store_catalog_error),
-              store.error);
-
+    out = runtime_->published_diagnostic;
     runtime_->unlock();
-    return out;
+    return true;
 }
 
 ReportEngineCompletion ReportTask::last_completion() const {

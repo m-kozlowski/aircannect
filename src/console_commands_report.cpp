@@ -64,8 +64,11 @@ void print_report_sleep_day(Print &out, SleepDayId sleep_day) {
 }
 
 void print_report_status(Print &out, const ReportTask &task) {
-    const ReportTaskOperationalSnapshot status =
-        task.operational_snapshot();
+    ReportTaskOperationalSnapshot status;
+    if (!task.operational_snapshot(status)) {
+        out.println("[REPORT] status temporarily unavailable");
+        return;
+    }
 
     out.print("[REPORT] state=");
     out.print(report_condition_name(status.condition));
@@ -94,7 +97,11 @@ void print_report_status(Print &out, const ReportTask &task) {
 }
 
 void print_report_stats(Print &out, const ReportTask &task) {
-    const ReportTaskDiagnosticSnapshot status = task.diagnostic_snapshot();
+    ReportTaskDiagnosticSnapshot status;
+    if (!task.diagnostic_snapshot(status)) {
+        out.println("[REPORT] stats temporarily unavailable");
+        return;
+    }
 
     out.print("[REPORT queue] task=");
     out.print(static_cast<unsigned long>(status.commands_queued));

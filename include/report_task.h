@@ -234,7 +234,9 @@ public:
     void publish_capture_session(const EdfSessionMetadata &metadata);
 
     ReportTaskControlSnapshot control_snapshot() const;
-    ReportTaskOperationalSnapshot operational_snapshot() const;
+    // Nonblocking reads; leave out unchanged if publication is busy.
+    bool operational_snapshot(ReportTaskOperationalSnapshot &out) const;
+    bool diagnostic_snapshot(ReportTaskDiagnosticSnapshot &out) const;
     ReportEngineCompletion last_completion() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     std::shared_ptr<const ReportCatalogJson> catalog_json_snapshot() const;
@@ -253,8 +255,6 @@ public:
     bool night_failure(SleepDayId sleep_day,
                        ReportNightFailureStatus &failure,
                        uint32_t lock_timeout_ms = 20) const;
-
-    ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
 
 private:
     struct Runtime;
