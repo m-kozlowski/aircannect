@@ -261,8 +261,7 @@ static bool export_config_pending = true;
 static bool local_poweroff_requested = false;
 static bool local_poweroff_attempted = false;
 static bool local_poweroff_backlight_was_on = false;
-static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
-static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
+
 static bool is_rpc_event(RpcEventKind kind) {
     return kind == RpcEventKind::RpcResponse ||
            kind == RpcEventKind::RpcNotification ||
@@ -957,12 +956,6 @@ static void poll_as11_ble_recovery(uint32_t now_ms) {
         rpc_transport, RpcSource::Scheduler, now_ms);
 }
 
-static bool main_loop_drain_timing_active() {
-    return session_manager.status().state == SessionState::Active ||
-           as11_device_service.state().therapy_state() ==
-               As11TherapyState::Running;
-}
-
 static void drain_can_side_events() {
     CanSideEvent event;
     while (can_rpc_link.take_side_event(event)) {
@@ -985,40 +978,11 @@ static void drain_can_side_events() {
     }
 }
 
-static void drain_can_rx_after(const char *section) {
-    static uint32_t last_checkpoint_ms = 0;
-    static uint32_t last_warn_ms = 0;
+static void drain_can_rx() {
+    if (!can_rpc_link.physical_enabled()) return;
 
-    if (!can_rpc_link.physical_enabled()) {
-        last_checkpoint_ms = 0;
-        return;
-    }
-
-    const uint32_t before_ms = millis();
-    const uint32_t gap_ms = last_checkpoint_ms == 0
-                                ? 0
-                                : before_ms - last_checkpoint_ms;
-    const size_t drained = can_rpc_link.drain_rx();
+    can_rpc_link.drain_rx();
     drain_can_side_events();
-    const uint32_t after_drain_ms = millis();
-    const uint32_t drain_ms = after_drain_ms - before_ms;
-
-    if (gap_ms > AC_MAIN_LOOP_CAN_DRAIN_WARN_MS &&
-        main_loop_drain_timing_active() &&
-        (last_warn_ms == 0 ||
-         after_drain_ms - last_warn_ms >=
-             AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS)) {
-        last_warn_ms = after_drain_ms;
-        Log::logf(CAT_CAN, LOG_WARN,
-                  "main-loop CAN drain gap section=%s gap_ms=%u "
-                  "drained=%u drain_ms=%u\n",
-                  section ? section : "--",
-                  static_cast<unsigned>(gap_ms),
-                  static_cast<unsigned>(drained),
-                  static_cast<unsigned>(drain_ms));
-    }
-
-    last_checkpoint_ms = millis();
 }
 
 static void refresh_status_presentations(uint32_t now_ms) {
@@ -1042,7 +1006,7 @@ static void refresh_status_presentations(uint32_t now_ms) {
             oximetry_udp_source,
             plx_peripheral,
         },
-        drain_can_rx_after);
+        drain_can_rx);
 
     snapshot.as11.transport = rpc_link_selector.selected();
     if (snapshot.as11.transport == As11Transport::Ble) {
@@ -1570,7 +1534,7 @@ void loop() {
             rpc_quiesce_coordinator.timed_out(),
         oximetry_sensor_source.suspended() && plx_peripheral.suspended());
 
-    drain_can_rx_after("rpc_ota_prepare");
+    drain_can_rx();
 
     // Report RPC adapter and ResMed OTA
     report_spool_service.poll(
@@ -1578,30 +1542,30 @@ void loop() {
         rpc_transport.background_backpressure_active(),
         can_driver.stats().rx_queue_full_alerts);
     poll_as11_ble_recovery(now_ms);
-    drain_can_rx_after("report");
+    drain_can_rx();
 
     resmed_ota_manager.poll();
-    drain_can_rx_after("resmed_ota");
+    drain_can_rx();
 
     // Oximetry samples must reach the recorder before a closing ZLE event.
     poll_oximetry(wifi_manager.network_available(), now_ms);
-    drain_can_rx_after("oximetry");
+    drain_can_rx();
 
     // RPC event fanout before services that depend on fresh state.
     drain_rpc_events();
-    drain_can_rx_after("rpc_events_pre_state");
+    drain_can_rx();
 
     // Session and EDF capture
     session_manager.poll(as11_device_service.state(), now_ms);
 
     local_inputs.poll(now_ms);
-    drain_can_rx_after("session");
+    drain_can_rx();
 
     edf_recorder_manager.poll(now_ms);
-    drain_can_rx_after("edf");
+    drain_can_rx();
 
     publish_report_catalog_inputs();
-    drain_can_rx_after("report_catalog");
+    drain_can_rx();
 
     // Therapy telemetry and live charts
     alert_telemetry_adapter.poll(now_ms);
@@ -1618,23 +1582,23 @@ void loop() {
                                        resmed_ota_transport_active);
 
     wifi_manager.poll();
-    drain_can_rx_after("wifi.poll");
+    drain_can_rx();
 
     publish_runtime_network();
 
     sync_network_services();
-    drain_can_rx_after("network_services.sync");
+    drain_can_rx();
 
     // Log and time services
     Log::poll(wifi_manager.sta_ipv4_online());
-    drain_can_rx_after("log");
+    drain_can_rx();
 
     if (!resmed_ota_transport_active &&
         !as11_application_quiesce_requested) {
         time_sync_service.poll();
     }
 
-    drain_can_rx_after("time_sync");
+    drain_can_rx();
 
     // ESP/Arduino OTA
     const FirmwareInstallStatus install_status = firmware_installer.status();
@@ -1681,10 +1645,10 @@ void loop() {
             as11_device_service.state().therapy_state() ==
                 As11TherapyState::Running);
 
-    drain_can_rx_after("arduino_ota");
+    drain_can_rx();
 
     resmed_ota_manager.poll();
-    drain_can_rx_after("resmed_ota_post");
+    drain_can_rx();
 
     // Storage and exports
     ExportReportActivity report_activity;
@@ -1717,26 +1681,26 @@ void loop() {
     publish_export_config();
 
     export_coordinator.poll(report_activity, storage_activity, now_ms);
-    drain_can_rx_after("export_coordinator");
+    drain_can_rx();
 
     poll_storage_upload_publication();
     resmed_firmware_repository.poll();
     resmed_firmware_http_controller.poll();
-    drain_can_rx_after("resmed_firmware_repository");
+    drain_can_rx();
 
     // Web, TCP, and console frontends
     refresh_status_presentations(now_ms);
-    drain_can_rx_after("status_http");
+    drain_can_rx();
 
     report_preferences_service.poll();
     report_http_controller.poll();
-    drain_can_rx_after("report_http");
+    drain_can_rx();
 
     storage_http_controller.poll();
-    drain_can_rx_after("storage_http");
+    drain_can_rx();
 
-    web_ui.poll(drain_can_rx_after);
-    drain_can_rx_after("web_ui");
+    web_ui.poll(drain_can_rx);
+    drain_can_rx();
 
     const bool service_entry_allowed =
         !as11_application_quiesce_requested &&
@@ -1746,11 +1710,11 @@ void loop() {
     telnet_console.poll(config_service.data(), console_router);
     serial_management_console.poll(Serial, Serial, console_router);
 
-    drain_can_rx_after("frontends");
+    drain_can_rx();
 
     // RPC event fanout after network and console frontends.
     drain_rpc_events();
-    drain_can_rx_after("rpc_events_post_frontends");
+    drain_can_rx();
 
     poll_stack_profiler(now_ms);
 

@@ -97,11 +97,11 @@ struct SystemStatusSources {
     const PlxPeripheral &plx_peripheral;
 };
 
-using SystemStatusCheckpoint = void (*)(const char *section);
+using SystemStatusServicePendingWork = void (*)();
 
 SystemStatusSnapshot collect_system_status(
     const SystemStatusSources &sources,
-    SystemStatusCheckpoint checkpoint = nullptr);
+    SystemStatusServicePendingWork service_pending_work = nullptr);
 
 const char *system_reset_reason_name();
 

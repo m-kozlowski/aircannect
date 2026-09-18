@@ -73,7 +73,7 @@ struct WebUiMemoryStatus {
 
 class WebUI {
 public:
-    using PollCheckpoint = void (*)(const char *section);
+    using ServicePendingWork = void (*)();
 
     // lifecycle
     bool begin(StatusHttpController &status,
@@ -93,7 +93,7 @@ public:
                size_t route_module_count,
                uint16_t port = 80);
     void stop();
-    void poll(PollCheckpoint checkpoint = nullptr);
+    void poll(ServicePendingWork service_pending_work = nullptr);
     void apply_auth_config(const AppConfigData &config);
 
     // inbound device events
@@ -130,8 +130,8 @@ private:
     void send_console_snapshot(AsyncWebServerRequest *request) const;
     void mark_snapshots_dirty(uint16_t mask);
     void request_sse_push();
-    void publish_snapshots(bool force,
-                           PollCheckpoint checkpoint = nullptr);
+    void publish_snapshots(
+        bool force, ServicePendingWork service_pending_work = nullptr);
 
     // Deferred command queue
     bool enqueue_command(WebCommand &&command);
@@ -201,7 +201,6 @@ private:
     struct SnapshotChannel {
         const PublishedJsonSnapshot *source = nullptr;
         const char *event = nullptr;
-        const char *checkpoint = nullptr;
         uint16_t mask = 0;
         size_t reserve = 0;
         LargeTextBuffer cached;

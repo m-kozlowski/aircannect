@@ -107,12 +107,13 @@ bool WebUI::begin(StatusHttpController &status,
     }
     server_->addMiddleware([this](AsyncWebServerRequest *request,
                                  ArMiddlewareNext next) {
-        if (request_allowed_cached(request)) {
+        const bool allowed = request_allowed_cached(request);
+        if (allowed) {
             next();
-            return;
+        } else {
+            request->requestAuthentication(AsyncAuthType::AUTH_BASIC,
+                                           "AirCANnect");
         }
-        request->requestAuthentication(AsyncAuthType::AUTH_BASIC,
-                                       "AirCANnect");
     });
     events_ = new AsyncEventSource("/api/events");
     if (events_) {
@@ -150,52 +151,41 @@ void WebUI::bind_snapshot_channels(
     auto bind = [this](SnapshotChannelId id,
                        const PublishedJsonSnapshot &source,
                        const char *event,
-                       const char *checkpoint,
                        uint16_t mask,
                        size_t reserve) {
         SnapshotChannel &channel = snapshot_channel(id);
         channel.source = &source;
         channel.event = event;
-        channel.checkpoint = checkpoint;
         channel.mask = mask;
         channel.reserve = reserve;
     };
 
     bind(SnapshotChannelId::Config, config_http.update_snapshot(),
-         "config", "web_ui.snapshots.config_copy", SNAPSHOT_CONFIG, 256);
+         "config", SNAPSHOT_CONFIG, 256);
     bind(SnapshotChannelId::As11Ble, device_http.ble_pairing_snapshot(),
-         "as11_ble", "web_ui.snapshots.as11_ble_copy",
-         SNAPSHOT_AS11_BLE, AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
+         "as11_ble", SNAPSHOT_AS11_BLE, AC_WEB_AS11_BLE_STATUS_JSON_RESERVE);
     bind(SnapshotChannelId::Oximetry, oximetry_http.snapshot(),
-         "oximetry", "web_ui.snapshots.oximetry_copy",
-         SNAPSHOT_OXIMETRY, AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
+         "oximetry", SNAPSHOT_OXIMETRY, AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
     bind(SnapshotChannelId::Settings, settings_http.snapshot(),
-         "settings", "web_ui.snapshots.settings_copy",
-         SNAPSHOT_SETTINGS, AC_WEB_SETTINGS_JSON_RESERVE);
+         "settings", SNAPSHOT_SETTINGS, AC_WEB_SETTINGS_JSON_RESERVE);
     bind(SnapshotChannelId::Ota, ota_http.snapshot(),
-         "ota", "web_ui.snapshots.ota_copy",
-         SNAPSHOT_OTA, AC_WEB_OTA_JSON_RESERVE);
+         "ota", SNAPSHOT_OTA, AC_WEB_OTA_JSON_RESERVE);
     bind(SnapshotChannelId::ResmedOta, ota_http.resmed_snapshot(),
-         "resmed_ota", "web_ui.snapshots.resmed_ota_copy",
-         SNAPSHOT_RESMED_OTA, AC_WEB_RESMED_OTA_JSON_RESERVE);
+         "resmed_ota", SNAPSHOT_RESMED_OTA, AC_WEB_RESMED_OTA_JSON_RESERVE);
     bind(SnapshotChannelId::ResmedRepository,
          resmed_firmware_http.status_snapshot(),
-         "resmed_repository", "web_ui.snapshots.resmed_repository_copy",
-         SNAPSHOT_RESMED_REPOSITORY,
+         "resmed_repository", SNAPSHOT_RESMED_REPOSITORY,
          AC_WEB_RESMED_REPOSITORY_JSON_RESERVE);
     bind(SnapshotChannelId::StorageOperation,
          storage_http.operation_snapshot(),
-         "storage_operation", "web_ui.snapshots.storage_operation_copy",
-         SNAPSHOT_STORAGE_OPERATION,
+         "storage_operation", SNAPSHOT_STORAGE_OPERATION,
          AC_WEB_STORAGE_OPERATION_JSON_RESERVE);
     bind(SnapshotChannelId::Report,
          report_http.completion_snapshot(),
-         "report", "web_ui.snapshots.report_copy",
-         SNAPSHOT_REPORT, 384);
+         "report", SNAPSHOT_REPORT, 384);
     bind(SnapshotChannelId::ReportPreferences,
          report_http.preferences_snapshot(),
-         "report_preferences", "web_ui.snapshots.report_preferences_copy",
-         SNAPSHOT_REPORT_PREFERENCES, 3072);
+         "report_preferences", SNAPSHOT_REPORT_PREFERENCES, 3072);
 }
 
 void WebUI::reserve_cached_json() {
@@ -339,7 +329,7 @@ void WebUI::stop() {
     started_ = false;
 }
 
-void WebUI::poll(PollCheckpoint checkpoint) {
+void WebUI::poll(ServicePendingWork service_pending_work) {
     if (!started_) return;
     publish_pending_auth_config();
 
@@ -360,18 +350,18 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     }
 
     drain_commands();
-    if (checkpoint) checkpoint("web_ui.commands");
+    if (service_pending_work) service_pending_work();
     enforce_sse_limits();
-    if (checkpoint) checkpoint("web_ui.sse_limits");
+    if (service_pending_work) service_pending_work();
 
     size_t connected_sse_clients = 0;
     size_t healthy_sse_clients = 0;
     count_sse_clients(connected_sse_clients, healthy_sse_clients);
     poll_live_transport(connected_sse_clients, healthy_sse_clients);
-    if (checkpoint) checkpoint("web_ui.live");
+    if (service_pending_work) service_pending_work();
 
-    publish_snapshots(false, checkpoint);
-    if (checkpoint) checkpoint("web_ui.snapshots");
+    publish_snapshots(false, service_pending_work);
+    if (service_pending_work) service_pending_work();
 
     if (!events_ || events_->count() == 0) return;
 
@@ -385,11 +375,11 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         static_cast<int32_t>(now_ms - last_console_sse_ms_) >=
             static_cast<int32_t>(AC_WEB_CONSOLE_PUSH_INTERVAL_MS);
     if (!status_push_due && !console_push_due) {
-        if (checkpoint) checkpoint("web_ui.sse_idle");
+        if (service_pending_work) service_pending_work();
         return;
     }
     if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
-        if (checkpoint) checkpoint("web_ui.sse_lock");
+        if (service_pending_work) service_pending_work();
         return;
     }
 
@@ -455,11 +445,11 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         }
     }
     xSemaphoreGive(cache_mutex_);
-    if (checkpoint) checkpoint("web_ui.sse_send");
+    if (service_pending_work) service_pending_work();
     if (sse_backpressure) {
         sse_enforce_needed_ = true;
         enforce_sse_limits();
-        if (checkpoint) checkpoint("web_ui.sse_backpressure");
+        if (service_pending_work) service_pending_work();
     }
 }
 
@@ -989,7 +979,8 @@ void WebUI::drain_commands() {
     }
 }
 
-void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
+void WebUI::publish_snapshots(bool force,
+                              ServicePendingWork service_pending_work) {
     const uint32_t now = millis();
     const bool periodic_due =
         static_cast<int32_t>(now - last_snapshot_ms_) >=
@@ -1017,14 +1008,14 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
                                              next_status_revision)) {
             completed_mask |= SNAPSHOT_STATUS;
         }
-        if (checkpoint) checkpoint("web_ui.snapshots.status_copy");
+        if (service_pending_work) service_pending_work();
     }
 
     if (rebuild_mask & SNAPSHOT_EXPORTS) {
         if (exports_ && exports_->build_status_snapshot(next_exports_json_)) {
             completed_mask |= SNAPSHOT_EXPORTS;
         }
-        if (checkpoint) checkpoint("web_ui.snapshots.exports_copy");
+        if (service_pending_work) service_pending_work();
     }
 
     for (size_t i = 0; i < SnapshotChannelCount; ++i) {
@@ -1035,7 +1026,7 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
             channel.source->copy(channel.next, next_channel_revisions[i])) {
             completed_mask |= channel.mask;
         }
-        if (checkpoint) checkpoint(channel.checkpoint);
+        if (service_pending_work) service_pending_work();
     }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {

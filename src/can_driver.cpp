@@ -216,6 +216,7 @@ bool CanDriver::start_controller() {
     const uint32_t alerts = TWAI_ALERT_TX_SUCCESS |
                             TWAI_ALERT_TX_FAILED |
                             TWAI_ALERT_RX_QUEUE_FULL |
+                            TWAI_ALERT_RX_FIFO_OVERRUN |
                             TWAI_ALERT_ERR_PASS |
                             TWAI_ALERT_ERR_ACTIVE |
                             TWAI_ALERT_BUS_ERROR |
@@ -433,6 +434,18 @@ bool CanDriver::set_debug_log_rx_enabled(bool enabled) {
 }
 
 void CanDriver::handle_alerts(uint32_t alerts) {
+    if (alerts & TWAI_ALERT_RX_FIFO_OVERRUN) {
+        twai_status_info_t status = {};
+        if (twai_get_status_info(&status) == ESP_OK) {
+            Log::logf(CAT_CAN, LOG_WARN,
+                      "RX FIFO overrun total=%lu rx_q=%lu missed=%lu",
+                      static_cast<unsigned long>(status.rx_overrun_count),
+                      static_cast<unsigned long>(status.msgs_to_rx),
+                      static_cast<unsigned long>(status.rx_missed_count));
+        }
+        alerts &= ~TWAI_ALERT_RX_FIFO_OVERRUN;
+    }
+
     const bool expected_ack_gap =
         ack_gap_expected_ || peer_absence_expected_;
     if ((alerts & TWAI_ALERT_BUS_ERROR) && !expected_ack_gap) {

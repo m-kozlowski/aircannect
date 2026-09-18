@@ -51,7 +51,7 @@ const char *system_reset_reason_name() {
 
 SystemStatusSnapshot collect_system_status(
     const SystemStatusSources &sources,
-    SystemStatusCheckpoint checkpoint) {
+    SystemStatusServicePendingWork service_pending_work) {
     SystemStatusSnapshot out;
     out.now_ms = millis();
     out.uptime_s = out.now_ms / 1000;
@@ -59,13 +59,13 @@ SystemStatusSnapshot collect_system_status(
     out.built = aircannect_build_date();
     out.reset_reason = system_reset_reason_name();
     out.onboarding_complete = sources.app_config.onboarding_complete;
-    if (checkpoint) checkpoint("web_ui.snapshots.status.core");
+    if (service_pending_work) service_pending_work();
 
     // Periodic presentation does not use largest-block sizes.
     out.memory = Memory::status(false);
-    if (checkpoint) checkpoint("web_ui.snapshots.status.memory");
+    if (service_pending_work) service_pending_work();
     out.storage = collect_storage_status_snapshot();
-    if (checkpoint) checkpoint("web_ui.snapshots.status.storage");
+    if (service_pending_work) service_pending_work();
 
     out.wifi.state = sources.wifi_manager.state_name();
     out.wifi.ssid = sources.wifi_manager.sta_ssid().c_str();
@@ -88,11 +88,11 @@ SystemStatusSnapshot collect_system_status(
     out.wifi.channel = sources.wifi_manager.channel();
     out.wifi.active_profile =
         sources.wifi_manager.active_profile_index();
-    if (checkpoint) checkpoint("web_ui.snapshots.status.wifi");
+    if (service_pending_work) service_pending_work();
 
     out.ota_active = sources.firmware_installer.active();
     out.update = sources.update_checker.notification();
-    if (checkpoint) checkpoint("web_ui.snapshots.status.ota");
+    if (service_pending_work) service_pending_work();
 
     const As11DeviceState &as11 = sources.device.state();
     out.as11.availability = as11.availability();
@@ -107,13 +107,13 @@ SystemStatusSnapshot collect_system_status(
     out.as11.pending_therapy_target = as11.pending_therapy_target();
     out.as11.clock_valid = as11.clock_valid();
     out.as11.clock_sample_ms = as11.clock_sample_ms();
-    if (checkpoint) checkpoint("web_ui.snapshots.status.as11");
+    if (service_pending_work) service_pending_work();
 
     out.oximetry = compose_oximetry_status(
         sources.oximetry_hub.snapshot(out.now_ms),
         sources.oximetry_udp.status(),
         sources.plx_peripheral.status(out.now_ms));
-    if (checkpoint) checkpoint("web_ui.snapshots.status.oxi");
+    if (service_pending_work) service_pending_work();
 
     out.time.resmed_time_sync_enabled =
         sources.app_config.resmed_time_sync_enabled;
@@ -124,7 +124,7 @@ SystemStatusSnapshot collect_system_status(
         sources.time_sync_service.esp_clock_source_name();
     sources.time_sync_service.utc_now_iso(out.time.esp_datetime,
                                           sizeof(out.time.esp_datetime));
-    if (checkpoint) checkpoint("web_ui.snapshots.status.time");
+    if (service_pending_work) service_pending_work();
 
     return out;
 }
