@@ -74,164 +74,148 @@ String settings_placeholder_json(As11Availability availability,
     return json;
 }
 
-void build_settings_json(LargeTextBuffer &json,
+void begin_settings_json(LargeTextBuffer &json,
                          const As11DeviceState &device,
                          const As11SettingsState &state,
-                         int requested_mode,
-                         bool refresh_queued) {
-    const int active_mode = active_settings_mode(device, state);
-    int profile_mode = requested_mode >= 0 ? requested_mode : active_mode;
-    const uint16_t supported_modes = state.supported_mode_mask();
-    const As11SettingsCatalog &catalog = state.catalog();
-    if (profile_mode >= 0 && supported_modes &&
-        !(supported_modes & (1u << profile_mode))) {
-        profile_mode = active_mode;
-    }
-
+                         bool refresh_queued,
+                         uint32_t now_ms) {
     json = "{";
     json_add_bool(json, "valid", state.valid(), false);
     json_add_string(json, "as11_state",
                     As11DeviceState::availability_name(
                         device.availability()));
     json_add_bool(json, "refresh_queued", refresh_queued);
-    json_add_int(json, "catalog_revision", catalog.revision());
-    json_add_int(json, "supported_mode_mask", supported_modes);
+    json_add_int(json, "catalog_revision", state.catalog().revision());
+    json_add_int(json, "supported_mode_mask", state.supported_mode_mask());
     json_add_int(json, "pending_count",
                  static_cast<long>(state.pending_count()));
     json_add_string(json, "last_write_status",
                     state.last_write_status().c_str());
     if (state.last_write_ms()) {
         json_add_int(json, "last_write_age_ms",
-                     millis() - state.last_write_ms());
+                     now_ms - state.last_write_ms());
     } else {
         json += ",\"last_write_age_ms\":null";
     }
     if (state.valid()) {
-        json_add_int(json, "age_ms", millis() - state.updated_ms());
+        json_add_int(json, "age_ms", now_ms - state.updated_ms());
     } else {
         json += ",\"age_ms\":null";
     }
 
     json += ",\"settings\":[";
-    size_t emitted = 0;
-    for (size_t i = 0; i < catalog.count(); ++i) {
-        const As11SettingDef &def = catalog.setting(i);
-        if (!state.setting_visible(i, profile_mode) ||
-            !as11_setting_readable_via_rpc(def)) {
-            continue;
-        }
-
-        const bool therapy_mode = strcmp(def.key, "MOP") == 0;
-        const std::string value =
-            state.value(i, therapy_mode ? active_mode : profile_mode);
-        const bool pending = state.pending(i);
-        const bool available = !value.empty() || pending;
-        if (!available) continue;
-
-        if (emitted++) json += ',';
-        json += '{';
-        json_add_string(json, "key", def.key, false);
-        json_add_string(json, "value", value.c_str());
-        if (pending) {
-            json_add_bool(json, "pending", true);
-            json_add_string(json, "pending_value",
-                            state.pending_value(i).c_str());
-            json_add_int(json, "pending_age_ms",
-                         millis() - state.pending_since_ms(i));
-        }
-        json += '}';
-    }
-    json += "]}";
 }
 
-void build_catalog_json(LargeTextBuffer &json,
-                        const As11SettingsCatalog &catalog) {
-    json = "{";
-    json_add_int(json, "revision", catalog.revision(), false);
-    json += ",\"settings\":[";
-    size_t emitted = 0;
-    for (size_t i = 0; i < catalog.count(); ++i) {
-        const As11SettingDef &def = catalog.setting(i);
-        if (!def.mode_mask || !as11_setting_readable_via_rpc(def)) continue;
-
-        if (emitted++) json += ',';
-        json += '{';
-        json_add_string(json, "key", def.key, false);
-        json_add_string(json, "label", def.label);
-        const std::string rpc_name = as11_setting_rpc_long_name(def);
-        json_add_string(json, "rpc_name", rpc_name.c_str());
-        json_add_string(json, "group", def.group);
-        json_add_string(json, "category", def.category);
-        json_add_string(json, "kind", setting_kind_name(def.kind));
-        json_add_int(json, "modes", def.mode_mask);
-        json_add_float(json, "min", def.min_value);
-        json_add_float(json, "max", def.max_value);
-        json_add_float(json, "step", def.step);
-        json_add_int(json, "scale_div", def.scale_div);
-        json_add_int(json, "decimals", def.decimals);
-        if (!def.writable) json_add_bool(json, "writable", false);
-        if (def.options && def.option_count) {
-            json += ",\"options\":[";
-            for (uint8_t option = 0; option < def.option_count; ++option) {
-                if (option) json += ',';
-                json += '{';
-                json_add_int(json, "value", option, false);
-                json_add_string(json, "label", def.options[option]);
-                json += '}';
-            }
-            json += ']';
-        }
-        json += '}';
+void append_setting_json(LargeTextBuffer &json,
+                         const As11SettingsState &state,
+                         size_t index, int active_mode, int profile_mode,
+                         uint32_t now_ms, size_t &emitted) {
+    const As11SettingDef &def = state.catalog().setting(index);
+    if (!state.setting_visible(index, profile_mode) ||
+        !as11_setting_readable_via_rpc(def)) {
+        return;
     }
 
-    json += "],\"composites\":[";
-    size_t emitted_composites = 0;
-    for (size_t i = 0; i < as11_setting_composite_count(); ++i) {
-        const As11SettingCompositeDef &def = as11_setting_composite(i);
-        if (catalog.overlaid(def.enum_key) ||
-            catalog.overlaid(def.numeric_key)) {
-            continue;
-        }
+    const bool therapy_mode = strcmp(def.key, "MOP") == 0;
+    const std::string value =
+        state.value(index, therapy_mode ? active_mode : profile_mode);
+    const bool pending = state.pending(index);
+    if (value.empty() && !pending) return;
 
-        if (emitted_composites++) json += ',';
-        json += '{';
-        json_add_string(json, "key", def.key, false);
-        json_add_string(json, "kind", "paired_enum_numeric");
-        json_add_string(json, "label", def.label);
-        json_add_string(json, "enum_key", def.enum_key);
-        json_add_string(json, "numeric_key", def.numeric_key);
+    if (emitted++) json += ',';
+    json += '{';
+    json_add_string(json, "key", def.key, false);
+    json_add_string(json, "value", value.c_str());
+    if (pending) {
+        json_add_bool(json, "pending", true);
+        json_add_string(json, "pending_value",
+                        state.pending_value(index).c_str());
+        json_add_int(json, "pending_age_ms",
+                     now_ms - state.pending_since_ms(index));
+    }
+    json += '}';
+}
 
-        json_add_string(json, "group", def.group);
-        json_add_string(json, "category", def.category);
+void append_catalog_setting_json(LargeTextBuffer &json,
+                                 const As11SettingDef &def,
+                                 size_t &emitted) {
+    if (!def.mode_mask || !as11_setting_readable_via_rpc(def)) return;
 
-        const As11SettingDef *enum_def = catalog.find(def.enum_key);
-        const As11SettingDef *numeric_def = catalog.find(def.numeric_key);
-        const std::string enum_rpc_name =
-            enum_def ? as11_setting_rpc_long_name(*enum_def) : def.enum_key;
-        const std::string numeric_rpc_name =
-            numeric_def ? as11_setting_rpc_long_name(*numeric_def)
-                        : def.numeric_key;
-        const std::string rpc_name = enum_rpc_name + " + " + numeric_rpc_name;
-        json_add_string(json, "rpc_name", rpc_name.c_str());
-        json_add_string(json, "enum_rpc_name", enum_rpc_name.c_str());
-        json_add_string(json, "numeric_rpc_name", numeric_rpc_name.c_str());
-        json_add_int(json, "numeric_branch_enum_value",
-                     def.numeric_branch_enum_value);
-
+    if (emitted++) json += ',';
+    json += '{';
+    json_add_string(json, "key", def.key, false);
+    json_add_string(json, "label", def.label);
+    const std::string rpc_name = as11_setting_rpc_long_name(def);
+    json_add_string(json, "rpc_name", rpc_name.c_str());
+    json_add_string(json, "group", def.group);
+    json_add_string(json, "category", def.category);
+    json_add_string(json, "kind", setting_kind_name(def.kind));
+    json_add_int(json, "modes", def.mode_mask);
+    json_add_float(json, "min", def.min_value);
+    json_add_float(json, "max", def.max_value);
+    json_add_float(json, "step", def.step);
+    json_add_int(json, "scale_div", def.scale_div);
+    json_add_int(json, "decimals", def.decimals);
+    if (!def.writable) json_add_bool(json, "writable", false);
+    if (def.options && def.option_count) {
         json += ",\"options\":[";
         for (uint8_t option = 0; option < def.option_count; ++option) {
-            const As11SettingCompositeOption &item = def.options[option];
             if (option) json += ',';
             json += '{';
             json_add_int(json, "value", option, false);
-            json_add_string(json, "label", item.label);
-            json_add_int(json, "enum_value", item.enum_value);
-            if (item.numeric_raw) {
-                json_add_string(json, "numeric_raw", item.numeric_raw);
-            }
+            json_add_string(json, "label", def.options[option]);
             json += '}';
         }
-        json += "]}";
+        json += ']';
+    }
+    json += '}';
+}
+
+void append_catalog_composite_json(LargeTextBuffer &json,
+                                   const As11SettingsCatalog &catalog,
+                                   size_t index, size_t &emitted) {
+    const As11SettingCompositeDef &def = as11_setting_composite(index);
+    if (catalog.overlaid(def.enum_key) || catalog.overlaid(def.numeric_key)) {
+        return;
+    }
+
+    if (emitted++) json += ',';
+    json += '{';
+    json_add_string(json, "key", def.key, false);
+    json_add_string(json, "kind", "paired_enum_numeric");
+    json_add_string(json, "label", def.label);
+    json_add_string(json, "enum_key", def.enum_key);
+    json_add_string(json, "numeric_key", def.numeric_key);
+
+    json_add_string(json, "group", def.group);
+    json_add_string(json, "category", def.category);
+
+    const As11SettingDef *enum_def = catalog.find(def.enum_key);
+    const As11SettingDef *numeric_def = catalog.find(def.numeric_key);
+    const std::string enum_rpc_name =
+        enum_def ? as11_setting_rpc_long_name(*enum_def) : def.enum_key;
+    const std::string numeric_rpc_name =
+        numeric_def ? as11_setting_rpc_long_name(*numeric_def)
+                    : def.numeric_key;
+    const std::string rpc_name = enum_rpc_name + " + " + numeric_rpc_name;
+    json_add_string(json, "rpc_name", rpc_name.c_str());
+    json_add_string(json, "enum_rpc_name", enum_rpc_name.c_str());
+    json_add_string(json, "numeric_rpc_name", numeric_rpc_name.c_str());
+    json_add_int(json, "numeric_branch_enum_value",
+                 def.numeric_branch_enum_value);
+
+    json += ",\"options\":[";
+    for (uint8_t option = 0; option < def.option_count; ++option) {
+        const As11SettingCompositeOption &item = def.options[option];
+        if (option) json += ',';
+        json += '{';
+        json_add_int(json, "value", option, false);
+        json_add_string(json, "label", item.label);
+        json_add_int(json, "enum_value", item.enum_value);
+        if (item.numeric_raw) {
+            json_add_string(json, "numeric_raw", item.numeric_raw);
+        }
+        json += '}';
     }
     json += "]}";
 }
@@ -253,10 +237,9 @@ bool SettingsHttpController::begin(RpcRequestPort &rpc,
         return false;
     }
 
-    catalog_json_.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
-    build_catalog_json(catalog_json_, settings_->state().catalog());
-    cached_catalog_revision_ = settings_->state().catalog().revision();
-    return !catalog_json_.overflowed();
+    return catalog_json_.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE) &&
+           settings_build_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE) &&
+           catalog_build_json_.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
 }
 
 void SettingsHttpController::register_routes(HttpRouteRegistry &server) {
@@ -378,67 +361,161 @@ void SettingsHttpController::publish_snapshot_if_needed() {
         settings_->refresh_pending();
     const uint32_t settings_revision = settings_->revision();
     const uint32_t device_revision = device_->revision();
+    const uint32_t catalog_revision = settings_->state().catalog().revision();
     const int active_mode = active_settings_mode(device_->state(),
                                                   settings_->state());
-    if (!requested_snapshot &&
+
+    // A changing clock/device revision does not invalidate settings being
+    // assembled. Only the device fields actually included in the JSON do.
+    if (build_.phase != BuildPhase::Idle &&
+        (build_.settings_revision != settings_revision ||
+         build_.catalog_revision != catalog_revision ||
+         build_.request_generation != request_generation ||
+         build_.availability != availability ||
+         build_.active_mode != active_mode ||
+         build_.refresh_pending != refresh_pending)) {
+        build_.phase = BuildPhase::Idle;
+    }
+
+    if (build_.phase == BuildPhase::Idle && !requested_snapshot &&
+        cached_catalog_revision_ == catalog_revision &&
         observed_refresh_pending_ == refresh_pending &&
         observed_settings_revision_ == settings_revision &&
         observed_device_revision_ == device_revision) {
         return;
     }
 
-    const bool publish_change =
-        requested_snapshot ||
-        observed_refresh_pending_ != refresh_pending ||
-        observed_settings_revision_ != settings_revision ||
-        published_availability_ != availability ||
-        published_active_mode_ != active_mode;
+    if (build_.phase == BuildPhase::Idle) {
+        build_ = {};
+        build_.phase = BuildPhase::Settings;
+        build_.settings_revision = settings_revision;
+        build_.catalog_revision = catalog_revision;
+        build_.device_revision = device_revision;
+        build_.request_generation = request_generation;
+        build_.now_ms = millis();
+        build_.active_mode = active_mode;
+        build_.profile_mode =
+            requested_mode >= 0 ? requested_mode : active_mode;
+        build_.availability = availability;
+        build_.refresh_pending = refresh_pending;
+        build_.advance_revision =
+            requested_snapshot ||
+            observed_refresh_pending_ != refresh_pending ||
+            observed_settings_revision_ != settings_revision ||
+            published_availability_ != availability ||
+            published_active_mode_ != active_mode;
 
-    LargeTextBuffer next;
-    next.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
-    build_settings_json(next, device_->state(), settings_->state(),
-                        requested_mode, refresh_pending);
-    if (next.overflowed()) {
+        const uint16_t supported_modes =
+            settings_->state().supported_mode_mask();
+
+        if (build_.profile_mode >= 0 && supported_modes &&
+            !(supported_modes & (1u << build_.profile_mode))) {
+            build_.profile_mode = active_mode;
+        }
+
+        begin_settings_json(settings_build_json_, device_->state(),
+                            settings_->state(), refresh_pending,
+                            build_.now_ms);
+
+        catalog_build_json_.clear();
+    }
+
+    advance_snapshot_build();
+    if (settings_build_json_.overflowed() || catalog_build_json_.overflowed()) {
+        build_.phase = BuildPhase::Idle;
         Log::logf(CAT_CONFIG, LOG_WARN,
                   "HTTP settings snapshot allocation failed\n");
         return;
     }
-
-    LargeTextBuffer next_catalog;
-    const As11SettingsCatalog &catalog = settings_->state().catalog();
-    const bool catalog_changed =
-        cached_catalog_revision_ != catalog.revision();
-    if (catalog_changed) {
-        next_catalog.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
-        build_catalog_json(next_catalog, catalog);
-        if (next_catalog.overflowed()) {
-            Log::logf(CAT_CONFIG, LOG_WARN,
-                      "HTTP settings catalog allocation failed\n");
-            return;
-        }
-    }
+    if (build_.phase != BuildPhase::Ready) return;
 
     if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
-    if (request_generation_ == request_generation) {
-        if (settings_snapshot_.replace(next, publish_change)) {
-            if (catalog_changed) {
-                catalog_json_.swap(next_catalog);
-                cached_catalog_revision_ = catalog.revision();
-            }
-
-            cached_request_mode_ = requested_mode;
-            cached_device_availability_ = availability;
-            cached_refresh_pending_ = refresh_pending;
-            snapshot_pending_ = false;
-            published_availability_ = availability;
-            published_active_mode_ = active_mode;
+    if (request_generation_ == build_.request_generation &&
+        settings_snapshot_.replace(settings_build_json_,
+                                   build_.advance_revision)) {
+        if (cached_catalog_revision_ != build_.catalog_revision) {
+            catalog_json_.swap(catalog_build_json_);
+            cached_catalog_revision_ = build_.catalog_revision;
         }
+
+        cached_device_availability_ = build_.availability;
+        cached_refresh_pending_ = build_.refresh_pending;
+        snapshot_pending_ = false;
+        published_availability_ = build_.availability;
+        published_active_mode_ = build_.active_mode;
+        observed_refresh_pending_ = build_.refresh_pending;
+        observed_settings_revision_ = build_.settings_revision;
+        observed_device_revision_ = build_.device_revision;
+        build_.phase = BuildPhase::Idle;
     }
     xSemaphoreGive(cache_mutex_);
+}
 
-    observed_refresh_pending_ = refresh_pending;
-    observed_settings_revision_ = settings_revision;
-    observed_device_revision_ = device_revision;
+void SettingsHttpController::advance_snapshot_build() {
+    const As11SettingsState &state = settings_->state();
+    const As11SettingsCatalog &catalog = state.catalog();
+    const uint32_t started_us = micros();
+
+    for (size_t count = 0; count < SnapshotItemsPerPoll; ++count) {
+        switch (build_.phase) {
+            case BuildPhase::Settings:
+                if (build_.index < catalog.count()) {
+                    append_setting_json(settings_build_json_, state,
+                                        build_.index++,
+                                        build_.active_mode, build_.profile_mode,
+                                        build_.now_ms, build_.emitted);
+
+                    break;
+                }
+
+                settings_build_json_ += "]}";
+                if (cached_catalog_revision_ == build_.catalog_revision) {
+                    build_.phase = BuildPhase::Ready;
+                    return;
+                }
+
+                catalog_build_json_ = "{";
+                json_add_int(catalog_build_json_, "revision",
+                             build_.catalog_revision, false);
+
+                catalog_build_json_ += ",\"settings\":[";
+                build_.phase = BuildPhase::Catalog;
+                build_.index = build_.emitted = 0;
+                break;
+
+            case BuildPhase::Catalog:
+                if (build_.index < catalog.count()) {
+                    append_catalog_setting_json(catalog_build_json_,
+                                                catalog.setting(build_.index++),
+                                                build_.emitted);
+
+                    break;
+                }
+
+                catalog_build_json_ += "],\"composites\":[";
+                build_.phase = BuildPhase::Composites;
+                build_.index = build_.emitted = 0;
+                break;
+
+            case BuildPhase::Composites:
+                if (build_.index < as11_setting_composite_count()) {
+                    append_catalog_composite_json(catalog_build_json_, catalog,
+                                                  build_.index++, build_.emitted);
+
+                    break;
+                }
+
+                catalog_build_json_ += "]}";
+                build_.phase = BuildPhase::Ready;
+                return;
+
+            case BuildPhase::Idle:
+            case BuildPhase::Ready:
+                return;
+        }
+
+        if (static_cast<uint32_t>(micros() - started_us) >= SnapshotBudgetUs) return;
+    }
 }
 
 void SettingsHttpController::send_catalog(
@@ -482,8 +559,7 @@ void SettingsHttpController::send_settings(
         return;
     }
 
-    if (requested_mode_ != requested_mode ||
-        cached_request_mode_ != requested_mode) {
+    if (requested_mode_ != requested_mode) {
         requested_mode_ = requested_mode;
         request_generation_++;
         snapshot_pending_ = true;

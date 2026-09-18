@@ -48,11 +48,35 @@ private:
     static constexpr size_t CommandQueueDepth = 8;
     static constexpr size_t CommandsPerPoll = 4;
 
+    // Snapshot assembly stays on the main loop, between CAN drain points.
+    enum class BuildPhase : uint8_t { Idle, Settings, Catalog, Composites, Ready };
+    static constexpr size_t SnapshotItemsPerPoll = 4;
+    static constexpr uint32_t SnapshotBudgetUs = 1000;
+
+    struct SnapshotBuild {
+        BuildPhase phase = BuildPhase::Idle;
+        size_t index = 0;
+        size_t emitted = 0;
+        uint32_t settings_revision = 0;
+        uint32_t catalog_revision = 0;
+        uint32_t device_revision = 0;
+        uint32_t request_generation = 0;
+        uint32_t now_ms = 0;
+        int active_mode = -1;
+        int profile_mode = -1;
+        As11Availability availability = As11Availability::Unknown;
+        bool refresh_pending = false;
+        bool advance_revision = false;
+    };
+
+    // Commands
     bool enqueue(Command &&command);
     void drain_commands();
     void execute(Command &command);
 
+    // Snapshot assembly and delivery
     void publish_snapshot_if_needed();
+    void advance_snapshot_build();
     void send_catalog(AsyncWebServerRequest *request);
     void send_settings(AsyncWebServerRequest *request,
                        int requested_mode,
@@ -68,8 +92,10 @@ private:
 
     LargeTextBuffer catalog_json_;
     PublishedJsonSnapshot settings_snapshot_;
+    LargeTextBuffer settings_build_json_;
+    LargeTextBuffer catalog_build_json_;
+    SnapshotBuild build_;
     int requested_mode_ = -1;
-    int cached_request_mode_ = -1;
     uint32_t cached_catalog_revision_ = 0;
     uint32_t request_generation_ = 1;
     int published_active_mode_ = -1;
