@@ -23,6 +23,7 @@ bool fill_record(ReportSignalStoreCatalogRecord &record,
     record.source_revision = view.night.source_revision;
     record.generation = view.night.generation;
     record.metadata = input.metadata;
+    record.view = view;
     return true;
 }
 

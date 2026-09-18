@@ -8,6 +8,7 @@
 #include "edf_session_metadata.h"
 #include "night_catalog_refresh_service.h"
 #include "night_catalog_store_service.h"
+#include "report_catalog_json.h"
 #include "report_engine.h"
 #include "report_signal_store.h"
 #include "report_signal_store_catalog.h"
@@ -152,6 +153,7 @@ struct ReportNightQuery {
     SourceRevision source_revision;
     uint32_t generation = 0;
     std::shared_ptr<const LargeByteBuffer> metadata;
+    ReportSignalStoreNightView view;
 };
 
 struct ReportSignalRangeQuery {
@@ -232,9 +234,9 @@ public:
 
     ReportTaskControlSnapshot control_snapshot() const;
     ReportTaskOperationalSnapshot operational_snapshot() const;
-    ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
     ReportEngineCompletion last_completion() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
+    std::shared_ptr<const ReportCatalogJson> catalog_json_snapshot() const;
     std::shared_ptr<const ReportSignalStoreCatalog>
         store_catalog_snapshot() const;
     DisplayReportSummary display_summary_snapshot() const;
@@ -250,6 +252,8 @@ public:
     bool night_failure(SleepDayId sleep_day,
                        ReportNightFailureStatus &failure,
                        uint32_t lock_timeout_ms = 20) const;
+
+    ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
 
 private:
     struct Runtime;

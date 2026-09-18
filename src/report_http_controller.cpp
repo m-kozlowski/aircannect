@@ -454,71 +454,6 @@ bool format_signal_etag(const ReportSignalRangeQuery &query,
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
-void append_session_json(LargeTextBuffer &json,
-                         const NightCatalogTimeRange &session) {
-    char number[32] = {};
-
-    json += "{\"start\":";
-    snprintf(number,
-             sizeof(number),
-             "%lld",
-             static_cast<long long>(session.start_ms));
-    json += number;
-    json += ",\"end\":";
-    snprintf(number,
-             sizeof(number),
-             "%lld",
-             static_cast<long long>(session.end_ms));
-    json += number;
-    json += ",\"duration_min\":";
-    snprintf(number,
-             sizeof(number),
-             "%lld",
-             static_cast<long long>(
-                 (session.end_ms - session.start_ms) / 60000));
-    json += number;
-    json += '}';
-}
-
-uint64_t catalog_identity(const NightCatalog &catalog,
-                          const ReportSignalStoreCatalog *store) {
-    uint64_t hash = 1469598103934665603ULL;
-    auto mix = [&hash](uint64_t value) {
-        for (size_t byte = 0; byte < sizeof(value); ++byte) {
-            hash ^= static_cast<uint8_t>(value >> (byte * 8));
-            hash *= 1099511628211ULL;
-        }
-    };
-
-    mix(catalog.size());
-    for (size_t i = 0; i < catalog.size(); ++i) {
-        const NightCatalogRecord *night = catalog.record(i);
-        if (!night) continue;
-
-        mix(static_cast<uint32_t>(night->sleep_day.epoch_days()));
-        mix(night->source_revision.value());
-        const ReportSignalStoreCatalogRecord *stored = store
-            ? store->find(night->sleep_day) : nullptr;
-        mix(stored && stored->source_revision == night->source_revision
-                ? stored->generation : 0);
-    }
-    return hash;
-}
-
-bool format_catalog_etag(const NightCatalog &catalog,
-                         const ReportSignalStoreCatalog *store,
-                         uint32_t generation,
-                         char *out,
-                         size_t out_size) {
-    const int written = snprintf(
-        out,
-        out_size,
-        "\"catalog-%08lx-%016llx\"",
-        static_cast<unsigned long>(generation),
-        static_cast<unsigned long long>(catalog_identity(catalog, store)));
-    return written > 0 && static_cast<size_t>(written) < out_size;
-}
-
 bool report_task_available(AsyncWebServerRequest *request,
                            const ReportTask &report_task) {
     const ReportTaskControlSnapshot status = report_task.control_snapshot();
@@ -1061,7 +996,7 @@ void ReportHttpController::send_preferences(
         return;
     }
 
-    AsyncResponseStream *response = nullptr;
+    AsyncWebServerResponse *response = nullptr;
     const JsonSnapshotResponse result =
         preferences_->snapshot().prepare_response(request, response);
     if (result == JsonSnapshotResponse::Busy) {
@@ -1108,116 +1043,32 @@ void ReportHttpController::send_summary(
     AsyncWebServerRequest *request) const {
     if (!report_task_ || !report_task_available(request, *report_task_)) return;
 
-    const std::shared_ptr<const NightCatalog> catalog =
-        report_task_->catalog_snapshot();
-    if (!catalog) {
-        send_preparing(request);
-        return;
-    }
-    const std::shared_ptr<const ReportSignalStoreCatalog> store =
-        report_task_->store_catalog_snapshot();
-    const ReportTaskControlSnapshot status =
-        report_task_->control_snapshot();
-
-    char etag[REPORT_HTTP_ETAG_BYTES] = {};
-    if (format_catalog_etag(*catalog, store.get(), status.catalog_generation,
-                            etag, sizeof(etag)) &&
-        request_etag_matches(request, etag)) {
-        send_not_modified(request, etag, {}, 0);
-        return;
-    }
-
-    std::shared_ptr<LargeTextBuffer> json =
-        std::make_shared<LargeTextBuffer>();
-    if (!json || !json->reserve(256 + catalog->size() * 288)) {
-        send_json_error(request, 503, "summary_alloc");
-        return;
-    }
-
-    char number[32] = {};
-    *json = "{\"state\":\"ready\",\"generation\":";
-    snprintf(number,
-             sizeof(number),
-             "%lu",
-             static_cast<unsigned long>(status.catalog_generation));
-    *json += number;
-    *json += ",\"nights\":[";
-    for (size_t i = 0; i < catalog->size(); ++i) {
-        const NightCatalogRecord *night = catalog->record(i);
-        if (!night) continue;
-
-        if (i) *json += ',';
-        char day[9] = {};
-        night->sleep_day.format_yyyymmdd(day, sizeof(day));
-        const ReportSignalStoreCatalogRecord *stored = store
-            ? store->find(night->sleep_day) : nullptr;
-        const bool materialized = stored &&
-            stored->source_revision == night->source_revision;
-
-        *json += "{\"id\":\"";
-        *json += day;
-        *json += "\",\"start\":";
-        snprintf(number,
-                 sizeof(number),
-                 "%lld",
-                 static_cast<long long>(night->day_start_ms));
-        *json += number;
-        *json += ",\"end\":";
-        snprintf(number,
-                 sizeof(number),
-                 "%lld",
-                 static_cast<long long>(night->day_end_ms));
-        *json += number;
-        *json += ",\"duration_min\":";
-        snprintf(number,
-                 sizeof(number),
-                 "%lu",
-                 static_cast<unsigned long>(
-                     night_catalog_duration_minutes(*catalog, *night)));
-        *json += number;
-        *json += ",\"materialized\":";
-        *json += materialized ? "true" : "false";
-        *json += ",\"active\":";
-        *json += (night->source_flags & NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE)
-            ? "true" : "false";
-        *json += ",\"report_generation\":";
-        snprintf(number,
-                 sizeof(number),
-                 "%lu",
-                 static_cast<unsigned long>(
-                     materialized ? stored->generation : 0));
-        *json += number;
-        *json += ",\"sessions\":[";
-
-        size_t session_count = 0;
-        const NightCatalogTimeRange *sessions =
-            catalog->sessions(*night, session_count);
-        for (size_t session = 0; sessions && session < session_count;
-             ++session) {
-            if (session) *json += ',';
-            append_session_json(*json, sessions[session]);
+    const auto summary = report_task_->catalog_json_snapshot();
+    if (!summary) {
+        if (report_task_->catalog_snapshot()) {
+            send_json_error(request, 503, "summary_alloc");
+        } else {
+            send_preparing(request);
         }
-        *json += "]}";
+        return;
     }
-    *json += "]}";
-
-    if (json->overflowed()) {
-        send_json_error(request, 503, "summary_alloc");
+    if (request_etag_matches(request, summary->etag)) {
+        send_not_modified(request, summary->etag, {}, 0);
         return;
     }
 
     AsyncWebServerResponse *response = new (std::nothrow)
         AsyncPreparedResponse(
             "application/json",
-            json->length(),
-            [json](uint8_t *buffer,
-                   size_t max_length,
-                   size_t offset) -> size_t {
-                if (!buffer || offset >= json->length()) return 0;
+            summary->body.length(),
+            [summary](uint8_t *buffer,
+                      size_t max_length,
+                      size_t offset) -> size_t {
+                if (!buffer || offset >= summary->body.length()) return 0;
 
                 const size_t copied = std::min(
-                    max_length, json->length() - offset);
-                memcpy(buffer, json->c_str() + offset, copied);
+                    max_length, summary->body.length() - offset);
+                memcpy(buffer, summary->body.c_str() + offset, copied);
                 return copied;
             });
     if (!response) {
@@ -1225,7 +1076,7 @@ void ReportHttpController::send_summary(
         return;
     }
 
-    add_common_headers(response, etag, {}, 0);
+    add_common_headers(response, summary->etag, {}, 0);
     request->send(response);
 }
 

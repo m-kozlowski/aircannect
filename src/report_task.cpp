@@ -88,6 +88,7 @@ struct ReportPublishedState {
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog;
     DisplayReportSummary display_summary;
+    std::shared_ptr<const ReportCatalogJson> catalog_json;
 };
 
 enum class CatalogStorePurpose : uint8_t {
@@ -445,9 +446,16 @@ struct ReportTask::Runtime {
     }
 
     bool publish_state() {
+        const auto previous = published_state();
+        const auto json = catalog
+            ? build_report_catalog_json(*catalog, store_catalog.get(),
+                                        catalog_generation,
+                                        previous ? previous->catalog_json : nullptr)
+            : nullptr;
+
         std::shared_ptr<const ReportPublishedState> next =
             std::make_shared<ReportPublishedState>(ReportPublishedState{
-                catalog, store_catalog, display_summary});
+                catalog, store_catalog, display_summary, json});
         if (!next) return false;
 
 #pragma GCC diagnostic push
@@ -455,7 +463,7 @@ struct ReportTask::Runtime {
         std::atomic_store_explicit(
             &published, std::move(next), std::memory_order_release);
 #pragma GCC diagnostic pop
-        return true;
+        return !catalog || json != nullptr;
     }
 
     void accept_store_catalog(
@@ -1648,6 +1656,7 @@ struct ReportTask::Runtime {
         next.post_therapy_settle_pending =
             post_therapy_settle_pending();
         control = next;
+        published_completion = engine_status.last_completion;
         unlock();
     }
 
@@ -1756,6 +1765,7 @@ struct ReportTask::Runtime {
     bool initialized = false;
     bool task_started = false;
     ReportTaskControlSnapshot control;
+    ReportEngineCompletion published_completion;
 
 #ifdef ARDUINO
     mutable SemaphoreHandle_t mutex = nullptr;
@@ -2026,8 +2036,8 @@ ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
 }
 
 ReportEngineCompletion ReportTask::last_completion() const {
-    if (!runtime_ || !runtime_->lock(20)) return {};
-    const ReportEngineCompletion out = runtime_->engine.status().last_completion;
+    if (!runtime_ || !runtime_->lock(0)) return {};
+    const ReportEngineCompletion out = runtime_->published_completion;
     runtime_->unlock();
     return out;
 }
@@ -2037,6 +2047,13 @@ std::shared_ptr<const NightCatalog> ReportTask::catalog_snapshot() const {
     const std::shared_ptr<const ReportPublishedState> state =
         runtime_->published_state();
     return state ? state->catalog : nullptr;
+}
+
+std::shared_ptr<const ReportCatalogJson>
+ReportTask::catalog_json_snapshot() const {
+    if (!runtime_) return {};
+    const auto state = runtime_->published_state();
+    return state ? state->catalog_json : nullptr;
 }
 
 std::shared_ptr<const ReportSignalStoreCatalog>
@@ -2084,6 +2101,7 @@ ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
     out.state = ReportStoreQueryState::Ready;
     out.generation = stored->generation;
     out.metadata = stored->metadata;
+    out.view = stored->view;
     return out;
 }
 
@@ -2104,10 +2122,7 @@ ReportSignalRangeQuery ReportTask::query_signal(
         return out;
     }
 
-    ReportSignalStoreNightView view;
-    if (!ReportSignalStoreNightCodec::decode(
-            night.metadata->data(), night.metadata->size(), view) ||
-        !view.track(metadata_track_index, out.track)) {
+    if (!night.view.track(metadata_track_index, out.track)) {
         out.state = ReportStoreQueryState::TrackMissing;
         return out;
     }
@@ -2141,13 +2156,7 @@ ReportEventFileQuery ReportTask::query_events(SleepDayId sleep_day) const {
         return out;
     }
 
-    ReportSignalStoreNightView view;
-    if (!ReportSignalStoreNightCodec::decode(
-            night.metadata->data(), night.metadata->size(), view)) {
-        out.state = ReportStoreQueryState::InvalidRange;
-        return out;
-    }
-
+    const ReportSignalStoreNightView &view = night.view;
     const int64_t first_block = align_block_start(view.night.day_start_ms);
     const int64_t last_block = align_block_start(view.night.day_end_ms - 1);
     const int64_t block_count =
@@ -2577,6 +2586,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
     runtime.publish_status();
+
+    const auto published = runtime.published_state();
+    if (published && published->catalog && !published->catalog_json) {
+        // Retry failed presentation allocation on the worker's existing cadence.
+        runtime.publish_state();
+    }
+
     return worked;
 }
 

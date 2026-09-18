@@ -14,6 +14,8 @@ struct ReportSignalStoreCatalogRecord {
     SourceRevision source_revision;
     uint32_t generation = 0;
     std::shared_ptr<const LargeByteBuffer> metadata;
+    // Validated at publication; pointers borrow from the owned metadata above.
+    ReportSignalStoreNightView view;
 };
 
 struct ReportSignalStoreCatalogInput {

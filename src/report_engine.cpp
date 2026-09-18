@@ -473,6 +473,7 @@ bool ReportEngine::finish_metadata_load(uint32_t now_ms) {
         stored.source_revision = view.night.source_revision;
         stored.generation = view.night.generation;
         stored.metadata = std::move(metadata);
+        stored.view = view;
         published_.metadata = stored.metadata;
         return start_known_request(&stored, now_ms);
     }
