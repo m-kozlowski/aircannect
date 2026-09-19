@@ -223,21 +223,23 @@ void enqueue_file_log_record(const LogRecord &record) {
 #endif
 }
 
-void enqueue_log_sinks(log_cat_t cat, log_level_t level, const char *buf) {
+void enqueue_log_sinks(log_cat_t cat, log_level_t level, const char *buf,
+                        bool include_file = true) {
     if (!syslog_enabled_value && !file_log_enabled_value) return;
     LogRecord record;
     if (!make_log_record(cat, level, buf, record)) return;
     enqueue_syslog_record(record);
-    enqueue_file_log_record(record);
+    if (include_file) enqueue_file_log_record(record);
 }
 
 void dispatch_structured(log_cat_t cat,
                          log_level_t level,
                          const char *buf,
                          int len,
-                         const char *syslog_text) {
+                         const char *syslog_text,
+                         bool include_file) {
     serial_dispatch(buf, len);
-    enqueue_log_sinks(cat, level, syslog_text);
+    enqueue_log_sinks(cat, level, syslog_text, include_file);
 }
 
 void lock_log() {
@@ -588,23 +590,35 @@ Stats stats() {
     return out;
 }
 
-void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {
+static void logv(log_cat_t cat, log_level_t level, bool include_file,
+                  const char *fmt, va_list args) {
     if (cat < 0 || cat >= CAT_COUNT ||
         level < LOG_ERROR || level > LOG_DEBUG ||
         level > levels[cat]) {
         return;
     }
     char buf[AC_LOG_LINE_MAX] = {};
-    va_list args;
-    va_start(args, fmt);
     format_message(buf, sizeof(buf), fmt, args);
-    va_end(args);
 
     char line[AC_LOG_LINE_MAX];
     const int len = compose_line(cat, level, buf, false, line, sizeof(line));
     lock_log();
-    dispatch_structured(cat, level, line, len, line);
+    dispatch_structured(cat, level, line, len, line, include_file);
     unlock_log();
+}
+
+void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    logv(cat, level, true, fmt, args);
+    va_end(args);
+}
+
+void logf_without_file(log_cat_t cat, log_level_t level, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    logv(cat, level, false, fmt, args);
+    va_end(args);
 }
 
 void log_payload(log_cat_t cat,

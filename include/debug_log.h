@@ -71,6 +71,8 @@ size_t filelog_queue_depth();
 Stats stats();
 
 void logf(log_cat_t cat, log_level_t level, const char *fmt, ...);
+// For storage I/O failures, including failures in the file-log sink itself.
+void logf_without_file(log_cat_t cat, log_level_t level, const char *fmt, ...);
 void log_payload(log_cat_t cat,
                  log_level_t level,
                  const char *prefix,

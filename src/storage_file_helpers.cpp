@@ -1,6 +1,7 @@
 #include "storage_internal.h"
 
 #include <algorithm>
+#include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -35,11 +36,21 @@ struct WriteHandleCache {
 WriteHandleCache *write_handles = nullptr;
 bool write_close_failed = false;
 
-void close_descriptor(int descriptor) {
-    if (::close(descriptor) != 0) write_close_failed = true;
+void close_cached(size_t index) {
+    auto &entry = write_handles->entries[index];
+    if (close_descriptor(entry.path, entry.descriptor) != 0) {
+        write_close_failed = true;
+    }
+    (void)write_handles->take(index);
 }
 
 }  // namespace
+
+int close_descriptor(const char *path, int descriptor) {
+    const int result = ::close(descriptor);
+    if (result != 0) log_io_error("close", path, errno);
+    return result;
+}
 
 int take_write_handle(const char *path) {
     if (!write_handles) return -1;
@@ -51,7 +62,7 @@ int take_write_handle(const char *path) {
     }
 
     if (write_handles->count == WriteHandleCache::Capacity) {
-        close_descriptor(write_handles->take(0));
+        close_cached(0);
     }
     return -1;
 }
@@ -63,7 +74,7 @@ void close_write_handle(const char *path, int descriptor, bool retain) {
     }
 
     if (!retain || !write_handles) {
-        close_descriptor(descriptor);
+        if (close_descriptor(path, descriptor) != 0) write_close_failed = true;
         return;
     }
 
@@ -76,7 +87,7 @@ bool release_write_handles() {
     if (!write_handles) return false;
 
     const bool released = write_handles->count != 0;
-    while (write_handles->count) close_descriptor(write_handles->take(0));
+    while (write_handles->count) close_cached(0);
     LargeObject::destroy(write_handles);
     write_handles = nullptr;
     return released;
@@ -93,7 +104,7 @@ void release_write_handle(const char *path) {
     if (!write_handles) return;
     for (size_t i = 0; i < write_handles->count; ++i) {
         if (strcmp(write_handles->entries[i].path, path) == 0) {
-            close_descriptor(write_handles->take(i));
+            close_cached(i);
             return;
         }
     }
@@ -200,8 +211,12 @@ size_t write_buffer(File &file, const uint8_t *data, size_t size) {
 
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
                      size_t offset, size_t size) {
-    return write_staged([descriptor](const uint8_t *bytes, size_t count) {
+    return write_staged([descriptor, &command](const uint8_t *bytes, size_t count) {
         const ssize_t written = ::write(descriptor, bytes, count);
+        if (written < 0 || static_cast<size_t>(written) != count) {
+            log_io_error("write", command.path.c_str(), written < 0 ? errno : 0,
+                         written > 0 ? static_cast<size_t>(written) : 0, count);
+        }
         return written > 0 ? static_cast<size_t>(written) : 0;
     }, [&command, offset](size_t position, size_t &available) {
         return command.span(offset + position, available);

@@ -368,7 +368,9 @@ bool ensure_dir(const char *path) {
     struct stat info {};
     if (file_stat(path, info)) return S_ISDIR(info.st_mode);
 
-    return fs->mkdir(path);
+    const bool ok = fs->mkdir(path);
+    if (!ok) log_io_error("mkdir", path, errno);
+    return ok;
 }
 
 bool exists(const char *path) {
@@ -382,8 +384,11 @@ bool file_stat(const char *path, struct stat &info) {
     if (!fs) return false;
 
     char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
-    return native_path(path, full_path, sizeof(full_path)) &&
-           ::stat(full_path, &info) == 0;
+    if (!native_path(path, full_path, sizeof(full_path))) return false;
+
+    const bool ok = ::stat(full_path, &info) == 0;
+    if (!ok) log_io_error("stat", path, errno);
+    return ok;
 }
 
 int open_descriptor(const char *path, int flags) {
@@ -400,6 +405,7 @@ int open_descriptor(const char *path, int flags) {
         release_write_handles()) {
         descriptor = ::open(full_path, flags, 0666);
     }
+    if (descriptor < 0) log_io_error("open", path, errno);
     return descriptor;
 }
 
@@ -417,6 +423,8 @@ bool remove(const char *path) {
         if (path_change_callback) path_change_callback(path);
         return true;
     }
+    const int error = errno;
+    log_io_error("remove", path, error);
     return !fs->exists(path);
 }
 
@@ -430,6 +438,8 @@ bool rmdir(const char *path) {
         if (path_change_callback) path_change_callback(path);
         return true;
     }
+    const int error = errno;
+    log_io_error("rmdir", path, error);
     return !fs->exists(path);
 }
 
@@ -438,7 +448,11 @@ bool rename(const char *from, const char *to) {
     fs::FS *fs = active_fs();
 
     release_write_handles();
-    if (!fs || !fs->rename(from, to)) return false;
+    if (!fs) return false;
+    if (!fs->rename(from, to)) {
+        log_io_error("rename", from, errno);
+        return false;
+    }
 
     if (path_change_callback) {
         path_change_callback(from);
@@ -455,12 +469,13 @@ File open(const char *path, const char *mode) {
     if (mode[0] != 'r' || strchr(mode, '+')) release_write_handles();
     else release_write_handle(path);
 
-    File file = fs->open(path, mode);
+    File file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode);
     if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
         release_write_handles()) {
-        file = fs->open(path, mode);
+        file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode);
     }
 
+    if (!file) log_io_error("open", path, errno);
     return file;
 }
 

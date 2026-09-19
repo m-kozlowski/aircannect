@@ -5,6 +5,7 @@
 
 #include "storage_admission.h"
 #include "storage_manager.h"
+#include "storage_io_diagnostics.h"
 
 namespace aircannect { struct StorageRangeWriteCommand; }
 
@@ -17,7 +18,10 @@ bool remove(const char *path);
 bool rmdir(const char *path);
 bool rename(const char *from, const char *to);
 File open(const char *path, const char *mode);
+File open_observed_file(const char *mount_point, const char *path,
+                         const char *mode);
 int open_descriptor(const char *path, int flags);
+int close_descriptor(const char *path, int descriptor);
 
 // Registered before the worker starts; callbacks run on the storage task.
 using PathChangeCallback = void (*)(const char *path);

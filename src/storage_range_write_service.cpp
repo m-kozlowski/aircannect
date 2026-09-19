@@ -17,7 +17,9 @@ StorageRangeWriteService::~StorageRangeWriteService() {
     release_write_reservation();
     Storage::release_write_handles();
     if (job_) {
-        if (job_->output >= 0) ::close(job_->output);
+        if (job_->output >= 0) {
+            Storage::close_descriptor(job_->command.path.c_str(), job_->output);
+        }
         LargeObject::destroy(job_);
     }
 
@@ -150,7 +152,8 @@ const char *StorageRangeWriteService::open_locked() {
                       (command.truncate ? O_TRUNC : 0);
     job_->output = Storage::take_write_handle(command.path.c_str());
     if (job_->output >= 0 && command.truncate) {
-        const int closed = ::close(job_->output);
+        const int closed = Storage::close_descriptor(command.path.c_str(),
+                                                       job_->output);
         job_->output = -1;
         if (closed != 0) return "close_failed";
     }
@@ -179,7 +182,10 @@ const char *StorageRangeWriteService::open_locked() {
     }
 
     struct stat info {};
-    if (::fstat(job_->output, &info) != 0) return "stat_failed";
+    if (::fstat(job_->output, &info) != 0) {
+        Storage::log_io_error("fstat", command.path.c_str(), errno);
+        return "stat_failed";
+    }
     if (!S_ISREG(info.st_mode)) return "not_a_file";
     if (command.offset > static_cast<uint64_t>(info.st_size)) {
         return "offset_past_end";
@@ -187,6 +193,7 @@ const char *StorageRangeWriteService::open_locked() {
 
     if (::lseek(job_->output, command.offset, SEEK_SET) !=
         static_cast<off_t>(command.offset)) {
+        Storage::log_io_error("seek", command.path.c_str(), errno);
         return "seek_failed";
     }
 
@@ -219,10 +226,12 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
                                              const char *error) {
     if (job_->output >= 0 && !job_->command.retain_handle &&
         job_->command.sync_on_close) {
-        if (::fsync(job_->output) != 0 &&
-            outcome.disposition == OperationDisposition::Succeeded) {
-            outcome = OperationOutcome::failed();
-            error = "flush_failed";
+        if (::fsync(job_->output) != 0) {
+            Storage::log_io_error("fsync", job_->command.path.c_str(), errno);
+            if (outcome.disposition == OperationDisposition::Succeeded) {
+                outcome = OperationOutcome::failed();
+                error = "flush_failed";
+            }
         }
     }
 
