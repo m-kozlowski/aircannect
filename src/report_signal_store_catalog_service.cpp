@@ -108,7 +108,7 @@ bool ReportSignalStoreCatalogLoadService::finish_current() {
                 fail("report_store_catalog_capacity_exceeded");
                 return true;
             }
-            input->metadata = std::move(metadata);
+            *input = {std::move(metadata), view};
             ++status_.nights_loaded;
         } else {
             ++status_.nights_skipped;

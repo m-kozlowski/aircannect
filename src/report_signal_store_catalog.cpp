@@ -12,12 +12,8 @@ namespace {
 
 bool fill_record(ReportSignalStoreCatalogRecord &record,
                  const ReportSignalStoreCatalogInput &input) {
-    ReportSignalStoreNightView view;
-    if (!input.metadata ||
-        !ReportSignalStoreNightCodec::decode(
-            input.metadata->data(), input.metadata->size(), view)) {
-        return false;
-    }
+    if (!input.metadata) return false;
+    const auto &view = input.view;
 
     record.sleep_day = view.night.sleep_day;
     record.source_revision = view.night.source_revision;

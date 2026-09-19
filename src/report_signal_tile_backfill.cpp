@@ -13,16 +13,15 @@ void ReportSignalTileBackfill::begin(StorageReadPort &read,
 }
 
 bool ReportSignalTileBackfill::start(
-    std::shared_ptr<const LargeByteBuffer> metadata, uint32_t generation) {
+    const ReportSignalStoreMetadata &metadata, uint32_t generation) {
     reset();
-    if (!metadata || !generation ||
-        !ReportSignalStoreNightCodec::decode(
-            metadata->data(), metadata->size(), night_)) {
+    if (!metadata.metadata || !generation) {
         succeeded_ = false;
         return false;
     }
 
-    metadata_ = std::move(metadata);
+    metadata_ = metadata.metadata;
+    night_ = metadata.view;
     generation_ = generation;
     active_ = true;
     return true;
@@ -56,15 +55,14 @@ bool ReportSignalTileBackfill::start_next_level() {
             continue;
         }
 
-        if (!night_.track(track_index_, track_)) {
+        if (level_index_ == 0 && !night_.track(track_index_, track_)) {
             ++track_index_;
             level_index_ = 0;
             continue;
         }
 
         const ReportSignalStoreLevel level = levels[level_index_++];
-        if (!report_signal_store_track_valid(track_) ||
-            !level_supported(track_, level)) {
+        if (!level_supported(track_, level)) {
             continue;
         }
 

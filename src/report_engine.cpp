@@ -458,7 +458,7 @@ bool ReportEngine::finish_metadata_load(uint32_t now_ms) {
         stored.generation = view.night.generation;
         stored.metadata = std::move(metadata);
         stored.view = view;
-        published_.metadata = stored.metadata;
+        published_ = {stored.metadata, stored.view};
         return start_known_request(&stored, now_ms);
     }
 
@@ -491,14 +491,16 @@ bool ReportEngine::start_known_request(
 
     active_store_generation_ = stored
         ? increment_generation(stored->generation) : 1;
-    retained_metadata_ = stored ? stored->metadata : nullptr;
+    retained_metadata_ = stored
+        ? ReportSignalStoreMetadata{stored->metadata, stored->view}
+        : ReportSignalStoreMetadata{};
     const auto *source = catalog_->find(active_request_.artifact.sleep_day);
     const bool edf_append = source && stored &&
         (source->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
         (stored->view.night.source_flags & NIGHT_CATALOG_SOURCE_EDF);
     previous_metadata_ = !active_request_.force_rebuild && edf_append
-        ? stored->metadata : nullptr;
-    if (previous_metadata_) active_store_generation_ = stored->generation;
+        ? retained_metadata_ : ReportSignalStoreMetadata{};
+    if (previous_metadata_.metadata) active_store_generation_ = stored->generation;
     return start_build(now_ms);
 }
 
@@ -652,11 +654,9 @@ bool ReportEngine::start_build(
     }
 
     active_plan_ = std::move(planned.plan);
-    if (previous_metadata_) {
-        ReportSignalStoreNightView previous;
-        bool append = ReportSignalStoreNightCodec::decode(
-            previous_metadata_->data(), previous_metadata_->size(), previous);
-        append = append &&
+    if (previous_metadata_.metadata) {
+        const auto &previous = previous_metadata_.view;
+        bool append =
             previous.night.day_start_ms == active_plan_->night().day_start_ms &&
             previous.night.day_end_ms == active_plan_->night().day_end_ms &&
             previous.night.session_count <= active_plan_->session_count();
@@ -672,16 +672,14 @@ bool ReportEngine::start_build(
         }
 
         if (!append) {
-            previous_metadata_.reset();
+            previous_metadata_ = {};
             active_store_generation_ = increment_generation(
                 active_store_generation_);
         }
     }
 
-    if (retained_metadata_ && !previous_metadata_) {
-        ReportSignalStoreNightView previous;
-        ReportSignalStoreNightCodec::decode(
-            retained_metadata_->data(), retained_metadata_->size(), previous);
+    if (retained_metadata_.metadata && !previous_metadata_.metadata) {
+        const auto &previous = retained_metadata_.view;
         const uint32_t missing = active_plan_->missing_required_signal_mask() |
             active_plan_->missing_optional_signal_mask();
         bool lost_source =
@@ -736,10 +734,8 @@ bool ReportEngine::start_build(
         return true;
     }
 
-    if (previous_metadata_) {
-        ReportSignalStoreNightView previous;
-        ReportSignalStoreNightCodec::decode(
-            previous_metadata_->data(), previous_metadata_->size(), previous);
+    if (previous_metadata_.metadata) {
+        const auto &previous = previous_metadata_.view;
 
         if (previous.night.checkpoint_slot) {
             char path[AC_STORAGE_PATH_MAX] = {};
@@ -777,7 +773,23 @@ bool ReportEngine::finish_checkpoint_load(uint32_t now_ms) {
         return true;
     }
 
-    previous_checkpoint_ = metadata_loader_.take_completed();
+    previous_checkpoint_.bytes = metadata_loader_.take_completed();
+    const auto &bytes = previous_checkpoint_.bytes;
+    auto &checkpoint = previous_checkpoint_.view;
+    const auto &previous = previous_metadata_.view.night;
+
+    if (!bytes || !ReportBuildCheckpointCodec::decode(
+            bytes->data(), bytes->size(), checkpoint) ||
+        !previous_metadata_.metadata ||
+        checkpoint.sleep_day != previous.sleep_day ||
+        checkpoint.generation != previous.generation ||
+        checkpoint.source_revision != previous.source_revision ||
+        checkpoint.track_count != previous.track_count) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, "report_checkpoint_invalid");
+        return true;
+    }
+
     return start_execution(now_ms);
 }
 
@@ -834,25 +846,9 @@ bool ReportEngine::finish_fallback_metadata_load(uint32_t now_ms) {
 
 bool ReportEngine::start_execution(uint32_t now_ms) {
     std::shared_ptr<const ReportReadPlan> execution_plan = active_plan_;
-    if (previous_checkpoint_) {
-        ReportBuildCheckpointView checkpoint;
-        ReportSignalStoreNightView previous;
-        const bool valid = ReportBuildCheckpointCodec::decode(
-            previous_checkpoint_->data(), previous_checkpoint_->size(),
-            checkpoint) && previous_metadata_ &&
-            ReportSignalStoreNightCodec::decode(
-                previous_metadata_->data(), previous_metadata_->size(),
-                previous) &&
-            checkpoint.sleep_day == previous.night.sleep_day &&
-            checkpoint.generation == previous.night.generation &&
-            checkpoint.source_revision == previous.night.source_revision;
-
-        if (!valid) {
-            complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
-                            ReportExecutorError::None,
-                            "report_checkpoint_invalid");
-            return true;
-        }
+    if (previous_checkpoint_.bytes) {
+        const auto &checkpoint = previous_checkpoint_.view;
+        const auto &previous = previous_metadata_.view;
 
         ReportPlanResult resumed = ReportPlanner::resume(
             active_plan_, checkpoint.progress, checkpoint.progress_size);
@@ -873,8 +869,8 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
                 }
             }
 
-            previous_metadata_.reset();
-            previous_checkpoint_.reset();
+            previous_metadata_ = {};
+            previous_checkpoint_ = {};
             active_store_generation_ = increment_generation(
                 active_store_generation_);
         } else if (!resumed.ready()) {
@@ -1030,15 +1026,8 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
 bool ReportEngine::finish_publication() {
     const ReportSignalStoreStatus status = store_.status();
     if (status.state == ReportSignalStoreState::Ready) {
-        std::shared_ptr<const LargeByteBuffer> metadata =
-            store_.take_published_metadata();
-        ReportSignalStoreNightView view;
-        if (!metadata ||
-            !ReportSignalStoreNightCodec::decode(
-                metadata->data(), metadata->size(), view) ||
-            view.night.sleep_day != active_request_.artifact.sleep_day ||
-            view.night.source_revision !=
-                active_request_.artifact.source_revision) {
+        auto metadata = store_.take_published_metadata();
+        if (!metadata.metadata) {
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::None,
@@ -1046,11 +1035,12 @@ bool ReportEngine::finish_publication() {
             return true;
         }
 
-        published_.metadata = std::move(metadata);
+        const uint32_t generation = metadata.view.night.generation;
+        published_ = std::move(metadata);
         complete_active(OperationOutcome::succeeded(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::None);
-        last_completion_.store_generation = view.night.generation;
+        last_completion_.store_generation = generation;
         return true;
     }
 
@@ -1156,9 +1146,9 @@ void ReportEngine::reset_active() {
     active_plan_.reset();
     active_request_ = {};
     active_store_generation_ = 0;
-    previous_metadata_.reset();
-    retained_metadata_.reset();
-    previous_checkpoint_.reset();
+    previous_metadata_ = {};
+    retained_metadata_ = {};
+    previous_checkpoint_ = {};
     phase_ = ActivePhase::Idle;
     clear_after_fallback_cancel_ = false;
 }

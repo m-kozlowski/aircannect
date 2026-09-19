@@ -81,38 +81,6 @@ struct ReportSignalStoreFilePayload {
     bool valid() const;
 };
 
-class ReportSignalStoreBundle {
-public:
-    ReportSignalStoreBundle() = default;
-    ~ReportSignalStoreBundle();
-
-    ReportSignalStoreBundle(const ReportSignalStoreBundle &) = delete;
-    ReportSignalStoreBundle &operator=(
-        const ReportSignalStoreBundle &) = delete;
-
-    SleepDayId sleep_day;
-    SourceRevision source_revision;
-    uint32_t generation = 0;
-    std::shared_ptr<const LargeByteBuffer> metadata;
-    std::shared_ptr<const LargeByteBuffer> events;
-    std::shared_ptr<const LargeByteBuffer> checkpoint;
-    uint8_t checkpoint_slot = 0;
-
-    size_t signal_count() const { return signal_count_; }
-    const ReportSignalStoreFilePayload *signal(size_t index) const;
-    bool valid() const;
-
-private:
-    bool allocate_signals(size_t count);
-    void release_events();
-
-    ReportSignalStoreFilePayload *signals_ = nullptr;
-    size_t signal_count_ = 0;
-
-    friend class ReportSignalStoreBuilder;
-    friend class ReportSignalStoreService;
-};
-
 struct ReportSignalStorePlaneRange {
     size_t offset = 0;
     size_t length = 0;
@@ -138,7 +106,9 @@ public:
     static constexpr size_t HeaderBytes = 192;
     static constexpr size_t MaxBlockBytes = 45000;
 
-    // One file per level; slot is the bitmap slot, not the packed ordinal.
+    // Typed tracks come from the builder or decoded night metadata. These
+    // methods check requested ranges, not the entire track again. One file
+    // per level; slot is the bitmap slot, not the packed ordinal.
     static std::shared_ptr<const LargeByteBuffer> encode_header(
         const ReportSignalStoreTrack &track,
         ReportSignalStoreLevel level);
@@ -226,6 +196,53 @@ struct ReportSignalStoreNightView {
     bool track(size_t index, ReportSignalStoreTrack &track) const;
 };
 
+// Construction from external bytes validates once. Producers and downstream
+// owners carry the accepted view together with the buffer it borrows.
+struct ReportSignalStoreMetadata {
+    ReportSignalStoreMetadata() = default;
+    explicit ReportSignalStoreMetadata(
+        std::shared_ptr<const LargeByteBuffer> bytes);
+    ReportSignalStoreMetadata(std::shared_ptr<const LargeByteBuffer> bytes,
+                              const ReportSignalStoreNightView &accepted);
+
+    std::shared_ptr<const LargeByteBuffer> metadata;
+    ReportSignalStoreNightView view;
+};
+
+class ReportSignalStoreBundle {
+public:
+    ReportSignalStoreBundle() = default;
+    ~ReportSignalStoreBundle();
+
+    ReportSignalStoreBundle(const ReportSignalStoreBundle &) = delete;
+    ReportSignalStoreBundle &operator=(
+        const ReportSignalStoreBundle &) = delete;
+
+    SleepDayId sleep_day;
+    SourceRevision source_revision;
+    uint32_t generation = 0;
+    std::shared_ptr<const LargeByteBuffer> metadata;
+    ReportSignalStoreNightView metadata_view;
+    std::shared_ptr<const LargeByteBuffer> events;
+    std::shared_ptr<const LargeByteBuffer> checkpoint;
+    uint8_t checkpoint_slot = 0;
+
+    size_t signal_count() const { return signal_count_; }
+    const ReportSignalStoreFilePayload *signal(size_t index) const;
+    // Diagnostic check, not part of the production handoff between owners.
+    bool valid() const;
+
+private:
+    bool allocate_signals(size_t count);
+    void release_events();
+
+    ReportSignalStoreFilePayload *signals_ = nullptr;
+    size_t signal_count_ = 0;
+
+    friend class ReportSignalStoreBuilder;
+    friend class ReportSignalStoreService;
+};
+
 class ReportSignalStoreNightCodec {
 public:
     static constexpr size_t MaxBytes = 64 * 1024;
@@ -235,7 +252,8 @@ public:
     static constexpr size_t TrackBytes = 88;
 
     static std::shared_ptr<const LargeByteBuffer> encode(
-        const ReportSignalStoreNight &night);
+        const ReportSignalStoreNight &night,
+        ReportSignalStoreNightView *view = nullptr);
     static bool decode(const uint8_t *bytes,
                        size_t length,
                        ReportSignalStoreNightView &view);

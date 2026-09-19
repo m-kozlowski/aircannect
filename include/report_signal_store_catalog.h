@@ -18,9 +18,7 @@ struct ReportSignalStoreCatalogRecord {
     ReportSignalStoreNightView view;
 };
 
-struct ReportSignalStoreCatalogInput {
-    std::shared_ptr<const LargeByteBuffer> metadata;
-};
+using ReportSignalStoreCatalogInput = ReportSignalStoreMetadata;
 
 class ReportSignalStoreCatalogBuilder;
 

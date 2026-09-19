@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "report_executor.h"
+#include "report_build_checkpoint.h"
 #include "report_request_queue.h"
 #include "report_signal_store.h"
 #include "report_signal_store_service.h"
@@ -24,8 +25,8 @@ public:
     bool begin_build(const ReportArtifactRequest &request,
                      const ReportReadPlan &plan,
                      uint32_t store_generation,
-                     std::shared_ptr<const LargeByteBuffer> previous = {},
-                     std::shared_ptr<const LargeByteBuffer> checkpoint = {});
+                     const ReportSignalStoreMetadata &previous = {},
+                     const ReportBuildCheckpointInput &checkpoint = {});
     bool configure_series(const ReportSeriesDescriptor &series,
                           const EdfSignalScale &scale) override;
     bool ready(bool *progressed = nullptr) override;

@@ -1192,7 +1192,7 @@ struct ReportTask::Runtime {
                 store_catalog->find(night->sleep_day);
             if (!stored || !stored->metadata ||
                 !signal_tile_backfill.start(
-                    stored->metadata, idle_generation)) {
+                    {stored->metadata, stored->view}, idle_generation)) {
                 ++idle_cursor;
                 idle_pass_failed = true;
                 idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;

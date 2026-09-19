@@ -53,9 +53,9 @@ struct SignalFileLayout {
 
 bool layout(const ReportSignalStoreTrack &track,
             ReportSignalStoreLevel level,
-            SignalFileLayout &result) {
+    SignalFileLayout &result) {
     result = {};
-    if (!report_signal_store_track_valid(track)) return false;
+    if (track.sample_interval_ms == 0) return false;
 
     result.samples_per_block = static_cast<uint32_t>(
         REPORT_SIGNAL_STORE_BLOCK_MS / track.sample_interval_ms);
@@ -357,7 +357,8 @@ bool ReportSignalStoreFileCodec::inspect(
 
     const auto level = static_cast<ReportSignalStoreLevel>(bytes[70]);
     SignalFileLayout file_layout;
-    if (!layout(track, level, file_layout) ||
+    if (!report_signal_store_track_valid(track) ||
+        !layout(track, level, file_layout) ||
         file_layout.total_bytes != length ||
         get_le32(bytes + 52) != file_layout.samples_per_block ||
         get_le32(bytes + 76) != file_layout.block_bytes ||

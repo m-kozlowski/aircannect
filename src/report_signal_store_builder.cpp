@@ -151,7 +151,7 @@ struct ReportSignalStoreBuilder::Runtime {
     ReportMetricAccumulator closed_metrics;
     int64_t closed_before_ms = 0;
     uint8_t checkpoint_slot = 1;
-    std::shared_ptr<const LargeByteBuffer> previous_checkpoint;
+    ReportBuildCheckpointInput previous_checkpoint;
     bool active = false;
     std::shared_ptr<ReportSignalStoreBundle> completed;
     EdfSignalScale scales[static_cast<size_t>(ReportSignalId::Count)];
@@ -197,7 +197,7 @@ struct ReportSignalStoreBuilder::Runtime {
         closed_metrics.clear();
         closed_before_ms = 0;
         checkpoint_slot = 1;
-        previous_checkpoint.reset();
+        previous_checkpoint = {};
 
         request = {};
         plan = nullptr;
@@ -432,8 +432,8 @@ bool ReportSignalStoreBuilder::begin_build(
     const ReportArtifactRequest &request,
     const ReportReadPlan &plan,
     uint32_t store_generation,
-    std::shared_ptr<const LargeByteBuffer> previous,
-    std::shared_ptr<const LargeByteBuffer> checkpoint_bytes) {
+    const ReportSignalStoreMetadata &previous,
+    const ReportBuildCheckpointInput &checkpoint_input) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_signal_store_runtime_unavailable";
@@ -472,25 +472,13 @@ bool ReportSignalStoreBuilder::begin_build(
         }
     }
 
-    ReportSignalStoreNightView previous_night;
-    if (previous && !ReportSignalStoreNightCodec::decode(
-            previous->data(), previous->size(), previous_night)) {
-        failure_reason_ = "report_signal_store_previous_invalid";
-        return false;
-    }
-
-    ReportBuildCheckpointView checkpoint;
-    if (checkpoint_bytes &&
-        (!ReportBuildCheckpointCodec::decode(
-             checkpoint_bytes->data(), checkpoint_bytes->size(), checkpoint) ||
-         checkpoint.track_count != previous_night.night.track_count)) {
-        failure_reason_ = "report_signal_store_checkpoint_invalid";
-        return false;
-    }
+    const auto &previous_night = previous.view;
+    const auto &checkpoint = checkpoint_input.view;
+    const auto &checkpoint_bytes = checkpoint_input.bytes;
 
     runtime_->checkpoint_slot = previous_night.night.checkpoint_slot == 1
         ? 2 : 1;
-    runtime_->previous_checkpoint = checkpoint_bytes;
+    runtime_->previous_checkpoint = checkpoint_input;
     for (size_t i = 0; i < plan.session_count(); ++i) {
         runtime_->closed_before_ms = std::max(
             runtime_->closed_before_ms,
@@ -1251,12 +1239,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
 
     runtime_->update_expected_coverage();
 
-    ReportBuildCheckpointView previous_checkpoint;
-    if (runtime_->previous_checkpoint) {
-        ReportBuildCheckpointCodec::decode(
-            runtime_->previous_checkpoint->data(),
-            runtime_->previous_checkpoint->size(), previous_checkpoint);
-    }
+    const auto &previous_checkpoint = runtime_->previous_checkpoint.view;
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         TrackWork &work = runtime_->tracks[i];
@@ -1401,7 +1384,8 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         night.tracks = tracks;
     }
 
-    bundle->metadata = ReportSignalStoreNightCodec::encode(night);
+    bundle->metadata = ReportSignalStoreNightCodec::encode(
+        night, &bundle->metadata_view);
     Memory::free(tracks);
     Memory::free(sessions);
 
@@ -1450,7 +1434,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     checkpoint.events_size = bundle->events->size();
     bundle->checkpoint = ReportBuildCheckpointCodec::encode(checkpoint);
 
-    if (!bundle->metadata || !bundle->checkpoint || !bundle->valid()) {
+    if (!bundle->metadata || !bundle->checkpoint) {
         failure_reason_ = "report_signal_store_metadata_encode_failed";
         return false;
     }

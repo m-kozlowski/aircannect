@@ -133,9 +133,9 @@ private:
     ReportSignalStoreService store_;
 
     StorageBoundedFileLoader metadata_loader_;
-    std::shared_ptr<const LargeByteBuffer> previous_metadata_;
-    std::shared_ptr<const LargeByteBuffer> retained_metadata_;
-    std::shared_ptr<const LargeByteBuffer> previous_checkpoint_;
+    ReportSignalStoreMetadata previous_metadata_;
+    ReportSignalStoreMetadata retained_metadata_;
+    ReportBuildCheckpointInput previous_checkpoint_;
 
     NightCatalogStoreService sources_loader_;
     SourceRevision sources_expected_revision_;

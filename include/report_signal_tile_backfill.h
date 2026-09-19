@@ -16,7 +16,7 @@ public:
     ~ReportSignalTileBackfill();
 
     void begin(StorageReadPort &read, StorageRangeWritePort &write);
-    bool start(std::shared_ptr<const LargeByteBuffer> metadata,
+    bool start(const ReportSignalStoreMetadata &metadata,
                uint32_t generation);
     bool poll();
     void reset();

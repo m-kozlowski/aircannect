@@ -110,7 +110,7 @@ public:
         StorageAtomicWriteLane lane);
 
     const ReportSignalStoreStatus &status() const { return status_; }
-    std::shared_ptr<const LargeByteBuffer> take_published_metadata();
+    ReportSignalStoreMetadata take_published_metadata();
 
 private:
     enum class Phase : uint8_t {
@@ -188,7 +188,7 @@ private:
 
     // Events and metadata publication
     std::shared_ptr<ReportSignalStoreBundle> bundle_;
-    std::shared_ptr<const LargeByteBuffer> published_metadata_;
+    ReportSignalStoreMetadata published_metadata_;
     OperationTicket write_ticket_;
 
     // Operation lifetime

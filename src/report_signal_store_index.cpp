@@ -171,7 +171,7 @@ bool decode_track(const uint8_t *in,
     memcpy(track.present_blocks,
            in + 64,
            REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES);
-    return report_signal_store_track_valid(track);
+    return true;
 }
 
 bool event_data_valid(const ReportSignalStoreEventFileData &data) {
@@ -227,7 +227,7 @@ bool ReportSignalStoreNightView::session(
         ReportSignalStoreNightCodec::SessionBytes;
     range.start_ms = get_i64(record);
     range.end_ms = get_i64(record + 8);
-    return range.valid();
+    return true;
 }
 
 bool ReportSignalStoreNightView::track(
@@ -242,7 +242,9 @@ bool ReportSignalStoreNightView::track(
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
-    const ReportSignalStoreNight &night) {
+    const ReportSignalStoreNight &night,
+    ReportSignalStoreNightView *view) {
+    if (view) *view = {};
     if (!night_data_valid(night) || !sessions_valid(night) ||
         !tracks_valid(night)) {
         return {};
@@ -338,6 +340,15 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
     for (size_t i = 0; i < night.track_count; ++i) {
         encode_track(track_records + i * TrackBytes, night.tracks[i]);
     }
+
+    if (view) {
+        view->night = night;
+        view->night.sessions = nullptr;
+        view->night.tracks = nullptr;
+        view->session_records = session_records;
+        view->track_records = track_records;
+    }
+
     return LargeByteBuffer::freeze(std::move(output));
 }
 
@@ -436,7 +447,7 @@ bool ReportSignalStoreNightCodec::decode(
     int64_t previous_end = 0;
     for (size_t i = 0; i < night.session_count; ++i) {
         NightCatalogTimeRange session;
-        if (!view.session(i, session) ||
+        if (!view.session(i, session) || !session.valid() ||
             session.start_ms < night.day_start_ms ||
             session.end_ms > night.day_end_ms ||
             (i > 0 && session.start_ms < previous_end)) {
@@ -454,16 +465,15 @@ bool ReportSignalStoreNightCodec::decode(
 
     for (size_t i = 0; i < night.track_count; ++i) {
         ReportSignalStoreTrack track;
-        if (!view.track(i, track)) {
+        if (!view.track(i, track) || !report_signal_store_track_valid(track)) {
             view = {};
             return false;
         }
         for (size_t n = 0; n < i; ++n) {
-            ReportSignalStoreTrack other;
-            if (!view.track(n, other) ||
-                (track.signal == other.signal &&
-                 track.sample_interval_ms == other.sample_interval_ms &&
-                 track.track_index == other.track_index)) {
+            const uint8_t *other = view.track_records + n * TrackBytes;
+            if (static_cast<uint8_t>(track.signal) == other[0] &&
+                track.sample_interval_ms == get_le32(other + 12) &&
+                track.track_index == get_le16(other + 4)) {
                 view = {};
                 return false;
             }
@@ -471,6 +481,19 @@ bool ReportSignalStoreNightCodec::decode(
     }
     return true;
 }
+
+ReportSignalStoreMetadata::ReportSignalStoreMetadata(
+    std::shared_ptr<const LargeByteBuffer> bytes) {
+    if (bytes && ReportSignalStoreNightCodec::decode(
+                     bytes->data(), bytes->size(), view)) {
+        metadata = std::move(bytes);
+    }
+}
+
+ReportSignalStoreMetadata::ReportSignalStoreMetadata(
+    std::shared_ptr<const LargeByteBuffer> bytes,
+    const ReportSignalStoreNightView &accepted)
+    : metadata(std::move(bytes)), view(accepted) {}
 
 std::shared_ptr<const LargeByteBuffer> ReportSignalStoreEventCodec::encode(
     const ReportSignalStoreEventFileData &data) {

@@ -53,6 +53,11 @@ struct ReportBuildCheckpointView {
     bool track(size_t index, ReportBuildTrackState &track) const;
 };
 
+struct ReportBuildCheckpointInput {
+    std::shared_ptr<const LargeByteBuffer> bytes;
+    ReportBuildCheckpointView view;
+};
+
 class ReportBuildCheckpointCodec {
 public:
     static constexpr uint16_t Version = 1;

@@ -99,7 +99,7 @@ OperationAdmission ReportSignalStoreService::start_blocks(
         block_count > MaxWriteBatchBlocks ||
         (lane != StorageAtomicWriteLane::Foreground &&
          lane != StorageAtomicWriteLane::Maintenance) ||
-        operation_generation == 0 || !report_signal_store_track_valid(track) ||
+        operation_generation == 0 ||
         first_slot >= track.block_slot_count ||
         block_count > track.block_slot_count - first_slot) {
         copy_cstr(status_.error, sizeof(status_.error),
@@ -159,7 +159,7 @@ OperationAdmission ReportSignalStoreService::start(
     uint32_t operation_generation,
     StorageAtomicWriteLane lane) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
-    if (!write_port_ || !bundle || !bundle->valid() ||
+    if (!write_port_ || !bundle ||
         operation_generation == 0) {
         copy_cstr(status_.error, sizeof(status_.error),
                   "report_signal_store_publish_invalid");
@@ -167,7 +167,7 @@ OperationAdmission ReportSignalStoreService::start(
     }
 
     bundle_ = std::move(bundle);
-    published_metadata_.reset();
+    published_metadata_ = {};
     operation_generation_ = operation_generation;
     lane_ = lane;
     status_ = {};
@@ -633,7 +633,7 @@ bool ReportSignalStoreService::finish_current() {
             phase_ = Phase::SubmitMetadata;
             break;
         case Phase::WaitMetadata:
-            published_metadata_ = bundle_->metadata;
+            published_metadata_ = {bundle_->metadata, bundle_->metadata_view};
             phase_ = Phase::Ready;
             status_.state = ReportSignalStoreState::Ready;
             bundle_.reset();
@@ -693,7 +693,7 @@ void ReportSignalStoreService::fail(const char *error) {
     status_.state = ReportSignalStoreState::Failed;
     copy_cstr(status_.error, sizeof(status_.error), error);
     bundle_.reset();
-    published_metadata_.reset();
+    published_metadata_ = {};
 }
 
 void ReportSignalStoreService::cancel() {
@@ -706,7 +706,7 @@ void ReportSignalStoreService::cancel() {
     phase_ = Phase::Cancelled;
     status_.state = ReportSignalStoreState::Cancelled;
     bundle_.reset();
-    published_metadata_.reset();
+    published_metadata_ = {};
 }
 
 void ReportSignalStoreService::release_io() {
@@ -760,7 +760,7 @@ void ReportSignalStoreService::clear_operation() {
     read_offset_ = 0;
     read_low_byte_ = 0;
     bundle_.reset();
-    published_metadata_.reset();
+    published_metadata_ = {};
     write_ticket_ = {};
     operation_generation_ = 0;
     lane_ = StorageAtomicWriteLane::Maintenance;
@@ -773,10 +773,11 @@ void ReportSignalStoreService::reset() {
     status_ = {};
 }
 
-std::shared_ptr<const LargeByteBuffer>
-ReportSignalStoreService::take_published_metadata() {
-    if (phase_ != Phase::Ready || !published_metadata_) return {};
-    return std::move(published_metadata_);
+ReportSignalStoreMetadata ReportSignalStoreService::take_published_metadata() {
+    if (phase_ != Phase::Ready) return {};
+    auto published = std::move(published_metadata_);
+    published_metadata_ = {};
+    return published;
 }
 
 }  // namespace aircannect
