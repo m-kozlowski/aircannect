@@ -5,7 +5,6 @@
 #include <string.h>
 
 #include "checked_size.h"
-#include "crc32.h"
 #include "little_endian.h"
 #include "report_fallback_payload_layout.h"
 #include "storage_read_port.h"
@@ -21,8 +20,11 @@ using LittleEndian::put_le16;
 using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
-constexpr uint8_t FILE_MAGIC[8] = {
+constexpr uint8_t FILE_MAGIC_V5[8] = {
     'A', 'C', 'F', 'B', 'A', 'C', 'K', '5',
+};
+constexpr uint8_t FILE_MAGIC_V6[8] = {
+    'A', 'C', 'F', 'B', 'A', 'C', 'K', '6',
 };
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
 constexpr size_t TIMEZONE_OFFSET = 28;
@@ -32,8 +34,6 @@ constexpr size_t HEADER_CRC_OFFSET = 68;
 constexpr size_t BUILDER_GROWTH_BYTES = 64 * 1024;
 constexpr int32_t TIMEZONE_BIAS = 2048;
 constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
-constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
-constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
 
 bool timezone_offset_valid(int32_t minutes) {
     return minutes >= -MAX_TIMEZONE_OFFSET_MINUTES &&
@@ -56,31 +56,6 @@ uint32_t encode_timezone_offset(bool valid, int32_t minutes) {
     return valid
         ? static_cast<uint32_t>(minutes + TIMEZONE_BIAS)
         : 0;
-}
-
-uint64_t identity_update(uint64_t hash,
-                         const uint8_t *bytes,
-                         size_t length) {
-    for (size_t i = 0; i < length; ++i) {
-        hash ^= bytes[i];
-        hash *= FNV_PRIME;
-    }
-    return hash;
-}
-
-uint64_t metadata_identity(const uint8_t *metadata,
-                           size_t metadata_bytes) {
-    if (!metadata || metadata_bytes <
-            ReportFallbackArtifactCodec::HeaderBytes) {
-        return 0;
-    }
-
-    uint64_t hash = identity_update(FNV_OFFSET, metadata, IDENTITY_OFFSET);
-    hash = identity_update(
-        hash,
-        metadata + ReportFallbackArtifactCodec::HeaderBytes,
-        metadata_bytes - ReportFallbackArtifactCodec::HeaderBytes);
-    return hash == 0 ? 1 : hash;
 }
 
 bool range_valid(const NightCatalogTimeRange &range,
@@ -206,8 +181,7 @@ ReportFallbackSectionInput section_sort_key(
 
 void encode_section(uint8_t *out,
                     const ReportFallbackSectionInput &section,
-                    uint64_t data_offset,
-                    uint32_t data_crc32) {
+                    uint64_t data_offset) {
     out[0] = static_cast<uint8_t>(section.kind);
     out[1] = static_cast<uint8_t>(section.source);
     out[2] = section.kind != ReportFallbackSectionKind::Events
@@ -223,7 +197,7 @@ void encode_section(uint8_t *out,
              static_cast<uint64_t>(section.coverage.end_ms));
     put_le64(out + 32, data_offset);
     put_le32(out + 40, static_cast<uint32_t>(section.payload_size));
-    put_le32(out + 44, data_crc32);
+    put_le32(out + 44, 0);
 }
 
 bool decode_section(const uint8_t *in, ReportFallbackSection &section) {
@@ -293,13 +267,19 @@ bool ReportFallbackArtifactCodec::inspect_header(
     ReportFallbackArtifactInfo &info) {
     info = {};
     if (!header || header_length < HeaderBytes ||
-        memcmp(header, FILE_MAGIC, sizeof(FILE_MAGIC)) != 0 ||
-        get_le16(header + 8) != Version ||
+        (get_le16(header + 8) != LegacyVersion &&
+         get_le16(header + 8) != Version)) {
+        return false;
+    }
+
+    const uint16_t version = get_le16(header + 8);
+    const uint8_t *magic = version == LegacyVersion
+        ? FILE_MAGIC_V5
+        : FILE_MAGIC_V6;
+    if (memcmp(header, magic, sizeof(FILE_MAGIC_V5)) != 0 ||
         get_le16(header + 10) != HeaderBytes ||
         get_le16(header + 12) != SessionBytes ||
-        get_le16(header + 14) != SectionBytes ||
-        crc32_ieee(header, HEADER_CRC_OFFSET) !=
-            get_le32(header + HEADER_CRC_OFFSET)) {
+        get_le16(header + 14) != SectionBytes) {
         return false;
     }
 
@@ -376,14 +356,6 @@ bool ReportFallbackArtifactCodec::decode_metadata(
     const size_t sessions_size =
         static_cast<size_t>(info.session_count) * SessionBytes;
     const uint8_t *section_bytes = session_bytes + sessions_size;
-    const size_t metadata_body_bytes = info.metadata_bytes - HeaderBytes;
-    if (crc32_ieee(session_bytes, metadata_body_bytes) !=
-            get_le32(metadata + METADATA_CRC_OFFSET) ||
-        metadata_identity(metadata, info.metadata_bytes) !=
-            info.content_identity) {
-        return false;
-    }
-
     NightCatalogTimeRange previous_session;
     for (size_t i = 0; i < info.session_count; ++i) {
         const NightCatalogTimeRange session =
@@ -449,6 +421,7 @@ bool ReportFallbackArtifactCodec::decode_metadata(
 
 std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
     SleepDayId sleep_day,
+    uint64_t identity,
     int64_t day_start_ms,
     int64_t day_end_ms,
     const NightCatalogTimeRange *sessions,
@@ -457,7 +430,7 @@ std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
     size_t section_count,
     bool timezone_valid,
     int32_t timezone_minutes) {
-    if (!sleep_day.valid() || day_start_ms <= 0 ||
+    if (!sleep_day.valid() || identity == 0 || day_start_ms <= 0 ||
         day_end_ms <= day_start_ms ||
         (timezone_valid && !timezone_offset_valid(timezone_minutes)) ||
         !sessions_valid(sessions,
@@ -480,6 +453,7 @@ std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
 
     ReportFallbackArtifactBuilder builder;
     if (!builder.begin(sleep_day,
+                       identity,
                        day_start_ms,
                        day_end_ms,
                        sessions,
@@ -496,6 +470,7 @@ std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
 
 bool ReportFallbackArtifactBuilder::begin(
     SleepDayId sleep_day,
+    uint64_t identity,
     int64_t day_start_ms,
     int64_t day_end_ms,
     const NightCatalogTimeRange *sessions,
@@ -503,7 +478,7 @@ bool ReportFallbackArtifactBuilder::begin(
     bool timezone_valid,
     int32_t timezone_minutes) {
     reset();
-    if (!sleep_day.valid() || day_start_ms <= 0 ||
+    if (!sleep_day.valid() || identity == 0 || day_start_ms <= 0 ||
         day_end_ms <= day_start_ms ||
         (timezone_valid && !timezone_offset_valid(timezone_minutes)) ||
         !sessions_valid(sessions,
@@ -529,6 +504,7 @@ bool ReportFallbackArtifactBuilder::begin(
     }
 
     sleep_day_ = sleep_day;
+    identity_ = identity;
     day_start_ms_ = day_start_ms;
     day_end_ms_ = day_end_ms;
     timezone_offset_minutes_ = timezone_minutes;
@@ -540,6 +516,7 @@ bool ReportFallbackArtifactBuilder::begin(
 void ReportFallbackArtifactBuilder::reset() {
     output_.reset();
     sleep_day_ = {};
+    identity_ = 0;
     day_start_ms_ = 0;
     day_end_ms_ = 0;
     timezone_offset_minutes_ = 0;
@@ -617,23 +594,12 @@ bool ReportFallbackArtifactBuilder::ensure_output_size(
     return output_->grow(target);
 }
 
-bool ReportFallbackArtifactBuilder::commit_reserved_section(
-    bool verify_crc,
-    uint32_t expected_crc32) {
+bool ReportFallbackArtifactBuilder::commit_reserved_section() {
     if (!output_ || !section_reserved_) return false;
-
-    const uint32_t payload_crc = crc32_ieee(
-        output_->data() + reserved_payload_offset_,
-        reserved_section_.payload_size);
-    if (verify_crc && payload_crc != expected_crc32) {
-        discard_reserved_section();
-        return false;
-    }
 
     encode_section(temporary_section_record(section_count_),
                    reserved_section_,
-                   reserved_payload_offset_,
-                   payload_crc);
+                   reserved_payload_offset_);
     payload_bytes_ += reserved_section_.payload_size;
     section_count_++;
     discard_reserved_section();
@@ -737,7 +703,7 @@ ReportFallbackArtifactBuilder::finish() {
         put_le64(record + 32, old_offset - payload_shift);
     }
 
-    memcpy(header, FILE_MAGIC, sizeof(FILE_MAGIC));
+    memcpy(header, FILE_MAGIC_V6, sizeof(FILE_MAGIC_V6));
     put_le16(header + 8, ReportFallbackArtifactCodec::Version);
     put_le16(header + 10, ReportFallbackArtifactCodec::HeaderBytes);
     put_le16(header + 12, ReportFallbackArtifactCodec::SessionBytes);
@@ -752,14 +718,9 @@ ReportFallbackArtifactBuilder::finish() {
     put_le64(header + 32, static_cast<uint64_t>(day_start_ms_));
     put_le64(header + 40, static_cast<uint64_t>(day_end_ms_));
     put_le64(header + 48, payload_bytes_);
-    put_le32(header + METADATA_CRC_OFFSET,
-             crc32_ieee(header + ReportFallbackArtifactCodec::HeaderBytes,
-                        metadata_bytes -
-                            ReportFallbackArtifactCodec::HeaderBytes));
-    put_le64(header + IDENTITY_OFFSET,
-             metadata_identity(header, metadata_bytes));
-    put_le32(header + HEADER_CRC_OFFSET,
-             crc32_ieee(header, HEADER_CRC_OFFSET));
+    put_le64(header + IDENTITY_OFFSET, identity_);
+    put_le32(header + METADATA_CRC_OFFSET, 0);
+    put_le32(header + HEADER_CRC_OFFSET, 0);
     if (!output_->truncate(total_bytes)) return {};
 
     std::unique_ptr<LargeByteBuffer> output = std::move(output_);

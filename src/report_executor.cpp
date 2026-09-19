@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "board_report.h"
-#include "crc32.h"
 #include "memory_manager.h"
 #include "report_records.h"
 
@@ -583,11 +582,6 @@ bool ReportExecutor::decode_fallback_operation() {
             read.bytes != operation->length) {
             finish(ReportExecutorState::Failed,
                    ReportExecutorError::StorageShortRead);
-            return false;
-        }
-        if (crc32_ieee(fallback_buffer_, read.bytes) != section->data_crc32) {
-            finish(ReportExecutorState::Failed,
-                   ReportExecutorError::DecodeFailed);
             return false;
         }
         fallback_loaded_ = true;

@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "crc32.h"
 #include "report_planner.h"
 #include "report_sources.h"
 
@@ -228,11 +227,21 @@ bool ReportFallbackAcquisitionService::prepare() {
     if (!build_targets()) return false;
 
     const NightCatalogRecord &night = plan_->night();
+    size_t fallback_count = 0;
+    const auto *fallbacks = plan_->catalog().fallback_files(night, fallback_count);
+    uint64_t previous_identity = 0;
+    for (size_t i = 0; i < fallback_count; ++i) {
+        previous_identity = std::max(previous_identity, fallbacks[i].identity);
+    }
+    const uint64_t next_identity = previous_identity == UINT64_MAX
+        ? 1 : previous_identity + 1;
+
     const NightCatalogTimeRange *sessions =
         plan_->catalog().sessions(night, session_count_);
     if (!sessions || session_count_ == 0 ||
         session_count_ > ReportFallbackArtifactCodec::MaxSessions ||
         !builder_.begin(night.sleep_day,
+                        next_identity,
                         night.day_start_ms,
                         night.day_end_ms,
                         sessions,
@@ -454,9 +463,7 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
     preserve_prepared_ = {};
     const bool payload_valid =
         read.state == PreparedByteReadState::Data &&
-        read.bytes == preserve_section_->data_size &&
-        crc32_ieee(preserve_payload_, read.bytes) ==
-            preserve_section_->data_crc32;
+        read.bytes == preserve_section_->data_size;
     const bool adjusted = payload_valid &&
         (preserve_section_->kind != ReportFallbackSectionKind::Events ||
          preserve_file_->time_adjust_ms == 0 ||

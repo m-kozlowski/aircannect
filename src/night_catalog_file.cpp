@@ -5,7 +5,6 @@
 #include <string.h>
 
 #include "checked_size.h"
-#include "crc32.h"
 #include "little_endian.h"
 #include "report_records.h"
 #include "report_fallback_payload_layout.h"
@@ -30,6 +29,9 @@ constexpr uint8_t FILE_MAGIC_V12[8] = {
 };
 constexpr uint8_t FILE_MAGIC_V13[8] = {
     'A', 'C', 'N', 'C', 'A', 'T', '1', '3',
+};
+constexpr uint8_t FILE_MAGIC_V14[8] = {
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '4',
 };
 
 constexpr size_t RECORD_BYTES_V11 = 120;
@@ -544,7 +546,9 @@ bool decode_record(const uint8_t *in,
         static_cast<int32_t>(get_le32(in + timezone_field_offset));
     if (session_count > UINT16_MAX || mask_count > UINT16_MAX ||
         file_count > UINT16_MAX || fallback_file_count > UINT16_MAX ||
-        in[5] > (version == NightCatalogFileCodec::Version ? 1 : 0) ||
+        in[5] > ((version == 13 || version == NightCatalogFileCodec::Version)
+            ? 1
+            : 0) ||
         !timezone_offset_valid(timezone_minutes != TIMEZONE_OFFSET_MISSING,
                                timezone_minutes)) {
         return false;
@@ -740,6 +744,9 @@ void encode_fallback_section(
     encode_range(out + 16, section.coverage);
     put_le64(out + 32, section.data_offset);
     put_le32(out + 40, section.data_size);
+    // Keep this legacy field opaque. New sections leave it at zero; old
+    // catalogs may carry a historical value that still participates in the
+    // source description.
     put_le32(out + 44, section.data_crc32);
 }
 
@@ -762,10 +769,8 @@ bool decode_fallback_section(
 
 bool parse_header(const uint8_t *header,
                   size_t header_length,
-                  NightCatalogFileInfo &info,
-                  uint32_t &body_crc) {
+                  NightCatalogFileInfo &info) {
     info = {};
-    body_crc = 0;
     if (!header || header_length != NightCatalogFileCodec::HeaderBytes ||
         get_le16(header + 10) != NightCatalogFileCodec::HeaderBytes ||
         get_le16(header + 14) != RANGE_BYTES ||
@@ -775,8 +780,7 @@ bool parse_header(const uint8_t *header,
         get_le16(header + 22) != FALLBACK_FILE_BYTES ||
         get_le16(header + 24) != FALLBACK_SECTION_BYTES ||
         get_le32(header + 64) != 0 ||
-        get_le32(header + 80) != 0 ||
-        crc32_ieee(header, 84) != get_le32(header + 84)) {
+        get_le32(header + 80) != 0) {
         return false;
     }
 
@@ -787,9 +791,11 @@ bool parse_header(const uint8_t *header,
         ? SOURCE_REVISION_POLICY_V11
         : NIGHT_CATALOG_SOURCE_REVISION_POLICY;
     const uint8_t *magic = legacy ? FILE_MAGIC_V11
-        : version == 12 ? FILE_MAGIC_V12 : FILE_MAGIC_V13;
+        : version == 12 ? FILE_MAGIC_V12
+        : version == 13 ? FILE_MAGIC_V13 : FILE_MAGIC_V14;
 
-    if ((!legacy && version != 12 && version != NightCatalogFileCodec::Version) ||
+    if ((!legacy && version != 12 && version != 13 &&
+         version != NightCatalogFileCodec::Version) ||
         memcmp(header, magic, sizeof(FILE_MAGIC_V11)) != 0 ||
         get_le16(header + 12) != record_bytes ||
         get_le16(header + 26) != revision_policy) {
@@ -832,7 +838,6 @@ bool parse_header(const uint8_t *header,
 
     info.body_bytes = body_bytes;
     info.total_bytes = NightCatalogFileCodec::HeaderBytes + body_bytes;
-    body_crc = get_le32(header + 76);
     return true;
 }
 
@@ -857,8 +862,7 @@ bool NightCatalogFileCodec::sources_path(SleepDayId sleep_day,
 bool NightCatalogFileCodec::inspect(const uint8_t *header,
                                     size_t header_length,
                                     NightCatalogFileInfo &info) {
-    uint32_t ignored_crc = 0;
-    return parse_header(header, header_length, info, ignored_crc);
+    return parse_header(header, header_length, info);
 }
 
 std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
@@ -981,7 +985,7 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         return {};
     }
 
-    memcpy(header, FILE_MAGIC_V13, sizeof(FILE_MAGIC_V13));
+    memcpy(header, FILE_MAGIC_V14, sizeof(FILE_MAGIC_V14));
     put_le16(header + 8, Version);
     put_le16(header + 10, HeaderBytes);
     put_le16(header + 12, RECORD_BYTES);
@@ -1002,9 +1006,8 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
     put_le32(header + 56, layout.fallback_sections);
     put_le32(header + 60, layout.path_bytes);
     put_le64(header + 68, layout.body_bytes);
-    put_le32(header + 76,
-             crc32_ieee(header + HeaderBytes, layout.body_bytes));
-    put_le32(header + 84, crc32_ieee(header, 84));
+    put_le32(header + 76, 0);
+    put_le32(header + 84, 0);
     return LargeByteBuffer::freeze(std::move(output));
 }
 
@@ -1014,14 +1017,11 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
     const uint8_t *body,
     size_t body_length) {
     NightCatalogFileInfo info;
-    uint32_t expected_body_crc = 0;
     if (!parse_header(header,
                       header_length,
-                      info,
-                      expected_body_crc) ||
+                      info) ||
         body_length != info.body_bytes ||
-        (body_length > 0 && !body) ||
-        crc32_ieee(body, body_length) != expected_body_crc) {
+        (body_length > 0 && !body)) {
         return {};
     }
 

@@ -66,7 +66,8 @@ struct ReportFallbackArtifactView {
 
 class ReportFallbackArtifactCodec {
 public:
-    static constexpr uint16_t Version = 5;
+    static constexpr uint16_t LegacyVersion = 5;
+    static constexpr uint16_t Version = 6;
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t SectionBytes = 48;
@@ -85,6 +86,7 @@ public:
                                 ReportFallbackArtifactView &view);
     static std::shared_ptr<const LargeByteBuffer> encode(
         SleepDayId sleep_day,
+        uint64_t identity,
         int64_t day_start_ms,
         int64_t day_end_ms,
         const NightCatalogTimeRange *sessions,
@@ -98,6 +100,7 @@ public:
 class ReportFallbackArtifactBuilder {
 public:
     bool begin(SleepDayId sleep_day,
+               uint64_t identity,
                int64_t day_start_ms,
                int64_t day_end_ms,
                const NightCatalogTimeRange *sessions,
@@ -109,8 +112,7 @@ public:
     bool append_section(const ReportFallbackSectionInput &section);
     bool reserve_section(const ReportFallbackSectionInput &section,
                          uint8_t *&payload);
-    bool commit_reserved_section(bool verify_crc = false,
-                                 uint32_t expected_crc32 = 0);
+    bool commit_reserved_section();
     void discard_reserved_section();
 
     std::shared_ptr<const LargeByteBuffer> finish();
@@ -122,6 +124,7 @@ private:
 
     std::unique_ptr<LargeByteBuffer> output_;
     SleepDayId sleep_day_;
+    uint64_t identity_ = 0;
     int64_t day_start_ms_ = 0;
     int64_t day_end_ms_ = 0;
     int32_t timezone_offset_minutes_ = 0;
