@@ -36,6 +36,8 @@ struct ReportEngineCompletion {
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }
+    // Rebuild was declined before writing because saved data cannot be reproduced.
+    bool retained_for_missing_sources() const;
 };
 
 struct ReportEngineStatus {

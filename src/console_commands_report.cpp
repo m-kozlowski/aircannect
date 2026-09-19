@@ -350,10 +350,14 @@ void ReportConsoleCommands::poll_pending(
         const ReportEngineCompletion &completion = status.last_completion;
         const bool success = completion.outcome.disposition ==
             OperationDisposition::Succeeded;
-        out.print(success ? "[REPORT] rebuild complete" :
+        const bool retained = completion.retained_for_missing_sources();
+        out.print(retained ? "[REPORT] rebuild unavailable" :
+                  success ? "[REPORT] rebuild complete" :
                             "[REPORT] rebuild failed");
         print_report_sleep_day(out, completion.request.artifact.sleep_day);
-        if (!success) {
+        if (retained) {
+            out.print("; sources incomplete; saved report kept");
+        } else if (!success) {
             out.print(" error=");
             out.print(completion.error[0] ? completion.error :
                                            "report_build_failed");
@@ -366,6 +370,8 @@ void ReportConsoleCommands::poll_pending(
     if (status.first_day != status.last_day) {
         out.print("[REPORT] rebuild range finished completed=");
         out.print(static_cast<unsigned long>(status.completed));
+        out.print(" retained=");
+        out.print(static_cast<unsigned long>(status.retained));
         out.print(" failed=");
         out.println(static_cast<unsigned long>(status.failed));
     } else if (!status.completed) {

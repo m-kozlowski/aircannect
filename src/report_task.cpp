@@ -1426,6 +1426,7 @@ struct ReportTask::Runtime {
         }
         observed_engine_completion = completion.request.ticket;
         release_loaded_sources();
+        const bool retained = completion.retained_for_missing_sources();
         bool rebuilding = false;
         if (rebuild_catalog) {
             if (!lock()) {
@@ -1436,7 +1437,9 @@ struct ReportTask::Runtime {
                 rebuilding = true;
                 rebuild.last_completion = completion;
                 ++rebuild.completed;
-                if (completion.outcome.disposition !=
+                if (retained) {
+                    ++rebuild.retained;
+                } else if (completion.outcome.disposition !=
                     OperationDisposition::Succeeded) {
                     ++rebuild.failed;
                 }
@@ -1496,8 +1499,18 @@ struct ReportTask::Runtime {
                 post_therapy ? "post_therapy" :
                 completion.request.priority == ReportRequestPriority::Foreground
                     ? "build" : "build_background";
-            record_failure(operation,
-                           completion.error, completed_day, failure.retry_after_ms);
+            if (retained) {
+#ifdef ARDUINO
+                char day[9] = {};
+                completed_day.format_yyyymmdd(day, sizeof(day));
+                Log::logf(CAT_REPORT, LOG_INFO,
+                          "saved report kept op=%s night=%s reason=sources_incomplete",
+                          operation, day);
+#endif
+            } else {
+                record_failure(operation, completion.error,
+                               completed_day, failure.retry_after_ms);
+            }
         }
 
         if (completion.request.priority !=
@@ -1510,7 +1523,7 @@ struct ReportTask::Runtime {
             if (current && current->sleep_day == completed_day) {
                 ++idle_cursor;
             }
-            if (!succeeded) {
+            if (!succeeded && !retained) {
                 idle_pass_failed = true;
                 idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
             }

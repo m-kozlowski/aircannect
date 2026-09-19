@@ -1,5 +1,6 @@
 #include "report_engine.h"
 
+#include <string.h>
 #include <utility>
 
 #include "night_catalog_builder.h"
@@ -87,6 +88,11 @@ uint32_t increment_generation(uint32_t generation) {
 }
 
 }  // namespace
+
+bool ReportEngineCompletion::retained_for_missing_sources() const {
+    return outcome.disposition == OperationDisposition::Failed &&
+        strcmp(error, "report_source_changed_incomplete") == 0;
+}
 
 ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
                            size_t queue_capacity) :

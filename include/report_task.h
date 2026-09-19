@@ -202,6 +202,7 @@ struct ReportRebuildStatus {
     SleepDayId last_day;
     uint32_t completed = 0;
     uint32_t failed = 0;
+    uint32_t retained = 0;
     ReportEngineCompletion last_completion;
 };
 

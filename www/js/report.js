@@ -1,4 +1,8 @@
 (() => {
+    const REPORT_RETAINED_REASON = "report_source_changed_incomplete";
+    const REPORT_RETAINED_NOTICE =
+      "Showing saved report; sources no longer cover a full rebuild.";
+
     function fmtMinutes(minutes) {
       const value = Number(minutes);
       if (!Number.isFinite(value) || value <= 0) return "--";
@@ -3462,12 +3466,15 @@
           res.update
             ? res.update === "pending"
               ? "Showing saved report; update pending"
+              : res.update === REPORT_RETAINED_REASON
+              ? REPORT_RETAINED_NOTICE
               : "Showing saved report; update failed: " + res.update
             : reportResult.active
             ? "Recording - data through " + fmtReportClock(reportResult.end)
             : reportResult.state === "partial"
             ? "Report loaded (incomplete - some data missing)"
-            : "Report loaded", !res.update || res.update === "pending", !!res.update);
+            : "Report loaded", !res.update || res.update === "pending" ||
+              res.update === REPORT_RETAINED_REASON, !!res.update);
       } catch (error) {
         if (token !== reportLoadToken) return;
         AirCANnect.ui.message("reportMsg", error.message, false, true);
@@ -3569,9 +3576,11 @@
       if (!data.success) {
         if (active && nightId === selectedNightId &&
             data.error !== "cancelled") {
+          const retained = data.error === REPORT_RETAINED_REASON;
           AirCANnect.ui.message(
-            "reportMsg", (reportResult ? "Report update failed: " : "") +
-              (data.error || "Report failed"), false, true);
+            "reportMsg", retained ? REPORT_RETAINED_NOTICE :
+              (reportResult ? "Report update failed: " : "") +
+                (data.error || "Report failed"), retained, true);
         }
         return;
       }
