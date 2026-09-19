@@ -5,6 +5,7 @@
 #include <freertos/semphr.h>
 
 #include "storage_range_write_port.h"
+#include "storage_internal.h"
 
 namespace aircannect {
 
@@ -39,7 +40,7 @@ private:
         OperationTicket ticket;
         int output = -1;
         size_t written = 0;
-        size_t parent_cursor = 0;
+        Storage::ParentDirectoryCursor parent_cursor;
         Phase phase = Phase::Open;
         bool abandoned = false;
         bool reserved = false;

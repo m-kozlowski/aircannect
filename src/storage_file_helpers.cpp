@@ -111,40 +111,54 @@ void release_write_handle(const char *path) {
 }
 
 ParentDirectoryStep ensure_parent_directory_step(const char *path,
-                                                 size_t &cursor) {
-    if (!storage_user_path_valid(path) || cursor > strlen(path)) {
+                                                 ParentDirectoryCursor &cursor) {
+    if (!storage_user_path_valid(path) || cursor.offset > strlen(path)) {
         return ParentDirectoryStep::Failed;
     }
 
-    if (cursor == 0) {
-        const char *last = strrchr(path, '/');
-        if (last == path) return ParentDirectoryStep::Done;
+    const size_t length = strlen(path);
+    if (cursor.offset == length) return ParentDirectoryStep::Done;
 
-        char parent[AC_STORAGE_PATH_MAX] = {};
-        memcpy(parent, path, static_cast<size_t>(last - path));
-        struct stat info {};
-        if (file_stat(parent, info)) {
-            const bool valid = S_ISDIR(info.st_mode);
-            cursor = strlen(path);
-            return valid ? ParentDirectoryStep::Done
-                         : ParentDirectoryStep::Failed;
+    if (cursor.offset == 0) {
+        const char *last = strrchr(path, '/');
+        if (last == path) {
+            cursor.offset = length;
+            return ParentDirectoryStep::Done;
         }
+
+        cursor.offset = static_cast<size_t>(last - path);
     }
 
-    const char *slash = strchr(path + (cursor ? cursor : 1), '/');
-    if (!slash) return ParentDirectoryStep::Done;
-
-    const size_t length = static_cast<size_t>(slash - path);
     char parent[AC_STORAGE_PATH_MAX] = {};
-    memcpy(parent, path, length);
-    if (!ensure_dir(parent)) return ParentDirectoryStep::Failed;
+    memcpy(parent, path, cursor.offset);
 
-    cursor = length + 1;
-    return ParentDirectoryStep::More;
+    if (!cursor.creating) {
+        struct stat info {};
+        if (!file_stat(parent, info)) {
+            if (errno != ENOENT) return ParentDirectoryStep::Failed;
+
+            // Search upward one parent per turn; the mounted root already exists.
+            const size_t previous =
+                static_cast<size_t>(strrchr(parent, '/') - parent);
+
+            if (previous == 0) cursor.creating = true;
+            else cursor.offset = previous;
+            return ParentDirectoryStep::More;
+        }
+
+        if (!S_ISDIR(info.st_mode)) return ParentDirectoryStep::Failed;
+        cursor.creating = true;
+    } else if (!ensure_dir(parent)) {
+        return ParentDirectoryStep::Failed;
+    }
+
+    const char *next = strchr(path + cursor.offset + 1, '/');
+    cursor.offset = next ? static_cast<size_t>(next - path) : length;
+    return next ? ParentDirectoryStep::More : ParentDirectoryStep::Done;
 }
 
 bool ensure_parent_directories(const char *path) {
-    size_t cursor = 0;
+    ParentDirectoryCursor cursor;
     ParentDirectoryStep result;
     do {
         result = ensure_parent_directory_step(path, cursor);

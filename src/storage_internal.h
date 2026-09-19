@@ -40,8 +40,13 @@ size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
 
 // Storage-task file preparation and post-close metadata
 enum class ParentDirectoryStep : uint8_t { More, Done, Failed };
+struct ParentDirectoryCursor {
+    size_t offset = 0;
+    bool creating = false;
+};
+
 ParentDirectoryStep ensure_parent_directory_step(const char *path,
-                                                 size_t &cursor);
+                                                 ParentDirectoryCursor &cursor);
 bool ensure_parent_directories(const char *path);
 uint64_t file_modified(const char *path);
 
