@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "large_scratch_array.h"
 #include "report_fallback_artifact.h"
 #include "report_parser.h"
 #include "report_read_plan.h"
@@ -115,12 +116,20 @@ private:
         bool valid() const { return sample_count > 0; }
     };
 
+    struct EventIndexEntry {
+        ReportEventRecord event;
+        size_t session_index = SIZE_MAX;
+        size_t record_index = SIZE_MAX;
+    };
+
     static bool accept_parsed_chunk(
         void *context,
         const ReportParsedChunk &chunk);
 
     bool prepare();
     bool build_targets();
+    bool prepare_indexes();
+    bool finalize_series_coverage_index();
 
     bool poll_preservation();
     bool select_preserved_section();
@@ -165,6 +174,12 @@ private:
                          ReportSignalId signal,
                          ReportSourceId source) const;
     bool event_session_targeted(size_t session_index) const;
+    bool append_preserved_series_coverage(
+        ReportSourceId source,
+        ReportSignalId signal,
+        const NightCatalogTimeRange &range);
+    static bool series_coverage_less(const SeriesCoverage &lhs,
+                                     const SeriesCoverage &rhs);
     void series_coverage_after(ReportSourceId source,
                                ReportSignalId signal,
                                int64_t timestamp_ms,
@@ -178,7 +193,13 @@ private:
                                 ReportSignalId signal,
                                 const NightCatalogTimeRange &range);
     size_t event_session_for(const ReportEventRecord &event) const;
-    bool append_unique_event(const ReportEventRecord &event);
+    size_t event_index_lower_bound(const ReportEventRecord &event) const;
+    bool append_indexed_event(const ReportEventRecord &event,
+                              size_t session_index,
+                              size_t record_index,
+                              size_t insert_position);
+    bool append_unique_event(const ReportEventRecord &event,
+                             size_t session_index);
 
     void abandon_operations();
     void begin_terminal(ReportFallbackAcquisitionState state,
@@ -195,6 +216,10 @@ private:
     ReportSpoolAvailability availability_;
     ReportSpoolBuffer event_records_;
     PendingSeries pending_series_;
+    std::unique_ptr<LargeScratchArray<SeriesCoverage>>
+        series_coverage_index_;
+    std::unique_ptr<LargeScratchArray<EventIndexEntry>> event_index_;
+    std::unique_ptr<LargeScratchArray<uint32_t>> event_session_counts_;
 
     SourceTarget targets_[MaxSourceTargets] = {};
     size_t target_count_ = 0;
@@ -203,9 +228,11 @@ private:
         ReportFallbackArtifactCodec::MaxSessions] = {};
     bool rebuild_events_[ReportFallbackArtifactCodec::MaxSessions] = {};
     size_t preserved_event_count_ = 0;
-    SeriesCoverage added_series_[
-        ReportFallbackArtifactCodec::MaxSections] = {};
-    size_t added_series_count_ = 0;
+    size_t series_coverage_count_ = 0;
+    size_t series_coverage_capacity_ = 0;
+    size_t event_index_count_ = 0;
+    size_t event_index_capacity_ = 0;
+    bool series_coverage_index_ready_ = false;
 
     size_t session_count_ = 0;
     size_t preserve_file_index_ = 0;

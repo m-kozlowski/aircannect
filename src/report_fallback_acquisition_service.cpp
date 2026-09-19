@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -179,18 +180,22 @@ void ReportFallbackAcquisitionService::reset() {
     builder_.reset();
     event_records_.clear();
     clear_pending_series();
+    series_coverage_index_.reset();
+    event_index_.reset();
+    event_session_counts_.reset();
     plan_.reset();
     replacement_.reset();
     std::fill(std::begin(targets_), std::end(targets_), SourceTarget{});
     memset(missing_signal_masks_, 0, sizeof(missing_signal_masks_));
     memset(rebuild_events_, 0, sizeof(rebuild_events_));
-    std::fill(std::begin(added_series_),
-              std::end(added_series_),
-              SeriesCoverage{});
     target_count_ = 0;
     target_index_ = 0;
     preserved_event_count_ = 0;
-    added_series_count_ = 0;
+    series_coverage_count_ = 0;
+    series_coverage_capacity_ = 0;
+    event_index_count_ = 0;
+    event_index_capacity_ = 0;
+    series_coverage_index_ready_ = false;
     session_count_ = 0;
     preserve_file_index_ = 0;
     preserve_section_index_ = 0;
@@ -239,8 +244,13 @@ bool ReportFallbackAcquisitionService::prepare() {
     const NightCatalogTimeRange *sessions =
         plan_->catalog().sessions(night, session_count_);
     if (!sessions || session_count_ == 0 ||
-        session_count_ > ReportFallbackArtifactCodec::MaxSessions ||
-        !builder_.begin(night.sleep_day,
+        session_count_ > ReportFallbackArtifactCodec::MaxSessions) {
+        fail("fallback_builder_start_failed");
+        return false;
+    }
+
+    if (!prepare_indexes()) return false;
+    if (!builder_.begin(night.sleep_day,
                         next_identity,
                         night.day_start_ms,
                         night.day_end_ms,
@@ -254,6 +264,60 @@ bool ReportFallbackAcquisitionService::prepare() {
 
     event_records_.set_max_size(MAX_EVENT_BYTES);
     status_.sources_total = static_cast<uint32_t>(target_count_);
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::prepare_indexes() {
+    const NightCatalogRecord &night = plan_->night();
+    size_t fallback_count = 0;
+    const NightCatalogFallbackFile *files =
+        plan_->catalog().fallback_files(night, fallback_count);
+
+    size_t series_capacity = ReportFallbackArtifactCodec::MaxSections;
+    bool event_index_needed =
+        source_target(ReportSourceId::RespiratoryEvents) != nullptr;
+    for (size_t file_index = 0; file_index < fallback_count; ++file_index) {
+        size_t section_count = 0;
+        const NightCatalogFallbackSection *sections =
+            plan_->catalog().fallback_sections(files[file_index],
+                                               section_count);
+        if (section_count > SIZE_MAX - series_capacity) {
+            fail("fallback_coverage_index_too_large");
+            return false;
+        }
+        series_capacity += section_count;
+        for (size_t section_index = 0;
+             section_index < section_count;
+             ++section_index) {
+            event_index_needed |=
+                sections[section_index].kind ==
+                    ReportFallbackSectionKind::Events;
+        }
+    }
+
+    series_coverage_index_.reset(
+        new (std::nothrow) LargeScratchArray<SeriesCoverage>());
+    if (!series_coverage_index_ ||
+        !series_coverage_index_->allocate(series_capacity)) {
+        fail("fallback_coverage_index_alloc_failed");
+        return false;
+    }
+    series_coverage_capacity_ = series_capacity;
+
+    if (!event_index_needed) return true;
+
+    const size_t event_record_bytes = report_event_record_wire_size();
+    event_index_capacity_ = MAX_EVENT_BYTES / event_record_bytes;
+    event_index_.reset(
+        new (std::nothrow) LargeScratchArray<EventIndexEntry>());
+    event_session_counts_.reset(
+        new (std::nothrow) LargeScratchArray<uint32_t>());
+    if (!event_index_ || !event_session_counts_ ||
+        !event_index_->allocate(event_index_capacity_) ||
+        !event_session_counts_->allocate(session_count_)) {
+        fail("fallback_event_index_alloc_failed");
+        return false;
+    }
     return true;
 }
 
@@ -403,6 +467,13 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
 
         const NightCatalogFallbackSection &section =
             sections[preserve_section_index_++];
+        if (section.kind == ReportFallbackSectionKind::Series &&
+            !append_preserved_series_coverage(section.source,
+                                              section.signal,
+                                              section.coverage)) {
+            fail("fallback_coverage_index_full");
+            return true;
+        }
         if (!should_preserve(section)) continue;
 
         ReportFallbackSectionInput input = section_input(section);
@@ -420,6 +491,11 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
         if (!builder_.reserve_section(input, preserve_payload_)) {
             fail("fallback_preserved_section_reserve_failed");
         }
+        return true;
+    }
+
+    if (!finalize_series_coverage_index()) {
+        fail("fallback_coverage_index_finalize_failed");
         return true;
     }
 
@@ -487,7 +563,13 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
                                           i,
                                           event) ||
                 report_event_source_mask(event) == 0 ||
-                !report_append_event_record(event_records_, event)) {
+                event_index_count_ >= event_index_capacity_ ||
+                !report_append_event_record(event_records_, event) ||
+                !append_indexed_event(
+                    event,
+                    event_session_for(event),
+                    event_records_.size() / record_bytes - 1,
+                    event_index_lower_bound(event))) {
                 fail("fallback_preserved_event_invalid");
                 return true;
             }
@@ -988,6 +1070,14 @@ bool ReportFallbackAcquisitionService::append_high_res_series_run(
             ? end_ms
             : start_ms + static_cast<int64_t>(consumed) * interval_ms;
 
+        if (!append_series_coverage(
+                source,
+                signal,
+                {pending_series_.start_ms, pending_series_.end_ms})) {
+            fail("fallback_series_coverage_index_full");
+            return false;
+        }
+
         if (pending_series_.values.size() == max_values_bytes &&
             !flush_pending_series()) {
             return false;
@@ -1027,10 +1117,7 @@ bool ReportFallbackAcquisitionService::flush_pending_series() {
             pending_series_.sample_count,
             payload,
             payload_size) ||
-        !builder_.commit_reserved_section() ||
-        !append_series_coverage(pending_series_.source,
-                                pending_series_.signal,
-                                section.coverage)) {
+        !builder_.commit_reserved_section()) {
         fail("fallback_series_append_failed");
         return false;
     }
@@ -1076,8 +1163,9 @@ bool ReportFallbackAcquisitionService::accept_event_chunk(
             fail("fallback_event_record_invalid");
             return false;
         }
-        if (event_session_for(event) == SIZE_MAX) continue;
-        if (!append_unique_event(event)) {
+        const size_t session_index = event_session_for(event);
+        if (session_index == SIZE_MAX) continue;
+        if (!append_unique_event(event, session_index)) {
             fail("fallback_event_buffer_full");
             return false;
         }
@@ -1095,23 +1183,54 @@ bool ReportFallbackAcquisitionService::append_event_sections() {
         fail("fallback_event_sessions_invalid");
         return false;
     }
+    if (!event_index_ || !event_session_counts_ ||
+        event_index_count_ != record_count ||
+        preserved_event_count_ > event_index_count_) {
+        fail("fallback_event_buffer_invalid");
+        return false;
+    }
 
+    EventIndexEntry *entries = event_index_->data();
+    if (event_index_count_ > 1) {
+        std::sort(entries,
+                  entries + event_index_count_,
+                  [](const EventIndexEntry &lhs,
+                     const EventIndexEntry &rhs) {
+                      if (lhs.session_index != rhs.session_index) {
+                          return lhs.session_index < rhs.session_index;
+                      }
+                      return lhs.record_index < rhs.record_index;
+                  });
+    }
+
+    size_t grouped_begin = 0;
     for (size_t session_index = 0;
          session_index < session_count_;
          ++session_index) {
         if (!event_session_targeted(session_index)) continue;
 
-        uint32_t selected = 0;
-        for (size_t i = preserved_event_count_; i < record_count; ++i) {
-            ReportEventRecord event;
-            if (!report_read_event_record(event_records_.data(),
-                                          event_records_.size(),
-                                          i,
-                                          event)) {
-                fail("fallback_event_buffer_invalid");
-                return false;
+        const uint32_t selected =
+            event_session_counts_->data()[session_index];
+
+        while (grouped_begin < event_index_count_) {
+            const EventIndexEntry &entry = entries[grouped_begin];
+            if (entry.session_index > session_index) break;
+            if (entry.session_index == session_index &&
+                entry.record_index >= preserved_event_count_) {
+                break;
             }
-            if (event_session_for(event) == session_index) selected++;
+            ++grouped_begin;
+        }
+        const size_t group_start = grouped_begin;
+        while (grouped_begin < event_index_count_ &&
+               entries[grouped_begin].session_index == session_index &&
+               entries[grouped_begin].record_index >=
+                   preserved_event_count_) {
+            ++grouped_begin;
+        }
+        if (grouped_begin - group_start != selected) {
+            fail("fallback_event_index_invalid");
+            return false;
         }
 
         ReportFallbackSectionInput section;
@@ -1131,26 +1250,14 @@ bool ReportFallbackAcquisitionService::append_event_sections() {
             return false;
         }
 
-        size_t write = 0;
-        for (size_t i = preserved_event_count_; i < record_count; ++i) {
-            ReportEventRecord event;
-            if (!report_read_event_record(event_records_.data(),
-                                          event_records_.size(),
-                                          i,
-                                          event)) {
-                builder_.discard_reserved_section();
-                fail("fallback_event_buffer_invalid");
-                return false;
-            }
-            if (event_session_for(event) != session_index) continue;
-
-            memcpy(payload + write * record_bytes,
-                   event_records_.data() + i * record_bytes,
+        for (size_t i = group_start; i < grouped_begin; ++i) {
+            const EventIndexEntry &entry = entries[i];
+            memcpy(payload + (i - group_start) * record_bytes,
+                   event_records_.data() + entry.record_index * record_bytes,
                    record_bytes);
-            write++;
         }
 
-        if (write != selected || !builder_.commit_reserved_section()) {
+        if (!builder_.commit_reserved_section()) {
             fail("fallback_event_section_commit_failed");
             return false;
         }
@@ -1334,6 +1441,23 @@ bool ReportFallbackAcquisitionService::event_session_targeted(
     return session_index < session_count_ && rebuild_events_[session_index];
 }
 
+bool ReportFallbackAcquisitionService::series_coverage_less(
+    const SeriesCoverage &lhs,
+    const SeriesCoverage &rhs) {
+    if (lhs.source != rhs.source) {
+        return static_cast<uint8_t>(lhs.source) <
+            static_cast<uint8_t>(rhs.source);
+    }
+    if (lhs.signal != rhs.signal) {
+        return static_cast<uint8_t>(lhs.signal) <
+            static_cast<uint8_t>(rhs.signal);
+    }
+    if (lhs.range.start_ms != rhs.range.start_ms) {
+        return lhs.range.start_ms < rhs.range.start_ms;
+    }
+    return lhs.range.end_ms < rhs.range.end_ms;
+}
+
 void ReportFallbackAcquisitionService::series_coverage_after(
     ReportSourceId source,
     ReportSignalId signal,
@@ -1345,46 +1469,32 @@ void ReportFallbackAcquisitionService::series_coverage_after(
     covered_end_ms = timestamp_ms;
     next_start_ms = INT64_MAX;
 
-    auto consider = [&](const NightCatalogTimeRange &range) {
-        if (!range.valid()) return;
-        if (range.start_ms <= timestamp_ms && range.end_ms > timestamp_ms) {
+    if (series_coverage_index_ready_ && series_coverage_index_ &&
+        series_coverage_count_ > 0) {
+        const SeriesCoverage *entries = series_coverage_index_->data();
+        const size_t count = series_coverage_count_;
+        const SeriesCoverage first_key{
+            source, signal, {INT64_MIN, INT64_MIN}};
+        const SeriesCoverage last_key{
+            source, signal, {INT64_MAX, INT64_MAX}};
+        const SeriesCoverage time_key{
+            source, signal, {timestamp_ms, INT64_MAX}};
+        const SeriesCoverage *first = std::lower_bound(
+            entries, entries + count, first_key, series_coverage_less);
+        const SeriesCoverage *last = std::upper_bound(
+            first, entries + count, last_key, series_coverage_less);
+        const SeriesCoverage *next = std::upper_bound(
+            first, last, time_key, series_coverage_less);
+
+        if (next != first &&
+            (next - 1)->range.end_ms > timestamp_ms) {
             covered = true;
-            covered_end_ms = std::max(covered_end_ms, range.end_ms);
-        } else if (range.start_ms > timestamp_ms) {
-            next_start_ms = std::min(next_start_ms, range.start_ms);
+            covered_end_ms = std::max(covered_end_ms,
+                                      (next - 1)->range.end_ms);
         }
-    };
-
-    size_t file_count = 0;
-    const NightCatalogFallbackFile *files = plan_->catalog().fallback_files(
-        plan_->night(), file_count);
-    for (size_t file_index = 0;
-         files && file_index < file_count;
-         ++file_index) {
-        size_t section_count = 0;
-        const NightCatalogFallbackSection *sections =
-            plan_->catalog().fallback_sections(files[file_index],
-                                               section_count);
-        for (size_t i = 0; sections && i < section_count; ++i) {
-            if (sections[i].kind == ReportFallbackSectionKind::Series &&
-                sections[i].source == source &&
-                sections[i].signal == signal) {
-                consider(sections[i].coverage);
-            }
+        if (next != last) {
+            next_start_ms = next->range.start_ms;
         }
-    }
-
-    for (size_t i = 0; i < added_series_count_; ++i) {
-        if (added_series_[i].source == source &&
-            added_series_[i].signal == signal) {
-            consider(added_series_[i].range);
-        }
-    }
-
-    if (pending_series_.valid() &&
-        pending_series_.source == source &&
-        pending_series_.signal == signal) {
-        consider({pending_series_.start_ms, pending_series_.end_ms});
     }
 }
 
@@ -1424,38 +1534,123 @@ bool ReportFallbackAcquisitionService::series_session_complete(
     return true;
 }
 
+bool ReportFallbackAcquisitionService::append_preserved_series_coverage(
+    ReportSourceId source,
+    ReportSignalId signal,
+    const NightCatalogTimeRange &range) {
+    if (!range.valid() || !series_coverage_index_ ||
+        series_coverage_count_ >= series_coverage_capacity_) {
+        return false;
+    }
+
+    series_coverage_index_->data()[series_coverage_count_++] =
+        {source, signal, range};
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::finalize_series_coverage_index() {
+    if (!series_coverage_index_) return false;
+
+    SeriesCoverage *entries = series_coverage_index_->data();
+    if (series_coverage_count_ > 1) {
+        std::sort(entries,
+                  entries + series_coverage_count_,
+                  series_coverage_less);
+    }
+
+    size_t write = 0;
+    for (size_t read = 0; read < series_coverage_count_; ++read) {
+        const SeriesCoverage current = entries[read];
+        if (write > 0 && entries[write - 1].source == current.source &&
+            entries[write - 1].signal == current.signal &&
+            entries[write - 1].range.end_ms >= current.range.start_ms) {
+            entries[write - 1].range.end_ms = std::max(
+                entries[write - 1].range.end_ms,
+                current.range.end_ms);
+            continue;
+        }
+        entries[write++] = current;
+    }
+    series_coverage_count_ = write;
+    series_coverage_index_ready_ = true;
+    return true;
+}
+
 bool ReportFallbackAcquisitionService::append_series_coverage(
     ReportSourceId source,
     ReportSignalId signal,
     const NightCatalogTimeRange &range) {
-    if (!range.valid()) return false;
-
-    NightCatalogTimeRange merged = range;
-    for (size_t i = 0; i < added_series_count_;) {
-        const SeriesCoverage &coverage = added_series_[i];
-        const bool adjacent = coverage.source == source &&
-            coverage.signal == signal &&
-            coverage.range.start_ms <= merged.end_ms &&
-            merged.start_ms <= coverage.range.end_ms;
-        if (!adjacent) {
-            ++i;
-            continue;
-        }
-
-        merged.start_ms = std::min(merged.start_ms,
-                                   coverage.range.start_ms);
-        merged.end_ms = std::max(merged.end_ms,
-                                 coverage.range.end_ms);
-        added_series_[i] = added_series_[added_series_count_ - 1];
-        added_series_[added_series_count_ - 1] = {};
-        added_series_count_--;
-    }
-
-    if (added_series_count_ >= ReportFallbackArtifactCodec::MaxSections) {
+    if (!range.valid() || !series_coverage_index_ ||
+        !series_coverage_index_ready_) {
         return false;
     }
 
-    added_series_[added_series_count_++] = {source, signal, merged};
+    SeriesCoverage *entries = series_coverage_index_->data();
+    NightCatalogTimeRange merged = range;
+    const SeriesCoverage first_key{
+        source, signal, {INT64_MIN, INT64_MIN}};
+    const SeriesCoverage last_key{
+        source, signal, {INT64_MAX, INT64_MAX}};
+    const SeriesCoverage time_key{
+        source, signal, {merged.start_ms, INT64_MIN}};
+    SeriesCoverage *first = std::lower_bound(
+        entries,
+        entries + series_coverage_count_,
+        first_key,
+        series_coverage_less);
+    SeriesCoverage *last = std::upper_bound(
+        first,
+        entries + series_coverage_count_,
+        last_key,
+        series_coverage_less);
+    SeriesCoverage *time_begin = std::lower_bound(
+        first, last, time_key, series_coverage_less);
+    const size_t first_key_index = static_cast<size_t>(first - entries);
+    const size_t time_begin_index = static_cast<size_t>(time_begin - entries);
+
+    size_t merge_begin = time_begin_index;
+    if (merge_begin > first_key_index &&
+        entries[merge_begin - 1].range.end_ms >= merged.start_ms) {
+        --merge_begin;
+        merged.start_ms = std::min(merged.start_ms,
+                                   entries[merge_begin].range.start_ms);
+        merged.end_ms = std::max(merged.end_ms,
+                                 entries[merge_begin].range.end_ms);
+    }
+
+    size_t merge_end = time_begin_index;
+    const size_t last_key_index = static_cast<size_t>(last - entries);
+    while (merge_end < last_key_index &&
+           entries[merge_end].range.start_ms <= merged.end_ms) {
+        merged.start_ms = std::min(merged.start_ms,
+                                   entries[merge_end].range.start_ms);
+        merged.end_ms = std::max(merged.end_ms,
+                                 entries[merge_end].range.end_ms);
+        ++merge_end;
+    }
+
+    if (merge_begin == merge_end) {
+        if (series_coverage_count_ >= series_coverage_capacity_) {
+            return false;
+        }
+        for (size_t i = series_coverage_count_;
+             i > time_begin_index;
+             --i) {
+            entries[i] = entries[i - 1];
+        }
+        entries[time_begin_index] = {source, signal, merged};
+        ++series_coverage_count_;
+        return true;
+    }
+
+    entries[merge_begin] = {source, signal, merged};
+    const size_t removed = merge_end - merge_begin;
+    if (removed > 1) {
+        for (size_t i = merge_end; i < series_coverage_count_; ++i) {
+            entries[i - removed + 1] = entries[i];
+        }
+        series_coverage_count_ -= removed - 1;
+    }
     return true;
 }
 
@@ -1496,26 +1691,70 @@ size_t ReportFallbackAcquisitionService::event_session_for(
     return selected;
 }
 
-bool ReportFallbackAcquisitionService::append_unique_event(
-    const ReportEventRecord &event) {
-    const size_t count =
-        event_records_.size() / report_event_record_wire_size();
-    for (size_t i = 0; i < count; ++i) {
-        ReportEventRecord existing;
-        if (!report_read_event_record(event_records_.data(),
-                                      event_records_.size(),
-                                      i,
-                                      existing)) {
-            return false;
-        }
-        if (existing.start_ms == event.start_ms &&
-            existing.duration_ms == event.duration_ms &&
-            existing.code == event.code &&
-            existing.flags == event.flags) {
-            return true;
-        }
+bool ReportFallbackAcquisitionService::append_indexed_event(
+    const ReportEventRecord &event,
+    size_t session_index,
+    size_t record_index,
+    size_t insert_position) {
+    if (!event_index_ || event_index_count_ >= event_index_capacity_) {
+        return false;
     }
-    return report_append_event_record(event_records_, event);
+
+    EventIndexEntry *entries = event_index_->data();
+    if (insert_position > event_index_count_) return false;
+    for (size_t i = event_index_count_; i > insert_position; --i) {
+        entries[i] = entries[i - 1];
+    }
+    entries[insert_position] = {event, session_index, record_index};
+    ++event_index_count_;
+    return true;
+}
+
+size_t ReportFallbackAcquisitionService::event_index_lower_bound(
+    const ReportEventRecord &event) const {
+    if (!event_index_ || event_index_count_ == 0) return 0;
+
+    const EventIndexEntry *entries = event_index_->data();
+    const EventIndexEntry *position = std::lower_bound(
+        entries,
+        entries + event_index_count_,
+        event,
+        [](const EventIndexEntry &entry, const ReportEventRecord &value) {
+            return report_event_record_less(entry.event, value);
+        });
+    return static_cast<size_t>(position - entries);
+}
+
+bool ReportFallbackAcquisitionService::append_unique_event(
+    const ReportEventRecord &event,
+    size_t session_index) {
+    if (!event_index_) {
+        return false;
+    }
+
+    const size_t insert = event_index_lower_bound(event);
+    const EventIndexEntry *entries = event_index_->data();
+    if (insert < event_index_count_ &&
+        report_event_record_equal(entries[insert].event, event)) {
+        return true;
+    }
+    if (event_index_count_ >= event_index_capacity_) {
+        return false;
+    }
+
+    const size_t record_bytes = report_event_record_wire_size();
+    const size_t record_index = event_records_.size() / record_bytes;
+    if (!report_append_event_record(event_records_, event) ||
+        !append_indexed_event(event,
+                              session_index,
+                              record_index,
+                              insert)) {
+        return false;
+    }
+    if (session_index < session_count_ && event_session_counts_) {
+        event_session_counts_->data()[session_index]++;
+    }
+    return true;
 }
 
 void ReportFallbackAcquisitionService::abandon_operations() {

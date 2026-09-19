@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "checked_size.h"
+#include "large_scratch_array.h"
 #include "little_endian.h"
 #include "report_fallback_payload_layout.h"
 #include "storage_read_port.h"
@@ -367,6 +368,9 @@ bool ReportFallbackArtifactCodec::decode_metadata(
         previous_session = session;
     }
 
+    LargeScratchArray<ReportFallbackSection> physical_sections;
+    if (!physical_sections.allocate(info.section_count)) return false;
+
     size_t payload_bytes = 0;
     ReportFallbackSection previous;
     bool have_previous = false;
@@ -388,30 +392,38 @@ bool ReportFallbackArtifactCodec::decode_metadata(
             }
         }
 
-        if (section.data_size > 0) {
-            const uint64_t section_end =
-                section.data_offset + section.data_size;
-            for (size_t j = 0; j < i; ++j) {
-                ReportFallbackSection other;
-                if (!decode_section(section_bytes + j * SectionBytes,
-                                    other)) {
-                    return false;
-                }
-                const uint64_t other_end =
-                    other.data_offset + other.data_size;
-                if (other.data_size > 0 &&
-                    section.data_offset < other_end &&
-                    other.data_offset < section_end) {
-                    return false;
-                }
-            }
-        }
-
+        physical_sections.data()[i] = section;
         payload_bytes += section.data_size;
         previous = section;
         have_previous = true;
     }
     if (payload_bytes != info.payload_bytes) return false;
+
+    if (info.section_count > 1) {
+        std::sort(physical_sections.data(),
+                  physical_sections.data() + info.section_count,
+                  [](const ReportFallbackSection &lhs,
+                     const ReportFallbackSection &rhs) {
+                      if (lhs.data_offset != rhs.data_offset) {
+                          return lhs.data_offset < rhs.data_offset;
+                      }
+                      return lhs.data_size < rhs.data_size;
+                  });
+    }
+    bool have_payload = false;
+    uint64_t previous_payload_end = 0;
+    for (size_t i = 0; i < info.section_count; ++i) {
+        const ReportFallbackSection &section = physical_sections.data()[i];
+        if (section.data_size == 0) continue;
+
+        const uint64_t section_end =
+            section.data_offset + section.data_size;
+        if (have_payload && section.data_offset < previous_payload_end) {
+            return false;
+        }
+        previous_payload_end = section_end;
+        have_payload = true;
+    }
 
     view.info = info;
     view.session_bytes = session_bytes;
