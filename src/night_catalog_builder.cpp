@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "checked_size.h"
+#include "incremental_sort.h"
+#include "large_object.h"
 #include "large_scratch_array.h"
 #include "report_records.h"
 #include "report_fallback_artifact.h"
@@ -692,159 +694,130 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
                      LargeScratchArray<BuildNight> &nights,
                      LargeScratchArray<BuildSession> &sessions,
                      LargeScratchArray<BuildFallback> &fallbacks,
-                     size_t &invalid_fallback_records) {
-    for (size_t i = 0; i < input.fallback_record_count; ++i) {
-        const NightCatalogFallbackInput &source =
-            input.fallback_records[i];
+                     size_t &invalid_fallback_records, size_t index) {
+    const NightCatalogFallbackInput &source = input.fallback_records[index];
 
-        BuildNight *night = find_night(nights, source.sleep_day);
-        if (night && night->has_edf && !source.retain_with_edf) continue;
+    BuildNight *night = find_night(nights, source.sleep_day);
+    if (night && night->has_edf && !source.retain_with_edf) return true;
 
-        if (!fallback_input_valid(source) || (night && night->has_fallback)) {
-            ++invalid_fallback_records;
-            continue;
+    if (!fallback_input_valid(source) || (night && night->has_fallback)) {
+        ++invalid_fallback_records;
+        return true;
+    }
+
+    const NightCatalogSummaryInput *summary = find_summary(input, source.sleep_day);
+    int32_t adjustment_ms = source.time_adjust_ms;
+    // EDF already owns this night's clock and sessions. Keep the saved
+    // fallback transform even when Summary is present during a full scan.
+    const bool use_summary_axis =
+        !source.coordinates_are_resolved && !(night && night->has_edf) && summary &&
+        resolve_fallback_adjustment(source, *summary, adjustment_ms);
+
+    int64_t fallback_day_start_ms = source.day_start_ms;
+    int64_t fallback_day_end_ms = source.day_end_ms;
+    if (!source.coordinates_are_resolved && !use_summary_axis &&
+        (!adjust_time(source.day_start_ms, adjustment_ms, fallback_day_start_ms) ||
+         !adjust_time(source.day_end_ms, adjustment_ms, fallback_day_end_ms) ||
+         !valid_boundary(fallback_day_start_ms, fallback_day_end_ms))) {
+        ++invalid_fallback_records;
+        return true;
+    }
+
+    if (!night) night = find_or_add_night(nights, source.sleep_day);
+    if (!night) return false;
+
+    if (use_summary_axis) {
+        if (!night->has_summary || night->day_start_ms != summary->day_start_ms ||
+            night->day_end_ms != summary->day_end_ms) {
+            return false;
         }
-
-        const NightCatalogSummaryInput *summary =
-            find_summary(input, source.sleep_day);
-        int32_t adjustment_ms = source.time_adjust_ms;
-        // EDF already owns this night's clock and sessions. Keep the saved
-        // fallback transform even when Summary is present during a full scan.
-        const bool use_summary_axis = !source.coordinates_are_resolved &&
-            !(night && night->has_edf) && summary &&
-            resolve_fallback_adjustment(source, *summary, adjustment_ms);
-
-        int64_t fallback_day_start_ms = source.day_start_ms;
-        int64_t fallback_day_end_ms = source.day_end_ms;
-        if (!source.coordinates_are_resolved && !use_summary_axis &&
-            (!adjust_time(source.day_start_ms,
-                          adjustment_ms,
-                          fallback_day_start_ms) ||
-             !adjust_time(source.day_end_ms,
-                          adjustment_ms,
-                          fallback_day_end_ms) ||
-             !valid_boundary(fallback_day_start_ms,
-                             fallback_day_end_ms))) {
-            ++invalid_fallback_records;
-            continue;
+        night->fallback_joins_summary = true;
+    } else if (night->has_edf) {
+        if (night->day_start_ms != fallback_day_start_ms ||
+            night->day_end_ms != fallback_day_end_ms) {
+            return false;
         }
+    } else {
+        night->day_start_ms = fallback_day_start_ms;
+        night->day_end_ms = fallback_day_end_ms;
+        night->boundary_set = true;
+        night->fallback_joins_summary = false;
+        night->has_summary = false;
+        night->summary_identity = 0;
+        night->summary_metrics_valid = false;
 
-        if (!night) night = find_or_add_night(nights, source.sleep_day);
-        if (!night) return false;
-
-        if (use_summary_axis) {
-            if (!night->has_summary ||
-                night->day_start_ms != summary->day_start_ms ||
-                night->day_end_ms != summary->day_end_ms) {
-                return false;
-            }
-            night->fallback_joins_summary = true;
-        } else if (night->has_edf) {
-            if (night->day_start_ms != fallback_day_start_ms ||
-                night->day_end_ms != fallback_day_end_ms) {
-                return false;
-            }
-        } else {
-            night->day_start_ms = fallback_day_start_ms;
-            night->day_end_ms = fallback_day_end_ms;
-            night->boundary_set = true;
-            night->fallback_joins_summary = false;
-            night->has_summary = false;
-            night->summary_identity = 0;
-            night->summary_metrics_valid = false;
-
-            if (source.resolved_timezone_offset_valid) {
-                night->timezone_offset_minutes =
-                    source.resolved_timezone_offset_minutes;
+        if (source.resolved_timezone_offset_valid) {
+            night->timezone_offset_minutes = source.resolved_timezone_offset_minutes;
+            night->timezone_offset_valid = true;
+        } else if (source.source_timezone_offset_valid && adjustment_ms % 60000 == 0) {
+            const int64_t resolved_minutes =
+                static_cast<int64_t>(source.source_timezone_offset_minutes) -
+                adjustment_ms / 60000;
+            if (resolved_minutes >= -24 * 60 && resolved_minutes <= 24 * 60) {
+                night->timezone_offset_minutes = static_cast<int32_t>(resolved_minutes);
                 night->timezone_offset_valid = true;
-            } else if (source.source_timezone_offset_valid &&
-                       adjustment_ms % 60000 == 0) {
-                const int64_t resolved_minutes =
-                    static_cast<int64_t>(
-                        source.source_timezone_offset_minutes) -
-                    adjustment_ms / 60000;
-                if (resolved_minutes >= -24 * 60 &&
-                    resolved_minutes <= 24 * 60) {
-                    night->timezone_offset_minutes =
-                        static_cast<int32_t>(resolved_minutes);
-                    night->timezone_offset_valid = true;
-                } else {
-                    night->timezone_offset_minutes = 0;
-                    night->timezone_offset_valid = false;
-                }
             } else {
                 night->timezone_offset_minutes = 0;
                 night->timezone_offset_valid = false;
             }
+        } else {
+            night->timezone_offset_minutes = 0;
+            night->timezone_offset_valid = false;
         }
+    }
 
-        for (size_t session_index = 0;
-             session_index < source.session_count;
-             ++session_index) {
-            NightCatalogTimeRange session = source.sessions[session_index];
-            if (!source.coordinates_are_resolved && adjustment_ms != 0) {
-                NightCatalogTimeRange adjusted;
-                if (!adjust_range(session, adjustment_ms, adjusted)) {
-                    return false;
-                }
-                session = adjusted;
-            }
-            if (!append_session(sessions,
-                                night->owner,
-                                SessionOrigin::Fallback,
-                                session)) {
+    for (size_t session_index = 0; session_index < source.session_count;
+         ++session_index) {
+        NightCatalogTimeRange session = source.sessions[session_index];
+        if (!source.coordinates_are_resolved && adjustment_ms != 0) {
+            NightCatalogTimeRange adjusted;
+            if (!adjust_range(session, adjustment_ms, adjusted)) {
                 return false;
             }
-
-            if (use_summary_axis && night->summary_metrics_valid &&
-                !summary_has_session(*summary, session)) {
-                night->summary_metrics_valid = false;
-            }
+            session = adjusted;
+        }
+        if (!append_session(sessions, night->owner, SessionOrigin::Fallback, session)) {
+            return false;
         }
 
-        BuildFallback *fallback = fallbacks.append();
-        if (!fallback) return false;
-        fallback->owner = night->owner;
-        fallback->source = source;
-        fallback->time_adjust_ms = adjustment_ms;
-        night->has_fallback = true;
+        if (use_summary_axis && night->summary_metrics_valid &&
+            !summary_has_session(*summary, session)) {
+            night->summary_metrics_valid = false;
+        }
     }
+
+    BuildFallback *fallback = fallbacks.append();
+    if (!fallback) return false;
+    fallback->owner = night->owner;
+    fallback->source = source;
+    fallback->time_adjust_ms = adjustment_ms;
+    night->has_fallback = true;
     return true;
 }
 
 bool ingest_edf(const NightCatalogBuildInput &input,
                 LargeScratchArray<BuildNight> &nights,
                 LargeScratchArray<BuildSession> &sessions,
-                LargeScratchArray<BuildFile> &files) {
-    for (size_t i = 0; i < input.edf_session_count; ++i) {
-        const NightCatalogEdfSessionInput &source = input.edf_sessions[i];
-        if (!source.display_window.valid() ||
-            (source.file_count > 0 && !source.files)) {
-            return false;
-        }
+                LargeScratchArray<BuildFile> &files, size_t index) {
+    const NightCatalogEdfSessionInput &source = input.edf_sessions[index];
+    if (!source.display_window.valid() || (source.file_count > 0 && !source.files)) {
+        return false;
+    }
 
-        BuildNight *night = find_or_add_night(nights, source.sleep_day);
-        if (!night || !set_primary_boundary(*night,
-                                            source.day_start_ms,
-                                            source.day_end_ms) ||
-            !append_session(sessions,
-                            night->owner,
-                            SessionOrigin::Edf,
-                            source.display_window)) {
-            return false;
-        }
+    BuildNight *night = find_or_add_night(nights, source.sleep_day);
+    if (!night ||
+        !set_primary_boundary(*night, source.day_start_ms, source.day_end_ms) ||
+        !append_session(sessions, night->owner, SessionOrigin::Edf,
+                        source.display_window)) {
+        return false;
+    }
 
-        night->has_edf = true;
-        night->active_capture = night->active_capture || source.active_capture;
-        for (size_t file_index = 0;
-             file_index < source.file_count;
-             ++file_index) {
-            if (!append_file(files,
-                             night->owner,
-                             source.files[file_index],
-                             &source.display_window)) {
-                return false;
-            }
+    night->has_edf = true;
+    night->active_capture = night->active_capture || source.active_capture;
+    for (size_t file_index = 0; file_index < source.file_count; ++file_index) {
+        if (!append_file(files, night->owner, source.files[file_index],
+                         &source.display_window)) {
+            return false;
         }
     }
     return true;
@@ -852,110 +825,93 @@ bool ingest_edf(const NightCatalogBuildInput &input,
 
 bool ingest_str(const NightCatalogBuildInput &input,
                 LargeScratchArray<BuildNight> &nights,
-                LargeScratchArray<BuildFile> &files) {
-    for (size_t i = 0; i < input.str_record_count; ++i) {
-        const NightCatalogStrInput &source = input.str_records[i];
-        if (!source.record.sleep_day.valid() || !source.path ||
-            !source.path[0] || source.record_size == 0 ||
-            source.record.source_identity == 0) {
-            return false;
-        }
-
-        BuildNight *night = find_night(nights, source.record.sleep_day);
-        if (!night || !night->has_edf) continue;
-        if (night->has_str) return false;
-
-        NightCatalogSourceFileInput file;
-        file.kind = NightCatalogFileKind::Str;
-        file.path = source.path;
-        file.coverage.range = {night->day_start_ms, night->day_end_ms};
-        file.file_size = source.file_size;
-        file.last_write_ms = source.last_write_ms;
-        file.data_offset = source.record_offset;
-        file.data_size = source.record_size;
-        file.identity = source.record.source_identity;
-        file.record_size = source.record_size;
-        file.complete_records = 1;
-        if (!append_file(files, night->owner, file, nullptr)) return false;
-
-        night->str_metrics = source.record.metrics;
-        night->has_str = true;
+                LargeScratchArray<BuildFile> &files, size_t index) {
+    const NightCatalogStrInput &source = input.str_records[index];
+    if (!source.record.sleep_day.valid() || !source.path || !source.path[0] ||
+        source.record_size == 0 || source.record.source_identity == 0) {
+        return false;
     }
+
+    BuildNight *night = find_night(nights, source.record.sleep_day);
+    if (!night || !night->has_edf) return true;
+    if (night->has_str) return false;
+
+    NightCatalogSourceFileInput file;
+    file.kind = NightCatalogFileKind::Str;
+    file.path = source.path;
+    file.coverage.range = {night->day_start_ms, night->day_end_ms};
+    file.file_size = source.file_size;
+    file.last_write_ms = source.last_write_ms;
+    file.data_offset = source.record_offset;
+    file.data_size = source.record_size;
+    file.identity = source.record.source_identity;
+    file.record_size = source.record_size;
+    file.complete_records = 1;
+    if (!append_file(files, night->owner, file, nullptr)) return false;
+
+    night->str_metrics = source.record.metrics;
+    night->has_str = true;
     return true;
 }
 
 bool ingest_summary(const NightCatalogBuildInput &input,
                     LargeScratchArray<BuildNight> &nights,
-                    LargeScratchArray<BuildSession> &sessions) {
-    for (size_t i = 0; i < input.summary_record_count; ++i) {
-        const NightCatalogSummaryInput &source = input.summary_records[i];
-        if (!source.sleep_day.valid() || source.identity == 0 ||
-            !valid_timezone_offset(source.timezone_offset_valid,
-                                   source.timezone_offset_minutes) ||
-            !valid_boundary(source.day_start_ms, source.day_end_ms) ||
-            (source.session_count > 0 && !source.sessions)) {
+                    LargeScratchArray<BuildSession> &sessions, size_t index) {
+    const NightCatalogSummaryInput &source = input.summary_records[index];
+    if (!source.sleep_day.valid() || source.identity == 0 ||
+        !valid_timezone_offset(source.timezone_offset_valid,
+                               source.timezone_offset_minutes) ||
+        !valid_boundary(source.day_start_ms, source.day_end_ms) ||
+        (source.session_count > 0 && !source.sessions)) {
+        return false;
+    }
+
+    size_t matched_session_count = 0;
+    NightCatalogTimeRange previous_session;
+    for (size_t session_index = 0; session_index < source.session_count;
+         ++session_index) {
+        const NightCatalogTimeRange &session = source.sessions[session_index];
+        if (session.start_ms < source.day_start_ms ||
+            session.end_ms > source.day_end_ms ||
+            (session_index > 0 && session.start_ms < previous_session.end_ms)) {
             return false;
         }
-
-        size_t matched_session_count = 0;
-        NightCatalogTimeRange previous_session;
-        for (size_t session_index = 0;
-             session_index < source.session_count;
-             ++session_index) {
-            const NightCatalogTimeRange &session =
-                source.sessions[session_index];
-            if (session.start_ms < source.day_start_ms ||
-                session.end_ms > source.day_end_ms ||
-                (session_index > 0 &&
-                 session.start_ms < previous_session.end_ms)) {
-                return false;
-            }
-            if (summary_session_matches_raw_edf(input,
-                                                source.sleep_day,
-                                                session)) {
-                ++matched_session_count;
-            }
-            previous_session = session;
+        if (summary_session_matches_raw_edf(input, source.sleep_day, session)) {
+            ++matched_session_count;
         }
+        previous_session = session;
+    }
 
-        BuildNight *night = find_night(nights, source.sleep_day);
-        if ((night && night->has_edf) ||
-            (source.session_count > 0 &&
-             matched_session_count == source.session_count)) {
+    BuildNight *night = find_night(nights, source.sleep_day);
+    if ((night && night->has_edf) ||
+        (source.session_count > 0 && matched_session_count == source.session_count)) {
+        return true;
+    }
+    if (!night) night = find_or_add_night(nights, source.sleep_day);
+    if (!night || night->has_summary ||
+        !set_primary_boundary(*night, source.day_start_ms, source.day_end_ms)) {
+        return false;
+    }
+
+    for (size_t session_index = 0; session_index < source.session_count;
+         ++session_index) {
+        if (summary_session_matches_raw_edf(input, source.sleep_day,
+                                            source.sessions[session_index])) {
             continue;
         }
-        if (!night) night = find_or_add_night(nights, source.sleep_day);
-        if (!night || night->has_summary ||
-            !set_primary_boundary(*night,
-                                  source.day_start_ms,
-                                  source.day_end_ms)) {
+        if (!append_session(sessions, night->owner, SessionOrigin::Summary,
+                            source.sessions[session_index])) {
             return false;
         }
-
-        for (size_t session_index = 0;
-             session_index < source.session_count;
-             ++session_index) {
-            if (summary_session_matches_raw_edf(input,
-                                                source.sleep_day,
-                                                source.sessions[session_index])) {
-                continue;
-            }
-            if (!append_session(sessions,
-                                night->owner,
-                                SessionOrigin::Summary,
-                                source.sessions[session_index])) {
-                return false;
-            }
-        }
-
-        night->summary_metrics = source.metrics;
-        night->summary_identity = source.identity;
-        night->timezone_offset_minutes = source.timezone_offset_minutes;
-        night->timezone_offset_valid = source.timezone_offset_valid;
-        night->has_summary = true;
-        night->summary_metrics_valid = matched_session_count == 0;
-        night->summary_expired = source.expired;
     }
+
+    night->summary_metrics = source.metrics;
+    night->summary_identity = source.identity;
+    night->timezone_offset_minutes = source.timezone_offset_minutes;
+    night->timezone_offset_valid = source.timezone_offset_valid;
+    night->has_summary = true;
+    night->summary_metrics_valid = matched_session_count == 0;
+    night->summary_expired = source.expired;
     return true;
 }
 
@@ -1209,178 +1165,55 @@ uint64_t calculate_revision(const NightCatalog &catalog,
     return hash == 0 ? 1 : hash;
 }
 
-std::shared_ptr<const NightCatalog> build_failed(
-    NightCatalogBuildStatus *status,
-    NightCatalogBuildFailure failure,
-    const char *detail) {
-    if (status) {
-        status->failure = failure;
-        status->detail = detail;
-    }
-    return {};
-}
-
 }  // namespace
 
-std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
-    const NightCatalogBuildInput &input,
-    NightCatalogBuildStatus *status) {
-    if (status) *status = {};
+struct NightCatalogBuilder::Runtime {
+    enum class Phase {
+        CountEdf,
+        CountSummary,
+        CountFallback,
+        AllocateNights,
+        AllocateSessions,
+        AllocateFiles,
+        AllocateFallbacks,
+        Edf,
+        Str,
+        Summary,
+        Fallback,
+        SortNights,
+        SortSessions,
+        SortFiles,
+        SortFallbacks,
+        CountOutput,
+        AllocateOutput,
+        WriteOutput,
+        Finish,
+        Done
+    };
 
-    if ((input.edf_session_count > 0 && !input.edf_sessions) ||
-        (input.str_record_count > 0 && !input.str_records) ||
-        (input.summary_record_count > 0 && !input.summary_records) ||
-        (input.fallback_record_count > 0 && !input.fallback_records)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvalidInput,
-                            "night_catalog_input_invalid");
-    }
+    explicit Runtime(const NightCatalogBuildInput &value,
+                     NightCatalogBuildStatus &result)
+        : input(value), status(result) {}
 
-    size_t max_nights = 0;
-    size_t max_sessions = 0;
-    size_t max_files = 0;
-    size_t max_fallbacks = 0;
-    if (!add_count(max_nights, input.edf_session_count) ||
-        !add_count(max_nights, input.str_record_count) ||
-        !add_count(max_nights, input.summary_record_count) ||
-        !add_count(max_nights, input.fallback_record_count) ||
-        !add_count(max_sessions, input.edf_session_count) ||
-        !add_count(max_files, input.str_record_count) ||
-        !add_count(max_fallbacks, input.fallback_record_count)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvalidInput,
-                            "night_catalog_count_overflow");
-    }
-
-    for (size_t i = 0; i < input.edf_session_count; ++i) {
-        if (!add_count(max_files, input.edf_sessions[i].file_count)) {
-            return build_failed(status,
-                                NightCatalogBuildFailure::InvalidInput,
-                                "night_catalog_count_overflow");
-        }
-    }
-    for (size_t i = 0; i < input.summary_record_count; ++i) {
-        if (!add_count(max_sessions,
-                       input.summary_records[i].session_count)) {
-            return build_failed(status,
-                                NightCatalogBuildFailure::InvalidInput,
-                                "night_catalog_count_overflow");
-        }
-    }
-    for (size_t i = 0; i < input.fallback_record_count; ++i) {
-        if (!add_count(max_sessions,
-                       input.fallback_records[i].session_count)) {
-            return build_failed(status,
-                                NightCatalogBuildFailure::InvalidInput,
-                                "night_catalog_count_overflow");
-        }
+    bool fail(NightCatalogBuildFailure failure, const char *detail) {
+        status.failure = failure;
+        status.detail = detail;
+        phase = Phase::Done;
+        catalog.reset();
+        return false;
     }
 
-    LargeScratchArray<BuildNight> nights;
-    LargeScratchArray<BuildSession> sessions;
-    LargeScratchArray<BuildFile> files;
-    LargeScratchArray<BuildFallback> fallbacks;
-    if (!nights.allocate(max_nights) ||
-        !sessions.allocate(max_sessions) ||
-        !files.allocate(max_files) ||
-        !fallbacks.allocate(max_fallbacks)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::AllocationFailed,
-                            "night_catalog_scratch_alloc_failed");
-    }
-    if (!ingest_edf(input, nights, sessions, files)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvalidInput,
-                            "night_catalog_edf_input_invalid");
-    }
-    if (!ingest_str(input, nights, files)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvalidInput,
-                            "night_catalog_str_input_invalid");
-    }
-    if (!ingest_summary(input, nights, sessions)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvalidInput,
-                            "night_catalog_summary_input_invalid");
-    }
-    size_t invalid_fallback_records = 0;
-    if (!ingest_fallback(input,
-                         nights,
-                         sessions,
-                         fallbacks,
-                         invalid_fallback_records)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvalidInput,
-                            "night_catalog_fallback_input_invalid");
-    }
-    if (status) {
-        status->invalid_fallback_records = invalid_fallback_records;
+    void advance(Phase next) {
+        phase = next;
+        cursor = 0;
+        sort.reset();
     }
 
-    if (nights.size() > 1) {
-        std::sort(nights.data(),
-                  nights.data() + nights.size(),
-                  [](const BuildNight &lhs, const BuildNight &rhs) {
-                      return rhs.sleep_day < lhs.sleep_day;
-                  });
-    }
-    if (sessions.size() > 1) {
-        std::sort(sessions.data(),
-                  sessions.data() + sessions.size(),
-                  [](const BuildSession &lhs, const BuildSession &rhs) {
-                      if (lhs.owner != rhs.owner) {
-                          return lhs.owner < rhs.owner;
-                      }
-                      if (lhs.range.start_ms != rhs.range.start_ms) {
-                          return lhs.range.start_ms < rhs.range.start_ms;
-                      }
-                      if (lhs.range.end_ms != rhs.range.end_ms) {
-                          return lhs.range.end_ms < rhs.range.end_ms;
-                      }
-                      return static_cast<uint8_t>(lhs.origin) <
-                             static_cast<uint8_t>(rhs.origin);
-                  });
-    }
-    if (files.size() > 1) {
-        std::sort(files.data(),
-                  files.data() + files.size(),
-                  [](const BuildFile &lhs, const BuildFile &rhs) {
-                      if (lhs.owner != rhs.owner) {
-                          return lhs.owner < rhs.owner;
-                      }
-                      if (lhs.source.coverage.range.start_ms !=
-                          rhs.source.coverage.range.start_ms) {
-                          return lhs.source.coverage.range.start_ms <
-                                 rhs.source.coverage.range.start_ms;
-                      }
-                      if (lhs.source.kind != rhs.source.kind) {
-                          return static_cast<uint8_t>(lhs.source.kind) <
-                                 static_cast<uint8_t>(rhs.source.kind);
-                      }
-                      return strcmp(lhs.source.path, rhs.source.path) < 0;
-                  });
-    }
-    if (fallbacks.size() > 1) {
-        std::sort(fallbacks.data(),
-                  fallbacks.data() + fallbacks.size(),
-                  [](const BuildFallback &lhs,
-                     const BuildFallback &rhs) {
-                      return lhs.owner < rhs.owner;
-                  });
-    }
-
-    size_t final_sessions = 0;
-    size_t final_files = 0;
-    size_t final_signal_layouts = 0;
-    size_t final_fallback_files = 0;
-    size_t final_fallback_sections = 0;
-    size_t final_paths = 0;
-    for (size_t i = 0; i < nights.size(); ++i) {
-        BuildNight &night = nights.data()[i];
+    bool count_night() {
+        BuildNight &night = nights.data()[cursor];
         if (!night.boundary_set) {
-            return build_failed(status,
-                                NightCatalogBuildFailure::InvariantViolation,
-                                "night_catalog_boundary_missing");
+            return fail(NightCatalogBuildFailure::InvariantViolation,
+                        "night_catalog_boundary_missing");
         }
 
         const size_t session_count = count_unique_sessions(night, sessions);
@@ -1397,9 +1230,8 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             !add_count(final_sessions, session_count) ||
             !add_count(final_files, file_count) ||
             !add_count(final_fallback_files, fallback_file_count)) {
-            return build_failed(status,
-                                NightCatalogBuildFailure::InvariantViolation,
-                                "night_catalog_output_count_invalid");
+            return fail(NightCatalogBuildFailure::InvariantViolation,
+                        "night_catalog_output_count_invalid");
         }
 
         for (size_t file_index = first_owned_index(files, night.owner);
@@ -1409,51 +1241,38 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             if (file.source.signal_layout_count > UINT16_MAX ||
                 !add_count(final_signal_layouts,
                            file.source.signal_layout_count)) {
-                return build_failed(
-                    status,
-                    NightCatalogBuildFailure::InvariantViolation,
-                    "night_catalog_signal_count_invalid");
+                return fail(NightCatalogBuildFailure::InvariantViolation,
+                            "night_catalog_signal_count_invalid");
             }
         }
+
+        return true;
     }
 
-    if (nights.size() > UINT32_MAX || final_sessions > UINT32_MAX ||
-        final_files > UINT32_MAX ||
-        final_signal_layouts > UINT32_MAX ||
-        final_fallback_files > UINT32_MAX ||
-        final_fallback_sections > UINT32_MAX ||
-        final_paths > UINT32_MAX) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvariantViolation,
-                            "night_catalog_output_count_invalid");
+    bool allocate_output() {
+        if (nights.size() > UINT32_MAX || final_sessions > UINT32_MAX ||
+            final_files > UINT32_MAX || final_signal_layouts > UINT32_MAX ||
+            final_fallback_files > UINT32_MAX || final_fallback_sections > UINT32_MAX ||
+            final_paths > UINT32_MAX) {
+            return fail(NightCatalogBuildFailure::InvariantViolation,
+                        "night_catalog_output_count_invalid");
+        }
+
+        catalog.reset(new (std::nothrow) NightCatalog());
+        if (!catalog ||
+            !catalog->allocate(nights.size(), final_sessions, 0, final_files,
+                               final_files, final_signal_layouts, final_fallback_files,
+                               final_fallback_sections, final_paths)) {
+            return fail(NightCatalogBuildFailure::AllocationFailed,
+                        "night_catalog_output_alloc_failed");
+        }
+
+        return true;
     }
 
-    std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
-    if (!catalog || !catalog->allocate(nights.size(),
-                                       final_sessions,
-                                       0,
-                                       final_files,
-                                       final_files,
-                                       final_signal_layouts,
-                                       final_fallback_files,
-                                       final_fallback_sections,
-                                       final_paths)) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::AllocationFailed,
-                            "night_catalog_output_alloc_failed");
-    }
-
-    size_t next_session = 0;
-    size_t next_file = 0;
-    size_t next_signal_layout = 0;
-    size_t next_fallback_file = 0;
-    size_t next_fallback_section = 0;
-    size_t next_path = 0;
-    for (size_t night_index = 0;
-         night_index < nights.size();
-         ++night_index) {
-        const BuildNight &source = nights.data()[night_index];
-        NightCatalogRecord &record = catalog->records_[night_index];
+    bool write_night() {
+        const BuildNight &source = nights.data()[cursor];
+        NightCatalogRecord &record = catalog->records_[cursor];
         record.sleep_day = source.sleep_day;
         record.day_start_ms = source.day_start_ms;
         record.day_end_ms = source.day_end_ms;
@@ -1527,10 +1346,8 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                 : NIGHT_CATALOG_NO_SESSION;
             if (source_file.has_session &&
                 file.session_index == NIGHT_CATALOG_NO_SESSION) {
-                return build_failed(
-                    status,
-                    NightCatalogBuildFailure::InvariantViolation,
-                    "night_catalog_file_session_missing");
+                return fail(NightCatalogBuildFailure::InvariantViolation,
+                            "night_catalog_file_session_missing");
             }
 
             file.coverage_offset = static_cast<uint32_t>(next_file);
@@ -1606,10 +1423,8 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                 } else if (!adjust_range(source_section.coverage,
                                          source_fallback.time_adjust_ms,
                                          section.coverage)) {
-                    return build_failed(
-                        status,
-                        NightCatalogBuildFailure::InvariantViolation,
-                        "night_catalog_fallback_adjustment_invalid");
+                    return fail(NightCatalogBuildFailure::InvariantViolation,
+                                "night_catalog_fallback_adjustment_invalid");
                 }
                 section.data_offset = source_section.data_offset;
                 section.data_size = source_section.data_size;
@@ -1626,74 +1441,104 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
 
         record.source_revision =
             SourceRevision(calculate_revision(*catalog, record));
+
+        return true;
     }
 
-    if (next_session != final_sessions || next_file != final_files ||
-        next_signal_layout != final_signal_layouts ||
-        next_fallback_file != final_fallback_files ||
-        next_fallback_section != final_fallback_sections ||
-        next_path != final_paths) {
-        return build_failed(status,
-                            NightCatalogBuildFailure::InvariantViolation,
-                            "night_catalog_output_mismatch");
-    }
-    return catalog;
-}
-
-std::shared_ptr<const NightCatalog> NightCatalogBuilder::index(
-    const NightCatalog &source) {
-    return project(source, Projection::Index, SleepDayId());
-}
-
-std::shared_ptr<const NightCatalog> NightCatalogBuilder::select_night(
-    const NightCatalog &source,
-    SleepDayId sleep_day) {
-    if (!source.find(sleep_day)) return {};
-
-    return project(source, Projection::Night, sleep_day);
-}
-
-std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
-    const NightCatalog &source,
-    const NightCatalog &replacement,
-    SleepDayId sleep_day) {
-    if (!replacement.find(sleep_day)) return {};
-
-    return project(source, Projection::Upsert, sleep_day, &replacement);
-}
-
-std::shared_ptr<const NightCatalog> NightCatalogBuilder::project(
-    const NightCatalog &source,
-    Projection projection,
-    SleepDayId sleep_day,
-    const NightCatalog *replacement) {
-    const NightCatalogRecord *replacement_record =
-        replacement ? replacement->find(sleep_day) : nullptr;
-    const bool externalize = projection == Projection::Index;
-
-    auto include_source = [&](const NightCatalogRecord &record) {
-        if (projection == Projection::Night) {
-            return record.sleep_day == sleep_day;
+    bool finish() {
+        if (next_session != final_sessions || next_file != final_files ||
+            next_signal_layout != final_signal_layouts ||
+            next_fallback_file != final_fallback_files ||
+            next_fallback_section != final_fallback_sections ||
+            next_path != final_paths) {
+            return fail(NightCatalogBuildFailure::InvariantViolation,
+                        "night_catalog_output_mismatch");
         }
 
-        return !replacement_record || record.sleep_day != sleep_day;
-    };
+        phase = Phase::Done;
+        return true;
+    }
 
-    struct CatalogCounts {
-        size_t records = 0;
-        size_t sessions = 0;
-        size_t mask_windows = 0;
-        size_t files = 0;
-        size_t coverage = 0;
-        size_t signal_layouts = 0;
-        size_t fallback_files = 0;
-        size_t fallback_sections = 0;
-        size_t paths = 0;
-    };
+    NightCatalogBuildInput input;
+    NightCatalogBuildStatus &status;
+    Phase phase = Phase::CountEdf;
+    size_t cursor = 0;
+    IncrementalSort sort;
 
-    CatalogCounts counts;
-    auto count_record = [&](const NightCatalog &catalog,
-                             const NightCatalogRecord &record) {
+    size_t max_nights = 0;
+    size_t max_sessions = 0;
+    size_t max_files = 0;
+    LargeScratchArray<BuildNight> nights;
+    LargeScratchArray<BuildSession> sessions;
+    LargeScratchArray<BuildFile> files;
+    LargeScratchArray<BuildFallback> fallbacks;
+
+    size_t final_sessions = 0;
+    size_t final_files = 0;
+    size_t final_signal_layouts = 0;
+    size_t final_fallback_files = 0;
+    size_t final_fallback_sections = 0;
+    size_t final_paths = 0;
+
+    std::shared_ptr<NightCatalog> catalog;
+    size_t next_session = 0;
+    size_t next_file = 0;
+    size_t next_signal_layout = 0;
+    size_t next_fallback_file = 0;
+    size_t next_fallback_section = 0;
+    size_t next_path = 0;
+};
+
+struct NightCatalogBuilder::ProjectionRuntime {
+    enum class Phase { Count, Allocate, Copy, Done };
+
+    ProjectionRuntime(const NightCatalog &value, Projection mode, SleepDayId day,
+                      const NightCatalog *other, const SleepDayId *selected,
+                      size_t selected_count, NightCatalogBuildStatus &result)
+        : source(value), projection(mode), sleep_day(day), replacement(other),
+          days(selected), day_count(selected_count), status(result),
+          externalize(mode == Projection::Index) {}
+
+    bool fail(NightCatalogBuildFailure failure) {
+        status.failure = failure;
+        status.detail = failure == NightCatalogBuildFailure::AllocationFailed
+                            ? "night_catalog_projection_alloc_failed"
+                            : "night_catalog_projection_invalid";
+        phase = Phase::Done;
+        catalog.reset();
+        return false;
+    }
+
+    bool select_record(const NightCatalog *&from, const NightCatalogRecord *&record) {
+        if (projection == Projection::Night) {
+            if (source_index++ > 0) return false;
+            from = &source;
+            record = source.find(sleep_day);
+            return record != nullptr;
+        }
+
+        const auto *base = source.record(source_index);
+        if (day_index < day_count && (!base || !(days[day_index] < base->sleep_day))) {
+            const SleepDayId day = days[day_index];
+            if ((day_index > 0 && !(day < days[day_index - 1])) || !replacement ||
+                !(record = replacement->find(day))) {
+                return fail(NightCatalogBuildFailure::InvalidInput);
+            }
+
+            from = replacement;
+            ++day_index;
+            if (base && base->sleep_day == day) ++source_index;
+            return true;
+        }
+
+        if (!base) return false;
+        from = &source;
+        record = base;
+        ++source_index;
+        return true;
+    }
+
+    bool count_record(const NightCatalog &catalog, const NightCatalogRecord &record) {
         if (!add_count(counts.records, 1) ||
             !add_count(counts.sessions, record.session_count) ||
             !add_count(counts.mask_windows, record.mask_window_count)) {
@@ -1748,43 +1593,9 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::project(
             }
         }
         return true;
-    };
-
-    for (size_t i = 0; i < source.record_count_; ++i) {
-        if (!include_source(source.records_[i])) continue;
-        if (!count_record(source, source.records_[i])) return {};
-    }
-    if (replacement_record &&
-        !count_record(*replacement, *replacement_record)) {
-        return {};
     }
 
-    std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
-    if (!catalog ||
-        !catalog->allocate(counts.records,
-                           counts.sessions,
-                           counts.mask_windows,
-                           counts.files,
-                           counts.coverage,
-                           counts.signal_layouts,
-                           counts.fallback_files,
-                           counts.fallback_sections,
-                           counts.paths)) {
-        return {};
-    }
-
-    size_t next_record = 0;
-    size_t next_session = 0;
-    size_t next_mask_window = 0;
-    size_t next_file = 0;
-    size_t next_coverage = 0;
-    size_t next_signal_layout = 0;
-    size_t next_fallback_file = 0;
-    size_t next_fallback_section = 0;
-    size_t next_path = 0;
-
-    auto append_record = [&](const NightCatalog &from,
-                             const NightCatalogRecord &old_record) {
+    bool append_record(const NightCatalog &from, const NightCatalogRecord &old_record) {
         NightCatalogRecord &record = catalog->records_[next_record++];
         record = old_record;
         record.session_offset = static_cast<uint32_t>(next_session);
@@ -1900,55 +1711,422 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::project(
             next_path += path_bytes;
         }
         return true;
+    }
+
+    bool poll() {
+        const NightCatalog *from = nullptr;
+        const NightCatalogRecord *record = nullptr;
+        switch (phase) {
+            case Phase::Count:
+                if (select_record(from, record)) {
+                    if (!count_record(*from, *record)) {
+                        fail(NightCatalogBuildFailure::InvariantViolation);
+                    }
+                } else if (phase != Phase::Done) {
+                    phase = Phase::Allocate;
+                }
+                break;
+
+            case Phase::Allocate:
+                catalog.reset(new (std::nothrow) NightCatalog());
+                if (!catalog || !catalog->allocate(
+                                    counts.records, counts.sessions,
+                                    counts.mask_windows, counts.files, counts.coverage,
+                                    counts.signal_layouts, counts.fallback_files,
+                                    counts.fallback_sections, counts.paths)) {
+                    fail(NightCatalogBuildFailure::AllocationFailed);
+                } else {
+                    source_index = day_index = 0;
+                    phase = Phase::Copy;
+                }
+                break;
+
+            case Phase::Copy:
+                if (select_record(from, record)) {
+                    if (!append_record(*from, *record)) {
+                        fail(NightCatalogBuildFailure::InvariantViolation);
+                    }
+                } else if (phase != Phase::Done) {
+                    finish();
+                }
+                break;
+
+            case Phase::Done:
+                return false;
+        }
+        return true;
+    }
+
+    bool finish() {
+        if (next_record != counts.records || next_session != counts.sessions ||
+            next_mask_window != counts.mask_windows || next_file != counts.files ||
+            next_coverage != counts.coverage ||
+            next_signal_layout != counts.signal_layouts ||
+            next_fallback_file != counts.fallback_files ||
+            next_fallback_section != counts.fallback_sections ||
+            next_path != counts.paths) {
+            return fail(NightCatalogBuildFailure::InvariantViolation);
+        }
+
+        phase = Phase::Done;
+        return true;
+    }
+
+    struct CatalogCounts {
+        size_t records = 0;
+        size_t sessions = 0;
+        size_t mask_windows = 0;
+        size_t files = 0;
+        size_t coverage = 0;
+        size_t signal_layouts = 0;
+        size_t fallback_files = 0;
+        size_t fallback_sections = 0;
+        size_t paths = 0;
     };
 
-    bool replacement_added = !replacement_record;
+    const NightCatalog &source;
+    Projection projection;
+    SleepDayId sleep_day;
+    const NightCatalog *replacement;
+    const SleepDayId *days;
+    size_t day_count;
+    NightCatalogBuildStatus &status;
+    bool externalize;
+    Phase phase = Phase::Count;
     size_t source_index = 0;
-    while (source_index < source.record_count_ || !replacement_added) {
-        const NightCatalogRecord *source_record =
-            source_index < source.record_count_
-                ? &source.records_[source_index]
-                : nullptr;
+    size_t day_index = 0;
+    CatalogCounts counts;
+    std::shared_ptr<NightCatalog> catalog;
+    size_t next_record = 0;
+    size_t next_session = 0;
+    size_t next_mask_window = 0;
+    size_t next_file = 0;
+    size_t next_coverage = 0;
+    size_t next_signal_layout = 0;
+    size_t next_fallback_file = 0;
+    size_t next_fallback_section = 0;
+    size_t next_path = 0;
+};
 
-        if (replacement_record && source_record &&
-            source_record->sleep_day == sleep_day) {
-            if (!replacement_added &&
-                !append_record(*replacement, *replacement_record)) {
-                return {};
-            }
-            replacement_added = true;
-            source_index++;
-            continue;
-        }
+NightCatalogBuilder::~NightCatalogBuilder() {
+    reset();
+}
 
-        if (!replacement_added &&
-            (!source_record || source_record->sleep_day < sleep_day)) {
-            if (!append_record(*replacement, *replacement_record)) {
-                return {};
-            }
-            replacement_added = true;
-            continue;
-        }
+void NightCatalogBuilder::reset() {
+    LargeObject::destroy(runtime_);
+    runtime_ = nullptr;
+    LargeObject::destroy(projection_);
+    projection_ = nullptr;
+    status_ = {};
+}
 
-        if (!source_record) return {};
-        if (include_source(*source_record) &&
-            !append_record(source, *source_record)) {
-            return {};
-        }
-        source_index++;
+bool NightCatalogBuilder::begin(const NightCatalogBuildInput &input) {
+    reset();
+
+    if ((input.edf_session_count > 0 && !input.edf_sessions) ||
+        (input.str_record_count > 0 && !input.str_records) ||
+        (input.summary_record_count > 0 && !input.summary_records) ||
+        (input.fallback_record_count > 0 && !input.fallback_records)) {
+        status_.failure = NightCatalogBuildFailure::InvalidInput;
+        status_.detail = "night_catalog_input_invalid";
+        return false;
     }
 
-    if (next_record != counts.records ||
-        next_session != counts.sessions ||
-        next_mask_window != counts.mask_windows ||
-        next_file != counts.files || next_coverage != counts.coverage ||
-        next_signal_layout != counts.signal_layouts ||
-        next_fallback_file != counts.fallback_files ||
-        next_fallback_section != counts.fallback_sections ||
-        next_path != counts.paths) {
-        return {};
+    runtime_ = LargeObject::create<Runtime>(input, status_);
+    if (!runtime_) {
+        status_.failure = NightCatalogBuildFailure::AllocationFailed;
+        status_.detail = "night_catalog_scratch_alloc_failed";
+        return false;
     }
-    return catalog;
+
+    Runtime &r = *runtime_;
+    r.max_sessions = input.edf_session_count;
+    r.max_files = input.str_record_count;
+    if (!add_count(r.max_nights, input.edf_session_count) ||
+        !add_count(r.max_nights, input.str_record_count) ||
+        !add_count(r.max_nights, input.summary_record_count) ||
+        !add_count(r.max_nights, input.fallback_record_count)) {
+        return r.fail(NightCatalogBuildFailure::InvalidInput,
+                      "night_catalog_count_overflow");
+    }
+    return true;
+}
+
+bool NightCatalogBuilder::begin_projection(const NightCatalog &source,
+                                           Projection projection, SleepDayId sleep_day,
+                                           const NightCatalog *replacement,
+                                           const SleepDayId *days, size_t day_count) {
+    reset();
+    if (day_count > 0 && (!days || !replacement)) {
+        status_.failure = NightCatalogBuildFailure::InvalidInput;
+        status_.detail = "night_catalog_projection_invalid";
+        return false;
+    }
+
+    projection_ = LargeObject::create<ProjectionRuntime>(
+        source, projection, sleep_day, replacement, days, day_count, status_);
+    if (!projection_) {
+        status_.failure = NightCatalogBuildFailure::AllocationFailed;
+        status_.detail = "night_catalog_projection_alloc_failed";
+    }
+    return projection_ != nullptr;
+}
+
+bool NightCatalogBuilder::begin_merge(const NightCatalog &source,
+                                      const NightCatalog &replacement,
+                                      const SleepDayId *days, size_t day_count) {
+    return begin_projection(source, Projection::Upsert, {}, &replacement, days,
+                            day_count);
+}
+
+bool NightCatalogBuilder::active() const {
+    return (runtime_ && runtime_->phase != Runtime::Phase::Done) ||
+           (projection_ && projection_->phase != ProjectionRuntime::Phase::Done);
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::take_result() {
+    if (active()) return {};
+    if (runtime_) return std::move(runtime_->catalog);
+    if (projection_) return std::move(projection_->catalog);
+    return {};
+}
+
+bool NightCatalogBuilder::poll() {
+    if (!active()) return false;
+    if (projection_) return projection_->poll();
+
+    Runtime &r = *runtime_;
+    const NightCatalogBuildInput &input = r.input;
+    using Phase = Runtime::Phase;
+    auto count = [&](size_t &total, size_t value) {
+        if (add_count(total, value)) return true;
+        return r.fail(NightCatalogBuildFailure::InvalidInput,
+                      "night_catalog_count_overflow");
+    };
+    auto allocated = [&](bool ok, Phase next) {
+        if (ok) {
+            r.advance(next);
+        } else {
+            r.fail(NightCatalogBuildFailure::AllocationFailed,
+                   "night_catalog_scratch_alloc_failed");
+        }
+    };
+    auto ingested = [&](bool ok, const char *error) {
+        if (ok) {
+            ++r.cursor;
+        } else {
+            r.fail(NightCatalogBuildFailure::InvalidInput, error);
+        }
+    };
+
+    switch (r.phase) {
+        case Phase::CountEdf:
+            if (r.cursor < input.edf_session_count) {
+                count(r.max_files, input.edf_sessions[r.cursor++].file_count);
+            } else {
+                r.advance(Phase::CountSummary);
+            }
+            break;
+
+        case Phase::CountSummary:
+            if (r.cursor < input.summary_record_count) {
+                count(r.max_sessions, input.summary_records[r.cursor++].session_count);
+            } else {
+                r.advance(Phase::CountFallback);
+            }
+            break;
+
+        case Phase::CountFallback:
+            if (r.cursor < input.fallback_record_count) {
+                count(r.max_sessions, input.fallback_records[r.cursor++].session_count);
+            } else {
+                r.advance(Phase::AllocateNights);
+            }
+            break;
+
+        case Phase::AllocateNights:
+            allocated(r.nights.allocate(r.max_nights), Phase::AllocateSessions);
+            break;
+
+        case Phase::AllocateSessions:
+            allocated(r.sessions.allocate(r.max_sessions), Phase::AllocateFiles);
+            break;
+
+        case Phase::AllocateFiles:
+            allocated(r.files.allocate(r.max_files), Phase::AllocateFallbacks);
+            break;
+
+        case Phase::AllocateFallbacks:
+            allocated(r.fallbacks.allocate(input.fallback_record_count), Phase::Edf);
+            break;
+
+        case Phase::Edf:
+            if (r.cursor < input.edf_session_count) {
+                ingested(ingest_edf(input, r.nights, r.sessions, r.files, r.cursor),
+                         "night_catalog_edf_input_invalid");
+            } else {
+                r.advance(Phase::Str);
+            }
+            break;
+
+        case Phase::Str:
+            if (r.cursor < input.str_record_count) {
+                ingested(ingest_str(input, r.nights, r.files, r.cursor),
+                         "night_catalog_str_input_invalid");
+            } else {
+                r.advance(Phase::Summary);
+            }
+            break;
+
+        case Phase::Summary:
+            if (r.cursor < input.summary_record_count) {
+                ingested(ingest_summary(input, r.nights, r.sessions, r.cursor),
+                         "night_catalog_summary_input_invalid");
+            } else {
+                r.advance(Phase::Fallback);
+            }
+            break;
+
+        case Phase::Fallback:
+            if (r.cursor < input.fallback_record_count) {
+                ingested(ingest_fallback(input, r.nights, r.sessions, r.fallbacks,
+                                         status_.invalid_fallback_records, r.cursor),
+                         "night_catalog_fallback_input_invalid");
+            } else {
+                r.advance(Phase::SortNights);
+            }
+            break;
+
+        case Phase::SortNights:
+            if (r.sort.poll(r.nights.data(), r.nights.size(),
+                            [](const BuildNight &lhs, const BuildNight &rhs) {
+                                return rhs.sleep_day < lhs.sleep_day;
+                            })) {
+                r.advance(Phase::SortSessions);
+            }
+            break;
+
+        case Phase::SortSessions:
+            if (r.sort.poll(r.sessions.data(), r.sessions.size(),
+                            [](const BuildSession &lhs, const BuildSession &rhs) {
+                                if (lhs.owner != rhs.owner) {
+                                    return lhs.owner < rhs.owner;
+                                }
+                                if (lhs.range.start_ms != rhs.range.start_ms) {
+                                    return lhs.range.start_ms < rhs.range.start_ms;
+                                }
+                                if (lhs.range.end_ms != rhs.range.end_ms) {
+                                    return lhs.range.end_ms < rhs.range.end_ms;
+                                }
+                                return static_cast<uint8_t>(lhs.origin) <
+                                       static_cast<uint8_t>(rhs.origin);
+                            })) {
+                r.advance(Phase::SortFiles);
+            }
+            break;
+
+        case Phase::SortFiles:
+            if (r.sort.poll(r.files.data(), r.files.size(),
+                            [](const BuildFile &lhs, const BuildFile &rhs) {
+                                if (lhs.owner != rhs.owner) {
+                                    return lhs.owner < rhs.owner;
+                                }
+                                if (lhs.source.coverage.range.start_ms !=
+                                    rhs.source.coverage.range.start_ms) {
+                                    return lhs.source.coverage.range.start_ms <
+                                           rhs.source.coverage.range.start_ms;
+                                }
+                                if (lhs.source.kind != rhs.source.kind) {
+                                    return static_cast<uint8_t>(lhs.source.kind) <
+                                           static_cast<uint8_t>(rhs.source.kind);
+                                }
+                                return strcmp(lhs.source.path, rhs.source.path) < 0;
+                            })) {
+                r.advance(Phase::SortFallbacks);
+            }
+            break;
+
+        case Phase::SortFallbacks:
+            if (r.sort.poll(r.fallbacks.data(), r.fallbacks.size(),
+                            [](const BuildFallback &lhs, const BuildFallback &rhs) {
+                                return lhs.owner < rhs.owner;
+                            })) {
+                r.advance(Phase::CountOutput);
+            }
+            break;
+
+        case Phase::CountOutput:
+            if (r.cursor < r.nights.size()) {
+                if (r.count_night()) ++r.cursor;
+            } else {
+                r.advance(Phase::AllocateOutput);
+            }
+            break;
+
+        case Phase::AllocateOutput:
+            if (r.allocate_output()) r.advance(Phase::WriteOutput);
+            break;
+
+        case Phase::WriteOutput:
+            if (r.cursor < r.nights.size()) {
+                if (r.write_night()) ++r.cursor;
+            } else {
+                r.advance(Phase::Finish);
+            }
+            break;
+
+        case Phase::Finish:
+            r.finish();
+            break;
+
+        case Phase::Done:
+            return false;
+    }
+    return true;
+}
+
+std::shared_ptr<const NightCatalog>
+NightCatalogBuilder::build(const NightCatalogBuildInput &input,
+                           NightCatalogBuildStatus *status) {
+    NightCatalogBuilder builder;
+    if (builder.begin(input)) {
+        while (builder.active())
+            builder.poll();
+    }
+    if (status) *status = builder.status();
+    return builder.take_result();
+}
+
+std::shared_ptr<const NightCatalog>
+NightCatalogBuilder::index(const NightCatalog &source) {
+    return project(source, Projection::Index, SleepDayId());
+}
+
+std::shared_ptr<const NightCatalog>
+NightCatalogBuilder::select_night(const NightCatalog &source, SleepDayId sleep_day) {
+    if (!source.find(sleep_day)) return {};
+
+    return project(source, Projection::Night, sleep_day);
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(
+    const NightCatalog &source, const NightCatalog &replacement, SleepDayId sleep_day) {
+    if (!replacement.find(sleep_day)) return {};
+
+    return project(source, Projection::Upsert, sleep_day, &replacement);
+}
+
+std::shared_ptr<const NightCatalog>
+NightCatalogBuilder::project(const NightCatalog &source, Projection projection,
+                             SleepDayId sleep_day, const NightCatalog *replacement) {
+    NightCatalogBuilder builder;
+    if (builder.begin_projection(source, projection, sleep_day, replacement,
+                                 replacement ? &sleep_day : nullptr,
+                                 replacement ? 1 : 0)) {
+        while (builder.active())
+            builder.poll();
+    }
+    return builder.take_result();
 }
 
 std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(

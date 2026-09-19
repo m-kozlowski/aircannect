@@ -156,6 +156,24 @@ class NightCatalogBuilder {
     enum class Projection { Index, Night, Upsert };
 
 public:
+    NightCatalogBuilder() = default;
+    ~NightCatalogBuilder();
+    NightCatalogBuilder(const NightCatalogBuilder &) = delete;
+    NightCatalogBuilder &operator=(const NightCatalogBuilder &) = delete;
+
+    // Input arrays remain borrowed until completion or reset. Each poll handles
+    // one input record, one output night, or a bounded sort batch.
+    bool begin(const NightCatalogBuildInput &input);
+    // Merge selected days in descending order. Catalogs and days are borrowed.
+    bool begin_merge(const NightCatalog &catalog, const NightCatalog &replacement,
+                     const SleepDayId *days, size_t day_count);
+    bool poll();
+    bool active() const;
+    void reset();
+    const NightCatalogBuildStatus &status() const { return status_; }
+    std::shared_ptr<const NightCatalog> take_result();
+
+    // Synchronous convenience for the existing single-night callers.
     static std::shared_ptr<const NightCatalog> build(
         const NightCatalogBuildInput &input,
         NightCatalogBuildStatus *status = nullptr);
@@ -187,11 +205,21 @@ public:
         int64_t last_write_ms = 0);
 
 private:
+    struct Runtime;
+    struct ProjectionRuntime;
+    bool begin_projection(const NightCatalog &catalog, Projection projection,
+                          SleepDayId sleep_day, const NightCatalog *replacement,
+                          const SleepDayId *days, size_t day_count);
+
     static std::shared_ptr<const NightCatalog> project(
         const NightCatalog &catalog,
         Projection projection,
         SleepDayId sleep_day,
         const NightCatalog *replacement = nullptr);
+
+    Runtime *runtime_ = nullptr;
+    ProjectionRuntime *projection_ = nullptr;
+    NightCatalogBuildStatus status_;
 };
 
 }  // namespace aircannect

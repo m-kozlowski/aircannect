@@ -12,6 +12,7 @@
 #include "edf_report_session.h"
 #include "edf_session_metadata.h"
 #include "edf_str_file_layout.h"
+#include "incremental_sort.h"
 #include "night_catalog_clock.h"
 #include "night_catalog_store_service.h"
 #include "night_str_record.h"
@@ -386,7 +387,20 @@ struct NightCatalogRefreshRuntime {
         WaitFallback,
         SubmitStr,
         WaitStr,
+        ParseStr,
+        SortLayouts,
+        SortMetadata,
+        AllocateBuild,
+        PrepareEdf,
+        SortDays,
+        CollectDayBounds,
+        ApplyDayBounds,
+        StartBuild,
         Build,
+        Preserve,
+        Merge,
+        WaitMerge,
+        Publish,
         Cancelling,
         Ready,
         Error,
@@ -398,6 +412,20 @@ struct NightCatalogRefreshRuntime {
     }
 
     void clear_sources() {
+        builder.reset();
+        building_catalog.reset();
+        destroy_large_array(build_sessions, edf_session_count);
+        build_sessions = nullptr;
+        destroy_large_array(build_files, build_file_capacity);
+        build_files = nullptr;
+        build_file_capacity = 0;
+        build_file_count = 0;
+        build_cursor = 0;
+        sort.reset();
+        Memory::free(preserve_days);
+        preserve_days = nullptr;
+        preserve_count = 0;
+
         previous_source_loader.cancel();
         (void)previous_source_loader.take_snapshot();
         previous_sources_requested = false;
@@ -453,6 +481,7 @@ struct NightCatalogRefreshRuntime {
         str_file_modified = 0;
         str_next_record = 0;
         str_chunk_records = 0;
+        str_chunk_index = 0;
     }
 
     void clear_summary() {
@@ -504,6 +533,21 @@ struct NightCatalogRefreshRuntime {
     size_t fallback_section_capacity = 0;
     size_t fallback_section_count = 0;
 
+    NightCatalogBuilder builder;
+    std::shared_ptr<const NightCatalog> building_catalog;
+    NightCatalogEdfSessionInput *build_sessions = nullptr;
+    NightCatalogSourceFileInput *build_files = nullptr;
+    size_t build_file_capacity = 0;
+    size_t build_file_count = 0;
+    size_t build_cursor = 0;
+    IncrementalSort sort;
+    size_t day_begin = 0;
+    size_t day_end = 0;
+    int64_t day_start_ms = 0;
+    int64_t day_end_ms = 0;
+    SleepDayId *preserve_days = nullptr;
+    size_t preserve_count = 0;
+
     uint8_t *read_buffer = nullptr;
     size_t scan_index = 0;
     char current_path[AC_STORAGE_PATH_MAX] = {};
@@ -515,6 +559,7 @@ struct NightCatalogRefreshRuntime {
     uint64_t str_file_modified = 0;
     uint32_t str_next_record = 0;
     uint32_t str_chunk_records = 0;
+    uint32_t str_chunk_index = 0;
 
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
@@ -1380,7 +1425,7 @@ void skip_str(NightCatalogRefreshRuntime &runtime,
     runtime.str_record_count = 0;
     runtime.str_next_record = 0;
     runtime.str_chunk_records = 0;
-    runtime.phase = NightCatalogRefreshRuntime::Phase::Build;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
     status.state = NightCatalogRefreshState::Building;
     status.str_records = 0;
     status.current_path[0] = '\0';
@@ -1391,7 +1436,7 @@ void skip_str(NightCatalogRefreshRuntime &runtime,
 bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
                          NightCatalogRefreshStatus &status) {
     if (!runtime.str_file_found || runtime.str_file_size == 0) {
-        runtime.phase = NightCatalogRefreshRuntime::Phase::Build;
+        runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
         return true;
     }
@@ -1407,7 +1452,7 @@ bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
         return true;
     }
     if (layout.record_count == 0) {
-        runtime.phase = NightCatalogRefreshRuntime::Phase::Build;
+        runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
         return true;
     }
@@ -1431,7 +1476,7 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     const size_t remaining = targeted ? runtime.str_next_record :
         runtime.str_record_capacity - runtime.str_next_record;
     if (remaining == 0) {
-        runtime.phase = NightCatalogRefreshRuntime::Phase::Build;
+        runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
         status.current_path[0] = '\0';
         return true;
@@ -1495,16 +1540,25 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
+    runtime.str_chunk_index = 0;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::ParseStr;
+    return true;
+}
+
+bool parse_str_chunk_record(NightCatalogRefreshRuntime &runtime,
+                            NightCatalogRefreshStatus &status) {
     const bool targeted = runtime.target.valid();
-    for (size_t index = 0; index < runtime.str_chunk_records; ++index) {
+    if (runtime.str_chunk_index < runtime.str_chunk_records) {
+        const size_t index = runtime.str_chunk_index++;
         const size_t i = targeted ? runtime.str_chunk_records - index - 1 : index;
+        const size_t record_size = edf_str_record_size();
         NightStrRecord record;
         if (!night_str_record_parse(runtime.read_buffer + i * record_size,
                                     record_size,
                                     record)) {
-            continue;
+            return true;
         }
-        if (targeted && record.sleep_day != runtime.target.sleep_day) continue;
+        if (targeted && record.sleep_day != runtime.target.sleep_day) return true;
 
         NightCatalogStrInput &out =
             runtime.str_records[runtime.str_record_count++];
@@ -1516,7 +1570,8 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
         out.record_offset = edf_str_record_offset(
             runtime.str_next_record + static_cast<uint32_t>(i));
         out.record_size = static_cast<uint32_t>(record_size);
-        if (targeted) break;
+        if (targeted) runtime.str_chunk_index = runtime.str_chunk_records;
+        return true;
     }
 
     if (!targeted) runtime.str_next_record += runtime.str_chunk_records;
@@ -1531,14 +1586,23 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
 const ParsedSessionMetadata *find_session_metadata(
     const NightCatalogRefreshRuntime &runtime,
     const EdfReportSessionDescriptor &session) {
-    for (size_t i = 0; i < runtime.session_metadata_count; ++i) {
-        const ParsedSessionMetadata &candidate = runtime.session_metadata[i];
-        if (strcmp(candidate.datalog_sleep_day_text, session.sleep_day) == 0 &&
-            strcmp(candidate.session_stamp, session.session_stamp) == 0) {
-            return &candidate;
-        }
-    }
-    return nullptr;
+    if (runtime.session_metadata_count == 0) return nullptr;
+
+    auto *end = runtime.session_metadata + runtime.session_metadata_count;
+    const auto *found = std::lower_bound(
+        runtime.session_metadata, end, session,
+        [](const ParsedSessionMetadata &candidate,
+           const EdfReportSessionDescriptor &value) {
+            const int day = strcmp(candidate.datalog_sleep_day_text, value.sleep_day);
+            return day != 0 ? day < 0
+                            : strcmp(candidate.session_stamp, value.session_stamp) < 0;
+        });
+
+    return found != end &&
+                   strcmp(found->datalog_sleep_day_text, session.sleep_day) == 0 &&
+                   strcmp(found->session_stamp, session.session_stamp) == 0
+               ? found
+               : nullptr;
 }
 
 bool metadata_raw_time(const EdfSessionMetadata &metadata,
@@ -1557,330 +1621,157 @@ bool metadata_raw_time(const EdfSessionMetadata &metadata,
     return true;
 }
 
-void normalize_edf_day_boundaries(NightCatalogEdfSessionInput *sessions,
-                                  size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        int64_t day_start_ms = sessions[i].day_start_ms;
-        int64_t day_end_ms = sessions[i].day_end_ms;
-        for (size_t j = 0; j < count; ++j) {
-            if (sessions[j].sleep_day != sessions[i].sleep_day) continue;
-            day_start_ms = std::min(
-                day_start_ms,
-                std::min(sessions[j].day_start_ms,
-                         sessions[j].display_window.start_ms));
-            day_end_ms = std::max(
-                day_end_ms,
-                std::max(sessions[j].day_end_ms,
-                         sessions[j].display_window.end_ms));
-        }
+bool allocate_build_inputs(NightCatalogRefreshRuntime &runtime) {
+    runtime.build_file_capacity =
+        runtime.edf_session_count * AC_EDF_REPORT_SESSION_FILE_MAX;
+    runtime.build_sessions =
+        allocate_large_array<NightCatalogEdfSessionInput>(runtime.edf_session_count);
+    runtime.build_files =
+        allocate_large_array<NightCatalogSourceFileInput>(runtime.build_file_capacity);
 
-        sessions[i].day_start_ms = day_start_ms;
-        sessions[i].day_end_ms = day_end_ms;
-    }
+    return runtime.edf_session_count == 0 ||
+           (runtime.build_sessions && runtime.build_files);
 }
 
-bool build_catalog(NightCatalogRefreshRuntime &runtime,
-                   std::shared_ptr<const NightCatalog> &catalog,
-                   const char *&error,
-                   bool &retryable,
-                   NightCatalogRefreshStatus &status) {
-    retryable = false;
-
-    const size_t session_count = runtime.edf_session_count;
-    if (session_count >
-        std::numeric_limits<size_t>::max() /
-            AC_EDF_REPORT_SESSION_FILE_MAX) {
-        error = "night_catalog_source_count_overflow";
-        return false;
-    }
-
-    NightCatalogEdfSessionInput *sessions =
-        allocate_large_array<NightCatalogEdfSessionInput>(session_count);
-    const size_t file_capacity =
-        session_count * AC_EDF_REPORT_SESSION_FILE_MAX;
-    NightCatalogSourceFileInput *files =
-        allocate_large_array<NightCatalogSourceFileInput>(file_capacity);
-    if ((session_count > 0 && !sessions) ||
-        (file_capacity > 0 && !files)) {
-        destroy_large_array(sessions, session_count);
-        destroy_large_array(files, file_capacity);
-        error = "night_catalog_build_alloc_failed";
-        retryable = true;
-        return false;
-    }
-
+bool prepare_build_session(NightCatalogRefreshRuntime &runtime, const char *&error) {
+    const size_t i = runtime.build_cursor;
     NightCatalogClockContext edf_clock;
     edf_clock.current_offset_valid = runtime.current_offset_valid;
     edf_clock.current_offset_minutes = runtime.current_offset_minutes;
 
-    size_t output_sessions = 0;
-    size_t output_files = 0;
-
-    auto find_layouts = [&runtime](const char *path)
-        -> const ParsedEdfLayouts * {
-        for (size_t i = 0; i < runtime.parsed_edf_file_count; ++i) {
-            if (strcmp(runtime.parsed_edf_files[i].path, path) == 0) {
-                return &runtime.parsed_edf_files[i];
-            }
-        }
-        return nullptr;
-    };
-
-    for (size_t i = 0; i < session_count; ++i) {
-        EdfReportSessionDescriptor session = runtime.edf_sessions[i];
-        const ParsedSessionMetadata *provenance =
-            find_session_metadata(runtime, session);
-        SleepDayId sleep_day;
-        const bool provenance_clock = provenance && provenance->decoded;
-        if (provenance) {
-            sleep_day = provenance->datalog_sleep_day;
-        } else {
-            (void)SleepDayId::from_yyyymmdd(session.sleep_day, sleep_day);
-        }
-
-        const bool clock_resolved = provenance_clock
-            ? resolve_provenance_session_clock(session,
-                                               provenance->metadata)
-            : resolve_legacy_session_clock(session, edf_clock, sleep_day);
-        if (provenance_clock) {
-            sleep_day = provenance->metadata.canonical_sleep_day;
-        }
-        if (!clock_resolved || !sleep_day.valid()) {
-            destroy_large_array(sessions, session_count);
-            destroy_large_array(files, file_capacity);
-            error = "night_catalog_timezone_unresolved";
-            return false;
-        }
-
-        NightCatalogEdfSessionInput &out = sessions[output_sessions++];
-        out.sleep_day = sleep_day;
-        const bool boundaries_resolved = provenance_clock
-            ? (provenance_day_boundary(
-                   sleep_day,
-                   provenance->metadata.timezone_offset_minutes,
-                   0,
-                   out.day_start_ms) &&
-               provenance_day_boundary(
-                   sleep_day,
-                   provenance->metadata.timezone_offset_minutes,
-                   1440,
-                   out.day_end_ms))
-            : (night_catalog_resolve_local_minute(
-                   &edf_clock, sleep_day, 0, out.day_start_ms) &&
-               night_catalog_resolve_local_minute(
-                   &edf_clock, sleep_day, 1440, out.day_end_ms));
-        if (!boundaries_resolved) {
-            destroy_large_array(sessions, session_count);
-            destroy_large_array(files, file_capacity);
-            error = "night_catalog_day_boundary_unresolved";
-            return false;
-        }
-
-        out.display_window = {session.earliest_header_start_ms,
-                              session.latest_header_end_ms};
-        if (provenance_clock) {
-            int64_t raw_segment_end_ms = 0;
-            if (!metadata_raw_time(provenance->metadata,
-                                   out.display_window.end_ms,
-                                   raw_segment_end_ms)) {
-                destroy_large_array(sessions, session_count);
-                destroy_large_array(files, file_capacity);
-                error = "night_catalog_metadata_clock_invalid";
-                return false;
-            }
-
-            out.raw_sleep_day = provenance->metadata.raw_sleep_day;
-            out.raw_segment_window = {
-                provenance->metadata.raw_segment_start_ms,
-                provenance->metadata.finalized
-                    ? provenance->metadata.raw_segment_end_ms
-                    : raw_segment_end_ms,
-            };
-            if (provenance->metadata.finalized) {
-                out.raw_therapy_window = {
-                    provenance->metadata.raw_therapy_start_ms,
-                    provenance->metadata.raw_therapy_end_ms,
-                };
-            }
-            out.has_clock_provenance = true;
-        }
-        out.files = files + output_files;
-        for (size_t slot = 0;
-             slot < AC_EDF_REPORT_SESSION_FILE_MAX;
-             ++slot) {
-            const EdfReportSessionFileDescriptor &source =
-                session.files[slot];
-            const EdfReportSessionFileDescriptor &stored_source =
-                runtime.edf_sessions[i].files[slot];
-            NightCatalogFileKind kind;
-            if (source.kind == EdfInventoryFileKind::Unknown ||
-                !source.path[0] || !file_kind(kind, source.kind)) {
-                continue;
-            }
-            if ((kind == NightCatalogFileKind::Brp ||
-                 kind == NightCatalogFileKind::Pld ||
-                 kind == NightCatalogFileKind::Sa2 ||
-                 kind == NightCatalogFileKind::Tcv) &&
-                source.complete_records == 0) {
-                continue;
-            }
-
-            NightCatalogSourceFileInput &file = files[output_files++];
-            file.kind = kind;
-            file.path = stored_source.path;
-            file.coverage.range = {source.header_start_ms,
-                                   source.header_end_ms};
-            file_signal_masks(session,
-                              source.kind,
-                              file.coverage.primary_signal_mask,
-                              file.coverage.fallback_signal_mask);
-            file.file_size = source.file_size;
-            file.last_write_ms =
-                static_cast<int64_t>(source.last_write) * 1000LL;
-            file.data_offset = source.header_size;
-            file.data_size =
-                static_cast<uint64_t>(source.complete_records) *
-                source.record_size;
-            file.record_start_ms = source.header_start_ms;
-            file.header_size = source.header_size;
-            file.record_size = source.record_size;
-            file.record_duration_ms = source.record_duration_ms;
-            file.complete_records = source.complete_records;
-            file.provenance_identity = provenance
-                ? provenance->identity
-                : 0;
-            const ParsedEdfLayouts *parsed = find_layouts(stored_source.path);
-            if (!parsed ||
-                parsed->layout_offset > runtime.edf_signal_layout_count ||
-                parsed->layout_count > runtime.edf_signal_layout_count -
-                                           parsed->layout_offset) {
-                destroy_large_array(sessions, session_count);
-                destroy_large_array(files, file_capacity);
-                error = "night_catalog_signal_layout_missing";
-                return false;
-            }
-            file.signal_layouts = parsed->layout_count > 0
-                ? runtime.edf_signal_layouts + parsed->layout_offset
-                : nullptr;
-            file.signal_layout_count = parsed->layout_count;
-            ++out.file_count;
-        }
+    EdfReportSessionDescriptor session = runtime.edf_sessions[i];
+    const ParsedSessionMetadata *provenance = find_session_metadata(runtime, session);
+    SleepDayId sleep_day;
+    const bool provenance_clock = provenance && provenance->decoded;
+    if (provenance) {
+        sleep_day = provenance->datalog_sleep_day;
+    } else {
+        (void)SleepDayId::from_yyyymmdd(session.sleep_day, sleep_day);
     }
 
-    normalize_edf_day_boundaries(sessions, output_sessions);
-
-    NightCatalogBuildInput input;
-    input.edf_sessions = sessions;
-    input.edf_session_count = output_sessions;
-    input.str_records = runtime.str_records;
-    input.str_record_count = runtime.str_record_count;
-    input.summary_records = runtime.summary
-        ? runtime.summary->records()
-        : nullptr;
-    input.summary_record_count = runtime.summary
-        ? runtime.summary->size()
-        : 0;
-    input.fallback_records = runtime.fallback_records;
-    input.fallback_record_count = runtime.fallback_record_count;
-    NightCatalogBuildStatus build_status;
-    catalog = NightCatalogBuilder::build(input, &build_status);
-
-    destroy_large_array(sessions, session_count);
-    destroy_large_array(files, file_capacity);
-    if (!catalog) {
-        error = build_status.detail[0]
-            ? build_status.detail
-            : "night_catalog_build_failed";
-        retryable = build_status.retryable();
+    const bool clock_resolved =
+        provenance_clock
+            ? resolve_provenance_session_clock(session, provenance->metadata)
+            : resolve_legacy_session_clock(session, edf_clock, sleep_day);
+    if (provenance_clock) {
+        sleep_day = provenance->metadata.canonical_sleep_day;
+    }
+    if (!clock_resolved || !sleep_day.valid()) {
+        error = "night_catalog_timezone_unresolved";
         return false;
     }
-    if (build_status.invalid_fallback_records > 0) {
-        const uint32_t skipped = static_cast<uint32_t>(std::min(
-            build_status.invalid_fallback_records,
-            static_cast<size_t>(UINT32_MAX)));
-        status.files_skipped += skipped;
-        status.files_indexed = status.files_indexed > skipped
-            ? status.files_indexed - skipped
-            : 0;
-        set_warning(status, "night_catalog_fallback_invalid");
+
+    NightCatalogEdfSessionInput &out = runtime.build_sessions[i];
+    out.sleep_day = sleep_day;
+    const bool boundaries_resolved =
+        provenance_clock
+            ? (provenance_day_boundary(sleep_day,
+                                       provenance->metadata.timezone_offset_minutes, 0,
+                                       out.day_start_ms) &&
+               provenance_day_boundary(sleep_day,
+                                       provenance->metadata.timezone_offset_minutes,
+                                       1440, out.day_end_ms))
+            : (night_catalog_resolve_local_minute(&edf_clock, sleep_day, 0,
+                                                  out.day_start_ms) &&
+               night_catalog_resolve_local_minute(&edf_clock, sleep_day, 1440,
+                                                  out.day_end_ms));
+    if (!boundaries_resolved) {
+        error = "night_catalog_day_boundary_unresolved";
+        return false;
     }
 
-    // An external index cannot rebuild a missing fallback's clock metadata.
-    // Preserve only that night during reconciliation, without blocking others.
-    if (runtime.previous_catalog) {
-        for (size_t i = 0; i < runtime.previous_catalog->size(); ++i) {
-            const NightCatalogRecord *previous =
-                runtime.previous_catalog->record(i);
-
-            if (!previous || !previous->sources_external ||
-                (runtime.target.valid() &&
-                 previous->sleep_day != runtime.target.sleep_day) ||
-                (previous->source_flags &
-                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
-                continue;
-            }
-
-            const NightCatalogRecord *rebuilt = catalog->find(previous->sleep_day);
-
-            if (rebuilt &&
-                (rebuilt->source_flags &
-                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) {
-                continue;
-            }
-
-            if (runtime.target.valid()) {
-                error = "night_catalog_previous_fallback_unavailable";
-                retryable = true;
-                catalog.reset();
-                return false;
-            }
-
-            std::shared_ptr<const NightCatalog> preserved =
-                NightCatalogBuilder::upsert_night(
-                    *catalog, *runtime.previous_catalog, previous->sleep_day);
-
-            if (!preserved) {
-                error = "night_catalog_previous_night_preserve_failed";
-                retryable = true;
-                catalog.reset();
-                return false;
-            }
-
-            catalog = std::move(preserved);
-            set_warning(status, "night_catalog_previous_night_preserved");
-        }
-    }
-
-    if (runtime.target.valid()) {
-        if (!runtime.previous_catalog) {
-            error = "night_catalog_target_base_missing";
-            catalog.reset();
-            return false;
-        }
-        // Summary and STR may contain other days even after a targeted scan.
-        // Only the requested day is merged into the previous catalog below.
-        if (!catalog->find(runtime.target.sleep_day)) {
-            error = catalog->size() == 0
-                ? "night_catalog_target_empty"
-                : "night_catalog_target_day_mismatch";
-            catalog.reset();
+    out.display_window = {session.earliest_header_start_ms,
+                          session.latest_header_end_ms};
+    if (provenance_clock) {
+        int64_t raw_segment_end_ms = 0;
+        if (!metadata_raw_time(provenance->metadata, out.display_window.end_ms,
+                               raw_segment_end_ms)) {
+            error = "night_catalog_metadata_clock_invalid";
             return false;
         }
 
-        std::shared_ptr<const NightCatalog> merged =
-            NightCatalogBuilder::upsert_night(
-                *runtime.previous_catalog,
-                *catalog,
-                runtime.target.sleep_day);
-        if (!merged) {
-            error = "night_catalog_target_merge_failed";
-            catalog.reset();
-            retryable = true;
+        out.raw_sleep_day = provenance->metadata.raw_sleep_day;
+        out.raw_segment_window = {
+            provenance->metadata.raw_segment_start_ms,
+            provenance->metadata.finalized ? provenance->metadata.raw_segment_end_ms
+                                           : raw_segment_end_ms,
+        };
+        if (provenance->metadata.finalized) {
+            out.raw_therapy_window = {
+                provenance->metadata.raw_therapy_start_ms,
+                provenance->metadata.raw_therapy_end_ms,
+            };
+        }
+        out.has_clock_provenance = true;
+    }
+    out.files = runtime.build_files + runtime.build_file_count;
+    for (size_t slot = 0; slot < AC_EDF_REPORT_SESSION_FILE_MAX; ++slot) {
+        const EdfReportSessionFileDescriptor &source = session.files[slot];
+        const EdfReportSessionFileDescriptor &stored_source =
+            runtime.edf_sessions[i].files[slot];
+        NightCatalogFileKind kind;
+        if (source.kind == EdfInventoryFileKind::Unknown || !source.path[0] ||
+            !file_kind(kind, source.kind)) {
+            continue;
+        }
+        if ((kind == NightCatalogFileKind::Brp || kind == NightCatalogFileKind::Pld ||
+             kind == NightCatalogFileKind::Sa2 || kind == NightCatalogFileKind::Tcv) &&
+            source.complete_records == 0) {
+            continue;
+        }
+
+        NightCatalogSourceFileInput &file =
+            runtime.build_files[runtime.build_file_count++];
+        file.kind = kind;
+        file.path = stored_source.path;
+        file.coverage.range = {source.header_start_ms, source.header_end_ms};
+        file_signal_masks(session, source.kind, file.coverage.primary_signal_mask,
+                          file.coverage.fallback_signal_mask);
+        file.file_size = source.file_size;
+        file.last_write_ms = static_cast<int64_t>(source.last_write) * 1000LL;
+        file.data_offset = source.header_size;
+        file.data_size =
+            static_cast<uint64_t>(source.complete_records) * source.record_size;
+        file.record_start_ms = source.header_start_ms;
+        file.header_size = source.header_size;
+        file.record_size = source.record_size;
+        file.record_duration_ms = source.record_duration_ms;
+        file.complete_records = source.complete_records;
+        file.provenance_identity = provenance ? provenance->identity : 0;
+        auto *end = runtime.parsed_edf_files + runtime.parsed_edf_file_count;
+        const ParsedEdfLayouts *parsed =
+            std::lower_bound(runtime.parsed_edf_files, end, stored_source.path,
+                             [](const ParsedEdfLayouts &candidate, const char *path) {
+                                 return strcmp(candidate.path, path) < 0;
+                             });
+        if (parsed == end || strcmp(parsed->path, stored_source.path) != 0 ||
+            parsed->layout_offset > runtime.edf_signal_layout_count ||
+            parsed->layout_count >
+                runtime.edf_signal_layout_count - parsed->layout_offset) {
+            error = "night_catalog_signal_layout_missing";
             return false;
         }
-        catalog = std::move(merged);
+        file.signal_layouts = parsed->layout_count > 0
+                                  ? runtime.edf_signal_layouts + parsed->layout_offset
+                                  : nullptr;
+        file.signal_layout_count = parsed->layout_count;
+        ++out.file_count;
     }
+
     return true;
+}
+
+bool begin_catalog_build(NightCatalogRefreshRuntime &runtime) {
+    NightCatalogBuildInput input;
+    input.edf_sessions = runtime.build_sessions;
+    input.edf_session_count = runtime.edf_session_count;
+    input.str_records = runtime.str_records;
+    input.str_record_count = runtime.str_record_count;
+    input.summary_records = runtime.summary ? runtime.summary->records() : nullptr;
+    input.summary_record_count = runtime.summary ? runtime.summary->size() : 0;
+    input.fallback_records = runtime.fallback_records;
+    input.fallback_record_count = runtime.fallback_record_count;
+    return runtime.builder.begin(input);
 }
 
 }  // namespace
@@ -1985,31 +1876,264 @@ bool NightCatalogRefreshService::poll() {
             }
             return true;
 
-        case NightCatalogRefreshRuntime::Phase::Build: {
-            std::shared_ptr<const NightCatalog> catalog;
-            bool retryable = false;
+        case NightCatalogRefreshRuntime::Phase::ParseStr:
+            return parse_str_chunk_record(*runtime_, status_);
 
-            if (!build_catalog(*runtime_,
-                               catalog,
-                               error,
-                               retryable,
-                               status_)) {
-                fail(error, retryable);
+        case NightCatalogRefreshRuntime::Phase::SortLayouts:
+            if (runtime_->sort.poll(
+                    runtime_->parsed_edf_files, runtime_->parsed_edf_file_count,
+                    [](const ParsedEdfLayouts &a, const ParsedEdfLayouts &b) {
+                        return strcmp(a.path, b.path) < 0;
+                    })) {
+                runtime_->sort.reset();
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::SortMetadata;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::SortMetadata:
+            if (runtime_->sort.poll(
+                    runtime_->session_metadata, runtime_->session_metadata_count,
+                    [](const ParsedSessionMetadata &a, const ParsedSessionMetadata &b) {
+                        const int day =
+                            strcmp(a.datalog_sleep_day_text, b.datalog_sleep_day_text);
+                        return day != 0 ? day < 0
+                                        : strcmp(a.session_stamp, b.session_stamp) < 0;
+                    })) {
+                runtime_->sort.reset();
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::AllocateBuild;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::AllocateBuild:
+            if (runtime_->edf_session_count >
+                std::numeric_limits<size_t>::max() / AC_EDF_REPORT_SESSION_FILE_MAX) {
+                fail("night_catalog_source_count_overflow");
+            } else if (!allocate_build_inputs(*runtime_)) {
+                fail("night_catalog_build_alloc_failed", true);
+            } else {
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::PrepareEdf;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::PrepareEdf:
+            if (runtime_->build_cursor < runtime_->edf_session_count) {
+                if (!prepare_build_session(*runtime_, error)) {
+                    fail(error);
+                } else {
+                    ++runtime_->build_cursor;
+                }
+            } else {
+                runtime_->build_cursor = 0;
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::SortDays;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::SortDays:
+            if (runtime_->sort.poll(runtime_->build_sessions,
+                                    runtime_->edf_session_count,
+                                    [](const NightCatalogEdfSessionInput &a,
+                                       const NightCatalogEdfSessionInput &b) {
+                                        return a.sleep_day < b.sleep_day;
+                                    })) {
+                runtime_->sort.reset();
+                runtime_->day_begin = runtime_->day_end = 0;
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::CollectDayBounds;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::CollectDayBounds: {
+            if (runtime_->day_begin == runtime_->edf_session_count) {
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::StartBuild;
                 return true;
             }
 
-            published_ = std::move(catalog);
+            const auto &first = runtime_->build_sessions[runtime_->day_begin];
+            if (runtime_->day_begin == runtime_->day_end) {
+                runtime_->day_start_ms = first.day_start_ms;
+                runtime_->day_end_ms = first.day_end_ms;
+            }
+
+            size_t budget = 32;
+            while (runtime_->day_end < runtime_->edf_session_count && budget-- > 0) {
+                const auto &session = runtime_->build_sessions[runtime_->day_end];
+                if (session.sleep_day != first.sleep_day) break;
+                runtime_->day_start_ms = std::min(
+                    runtime_->day_start_ms,
+                    std::min(session.day_start_ms, session.display_window.start_ms));
+                runtime_->day_end_ms = std::max(
+                    runtime_->day_end_ms,
+                    std::max(session.day_end_ms, session.display_window.end_ms));
+                ++runtime_->day_end;
+            }
+
+            if (runtime_->day_end == runtime_->edf_session_count ||
+                runtime_->build_sessions[runtime_->day_end].sleep_day !=
+                    first.sleep_day) {
+                runtime_->build_cursor = runtime_->day_begin;
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::ApplyDayBounds;
+            }
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::ApplyDayBounds: {
+            size_t budget = 32;
+            while (runtime_->build_cursor < runtime_->day_end && budget-- > 0) {
+                auto &session = runtime_->build_sessions[runtime_->build_cursor++];
+                session.day_start_ms = runtime_->day_start_ms;
+                session.day_end_ms = runtime_->day_end_ms;
+            }
+
+            if (runtime_->build_cursor == runtime_->day_end) {
+                runtime_->day_begin = runtime_->day_end;
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::CollectDayBounds;
+            }
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::StartBuild:
+            if (!begin_catalog_build(*runtime_)) {
+                const auto status = runtime_->builder.status();
+                fail(status.detail, status.retryable());
+            } else {
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::Build;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::Build: {
+            runtime_->builder.poll();
+            if (runtime_->builder.active()) return true;
+
+            const auto status = runtime_->builder.status();
+            runtime_->building_catalog = runtime_->builder.take_result();
+            if (!runtime_->building_catalog) {
+                fail(status.detail[0] ? status.detail : "night_catalog_build_failed",
+                     status.retryable());
+                return true;
+            }
+
+            if (status.invalid_fallback_records > 0) {
+                const uint32_t skipped = static_cast<uint32_t>(std::min(
+                    status.invalid_fallback_records, static_cast<size_t>(UINT32_MAX)));
+                status_.files_skipped += skipped;
+                status_.files_indexed = status_.files_indexed > skipped
+                                            ? status_.files_indexed - skipped
+                                            : 0;
+                set_warning(status_, "night_catalog_fallback_invalid");
+            }
+
+            runtime_->builder.reset();
+            runtime_->build_cursor = 0;
+            runtime_->phase = NightCatalogRefreshRuntime::Phase::Preserve;
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::Preserve: {
+            if (!runtime_->previous_catalog ||
+                runtime_->build_cursor == runtime_->previous_catalog->size()) {
+                if (runtime_->preserve_count == 0) {
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::Merge;
+                } else if (!runtime_->builder.begin_merge(
+                               *runtime_->building_catalog, *runtime_->previous_catalog,
+                               runtime_->preserve_days, runtime_->preserve_count)) {
+                    fail("night_catalog_previous_night_preserve_failed", true);
+                } else {
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::WaitMerge;
+                }
+                return true;
+            }
+
+            // Preserve inaccessible external fallback history, not a partial rebuild.
+            const auto *previous =
+                runtime_->previous_catalog->record(runtime_->build_cursor++);
+            if (!previous->sources_external ||
+                (runtime_->target.valid() &&
+                 previous->sleep_day != runtime_->target.sleep_day) ||
+                (previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
+                return true;
+            }
+
+            const auto *rebuilt = runtime_->building_catalog->find(previous->sleep_day);
+            if (rebuilt &&
+                (rebuilt->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) {
+                return true;
+            }
+
+            if (runtime_->target.valid()) {
+                fail("night_catalog_previous_fallback_unavailable", true);
+                return true;
+            }
+
+            if (!runtime_->preserve_days) {
+                runtime_->preserve_days = allocate_large_array<SleepDayId>(
+                    runtime_->previous_catalog->size());
+                if (!runtime_->preserve_days) {
+                    fail("night_catalog_previous_night_preserve_failed", true);
+                    return true;
+                }
+            }
+
+            runtime_->preserve_days[runtime_->preserve_count++] = previous->sleep_day;
+            set_warning(status_, "night_catalog_previous_night_preserved");
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::Merge: {
+            if (runtime_->target.valid()) {
+                if (!runtime_->previous_catalog) {
+                    fail("night_catalog_target_base_missing");
+                    return true;
+                }
+                if (!runtime_->building_catalog->find(runtime_->target.sleep_day)) {
+                    fail(runtime_->building_catalog->size() == 0
+                             ? "night_catalog_target_empty"
+                             : "night_catalog_target_day_mismatch");
+                    return true;
+                }
+
+                if (!runtime_->builder.begin_merge(*runtime_->previous_catalog,
+                                                   *runtime_->building_catalog,
+                                                   &runtime_->target.sleep_day, 1)) {
+                    fail("night_catalog_target_merge_failed", true);
+                } else {
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::WaitMerge;
+                }
+                return true;
+            }
+
+            runtime_->phase = NightCatalogRefreshRuntime::Phase::Publish;
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::WaitMerge: {
+            runtime_->builder.poll();
+            if (runtime_->builder.active()) return true;
+
+            auto merged = runtime_->builder.take_result();
+            if (!merged) {
+                fail(runtime_->target.valid()
+                         ? "night_catalog_target_merge_failed"
+                         : "night_catalog_previous_night_preserve_failed",
+                     true);
+                return true;
+            }
+
+            runtime_->builder.reset();
+            runtime_->building_catalog = std::move(merged);
+            runtime_->phase = NightCatalogRefreshRuntime::Phase::Publish;
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::Publish:
+            published_ = std::move(runtime_->building_catalog);
             status_.state = NightCatalogRefreshState::Ready;
-            status_.sessions = static_cast<uint32_t>(std::min(
-                published_->size(),
-                static_cast<size_t>(UINT32_MAX)));
+            status_.sessions = static_cast<uint32_t>(
+                std::min(published_->size(), static_cast<size_t>(UINT32_MAX)));
             status_.current_path[0] = '\0';
             status_.error[0] = '\0';
             status_.retryable = false;
             reset_transient();
             runtime_->phase = NightCatalogRefreshRuntime::Phase::Ready;
             return true;
-        }
     }
     return false;
 }
