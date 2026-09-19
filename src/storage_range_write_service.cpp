@@ -150,25 +150,31 @@ const char *StorageRangeWriteService::open_locked() {
     const StorageRangeWriteCommand &command = job_->command;
     const int flags = O_RDWR | (command.offset == 0 ? O_CREAT : 0) |
                       (command.truncate ? O_TRUNC : 0);
-    job_->output = Storage::take_write_handle(command.path.c_str());
-    if (job_->output >= 0 && command.truncate) {
-        const int closed = Storage::close_descriptor(command.path.c_str(),
-                                                       job_->output);
-        job_->output = -1;
-        if (closed != 0) return "close_failed";
-    }
 
-    if (job_->output < 0) {
-        job_->output = Storage::open_descriptor(command.path.c_str(), flags);
-    }
-
-    if (job_->output < 0) {
-        const int error = errno;
-        if (command.offset != 0) {
-            return error == ENOENT ? "file_not_found" : "open_failed";
+    if (job_->parent_cursor == 0) {
+        job_->output = Storage::take_write_handle(command.path.c_str());
+        if (job_->output >= 0 && command.truncate) {
+            const int closed = Storage::close_descriptor(command.path.c_str(),
+                                                         job_->output);
+            job_->output = -1;
+            if (closed != 0) return "close_failed";
         }
-        if (error != ENOENT && error != ENOTDIR) return "open_failed";
 
+        if (job_->output < 0) {
+            job_->output = Storage::open_descriptor(command.path.c_str(), flags);
+        }
+
+        if (job_->output < 0) {
+            const int error = errno;
+            if (command.offset != 0) {
+                return error == ENOENT ? "file_not_found" : "open_failed";
+            }
+            if (error != ENOENT && error != ENOTDIR) return "open_failed";
+        }
+    }
+
+    // Once parent creation starts, finish its bounded walk before retrying open.
+    if (job_->output < 0) {
         const auto parents = Storage::ensure_parent_directory_step(
             command.path.c_str(), job_->parent_cursor);
 
