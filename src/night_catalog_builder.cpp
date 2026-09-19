@@ -866,6 +866,11 @@ bool ingest_summary(const NightCatalogBuildInput &input,
         return false;
     }
 
+    BuildNight *night = find_night(nights, source.sleep_day);
+    const bool edf_owned = night && night->has_edf;
+    LargeScratchArray<bool> matched_sessions;
+    if (!edf_owned && !matched_sessions.allocate(source.session_count)) return false;
+
     size_t matched_session_count = 0;
     NightCatalogTimeRange previous_session;
     for (size_t session_index = 0; session_index < source.session_count;
@@ -876,14 +881,16 @@ bool ingest_summary(const NightCatalogBuildInput &input,
             (session_index > 0 && session.start_ms < previous_session.end_ms)) {
             return false;
         }
-        if (summary_session_matches_raw_edf(input, source.sleep_day, session)) {
-            ++matched_session_count;
+        if (!edf_owned) {
+            const bool matched = summary_session_matches_raw_edf(
+                input, source.sleep_day, session);
+            *matched_sessions.append() = matched;
+            if (matched) ++matched_session_count;
         }
         previous_session = session;
     }
 
-    BuildNight *night = find_night(nights, source.sleep_day);
-    if ((night && night->has_edf) ||
+    if (edf_owned ||
         (source.session_count > 0 && matched_session_count == source.session_count)) {
         return true;
     }
@@ -895,8 +902,7 @@ bool ingest_summary(const NightCatalogBuildInput &input,
 
     for (size_t session_index = 0; session_index < source.session_count;
          ++session_index) {
-        if (summary_session_matches_raw_edf(input, source.sleep_day,
-                                            source.sessions[session_index])) {
+        if (matched_sessions.data()[session_index]) {
             continue;
         }
         if (!append_session(sessions, night->owner, SessionOrigin::Summary,

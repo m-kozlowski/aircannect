@@ -2,7 +2,10 @@
 
 #include <memory>
 #include <stddef.h>
+#include <stdint.h>
+#include <vector>
 
+#include "large_allocator.h"
 #include "night_catalog_builder.h"
 #include "report_proto.h"
 #include "report_spool_types.h"
@@ -49,9 +52,34 @@ public:
         const NightCatalog &previous_catalog);
 
 private:
+    struct MaterializedRecord {
+        SleepDayId sleep_day;
+        int64_t day_start_ms = 0;
+        int64_t day_end_ms = 0;
+        ReportDailyMetrics metrics;
+        uint64_t identity = 0;
+        int32_t timezone_offset_minutes = 0;
+        size_t session_count = 0;
+        NightCatalogTimeRange sessions[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    };
+
+    using MaterializedRecords =
+        std::vector<MaterializedRecord, LargeAllocator<MaterializedRecord>>;
+
+    struct ParseContext {
+        MaterializedRecords *records = nullptr;
+        bool allocation_failed = false;
+    };
+
     NightCatalogSummarySnapshot() = default;
 
+    static bool materialize_record(const ReportSummaryRecord &source,
+                                   MaterializedRecord &target);
+    static bool append_parsed_record(void *context,
+                                     const ReportSummaryRecord &source);
     bool allocate(size_t record_count, size_t session_count);
+    bool initialize_from_materialized(const MaterializedRecord *records,
+                                      size_t record_count);
 
     uint8_t *storage_ = nullptr;
     size_t storage_bytes_ = 0;

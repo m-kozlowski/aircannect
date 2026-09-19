@@ -93,101 +93,12 @@ bool summary_axis_timezone_offset(SleepDayId sleep_day,
     return true;
 }
 
-size_t valid_session_count(const ReportSummaryRecord &record) {
-    const size_t count = std::min<size_t>(
-        record.session_interval_count, AC_REPORT_SUMMARY_SESSION_MAX);
-    size_t valid = 0;
-    for (size_t i = 0; i < count; ++i) {
-        const ReportSummarySession &session = record.sessions[i];
-        if (session.start_ms == 0 || session.duration_min == 0 ||
-            session.start_ms > static_cast<uint64_t>(INT64_MAX)) {
-            continue;
-        }
-
-        const int64_t duration_ms =
-            static_cast<int64_t>(session.duration_min) * MS_PER_MINUTE;
-        if (static_cast<int64_t>(session.start_ms) >
-            INT64_MAX - duration_ms) {
-            continue;
-        }
-        ++valid;
-    }
-    return valid;
-}
-
-bool valid_record(const ReportSummaryRecord &record,
-                  SleepDayId &sleep_day,
-                  size_t &session_count) {
-    session_count = 0;
-    int32_t axis_timezone_offset = 0;
-    if (!summary_sleep_day(record, sleep_day) ||
-        record.tz_offset_min < -24 * 60 ||
-        record.tz_offset_min > 24 * 60 ||
-        record.start_ms > static_cast<uint64_t>(INT64_MAX) ||
-        record.end_ms > static_cast<uint64_t>(INT64_MAX) ||
-        record.end_ms <= record.start_ms ||
-        !summary_axis_timezone_offset(
-            sleep_day,
-            static_cast<int64_t>(record.start_ms),
-            axis_timezone_offset)) {
-        return false;
-    }
-
-    session_count = valid_session_count(record);
-    return true;
-}
-
 void fill_metrics(const ReportSummaryRecord &record,
                   ReportDailyMetrics &metrics) {
     (void)report_daily_metrics_from_summary(record, metrics);
     metrics.source = ReportMetricSource::Summary;
     metrics.has_duration_min = record.duration_min > 0;
     metrics.duration_min = record.duration_min;
-}
-
-bool fill_record(const ReportSummaryRecord &source,
-                 SleepDayId sleep_day,
-                 size_t expected_sessions,
-                 NightCatalogSummaryInput &target,
-                 NightCatalogTimeRange *sessions,
-                 size_t session_capacity,
-                 size_t &sessions_written) {
-    if (expected_sessions > session_capacity ||
-        (expected_sessions > 0 && !sessions)) {
-        return false;
-    }
-
-    target.sleep_day = sleep_day;
-    target.day_start_ms = static_cast<int64_t>(source.start_ms);
-    target.day_end_ms = static_cast<int64_t>(source.end_ms);
-    target.sessions = expected_sessions > 0 ? sessions : nullptr;
-    target.session_count = expected_sessions;
-    target.identity = summary_identity(source);
-    target.timezone_offset_valid = summary_axis_timezone_offset(
-        sleep_day,
-        static_cast<int64_t>(source.start_ms),
-        target.timezone_offset_minutes);
-    if (!target.timezone_offset_valid) return false;
-    fill_metrics(source, target.metrics);
-
-    sessions_written = 0;
-    const size_t source_count = std::min<size_t>(
-        source.session_interval_count, AC_REPORT_SUMMARY_SESSION_MAX);
-    for (size_t i = 0; i < source_count; ++i) {
-        const ReportSummarySession &session = source.sessions[i];
-        if (session.start_ms == 0 || session.duration_min == 0 ||
-            session.start_ms > static_cast<uint64_t>(INT64_MAX)) {
-            continue;
-        }
-
-        const int64_t start_ms = static_cast<int64_t>(session.start_ms);
-        const int64_t duration_ms =
-            static_cast<int64_t>(session.duration_min) * MS_PER_MINUTE;
-        if (start_ms > INT64_MAX - duration_ms) continue;
-
-        sessions[sessions_written++] = {start_ms, start_ms + duration_ms};
-    }
-    return sessions_written == expected_sessions;
 }
 
 template <typename T>
@@ -340,14 +251,31 @@ bool copy_catalog_record(const NightCatalog &catalog,
     return true;
 }
 
-bool current_summary_contains(const NightCatalogSummarySnapshot &current,
-                              SleepDayId sleep_day) {
-    const NightCatalogSummaryInput *records = current.records();
-    for (size_t i = 0; i < current.size(); ++i) {
-        if (records[i].sleep_day == sleep_day) return true;
+class SummaryDayIndex {
+public:
+    bool build(const NightCatalogSummarySnapshot &summary) {
+        if (!days_.allocate(summary.size())) return false;
+
+        for (size_t i = 0; i < summary.size(); ++i) {
+            SleepDayId *day = days_.append();
+            if (!day) return false;
+            *day = summary.records()[i].sleep_day;
+        }
+        if (days_.size() > 0) {
+            std::sort(days_.data(), days_.data() + days_.size());
+        }
+        return true;
     }
-    return false;
-}
+
+    bool contains(SleepDayId sleep_day) const {
+        if (days_.size() == 0) return false;
+        return std::binary_search(days_.data(), days_.data() + days_.size(),
+                                  sleep_day);
+    }
+
+private:
+    LargeScratchArray<SleepDayId> days_;
+};
 
 bool expirable_summary_history(const NightCatalogRecord &record) {
     constexpr uint8_t local_sources = NIGHT_CATALOG_SOURCE_EDF |
@@ -358,71 +286,71 @@ bool expirable_summary_history(const NightCatalogRecord &record) {
            record.summary_identity != 0;
 }
 
-struct ParseCountContext {
-    size_t records = 0;
-    size_t sessions = 0;
-    bool overflow = false;
-};
-
-bool count_parsed_record(void *context, const ReportSummaryRecord &record) {
-    ParseCountContext *count = static_cast<ParseCountContext *>(context);
-    if (!count) return false;
-
-    SleepDayId sleep_day;
-    size_t sessions = 0;
-    if (!valid_record(record, sleep_day, sessions)) return true;
-    if (count->records == std::numeric_limits<size_t>::max() ||
-        count->sessions > std::numeric_limits<size_t>::max() - sessions) {
-        count->overflow = true;
-        return false;
-    }
-
-    ++count->records;
-    count->sessions += sessions;
-    return true;
-}
-
-struct ParseFillContext {
-    NightCatalogSummaryInput *records = nullptr;
-    NightCatalogTimeRange *sessions = nullptr;
-    size_t record_capacity = 0;
-    size_t session_capacity = 0;
-    size_t record_count = 0;
-    size_t session_count = 0;
-};
-
-bool fill_parsed_record(void *context, const ReportSummaryRecord &record) {
-    ParseFillContext *fill = static_cast<ParseFillContext *>(context);
-    if (!fill) return false;
-
-    SleepDayId sleep_day;
-    size_t expected_sessions = 0;
-    if (!valid_record(record, sleep_day, expected_sessions)) return true;
-    if (fill->record_count >= fill->record_capacity ||
-        expected_sessions > fill->session_capacity - fill->session_count) {
-        return false;
-    }
-
-    size_t written = 0;
-    NightCatalogTimeRange *session_target = expected_sessions > 0
-        ? fill->sessions + fill->session_count
-        : nullptr;
-    if (!fill_record(record,
-                     sleep_day,
-                     expected_sessions,
-                     fill->records[fill->record_count],
-                     session_target,
-                     fill->session_capacity - fill->session_count,
-                     written)) {
-        return false;
-    }
-
-    ++fill->record_count;
-    fill->session_count += written;
-    return true;
-}
-
 }  // namespace
+
+bool NightCatalogSummarySnapshot::materialize_record(
+    const ReportSummaryRecord &source,
+    MaterializedRecord &target) {
+    SleepDayId sleep_day;
+    int32_t axis_timezone_offset = 0;
+    if (!summary_sleep_day(source, sleep_day) ||
+        source.tz_offset_min < -24 * 60 ||
+        source.tz_offset_min > 24 * 60 ||
+        source.start_ms > static_cast<uint64_t>(INT64_MAX) ||
+        source.end_ms > static_cast<uint64_t>(INT64_MAX) ||
+        source.end_ms <= source.start_ms ||
+        !summary_axis_timezone_offset(
+            sleep_day,
+            static_cast<int64_t>(source.start_ms),
+            axis_timezone_offset)) {
+        return false;
+    }
+
+    target = {};
+    target.sleep_day = sleep_day;
+    target.day_start_ms = static_cast<int64_t>(source.start_ms);
+    target.day_end_ms = static_cast<int64_t>(source.end_ms);
+    target.identity = summary_identity(source);
+    target.timezone_offset_minutes = axis_timezone_offset;
+    fill_metrics(source, target.metrics);
+
+    const size_t source_count = std::min<size_t>(
+        source.session_interval_count, AC_REPORT_SUMMARY_SESSION_MAX);
+    for (size_t i = 0; i < source_count; ++i) {
+        const ReportSummarySession &session = source.sessions[i];
+        if (session.start_ms == 0 || session.duration_min == 0 ||
+            session.start_ms > static_cast<uint64_t>(INT64_MAX)) {
+            continue;
+        }
+
+        const int64_t start_ms = static_cast<int64_t>(session.start_ms);
+        const int64_t duration_ms =
+            static_cast<int64_t>(session.duration_min) * MS_PER_MINUTE;
+        if (start_ms > INT64_MAX - duration_ms) continue;
+
+        target.sessions[target.session_count++] = {
+            start_ms, start_ms + duration_ms};
+    }
+    return true;
+}
+
+bool NightCatalogSummarySnapshot::append_parsed_record(
+    void *context,
+    const ReportSummaryRecord &source) {
+    ParseContext *parse = static_cast<ParseContext *>(context);
+    if (!parse || !parse->records) return false;
+
+    MaterializedRecord record;
+    if (!materialize_record(source, record)) return true;
+
+    try {
+        parse->records->push_back(record);
+    } catch (const std::bad_alloc &) {
+        parse->allocation_failed = true;
+        return false;
+    }
+    return true;
+}
 
 NightCatalogSummarySnapshot::~NightCatalogSummarySnapshot() {
     Memory::free(storage_);
@@ -470,6 +398,47 @@ bool NightCatalogSummarySnapshot::allocate(size_t record_count,
     return true;
 }
 
+bool NightCatalogSummarySnapshot::initialize_from_materialized(
+    const MaterializedRecord *records,
+    size_t record_count) {
+    if (record_count > 0 && !records) return false;
+
+    size_t session_count = 0;
+    for (size_t i = 0; i < record_count; ++i) {
+        if (session_count > std::numeric_limits<size_t>::max() -
+                                records[i].session_count) {
+            return false;
+        }
+        session_count += records[i].session_count;
+    }
+    if (!allocate(record_count, session_count)) return false;
+
+    size_t next_session = 0;
+    for (size_t i = 0; i < record_count; ++i) {
+        const MaterializedRecord &source = records[i];
+        NightCatalogSummaryInput &target = records_[i];
+        target.sleep_day = source.sleep_day;
+        target.day_start_ms = source.day_start_ms;
+        target.day_end_ms = source.day_end_ms;
+        target.sessions = source.session_count > 0
+            ? sessions_ + next_session
+            : nullptr;
+        target.session_count = source.session_count;
+        target.metrics = source.metrics;
+        target.identity = source.identity;
+        target.timezone_offset_minutes = source.timezone_offset_minutes;
+        target.timezone_offset_valid = true;
+
+        if (source.session_count > 0) {
+            memcpy(sessions_ + next_session,
+                   source.sessions,
+                   source.session_count * sizeof(NightCatalogTimeRange));
+            next_session += source.session_count;
+        }
+    }
+    return next_session == session_count;
+}
+
 std::shared_ptr<const NightCatalogSummarySnapshot>
 NightCatalogSummarySnapshot::build(const ReportSummaryRecord *records,
                                    size_t record_count,
@@ -480,31 +449,24 @@ NightCatalogSummarySnapshot::build(const ReportSummaryRecord *records,
         return {};
     }
 
-    ParseCountContext count;
-    for (size_t i = 0; i < record_count; ++i) {
-        if (!count_parsed_record(&count, records[i])) {
-            set_error(error, error_size, "summary_size_overflow");
-            return {};
+    MaterializedRecords materialized;
+    try {
+        for (size_t i = 0; i < record_count; ++i) {
+            MaterializedRecord parsed;
+            if (!materialize_record(records[i], parsed)) continue;
+            materialized.push_back(parsed);
         }
-    }
-
-    std::shared_ptr<NightCatalogSummarySnapshot> snapshot(
-        new (std::nothrow) NightCatalogSummarySnapshot());
-    if (!snapshot || !snapshot->allocate(count.records, count.sessions)) {
+    } catch (const std::bad_alloc &) {
         set_error(error, error_size, "summary_snapshot_alloc_failed");
         return {};
     }
 
-    ParseFillContext fill;
-    fill.records = snapshot->records_;
-    fill.sessions = snapshot->sessions_;
-    fill.record_capacity = count.records;
-    fill.session_capacity = count.sessions;
-    for (size_t i = 0; i < record_count; ++i) {
-        if (!fill_parsed_record(&fill, records[i])) {
-            set_error(error, error_size, "summary_snapshot_build_failed");
-            return {};
-        }
+    std::shared_ptr<NightCatalogSummarySnapshot> snapshot(
+        new (std::nothrow) NightCatalogSummarySnapshot());
+    if (!snapshot || !snapshot->initialize_from_materialized(
+                         materialized.data(), materialized.size())) {
+        set_error(error, error_size, "summary_snapshot_alloc_failed");
+        return {};
     }
 
     set_error(error, error_size, "");
@@ -559,36 +521,26 @@ std::shared_ptr<const NightCatalogSummarySnapshot>
 NightCatalogSummarySnapshot::parse(const ReportSpoolResult &result,
                                    char *error,
                                    size_t error_size) {
-    ParseCountContext count;
-    if (!report_parse_summary_spool(result,
-                                    count_parsed_record,
-                                    &count,
-                                    error,
-                                    error_size) ||
-        count.overflow) {
+    MaterializedRecords materialized;
+    ParseContext parse;
+    parse.records = &materialized;
+    if (!report_parse_summary_spool(
+            result,
+            NightCatalogSummarySnapshot::append_parsed_record,
+            &parse,
+            error,
+            error_size)) {
+        if (parse.allocation_failed) {
+            set_error(error, error_size, "summary_snapshot_alloc_failed");
+        }
         return {};
     }
 
     std::shared_ptr<NightCatalogSummarySnapshot> snapshot(
         new (std::nothrow) NightCatalogSummarySnapshot());
-    if (!snapshot || !snapshot->allocate(count.records, count.sessions)) {
+    if (!snapshot || !snapshot->initialize_from_materialized(
+                         materialized.data(), materialized.size())) {
         set_error(error, error_size, "summary_snapshot_alloc_failed");
-        return {};
-    }
-
-    ParseFillContext fill;
-    fill.records = snapshot->records_;
-    fill.sessions = snapshot->sessions_;
-    fill.record_capacity = count.records;
-    fill.session_capacity = count.sessions;
-    if (!report_parse_summary_spool(result,
-                                    fill_parsed_record,
-                                    &fill,
-                                    error,
-                                    error_size) ||
-        fill.record_count != count.records ||
-        fill.session_count != count.sessions) {
-        set_error(error, error_size, "summary_snapshot_build_failed");
         return {};
     }
 
@@ -707,6 +659,9 @@ std::shared_ptr<const NightCatalogSummarySnapshot>
 NightCatalogSummarySnapshot::preserve_expired_history(
     const NightCatalogSummarySnapshot &current,
     const NightCatalog &previous_catalog) {
+    SummaryDayIndex current_days;
+    if (!current_days.build(current)) return {};
+
     size_t record_count = current.size();
     size_t session_count = 0;
     const NightCatalogSummaryInput *current_records = current.records();
@@ -723,7 +678,7 @@ NightCatalogSummarySnapshot::preserve_expired_history(
     for (size_t i = 0; i < previous_catalog.size(); ++i) {
         const NightCatalogRecord *record = previous_catalog.record(i);
         if (!record || !expirable_summary_history(*record) ||
-            current_summary_contains(current, record->sleep_day)) {
+            current_days.contains(record->sleep_day)) {
             continue;
         }
 
@@ -763,7 +718,7 @@ NightCatalogSummarySnapshot::preserve_expired_history(
     for (size_t i = 0; i < previous_catalog.size(); ++i) {
         const NightCatalogRecord *source = previous_catalog.record(i);
         if (!source || !expirable_summary_history(*source) ||
-            current_summary_contains(current, source->sleep_day)) {
+            current_days.contains(source->sleep_day)) {
             continue;
         }
 

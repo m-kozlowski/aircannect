@@ -13,6 +13,7 @@
 #include "edf_session_metadata.h"
 #include "edf_str_file_layout.h"
 #include "incremental_sort.h"
+#include "large_scratch_array.h"
 #include "night_catalog_clock.h"
 #include "night_catalog_store_service.h"
 #include "night_str_record.h"
@@ -32,6 +33,14 @@ constexpr uint8_t FALLBACK_SCAN_ROOT = 3;
 constexpr int64_t MS_PER_MINUTE = 60LL * 1000LL;
 constexpr int64_t MS_PER_DAY = 24LL * 60LL * MS_PER_MINUTE;
 constexpr int64_t LOCAL_NOON_MS = 12LL * 60LL * MS_PER_MINUTE;
+
+enum class ScanSourceKind : uint8_t {
+    None,
+    Edf,
+    SessionMetadata,
+    Str,
+    Fallback,
+};
 
 template <typename T>
 void destroy_large_array(T *values, size_t count) {
@@ -431,6 +440,23 @@ struct NightCatalogRefreshRuntime {
         previous_sources_requested = false;
         previous_fallback.reset();
 
+        destroy_large_array(edf_scan_indices, edf_scan_index_capacity);
+        edf_scan_indices = nullptr;
+        edf_scan_index_capacity = 0;
+        edf_scan_count = 0;
+
+        destroy_large_array(metadata_scan_indices,
+                           metadata_scan_index_capacity);
+        metadata_scan_indices = nullptr;
+        metadata_scan_index_capacity = 0;
+        metadata_scan_count = 0;
+
+        destroy_large_array(fallback_scan_indices,
+                           fallback_scan_index_capacity);
+        fallback_scan_indices = nullptr;
+        fallback_scan_index_capacity = 0;
+        fallback_scan_count = 0;
+
         scan.reset();
         destroy_large_array(edf_sessions, edf_session_capacity);
         edf_sessions = nullptr;
@@ -482,6 +508,7 @@ struct NightCatalogRefreshRuntime {
         str_next_record = 0;
         str_chunk_records = 0;
         str_chunk_index = 0;
+        current_scan_entry = 0;
     }
 
     void clear_summary() {
@@ -497,6 +524,16 @@ struct NightCatalogRefreshRuntime {
     OperationTicket scan_ticket;
     SourceReadCursor source_read;
     std::shared_ptr<const StorageScanSnapshot> scan;
+
+    size_t *edf_scan_indices = nullptr;
+    size_t edf_scan_index_capacity = 0;
+    size_t edf_scan_count = 0;
+    size_t *metadata_scan_indices = nullptr;
+    size_t metadata_scan_index_capacity = 0;
+    size_t metadata_scan_count = 0;
+    size_t *fallback_scan_indices = nullptr;
+    size_t fallback_scan_index_capacity = 0;
+    size_t fallback_scan_count = 0;
 
     std::shared_ptr<const NightCatalogSummarySnapshot> summary;
     std::shared_ptr<const NightCatalog> previous_catalog;
@@ -550,6 +587,7 @@ struct NightCatalogRefreshRuntime {
 
     uint8_t *read_buffer = nullptr;
     size_t scan_index = 0;
+    size_t current_scan_entry = 0;
     char current_path[AC_STORAGE_PATH_MAX] = {};
     uint64_t current_size = 0;
     uint64_t current_modified = 0;
@@ -747,24 +785,73 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
     size_t report_file_count = 0;
     size_t metadata_file_count = 0;
     size_t fallback_file_count = 0;
+    LargeScratchArray<uint8_t> scan_entry_kinds;
+    if (!scan_entry_kinds.allocate(runtime.scan->size())) {
+        return false;
+    }
+
     StorageScanEntryView entry;
     for (size_t i = 0; i < runtime.scan->size(); ++i) {
+        scan_entry_kinds.data()[i] =
+            static_cast<uint8_t>(ScanSourceKind::None);
         if (!runtime.scan->entry(i, entry) || entry.directory) continue;
 
         if (entry.root_index == DATALOG_SCAN_ROOT &&
             path_is_report_edf(entry.path)) {
+            scan_entry_kinds.data()[i] =
+                static_cast<uint8_t>(ScanSourceKind::Edf);
             ++report_file_count;
         } else if (entry.root_index == SESSION_METADATA_SCAN_ROOT &&
                    path_is_session_metadata(entry.path)) {
+            scan_entry_kinds.data()[i] =
+                static_cast<uint8_t>(ScanSourceKind::SessionMetadata);
             ++metadata_file_count;
         } else if (entry.root_index == STR_SCAN_ROOT &&
                    strcmp(entry.path, "/STR.edf") == 0) {
+            scan_entry_kinds.data()[i] =
+                static_cast<uint8_t>(ScanSourceKind::Str);
             runtime.str_file_found = true;
             runtime.str_file_size = entry.size;
             runtime.str_file_modified = entry.modified;
         } else if (entry.root_index == FALLBACK_SCAN_ROOT &&
                    path_is_fallback_artifact(entry.path)) {
+            scan_entry_kinds.data()[i] =
+                static_cast<uint8_t>(ScanSourceKind::Fallback);
             ++fallback_file_count;
+        }
+    }
+
+    runtime.edf_scan_index_capacity = report_file_count;
+    runtime.edf_scan_indices = allocate_large_array<size_t>(
+        runtime.edf_scan_index_capacity);
+    runtime.metadata_scan_index_capacity = metadata_file_count;
+    runtime.metadata_scan_indices = allocate_large_array<size_t>(
+        runtime.metadata_scan_index_capacity);
+    runtime.fallback_scan_index_capacity = fallback_file_count;
+    runtime.fallback_scan_indices = allocate_large_array<size_t>(
+        runtime.fallback_scan_index_capacity);
+    if ((report_file_count > 0 && !runtime.edf_scan_indices) ||
+        (metadata_file_count > 0 && !runtime.metadata_scan_indices) ||
+        (fallback_file_count > 0 && !runtime.fallback_scan_indices)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < runtime.scan->size(); ++i) {
+        switch (static_cast<ScanSourceKind>(scan_entry_kinds.data()[i])) {
+            case ScanSourceKind::Edf:
+                runtime.edf_scan_indices[runtime.edf_scan_count++] = i;
+                break;
+            case ScanSourceKind::SessionMetadata:
+                runtime.metadata_scan_indices[
+                    runtime.metadata_scan_count++] = i;
+                break;
+            case ScanSourceKind::Fallback:
+                runtime.fallback_scan_indices[
+                    runtime.fallback_scan_count++] = i;
+                break;
+            case ScanSourceKind::None:
+            case ScanSourceKind::Str:
+                break;
         }
     }
 
@@ -840,11 +927,9 @@ bool submit_next_edf(NightCatalogRefreshRuntime &runtime,
                      StorageReadPort &read_port,
                      NightCatalogRefreshStatus &status) {
     StorageScanEntryView entry;
-    while (runtime.scan_index < runtime.scan->size()) {
-        const size_t index = runtime.scan_index;
-        if (!runtime.scan->entry(index, entry) || entry.directory ||
-            entry.root_index != DATALOG_SCAN_ROOT ||
-            !path_is_report_edf(entry.path)) {
+    while (runtime.scan_index < runtime.edf_scan_count) {
+        const size_t index = runtime.edf_scan_indices[runtime.scan_index];
+        if (!runtime.scan->entry(index, entry)) {
             ++runtime.scan_index;
             continue;
         }
@@ -874,6 +959,7 @@ bool submit_next_edf(NightCatalogRefreshRuntime &runtime,
         }
 
         runtime.source_read.begin(submission.ticket);
+        runtime.current_scan_entry = index;
         copy_cstr(runtime.current_path,
                   sizeof(runtime.current_path),
                   entry.path);
@@ -997,11 +1083,10 @@ bool submit_next_metadata(NightCatalogRefreshRuntime &runtime,
                           StorageReadPort &read_port,
                           NightCatalogRefreshStatus &status) {
     StorageScanEntryView entry;
-    while (runtime.scan_index < runtime.scan->size()) {
-        if (!runtime.scan->entry(runtime.scan_index, entry) ||
-            entry.directory ||
-            entry.root_index != SESSION_METADATA_SCAN_ROOT ||
-            !path_is_session_metadata(entry.path)) {
+    while (runtime.scan_index < runtime.metadata_scan_count) {
+        const size_t index =
+            runtime.metadata_scan_indices[runtime.scan_index];
+        if (!runtime.scan->entry(index, entry)) {
             ++runtime.scan_index;
             continue;
         }
@@ -1030,6 +1115,7 @@ bool submit_next_metadata(NightCatalogRefreshRuntime &runtime,
         }
 
         runtime.source_read.begin(submission.ticket);
+        runtime.current_scan_entry = index;
         copy_cstr(runtime.current_path,
                   sizeof(runtime.current_path),
                   entry.path);
@@ -1154,10 +1240,10 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
                           NightCatalogRefreshStatus &status,
                           const char *&error) {
     StorageScanEntryView entry;
-    while (runtime.scan_index < runtime.scan->size()) {
-        if (!runtime.scan->entry(runtime.scan_index, entry) ||
-            entry.directory || entry.root_index != FALLBACK_SCAN_ROOT ||
-            !path_is_fallback_artifact(entry.path)) {
+    while (runtime.scan_index < runtime.fallback_scan_count) {
+        const size_t index =
+            runtime.fallback_scan_indices[runtime.scan_index];
+        if (!runtime.scan->entry(index, entry)) {
             ++runtime.scan_index;
             continue;
         }
@@ -1244,6 +1330,7 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
         }
 
         runtime.source_read.begin(submission.ticket);
+        runtime.current_scan_entry = index;
         copy_cstr(runtime.current_path,
                   sizeof(runtime.current_path),
                   entry.path);
@@ -1296,7 +1383,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
                                       expected_path,
                                       sizeof(expected_path)) &&
         strcmp(expected_path, runtime.current_path) == 0 &&
-        runtime.scan->entry(runtime.scan_index, scan_entry) &&
+        runtime.scan->entry(runtime.current_scan_entry, scan_entry) &&
         strcmp(scan_entry.path, runtime.current_path) == 0;
     if (!metadata_valid ||
         runtime.fallback_record_count >=
