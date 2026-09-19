@@ -1572,9 +1572,13 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
                      ReportReadOperation *plan_operations,
                      size_t plan_operation_count,
                      ReportReadMapping *plan_mappings,
-                     size_t plan_mapping_count) {
+                     size_t plan_mapping_count,
+                     size_t &fallback_read_capacity,
+                     size_t &decoder_capacity) {
     size_t operation_index = 0;
     size_t mapping_index = 0;
+    fallback_read_capacity = 0;
+    decoder_capacity = 0;
     const PendingOperation *previous_pending = nullptr;
     ReportReadOperation *operation = nullptr;
     ReportReadMapping *mapping = nullptr;
@@ -1587,6 +1591,12 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
             if (operation_index >= plan_operation_count) return false;
             operation = &plan_operations[operation_index++];
             *operation = entry.operation;
+            if (operation->kind == ReportReadOperationKind::FallbackSeries ||
+                operation->kind == ReportReadOperationKind::FallbackEvents) {
+                fallback_read_capacity = std::max(
+                    fallback_read_capacity,
+                    static_cast<size_t>(operation->length));
+            }
             operation->mapping_offset = static_cast<uint32_t>(mapping_index);
             operation->mapping_count = 0;
             mapping = nullptr;
@@ -1608,6 +1618,11 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
         mapping = &plan_mappings[mapping_index++];
         *mapping = entry.mapping;
         ++operation->mapping_count;
+        if (operation->kind == ReportReadOperationKind::Numeric) {
+            decoder_capacity = std::max(
+                decoder_capacity,
+                static_cast<size_t>(operation->mapping_count));
+        }
     }
     return operation_index == plan_operation_count &&
            mapping_index == plan_mapping_count;
@@ -1922,6 +1937,8 @@ ReportPlanResult ReportPlanner::build(
     plan->requested_event_mask_ = request.event_mask;
     plan->fallback_acquisition_allowed_ =
         (night->source_flags & NIGHT_CATALOG_SOURCE_EDF) == 0;
+    size_t fallback_read_capacity = 0;
+    size_t decoder_capacity = 0;
     if (!fill_sessions(request,
                        plan->catalog(),
                        plan->night(),
@@ -1938,10 +1955,14 @@ ReportPlanResult ReportPlanner::build(
                          plan->operations_,
                          plan->operation_count_,
                          plan->mappings_,
-                         plan->mapping_count_)) {
+                         plan->mapping_count_,
+                         fallback_read_capacity,
+                         decoder_capacity)) {
         result.status = ReportPlanStatus::InvalidCatalog;
         return result;
     }
+    plan->set_executor_capacities(fallback_read_capacity,
+                                  decoder_capacity);
 
     result.status = ReportPlanStatus::Ready;
     result.plan = std::move(plan);
@@ -2179,14 +2200,20 @@ ReportPlanResult ReportPlanner::resume(
         resumed_plan->sessions_[i] = *session;
     }
 
+    size_t fallback_read_capacity = 0;
+    size_t decoder_capacity = 0;
     if (!fill_operations(pending,
                          resumed_plan->operations_,
                          resumed_plan->operation_count_,
                          resumed_plan->mappings_,
-                         resumed_plan->mapping_count_)) {
+                         resumed_plan->mapping_count_,
+                         fallback_read_capacity,
+                         decoder_capacity)) {
         result.status = ReportPlanStatus::InvalidCatalog;
         return result;
     }
+    resumed_plan->set_executor_capacities(fallback_read_capacity,
+                                          decoder_capacity);
     result.status = ReportPlanStatus::Ready;
     result.plan = std::move(resumed_plan);
     return result;

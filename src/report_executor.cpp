@@ -78,13 +78,8 @@ OperationAdmission ReportExecutor::start(
         return OperationAdmission::Accepted;
     }
 
-    size_t record_capacity = 0;
-    size_t decoder_capacity = 0;
-    if (!validate_plan(record_capacity, decoder_capacity)) {
-        finish(ReportExecutorState::Failed, ReportExecutorError::InvalidPlan);
-        return OperationAdmission::Rejected;
-    }
-    if (!allocate_scratch(record_capacity, decoder_capacity)) {
+    if (!allocate_scratch(plan_->fallback_read_capacity(),
+                          plan_->decoder_capacity())) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::AllocationFailed);
         return OperationAdmission::Rejected;
@@ -171,141 +166,6 @@ ReportExecutorStatus ReportExecutor::status() const {
             : nullptr;
     out.record_count = operation ? operation->record_count : 0;
     return out;
-}
-
-bool ReportExecutor::validate_plan(size_t &record_capacity,
-                                   size_t &decoder_capacity) const {
-    record_capacity = 0;
-    decoder_capacity = 0;
-    if (!plan_) return false;
-
-    bool valid_operation = false;
-
-    for (size_t i = 0; i < plan_->operation_count(); ++i) {
-        const ReportReadOperation *operation = plan_->operation(i);
-        if (!operation || operation->record_count == 0 ||
-            operation->length == 0 ||
-            operation->length > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
-            return false;
-        }
-
-        const char *path = plan_->source_path(*operation);
-        if (!path || !path[0]) return false;
-
-        size_t mapping_count = 0;
-        const ReportReadMapping *mappings =
-            plan_->mappings(*operation, mapping_count);
-        if (fallback_kind(operation->kind)) {
-            const NightCatalogFallbackFile *file =
-                plan_->fallback_file(*operation);
-            const NightCatalogFallbackSection *section =
-                plan_->fallback_section(*operation);
-            if (!file || !section ||
-                operation->first_record > section->record_count ||
-                operation->record_count >
-                    section->record_count - operation->first_record) {
-                return false;
-            }
-
-            const bool series =
-                operation->kind == ReportReadOperationKind::FallbackSeries;
-            if (series) {
-                if (section->kind != ReportFallbackSectionKind::Series ||
-                    operation->record_count == 0 ||
-                    !mappings || mapping_count != 1 ||
-                    !mappings[0].output_window.valid() ||
-                    mappings[0].series.signal != section->signal ||
-                    mappings[0].series.source != section->source ||
-                    mappings[0].series.sample_interval_ms !=
-                        section->sample_interval_ms ||
-                    operation->event_mask != 0) {
-                    return false;
-                }
-
-                if (operation->offset != section->data_offset ||
-                    operation->length != section->data_size) {
-                    return false;
-                }
-            } else if (operation->offset != section->data_offset ||
-                       operation->length != section->data_size ||
-                       operation->first_record != 0 ||
-                       operation->record_count != section->record_count ||
-                       section->kind != ReportFallbackSectionKind::Events ||
-                       mapping_count != 0 ||
-                       !operation->event_filter.valid() ||
-                       operation->event_mask == 0 ||
-                       (operation->event_mask & ~section->event_mask) != 0) {
-                return false;
-            }
-
-            record_capacity = std::max(
-                record_capacity,
-                static_cast<size_t>(operation->length));
-            valid_operation = true;
-            continue;
-        }
-
-        const NightCatalogSourceFile *file =
-            plan_->source_file(*operation);
-        if (!file || file->record_size == 0 ||
-            operation->first_record > file->complete_records ||
-            operation->record_count >
-                file->complete_records - operation->first_record) {
-            return false;
-        }
-
-        if (file->data_offset > UINT64_MAX - file->data_size) return false;
-
-        const uint64_t expected_length =
-            static_cast<uint64_t>(operation->record_count) *
-            file->record_size;
-        const uint64_t data_end = file->data_offset + file->data_size;
-        if (expected_length != operation->length ||
-            operation->offset < file->data_offset ||
-            operation->offset > data_end ||
-            operation->length > data_end - operation->offset) {
-            return false;
-        }
-
-        if (operation->kind == ReportReadOperationKind::Numeric) {
-            if (!mappings || mapping_count == 0 ||
-                mapping_count > static_cast<size_t>(ReportSignalId::Count)) {
-                return false;
-            }
-            for (size_t mapping_index = 0;
-                 mapping_index < mapping_count;
-                 ++mapping_index) {
-                const EdfReportSignalLayout &layout =
-                    mappings[mapping_index].layout;
-                const ReportSeriesDescriptor &series =
-                    mappings[mapping_index].series;
-                const uint64_t signal_end =
-                    static_cast<uint64_t>(layout.byte_offset_in_record) +
-                    static_cast<uint64_t>(layout.samples_per_record) * 2u;
-                if (!mappings[mapping_index].output_window.valid() ||
-                    report_signal_bit(layout.signal) == 0 ||
-                    series.signal != layout.signal ||
-                    series.source != layout.source ||
-                    series.sample_interval_ms != layout.sample_interval_ms ||
-                    series.primary != layout.primary ||
-                    layout.samples_per_record == 0 ||
-                    signal_end > file->record_size) {
-                    return false;
-                }
-            }
-        } else {
-            EdfInventoryFileKind ignored;
-            if (mapping_count != 0 ||
-                !operation->event_filter.valid() ||
-                !source_kind(operation->kind, file->kind, ignored)) {
-                return false;
-            }
-        }
-
-        decoder_capacity = std::max(decoder_capacity, mapping_count);
-        valid_operation = true;
-    }
-    return valid_operation;
 }
 
 bool ReportExecutor::allocate_scratch(size_t record_capacity,

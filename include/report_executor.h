@@ -132,8 +132,6 @@ public:
     ReportExecutorStatus status() const;
 
 private:
-    bool validate_plan(size_t &record_capacity,
-                       size_t &decoder_capacity) const;
     bool allocate_scratch(size_t record_capacity,
                           size_t decoder_capacity);
     bool submit_read();
