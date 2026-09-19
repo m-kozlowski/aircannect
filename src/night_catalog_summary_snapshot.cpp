@@ -146,14 +146,14 @@ void fill_metrics(const ReportSummaryRecord &record,
 }
 
 bool fill_record(const ReportSummaryRecord &source,
+                 SleepDayId sleep_day,
+                 size_t expected_sessions,
                  NightCatalogSummaryInput &target,
                  NightCatalogTimeRange *sessions,
                  size_t session_capacity,
                  size_t &sessions_written) {
-    SleepDayId sleep_day;
-    size_t expected_sessions = 0;
-    if (!valid_record(source, sleep_day, expected_sessions) ||
-        expected_sessions > session_capacity) {
+    if (expected_sessions > session_capacity ||
+        (expected_sessions > 0 && !sessions)) {
         return false;
     }
 
@@ -408,6 +408,8 @@ bool fill_parsed_record(void *context, const ReportSummaryRecord &record) {
         ? fill->sessions + fill->session_count
         : nullptr;
     if (!fill_record(record,
+                     sleep_day,
+                     expected_sessions,
                      fill->records[fill->record_count],
                      session_target,
                      fill->session_capacity - fill->session_count,
