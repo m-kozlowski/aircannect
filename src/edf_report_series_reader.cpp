@@ -24,6 +24,29 @@ int32_t physical_to_milli(float value) {
 
 }  // namespace
 
+EdfReportSeriesDecoder::EdfReportSeriesDecoder(
+    const EdfReportSignalLayout &layout,
+    int64_t header_start_ms,
+    uint32_t record_duration_ms,
+    uint32_t record_size,
+    uint32_t complete_records,
+    int64_t range_start_ms,
+    int64_t range_end_ms) {
+    signal_header.samples_per_record = layout.samples_per_record;
+    signal_header.byte_offset_in_record = layout.byte_offset_in_record;
+    signal_scale = layout.scale;
+    mapping.signal = layout.signal;
+    mapping.source = layout.source;
+    mapping.sample_interval_ms = layout.sample_interval_ms;
+    mapping.primary = layout.primary;
+    this->header_start_ms = header_start_ms;
+    this->range_start_ms = range_start_ms;
+    this->range_end_ms = range_end_ms;
+    this->record_duration_ms = record_duration_ms;
+    this->record_size = record_size;
+    this->complete_records = complete_records;
+}
+
 bool EdfReportSeriesSpan::valid() const {
     return data && sample_count > 0 && samples_per_record > 0 &&
         first_sample_index <= samples_per_record &&
@@ -62,12 +85,15 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
     uint32_t record_duration_ms,
     uint32_t record_size,
     uint32_t complete_records,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
     EdfReportSeriesDecoder &out) {
     out = {};
     const uint64_t signal_end =
         static_cast<uint64_t>(layout.byte_offset_in_record) +
         static_cast<uint64_t>(layout.samples_per_record) * 2u;
     if (header_start_ms <= 0 || record_duration_ms == 0 || record_size == 0 ||
+        range_end_ms <= range_start_ms ||
         layout.samples_per_record == 0 || signal_end > record_size ||
         layout.scale.digital_max <= layout.scale.digital_min ||
         !isfinite(layout.scale.scale) || !isfinite(layout.scale.offset) ||
@@ -75,17 +101,13 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
         return EdfReportSeriesStatus::InvalidArgument;
     }
 
-    out.signal_header.samples_per_record = layout.samples_per_record;
-    out.signal_header.byte_offset_in_record = layout.byte_offset_in_record;
-    out.signal_scale = layout.scale;
-    out.mapping.signal = layout.signal;
-    out.mapping.source = layout.source;
-    out.mapping.sample_interval_ms = layout.sample_interval_ms;
-    out.mapping.primary = layout.primary;
-    out.header_start_ms = header_start_ms;
-    out.record_duration_ms = record_duration_ms;
-    out.record_size = record_size;
-    out.complete_records = complete_records;
+    out = EdfReportSeriesDecoder(layout,
+                                 header_start_ms,
+                                 record_duration_ms,
+                                 record_size,
+                                 complete_records,
+                                 range_start_ms,
+                                 range_end_ms);
     return EdfReportSeriesStatus::Ok;
 }
 
@@ -94,8 +116,6 @@ EdfReportSeriesStatus edf_report_decode_series_record(
     const uint8_t *record,
     size_t record_size,
     uint32_t record_index,
-    int64_t range_start_ms,
-    int64_t range_end_ms,
     EdfReportSeriesSampleCallback callback,
     void *context) {
     struct LegacyContext {
@@ -121,8 +141,7 @@ EdfReportSeriesStatus edf_report_decode_series_record(
     };
 
     return edf_report_decode_series_record_spans(
-        decoder, record, record_size, record_index, range_start_ms,
-        range_end_ms, emit_legacy, &legacy);
+        decoder, record, record_size, record_index, emit_legacy, &legacy);
 }
 
 EdfReportSeriesStatus edf_report_decode_series_record_spans(
@@ -130,13 +149,9 @@ EdfReportSeriesStatus edf_report_decode_series_record_spans(
     const uint8_t *record,
     size_t record_size,
     uint32_t record_index,
-    int64_t range_start_ms,
-    int64_t range_end_ms,
     EdfReportSeriesSpanCallback callback,
     void *context) {
-    if (!record || !callback || range_end_ms <= range_start_ms ||
-        decoder.record_duration_ms == 0 || decoder.record_size == 0 ||
-        decoder.signal_header.samples_per_record == 0) {
+    if (!record || !callback) {
         return EdfReportSeriesStatus::InvalidArgument;
     }
     if (record_index >= decoder.complete_records) {
@@ -154,17 +169,17 @@ EdfReportSeriesStatus edf_report_decode_series_record_spans(
         record_start_ms + static_cast<int64_t>(decoder.record_duration_ms);
     if (!ranges_overlap(record_start_ms,
                         record_end_ms,
-                        range_start_ms,
-                        range_end_ms)) {
+                        decoder.range_start_ms,
+                        decoder.range_end_ms)) {
         return EdfReportSeriesStatus::Ok;
     }
 
     const uint32_t samples_per_record =
         decoder.signal_header.samples_per_record;
     const int64_t clipped_start_ms =
-        std::max(record_start_ms, range_start_ms);
+        std::max(record_start_ms, decoder.range_start_ms);
     const int64_t clipped_end_ms =
-        std::min(record_end_ms, range_end_ms);
+        std::min(record_end_ms, decoder.range_end_ms);
     const uint64_t start_delta = static_cast<uint64_t>(
         clipped_start_ms - record_start_ms);
     const uint64_t end_delta = static_cast<uint64_t>(

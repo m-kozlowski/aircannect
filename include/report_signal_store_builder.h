@@ -26,7 +26,8 @@ public:
                      const ReportReadPlan &plan,
                      uint32_t store_generation,
                      const ReportSignalStoreMetadata &previous = {},
-                     const ReportBuildCheckpointInput &checkpoint = {});
+                     const ReportBuildCheckpointInput &checkpoint = {},
+                     std::shared_ptr<const ReportReadPlan> execution_plan = {});
     bool configure_series(const ReportSeriesDescriptor &series,
                           const EdfSignalScale &scale) override;
     bool ready(bool *progressed = nullptr) override;
@@ -48,6 +49,9 @@ public:
 
 private:
     struct Runtime;
+    bool accept_prepared_sample(uint16_t session_index,
+                                const ReportSeriesDescriptor &series,
+                                const ReportSeriesSample &sample);
     bool accept_raw_sample(uint16_t session_index,
                            const ReportSeriesDescriptor &series,
                            int64_t timestamp_ms,

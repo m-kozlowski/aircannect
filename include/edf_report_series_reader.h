@@ -20,11 +20,24 @@ enum class EdfReportSeriesStatus : uint8_t {
 };
 
 struct EdfReportSeriesDecoder {
+    EdfReportSeriesDecoder() = default;
+    // The caller must supply a layout accepted by the planner boundary.
+    // This constructor only prepares the immutable decode context.
+    EdfReportSeriesDecoder(const EdfReportSignalLayout &layout,
+                           int64_t header_start_ms,
+                           uint32_t record_duration_ms,
+                           uint32_t record_size,
+                           uint32_t complete_records,
+                           int64_t range_start_ms,
+                           int64_t range_end_ms);
+
     EdfSignalHeader signal_header;
     // Original EDF units: physical = raw * scale + offset.
     EdfSignalScale signal_scale;
     EdfReportSignalMapping mapping;
     int64_t header_start_ms = 0;
+    int64_t range_start_ms = 0;
+    int64_t range_end_ms = 0;
     uint32_t record_duration_ms = 0;
     uint32_t record_size = 0;
     uint32_t complete_records = 0;
@@ -63,6 +76,8 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
     uint32_t record_duration_ms,
     uint32_t record_size,
     uint32_t complete_records,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
     EdfReportSeriesDecoder &out);
 
 // Emits original digital samples alongside the legacy physical milli-values.
@@ -72,8 +87,6 @@ EdfReportSeriesStatus edf_report_decode_series_record(
     const uint8_t *record,
     size_t record_size,
     uint32_t record_index,
-    int64_t range_start_ms,
-    int64_t range_end_ms,
     EdfReportSeriesSampleCallback callback,
     void *context);
 
@@ -82,8 +95,6 @@ EdfReportSeriesStatus edf_report_decode_series_record_spans(
     const uint8_t *record,
     size_t record_size,
     uint32_t record_index,
-    int64_t range_start_ms,
-    int64_t range_end_ms,
     EdfReportSeriesSpanCallback callback,
     void *context);
 

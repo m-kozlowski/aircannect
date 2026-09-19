@@ -6,9 +6,12 @@
 #include <new>
 #include <optional>
 #include <string.h>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include "large_object.h"
+#include "large_allocator.h"
 #include "edf_bytes.h"
 #include "large_scratch_array.h"
 #include "memory_manager.h"
@@ -124,6 +127,17 @@ bool same_track_format(const ReportSignalStoreTrack &a,
         a.missing_value == b.missing_value;
 }
 
+auto track_format_key(const ReportSignalStoreTrack &track) {
+    return std::tie(track.signal, track.sample_interval_ms, track.grid_phase_ms,
+                    track.value_scale, track.value_offset, track.missing_value);
+}
+
+struct TrackCoverage {
+    ReportSignalStoreTrack format;
+    uint16_t session = 0;
+    uint64_t expected = 0;
+};
+
 void destroy_bundle(ReportSignalStoreBundle *bundle) {
     if (!bundle) return;
     bundle->~ReportSignalStoreBundle();
@@ -135,12 +149,14 @@ void destroy_bundle(ReportSignalStoreBundle *bundle) {
 struct ReportSignalStoreBuilder::Runtime {
     ReportArtifactRequest request;
     const ReportReadPlan *plan = nullptr;
+    std::shared_ptr<const ReportReadPlan> execution_plan;
     TrackWork *tracks = nullptr;
     size_t track_count = 0;
     size_t track_capacity = 0;
     size_t last_track = SIZE_MAX;
     ReportSourceId last_source = ReportSourceId::Summary;
     bool last_original = false;
+    std::vector<TrackCoverage, LargeAllocator<TrackCoverage>> coverage;
     ReportEventRecord *events = nullptr;
     size_t event_count = 0;
     size_t event_capacity = 0;
@@ -187,6 +203,7 @@ struct ReportSignalStoreBuilder::Runtime {
         track_count = 0;
         track_capacity = 0;
         last_track = SIZE_MAX;
+        decltype(coverage){}.swap(coverage);
 
         Memory::free(events);
         events = nullptr;
@@ -201,6 +218,7 @@ struct ReportSignalStoreBuilder::Runtime {
 
         request = {};
         plan = nullptr;
+        execution_plan.reset();
         first_block_start_ms = 0;
         block_slot_count = 0;
         store_generation = 0;
@@ -355,7 +373,7 @@ struct ReportSignalStoreBuilder::Runtime {
         track.last_valid_sample_ms = last_timestamp_ms;
         track.valid_sample_count += count;
 
-        if (!work.sessions_seen[session_index]) {
+        if (!work.source_present && !work.sessions_seen[session_index]) {
             work.sessions_seen[session_index] = 1;
             const ReportReadSession *session = plan->session(session_index);
             const uint64_t expected = expected_samples(
@@ -370,49 +388,76 @@ struct ReportSignalStoreBuilder::Runtime {
         return true;
     }
 
-    void update_expected_coverage() {
-        for (size_t i = 0; i < track_count; ++i) {
-            TrackWork &work = tracks[i];
-            memset(work.sessions_seen, 0, plan->session_count());
-            uint64_t expected = 0;
-            bool matched = false;
-
-            for (size_t op = 0; op < plan->operation_count(); ++op) {
-                const ReportReadOperation &operation = *plan->operation(op);
-                const auto *file = plan->source_file(operation);
-                const auto *section = plan->fallback_section(operation);
-                const bool edf = operation.kind == ReportReadOperationKind::Numeric;
-                if ((!edf || !file) &&
-                    (operation.kind != ReportReadOperationKind::FallbackSeries ||
-                     !section)) continue;
-
-                size_t count = 0;
-                const auto *mappings = plan->mappings(operation, count);
-                for (size_t m = 0; m < count; ++m) {
-                    const auto &mapping = mappings[m];
-                    const auto &series = mapping.series;
-                    if (series.signal != work.track.signal ||
-                        series.sample_interval_ms != work.track.sample_interval_ms) {
-                        continue;
-                    }
-
-                    const auto format = track_format(
-                        series, edf ? &mapping.layout.scale : nullptr,
-                        edf ? file->record_start_ms : section->coverage.start_ms);
-
-                    if (!same_track_format(work.track, format) ||
-                        work.sessions_seen[operation.session_index]) continue;
-
-                    work.sessions_seen[operation.session_index] = 1;
-                    matched = true;
-                    expected += expected_samples(
-                        plan->session(operation.session_index)->output_window,
-                        series.sample_interval_ms, format.grid_phase_ms);
-                }
-            }
-            if (matched) work.track.expected_sample_count = expected;
-            work.source_present = matched;
+    bool prepare_expected_coverage() {
+        try {
+            coverage.reserve(plan->mapping_count());
+        } catch (const std::bad_alloc &) {
+            return false;
         }
+
+        for (size_t op = 0; op < plan->operation_count(); ++op) {
+            const auto &operation = *plan->operation(op);
+            const bool edf = operation.kind == ReportReadOperationKind::Numeric;
+            if (!edf && operation.kind != ReportReadOperationKind::FallbackSeries) {
+                continue;
+            }
+
+            const int64_t origin = edf
+                ? plan->source_file(operation)->record_start_ms
+                : plan->fallback_section(operation)->coverage.start_ms;
+            size_t count = 0;
+            const auto *mappings = plan->mappings(operation, count);
+            for (size_t m = 0; m < count; ++m) {
+                const auto &mapping = mappings[m];
+                const auto interval = mapping.series.sample_interval_ms;
+                if (interval < 40 || REPORT_SIGNAL_STORE_BLOCK_MS % interval != 0) {
+                    return false;
+                }
+
+                TrackCoverage entry;
+                entry.format = track_format(
+                    mapping.series, edf ? &mapping.layout.scale : nullptr, origin);
+                entry.session = operation.session_index;
+                entry.expected = expected_samples(
+                    plan->session(entry.session)->output_window, interval,
+                    entry.format.grid_phase_ms);
+                coverage.push_back(entry);
+            }
+        }
+
+        std::sort(coverage.begin(), coverage.end(),
+                  [](const TrackCoverage &a, const TrackCoverage &b) {
+            const auto ak = track_format_key(a.format);
+            const auto bk = track_format_key(b.format);
+            return ak == bk ? a.session < b.session : ak < bk;
+        });
+
+        size_t unique = 0;
+        for (const auto &entry : coverage) {
+            if (unique && same_track_format(coverage[unique - 1].format,
+                                             entry.format)) {
+                auto &previous = coverage[unique - 1];
+                if (previous.session == entry.session) continue;
+                if (previous.expected > UINT64_MAX - entry.expected) return false;
+                previous.expected += entry.expected;
+                previous.session = entry.session;
+            } else {
+                coverage[unique++] = entry;
+            }
+        }
+        coverage.resize(unique);
+        return true;
+    }
+
+    void set_expected_coverage(TrackWork &work) const {
+        const auto found = std::lower_bound(
+            coverage.begin(), coverage.end(), work.track,
+            [](const TrackCoverage &entry, const ReportSignalStoreTrack &track) {
+                return track_format_key(entry.format) < track_format_key(track);
+            });
+        work.source_present = found != coverage.end() &&
+            same_track_format(found->format, work.track);
+        if (work.source_present) work.track.expected_sample_count = found->expected;
     }
 };
 
@@ -433,7 +478,8 @@ bool ReportSignalStoreBuilder::begin_build(
     const ReportReadPlan &plan,
     uint32_t store_generation,
     const ReportSignalStoreMetadata &previous,
-    const ReportBuildCheckpointInput &checkpoint_input) {
+    const ReportBuildCheckpointInput &checkpoint_input,
+    std::shared_ptr<const ReportReadPlan> execution_plan) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_signal_store_runtime_unavailable";
@@ -443,9 +489,7 @@ bool ReportSignalStoreBuilder::begin_build(
     runtime_->clear_work();
     runtime_->completed.reset();
     if (!request.ticket.valid() || request.artifact != plan.key() ||
-        store_generation == 0 || !plan.night().sleep_day.valid() ||
-        !plan.night().source_revision.valid() ||
-        plan.night().day_end_ms <= plan.night().day_start_ms) {
+        store_generation == 0) {
         failure_reason_ = "report_signal_store_request_invalid";
         return false;
     }
@@ -460,16 +504,6 @@ bool ReportSignalStoreBuilder::begin_build(
         slot_count > static_cast<int64_t>(REPORT_SIGNAL_STORE_MAX_BLOCKS)) {
         failure_reason_ = "report_signal_store_day_layout_invalid";
         return false;
-    }
-
-    for (size_t i = 0; i < plan.session_count(); ++i) {
-        const ReportReadSession *session = plan.session(i);
-        if (!session || !session->output_window.valid() ||
-            session->output_window.start_ms < plan.night().day_start_ms ||
-            session->output_window.end_ms > plan.night().day_end_ms) {
-            failure_reason_ = "report_signal_store_session_invalid";
-            return false;
-        }
     }
 
     const auto &previous_night = previous.view;
@@ -540,9 +574,17 @@ bool ReportSignalStoreBuilder::begin_build(
 
     runtime_->request = request;
     runtime_->plan = &plan;
+    runtime_->execution_plan = std::move(execution_plan);
     runtime_->first_block_start_ms = first_block;
     runtime_->block_slot_count = static_cast<uint16_t>(slot_count);
     runtime_->store_generation = store_generation;
+    if (!runtime_->prepare_expected_coverage()) {
+        failure_reason_ = "report_signal_store_coverage_prepare_failed";
+        return false;
+    }
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        runtime_->set_expected_coverage(runtime_->tracks[i]);
+    }
     if (!runtime_->metrics.begin(plan) ||
         !runtime_->closed_metrics.begin(plan) ||
         (checkpoint_bytes &&
@@ -574,7 +616,8 @@ bool ReportSignalStoreBuilder::begin_build(
 bool ReportSignalStoreBuilder::configure_series(
     const ReportSeriesDescriptor &series, const EdfSignalScale &scale) {
     const size_t index = static_cast<size_t>(series.signal);
-    if (!runtime_ || index >= static_cast<size_t>(ReportSignalId::Count)) {
+    if (!runtime_ || !runtime_->active ||
+        index >= static_cast<size_t>(ReportSignalId::Count)) {
         return false;
     }
     if (scale.digital_min == INT16_MIN && scale.digital_max == INT16_MAX) {
@@ -607,6 +650,13 @@ bool ReportSignalStoreBuilder::accept_series(
         return false;
     }
 
+    return accept_prepared_sample(session_index, series, sample);
+}
+
+bool ReportSignalStoreBuilder::accept_prepared_sample(
+    uint16_t session_index,
+    const ReportSeriesDescriptor &series,
+    const ReportSeriesSample &sample) {
     const size_t signal_index = static_cast<size_t>(series.signal);
     const bool original = sample.raw_valid && runtime_->configured[signal_index];
     uint32_t phase = 0;
@@ -708,6 +758,7 @@ bool ReportSignalStoreBuilder::accept_series(
             failure_reason_ = "report_signal_store_session_map_failed";
             return false;
         }
+        runtime_->set_expected_coverage(*work);
     }
 
     runtime_->last_track = static_cast<size_t>(work - runtime_->tracks);
@@ -719,7 +770,7 @@ bool ReportSignalStoreBuilder::accept_series(
 
     if (work->recount_samples) {
         work->track.valid_sample_count = 0;
-        work->track.expected_sample_count = 0;
+        if (!work->source_present) work->track.expected_sample_count = 0;
         work->track.first_valid_sample_ms = 0;
         work->track.last_valid_sample_ms = 0;
         work->recount_samples = false;
@@ -798,16 +849,10 @@ bool ReportSignalStoreBuilder::accept_raw_sample(
     sample.raw_valid = true;
     if (report_signal_has_metric_consumer(series.signal)) {
         const size_t signal_index = static_cast<size_t>(series.signal);
-        if (!runtime_ || signal_index >=
-                static_cast<size_t>(ReportSignalId::Count) ||
-            !runtime_->configured[signal_index]) {
-            failure_reason_ = "report_signal_store_series_scale_missing";
-            return false;
-        }
         sample.value_milli = edf_report_physical_value_milli(
             scale ? *scale : runtime_->scales[signal_index], raw);
     }
-    return accept_series(session_index, series, sample);
+    return accept_prepared_sample(session_index, series, sample);
 }
 
 bool ReportSignalStoreBuilder::accept_raw_run(
@@ -850,23 +895,13 @@ bool ReportSignalStoreBuilder::accept_series_span(
     uint16_t session_index,
     const ReportSeriesDescriptor &series,
     const EdfReportSeriesSpan &span) {
-    const size_t signal_index = static_cast<size_t>(series.signal);
-    if (!runtime_ || !runtime_->active || !runtime_->plan || !span.valid() ||
-        session_index >= runtime_->plan->session_count() ||
-        signal_index >= static_cast<size_t>(ReportSignalId::Count) ||
-        !runtime_->configured[signal_index] ||
-        series.sample_interval_ms < 40 ||
-        (REPORT_SIGNAL_STORE_BLOCK_MS % series.sample_interval_ms) != 0) {
-        failure_reason_ = "report_signal_store_series_span_invalid";
+    if (!runtime_ || !runtime_->active) {
+        failure_reason_ = "report_signal_store_series_context_invalid";
         return false;
     }
 
-    const auto &window = runtime_->plan->session(session_index)->output_window;
-    if (span.timestamp_at(0) < window.start_ms ||
-        span.timestamp_at(span.sample_count - 1) >= window.end_ms) {
-        failure_reason_ = "report_signal_store_series_invalid";
-        return false;
-    }
+    // Executor supplies a clipped EDF span for a configured plan mapping.
+    // Missing words and chronological track placement are still checked here.
 
     size_t first_valid = span.sample_count;
     for (uint32_t i = 0; i < span.sample_count; ++i) {
@@ -1237,8 +1272,6 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     bundle->generation = runtime_->store_generation;
     bundle->checkpoint_slot = runtime_->checkpoint_slot;
 
-    runtime_->update_expected_coverage();
-
     const auto &previous_checkpoint = runtime_->previous_checkpoint.view;
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
@@ -1390,8 +1423,8 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     Memory::free(sessions);
 
     const auto progress = ReportPlanner::capture_progress(
-        *runtime_->plan, runtime_->closed_before_ms,
-        previous_checkpoint.progress, previous_checkpoint.progress_size);
+        runtime_->execution_plan ? *runtime_->execution_plan : *runtime_->plan,
+        runtime_->closed_before_ms);
     const auto metrics = runtime_->closed_metrics.snapshot();
     LargeScratchArray<ReportBuildTrackState> closed_tracks;
     LargeScratchArray<std::shared_ptr<const LargeByteBuffer>> tail_snapshots;

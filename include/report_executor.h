@@ -132,6 +132,19 @@ public:
     ReportExecutorStatus status() const;
 
 private:
+    struct OperationContext {
+        const ReportReadOperation *operation = nullptr;
+        const char *path = nullptr;
+        const NightCatalogSourceFile *source_file = nullptr;
+        const NightCatalogFallbackFile *fallback_file = nullptr;
+        const NightCatalogFallbackSection *fallback_section = nullptr;
+        const ReportReadMapping *mappings = nullptr;
+        size_t mapping_count = 0;
+        EdfReportEventSource event_source;
+        bool event_source_valid = false;
+        bool prepared = false;
+    };
+
     bool allocate_scratch(size_t record_capacity,
                           size_t decoder_capacity);
     bool submit_read();
@@ -175,6 +188,7 @@ private:
     EdfReportSeriesDecoder *decoders_ = nullptr;
     size_t decoder_capacity_ = 0;
     bool fallback_loaded_ = false;
+    OperationContext operation_context_;
 
     EdfReportEventDecodeContext event_context_;
     uint16_t event_file_index_ = UINT16_MAX;

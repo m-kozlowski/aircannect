@@ -235,7 +235,7 @@ std::shared_ptr<const LargeByteBuffer> encode_report_source_progress(
     size_t total = PROGRESS_HEADER_BYTES;
     for (size_t i = 0; i < count; ++i) {
         const ReportSourceProgressEntry &entry = entries[i];
-        if (!valid_entry(entry)) return {};
+        if (!entry.path || entry.path_length == 0) return {};
 
         size_t entry_bytes = 0;
         if (!checked_entry_bytes(entry.path_length, entry_bytes) ||

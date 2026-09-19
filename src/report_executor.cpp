@@ -128,8 +128,10 @@ bool ReportExecutor::poll(size_t record_budget) {
             break;
         }
 
-        const bool fallback = fallback_kind(
-            plan_->operation(operation_index_)->kind);
+        const ReportReadOperation *operation = operation_context_.prepared
+            ? operation_context_.operation
+            : plan_->operation(operation_index_);
+        const bool fallback = operation && fallback_kind(operation->kind);
         if (!decode_record()) break;
         progressed = true;
         record_budget = fallback ? 0 : record_budget - 1;
@@ -191,9 +193,15 @@ bool ReportExecutor::allocate_scratch(size_t record_capacity,
 }
 
 bool ReportExecutor::submit_read() {
-    const ReportReadOperation *operation =
-        plan_ ? plan_->operation(operation_index_) : nullptr;
-    const char *path = operation ? plan_->source_path(*operation) : nullptr;
+    if (!prepare_operation()) {
+        finish(ReportExecutorState::Failed,
+               sink_rejected_ ? ReportExecutorError::SinkRejected
+                              : ReportExecutorError::InvalidPlan);
+        return true;
+    }
+
+    const ReportReadOperation *operation = operation_context_.operation;
+    const char *path = operation_context_.path;
     if (!operation || !path) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
@@ -241,62 +249,88 @@ bool ReportExecutor::poll_read() {
         return true;
     }
 
-    const ReportReadOperation *operation = plan_->operation(operation_index_);
+    const ReportReadOperation *operation = operation_context_.operation;
     prepared_ = completion.prepared;
     if (!operation || prepared_.length != operation->length) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::StorageShortRead);
         return true;
     }
-    if (!prepare_operation()) {
-        finish(ReportExecutorState::Failed,
-               sink_rejected_ ? ReportExecutorError::SinkRejected
-                              : ReportExecutorError::InvalidPlan);
-        return true;
-    }
-
     state_ = ReportExecutorState::DecodeRecords;
     return true;
 }
 
 bool ReportExecutor::prepare_operation() {
-    const ReportReadOperation *operation = plan_->operation(operation_index_);
+    if (operation_context_.prepared) return true;
+
+    OperationContext context;
+    const ReportReadOperation *operation =
+        plan_ ? plan_->operation(operation_index_) : nullptr;
     if (!operation) return false;
+
+    context.operation = operation;
+    context.path = plan_->source_path(*operation);
+    if (!context.path || !context.path[0]) return false;
+
+    context.mappings = plan_->mappings(*operation, context.mapping_count);
+    if (context.mapping_count > 0 && !context.mappings) return false;
 
     record_index_ = 0;
     fallback_loaded_ = false;
-    if (fallback_kind(operation->kind)) return true;
+    if (fallback_kind(operation->kind)) {
+        context.fallback_file = plan_->fallback_file(*operation);
+        context.fallback_section = plan_->fallback_section(*operation);
+        if (!context.fallback_file || !context.fallback_section) return false;
 
-    const NightCatalogSourceFile *file = operation
-        ? plan_->source_file(*operation)
-        : nullptr;
-    if (!file) return false;
+        if (operation->kind == ReportReadOperationKind::FallbackSeries) {
+            if (context.mapping_count != 1) return false;
+        } else if (context.mapping_count != 0) {
+            return false;
+        }
+
+        context.prepared = true;
+        operation_context_ = context;
+        return true;
+    }
+
+    context.source_file = plan_->source_file(*operation);
+    if (!context.source_file) return false;
+    const NightCatalogSourceFile &file = *context.source_file;
 
     if (operation->kind == ReportReadOperationKind::Numeric) {
-        size_t mapping_count = 0;
-        const ReportReadMapping *mappings =
-            plan_->mappings(*operation, mapping_count);
-        if (!mappings || mapping_count > decoder_capacity_) return false;
+        if (context.mapping_count == 0 ||
+            context.mapping_count > decoder_capacity_) {
+            return false;
+        }
 
-        for (size_t i = 0; i < mapping_count; ++i) {
-            if (edf_report_series_decoder_init(
-                    mappings[i].layout,
-                    file->record_start_ms,
-                    file->record_duration_ms,
-                    file->record_size,
-                    file->complete_records,
-                    decoders_[i]) != EdfReportSeriesStatus::Ok) {
-                return false;
-            }
-
-            if (!sink_->configure_series(mappings[i].series,
+        for (size_t i = 0; i < context.mapping_count; ++i) {
+            decoders_[i] = EdfReportSeriesDecoder(
+                context.mappings[i].layout,
+                file.record_start_ms,
+                file.record_duration_ms,
+                file.record_size,
+                file.complete_records,
+                context.mappings[i].output_window.start_ms,
+                context.mappings[i].output_window.end_ms);
+            if (!sink_->configure_series(context.mappings[i].series,
                                          decoders_[i].signal_scale)) {
                 sink_rejected_ = true;
                 return false;
             }
         }
+        context.prepared = true;
+        operation_context_ = context;
         return true;
     }
+
+    if (context.mapping_count != 0) return false;
+    if (!source_kind(operation->kind,
+                     file.kind,
+                     context.event_source.kind)) {
+        return false;
+    }
+    context.event_source.header_start_ms = file.record_start_ms;
+    context.event_source_valid = true;
 
     if (operation->kind == ReportReadOperationKind::CsrEvents) {
         const bool contiguous = event_context_valid_ &&
@@ -311,18 +345,25 @@ bool ReportExecutor::prepare_operation() {
         event_file_index_ = UINT16_MAX;
         event_next_record_ = 0;
     }
+
+    context.prepared = true;
+    operation_context_ = context;
     return true;
 }
 
 bool ReportExecutor::decode_record() {
-    const ReportReadOperation *operation = plan_->operation(operation_index_);
-    if (operation && fallback_kind(operation->kind)) {
+    const OperationContext &operation_context = operation_context_;
+    const ReportReadOperation *operation = operation_context.operation;
+    if (!operation_context.prepared || !operation) {
+        finish(ReportExecutorState::Failed,
+               ReportExecutorError::InvalidPlan);
+        return false;
+    }
+    if (fallback_kind(operation->kind)) {
         return decode_fallback_operation();
     }
 
-    const NightCatalogSourceFile *file = operation
-        ? plan_->source_file(*operation)
-        : nullptr;
+    const NightCatalogSourceFile *file = operation_context.source_file;
     if (!operation || !file || record_index_ >= operation->record_count) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
@@ -357,10 +398,8 @@ bool ReportExecutor::decode_record() {
     const uint32_t source_record_index =
         operation->first_record + record_index_;
     if (operation->kind == ReportReadOperationKind::Numeric) {
-        size_t mapping_count = 0;
-        const ReportReadMapping *mappings =
-            plan_->mappings(*operation, mapping_count);
-        for (size_t i = 0; i < mapping_count; ++i) {
+        for (size_t i = 0; i < operation_context.mapping_count; ++i) {
+            const ReportReadMapping *mappings = operation_context.mappings;
             callback_mapping_ = &mappings[i];
             const EdfReportSeriesStatus decode_status =
                 edf_report_decode_series_record_spans(
@@ -368,8 +407,6 @@ bool ReportExecutor::decode_record() {
                     record,
                     file->record_size,
                     source_record_index,
-                    mappings[i].output_window.start_ms,
-                    mappings[i].output_window.end_ms,
                     emit_series_span,
                     this);
             if (decode_status != EdfReportSeriesStatus::Ok) {
@@ -381,20 +418,18 @@ bool ReportExecutor::decode_record() {
             }
         }
     } else {
-        EdfInventoryFileKind kind;
-        if (!source_kind(operation->kind, file->kind, kind)) {
+        if (!operation_context.event_source_valid) {
             finish(ReportExecutorState::Failed,
                    ReportExecutorError::InvalidPlan);
             return false;
         }
 
-        const EdfReportEventSource source{kind, file->record_start_ms};
         EdfReportEventDecodeContext *event_context =
             operation->kind == ReportReadOperationKind::CsrEvents
                 ? &event_context_
                 : nullptr;
         const EdfReportEventStatus decode_status =
-            edf_report_decode_annotation_record(source,
+            edf_report_decode_annotation_record(operation_context.event_source,
                                                 record,
                                                 file->record_size,
                                                 true,
@@ -418,14 +453,12 @@ bool ReportExecutor::decode_record() {
 }
 
 bool ReportExecutor::decode_fallback_operation() {
-    const ReportReadOperation *operation = plan_->operation(operation_index_);
-    const NightCatalogFallbackFile *file = operation
-        ? plan_->fallback_file(*operation)
-        : nullptr;
-    const NightCatalogFallbackSection *section = operation
-        ? plan_->fallback_section(*operation)
-        : nullptr;
-    if (!operation || !file || !section ||
+    const OperationContext &operation_context = operation_context_;
+    const ReportReadOperation *operation = operation_context.operation;
+    const NightCatalogFallbackFile *file = operation_context.fallback_file;
+    const NightCatalogFallbackSection *section =
+        operation_context.fallback_section;
+    if (!operation_context.prepared || !operation || !file || !section ||
         record_index_ >= operation->record_count ||
         operation->length > fallback_capacity_) {
         finish(ReportExecutorState::Failed,
@@ -455,16 +488,7 @@ bool ReportExecutor::decode_fallback_operation() {
     sink_rejected_ = false;
     callback_operation_ = operation;
     if (operation->kind == ReportReadOperationKind::FallbackSeries) {
-        size_t mapping_count = 0;
-        const ReportReadMapping *mappings =
-            plan_->mappings(*operation, mapping_count);
-        if (!mappings || mapping_count != 1) {
-            finish(ReportExecutorState::Failed,
-                   ReportExecutorError::InvalidPlan);
-            return false;
-        }
-
-        callback_mapping_ = mappings;
+        callback_mapping_ = operation_context.mappings;
         const bool decoded = report_for_each_series_sample_range(
             section->payload_schema,
             section->coverage.start_ms,
@@ -519,7 +543,7 @@ bool ReportExecutor::decode_fallback_operation() {
 }
 
 void ReportExecutor::finish_operation() {
-    const ReportReadOperation *operation = plan_->operation(operation_index_);
+    const ReportReadOperation *operation = operation_context_.operation;
     if (operation && operation->kind == ReportReadOperationKind::CsrEvents) {
         event_next_record_ = operation->first_record + operation->record_count;
     }
@@ -538,6 +562,7 @@ bool ReportExecutor::poll_operation_end(bool &progressed) {
 
     ++operation_index_;
     record_index_ = 0;
+    operation_context_ = {};
 
     if (operation_index_ >= operation_count_) {
         finish(ReportExecutorState::Complete, ReportExecutorError::None);
@@ -565,6 +590,7 @@ void ReportExecutor::release_run_resources() {
     sink_ = nullptr;
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
+    operation_context_ = {};
     event_context_ = {};
     event_file_index_ = UINT16_MAX;
     event_next_record_ = 0;

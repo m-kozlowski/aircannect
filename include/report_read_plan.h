@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 #include "night_catalog.h"
+#include "large_scratch_array.h"
 #include "report_artifact_key.h"
+#include "report_source_progress.h"
 #include "report_sources.h"
 
 namespace aircannect {
@@ -39,6 +41,7 @@ struct ReportReadMapping {
     NightCatalogTimeRange output_window;
     ReportSeriesDescriptor series;
     EdfReportSignalLayout layout;
+    uint32_t source_progress_index = 0;
 };
 
 struct ReportReadOperation {
@@ -110,6 +113,10 @@ public:
     const ReportReadMapping *mapping(size_t index) const;
     const ReportReadMapping *mappings(const ReportReadOperation &operation,
                                       size_t &count) const;
+    const ReportSourceProgressEntry &source_progress(
+        const ReportReadMapping &mapping) const {
+        return source_progress_.data()[mapping.source_progress_index];
+    }
 
     const NightCatalog &catalog() const { return *catalog_; }
     const NightCatalogRecord &night() const { return *night_; }
@@ -142,6 +149,10 @@ private:
     // Maximum fallback payload read and EDF decoder count for this plan.
     size_t fallback_read_capacity_ = 0;
     size_t decoder_capacity_ = 0;
+
+    // Prepared once; paths borrow catalog_ or the retained progress payload.
+    LargeScratchArray<ReportSourceProgressEntry> source_progress_;
+    std::shared_ptr<const LargeByteBuffer> previous_progress_;
 
     uint32_t requested_signal_mask_ = 0;
     uint32_t missing_required_signal_mask_ = 0;

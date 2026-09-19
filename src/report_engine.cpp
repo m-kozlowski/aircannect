@@ -850,8 +850,18 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
         const auto &checkpoint = previous_checkpoint_.view;
         const auto &previous = previous_metadata_.view;
 
-        ReportPlanResult resumed = ReportPlanner::resume(
-            active_plan_, checkpoint.progress, checkpoint.progress_size);
+        const auto progress = LargeByteBuffer::slice(
+            previous_checkpoint_.bytes,
+            checkpoint.progress - previous_checkpoint_.bytes->data(),
+            checkpoint.progress_size);
+        if (!progress) {
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::AllocationFailed,
+                            ReportExecutorError::None,
+                            "report_checkpoint_progress_allocation_failed");
+            return true;
+        }
+        ReportPlanResult resumed = ReportPlanner::resume(active_plan_, progress);
 
         if (resumed.status == ReportPlanStatus::InvalidCatalog) {
             // Source layout or historical coverage changed, not a tail append.
@@ -885,7 +895,7 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
 
     if (!builder_.begin_build(
             active_request_, *active_plan_, active_store_generation_,
-            previous_metadata_, previous_checkpoint_)) {
+            previous_metadata_, previous_checkpoint_, execution_plan)) {
         const char *reason = builder_.failure_reason();
         builder_.discard_build();
         complete_active(OperationOutcome::failed(),
