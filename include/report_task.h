@@ -89,6 +89,14 @@ struct ReportTaskControlSnapshot {
     bool catalog_refresh_retryable = false;
 };
 
+struct ReportTaskFailure {
+    char operation[32] = {};
+    SleepDayId sleep_day;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    uint32_t occurred_ms = 0;
+    uint32_t retry_ms = 0;
+};
+
 struct ReportTaskDiagnosticSnapshot {
     bool task_started = false;
     ReportTaskState state = ReportTaskState::Stopped;
@@ -97,6 +105,7 @@ struct ReportTaskDiagnosticSnapshot {
     size_t materialized_nights = 0;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
+    ReportTaskFailure last_failure;
     uint32_t catalog_generation = 0;
     uint32_t durable_catalog_generation = 0;
     bool foreground_active = false;

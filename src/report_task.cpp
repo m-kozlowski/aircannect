@@ -163,6 +163,31 @@ int64_t align_block_start(int64_t timestamp_ms) {
 struct ReportTask::Runtime {
     Runtime() : engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
 
+    void record_failure(const char *operation, const char *error,
+                        SleepDayId sleep_day = {}, uint32_t retry_ms = 0,
+                        bool log = true) {
+        ++command_failures;
+        copy_cstr(last_failure.operation, sizeof(last_failure.operation), operation);
+        copy_cstr(last_failure.error, sizeof(last_failure.error),
+                  error && error[0] ? error : "report_operation_failed");
+        last_failure.sleep_day = sleep_day;
+        last_failure.occurred_ms = last_step_ms;
+        last_failure.retry_ms = retry_ms;
+
+#ifdef ARDUINO
+        if (log) {
+            char day[9] = "--";
+            if (sleep_day.valid()) sleep_day.format_yyyymmdd(day, sizeof(day));
+            Log::logf(CAT_REPORT, LOG_WARN,
+                      "failed op=%s night=%s error=%s retry_ms=%lu",
+                      last_failure.operation, day, last_failure.error,
+                      static_cast<unsigned long>(retry_ms));
+        }
+#else
+        (void)log;
+#endif
+    }
+
     bool lock(uint32_t timeout_ms = 10) const {
 #ifdef ARDUINO
         return mutex &&
@@ -478,7 +503,9 @@ struct ReportTask::Runtime {
 
         store_catalog = std::move(next);
         engine.publish_store_catalog(store_catalog);
-        if (!publish_state()) ++command_failures;
+        if (!publish_state()) {
+            record_failure("publish_status", "report_snapshot_alloc_failed");
+        }
     }
 
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
@@ -505,7 +532,7 @@ struct ReportTask::Runtime {
             if (reconciled) {
                 store_catalog = std::move(reconciled);
             } else {
-                ++command_failures;
+                record_failure("reconcile_metadata", "report_store_catalog_alloc_failed");
             }
         } else {
             store_catalog = ReportSignalStoreCatalogBuilder::build(
@@ -521,7 +548,9 @@ struct ReportTask::Runtime {
         store_catalog_load_retry_attempt = 0;
 
         reset_background_pass();
-        if (!publish_state()) ++command_failures;
+        if (!publish_state()) {
+            record_failure("publish_status", "report_snapshot_alloc_failed");
+        }
     }
 
     bool merge_loaded_sources(std::shared_ptr<const NightCatalog> loaded,
@@ -542,7 +571,8 @@ struct ReportTask::Runtime {
         const auto merged = NightCatalogBuilder::upsert_night(
             *catalog, *loaded, night->sleep_day);
         if (!merged) {
-            ++command_failures;
+            record_failure("merge_sources", "report_catalog_merge_failed",
+                           night->sleep_day);
             return false;
         }
 
@@ -553,7 +583,8 @@ struct ReportTask::Runtime {
                       *summary, *loaded, current->summary_identity)
                 : NightCatalogSummarySnapshot::from_catalog(*merged);
             if (!repaired_summary) {
-                ++command_failures;
+                record_failure("merge_summary", "report_summary_merge_failed",
+                               night->sleep_day);
                 return false;
             }
 
@@ -571,7 +602,9 @@ struct ReportTask::Runtime {
         } else {
             catalog = merged;
             engine.publish_catalog(catalog);
-            if (!publish_state()) ++command_failures;
+            if (!publish_state()) {
+                record_failure("publish_status", "report_snapshot_alloc_failed");
+            }
         }
         return true;
     }
@@ -590,7 +623,8 @@ struct ReportTask::Runtime {
             capture_sources_flags = night->source_flags;
         } else if (admitted == OperationAdmission::Rejected) {
             capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
-            ++command_failures;
+            record_failure("load_capture_sources", "report_sources_load_rejected",
+                           night->sleep_day, CATALOG_RETRY_MAX_MS);
         }
         return false;
     }
@@ -608,11 +642,13 @@ struct ReportTask::Runtime {
             current->source_revision != capture_sources_revision ||
             current->source_flags != capture_sources_flags) return true;
 
-        if (capture_sources.status().state != NightCatalogStoreState::Ready ||
-            !merge_loaded_sources(std::move(loaded), capture_sources_revision,
-                                  capture_sources_flags)) {
+        if (capture_sources.status().state != NightCatalogStoreState::Ready) {
             capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
-            ++command_failures;
+            record_failure("load_capture_sources", capture_sources.status().error,
+                           current->sleep_day, CATALOG_RETRY_MAX_MS);
+        } else if (!merge_loaded_sources(std::move(loaded), capture_sources_revision,
+                                         capture_sources_flags)) {
+            capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
         }
         return true;
     }
@@ -627,7 +663,9 @@ struct ReportTask::Runtime {
 
         catalog = index;
         engine.publish_catalog(catalog);
-        if (!publish_state()) ++command_failures;
+        if (!publish_state()) {
+            record_failure("publish_status", "report_snapshot_alloc_failed");
+        }
     }
 
     void remember_failure(const ReportEngineCompletion &completion,
@@ -1037,7 +1075,8 @@ struct ReportTask::Runtime {
         store_catalog_load_retry_at_ms =
             now_ms + retry_delay(store_catalog_load_retry_attempt);
         advance_retry(store_catalog_load_retry_attempt);
-        ++command_failures;
+        record_failure("load_metadata", "report_store_catalog_load_rejected", {},
+                       deadline_remaining(now_ms, store_catalog_load_retry_at_ms));
         return true;
     }
 
@@ -1054,16 +1093,17 @@ struct ReportTask::Runtime {
                 store_catalog_load_retry_at_ms = 0;
                 store_catalog_load_retry_attempt = 0;
             } else {
-                ++command_failures;
+                record_failure("load_metadata", "report_store_catalog_missing");
             }
         } else if (status.state ==
                    ReportSignalStoreCatalogLoadState::Failed) {
-            ++command_failures;
             store_catalog_loader.reset();
             store_catalog_load_pending = catalog != nullptr;
             store_catalog_load_retry_at_ms =
                 now_ms + retry_delay(store_catalog_load_retry_attempt);
             advance_retry(store_catalog_load_retry_attempt);
+            record_failure("load_metadata", status.error, {},
+                           deadline_remaining(now_ms, store_catalog_load_retry_at_ms));
         } else {
             store_catalog_loader.reset();
         }
@@ -1091,7 +1131,8 @@ struct ReportTask::Runtime {
         if (admitted == OperationAdmission::Rejected) {
             spool_availability_retry_at_ms =
                 now_ms + SPOOL_AVAILABILITY_RETRY_MS;
-            ++command_failures;
+            record_failure("probe_spools", "report_spool_probe_rejected", {},
+                           SPOOL_AVAILABILITY_RETRY_MS);
             return true;
         }
 
@@ -1119,6 +1160,7 @@ struct ReportTask::Runtime {
         } else {
             spool_availability_retry_at_ms =
                 now_ms + SPOOL_AVAILABILITY_RETRY_MS;
+            record_failure("probe_spools", status.error, {}, SPOOL_AVAILABILITY_RETRY_MS);
         }
         return true;
     }
@@ -1150,8 +1192,9 @@ struct ReportTask::Runtime {
             catalog_generation);
         if (queued.status == ReportRequestEnqueueStatus::Full) return false;
         if (queued.status == ReportRequestEnqueueStatus::Invalid) {
+            record_failure("queue_post_therapy", "report_request_rejected",
+                           night->sleep_day);
             post_therapy_build = {};
-            ++command_failures;
         }
         return true;
     }
@@ -1183,7 +1226,8 @@ struct ReportTask::Runtime {
         if (!night || !night->sleep_day.valid() ||
             !night->source_revision.valid()) {
             ++idle_cursor;
-            ++command_failures;
+            record_failure("queue_background", "report_catalog_night_invalid",
+                           night ? night->sleep_day : SleepDayId{});
             return true;
         }
         if (store_catalog &&
@@ -1196,7 +1240,8 @@ struct ReportTask::Runtime {
                 ++idle_cursor;
                 idle_pass_failed = true;
                 idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
-                ++command_failures;
+                record_failure("compress_background", "report_tile_start_failed",
+                               night->sleep_day, MATERIALIZE_RETRY_MS);
                 return true;
             }
             signal_tile_backfill_started = true;
@@ -1228,7 +1273,7 @@ struct ReportTask::Runtime {
         if (queued.status == ReportRequestEnqueueStatus::Full) return false;
         if (queued.status == ReportRequestEnqueueStatus::Invalid) {
             ++idle_cursor;
-            ++command_failures;
+            record_failure("queue_background", "report_request_rejected", night->sleep_day);
         }
         return true;
     }
@@ -1245,7 +1290,8 @@ struct ReportTask::Runtime {
         if (!succeeded) {
             idle_pass_failed = true;
             idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
-            ++command_failures;
+            record_failure("compress_background", signal_tile_backfill.error(),
+                           signal_tile_backfill.sleep_day(), MATERIALIZE_RETRY_MS);
         }
         signal_tile_backfill.reset();
         return true;
@@ -1272,7 +1318,6 @@ struct ReportTask::Runtime {
 
         if (!updated) {
             engine.catalog_update_failed(error);
-            ++command_failures;
             return true;
         }
 
@@ -1331,6 +1376,8 @@ struct ReportTask::Runtime {
                           sizeof(rebuild.last_completion.error),
                           "report_request_rejected");
                 unlock();
+                record_failure("queue_rebuild", "report_request_rejected",
+                               night->sleep_day);
                 return true;
             }
 
@@ -1365,7 +1412,8 @@ struct ReportTask::Runtime {
             if (next) {
                 accept_store_catalog(std::move(next));
             } else {
-                ++command_failures;
+                record_failure("publish_metadata", "report_store_catalog_alloc_failed",
+                               published_input.view.night.sleep_day);
             }
             worked = true;
         }
@@ -1378,12 +1426,14 @@ struct ReportTask::Runtime {
         }
         observed_engine_completion = completion.request.ticket;
         release_loaded_sources();
+        bool rebuilding = false;
         if (rebuild_catalog) {
             if (!lock()) {
                 observed_engine_completion = {};
                 return worked;
             }
             if (rebuild.active && completion.request.ticket == rebuild_ticket) {
+                rebuilding = true;
                 rebuild.last_completion = completion;
                 ++rebuild.completed;
                 if (completion.outcome.disposition !=
@@ -1399,11 +1449,6 @@ struct ReportTask::Runtime {
                     OperationDisposition::Succeeded) {
                     Log::logf(CAT_REPORT, LOG_INFO,
                               "rebuild complete night=%s", day);
-                } else {
-                    Log::logf(CAT_REPORT, LOG_WARN,
-                              "rebuild failed night=%s error=%s", day,
-                              completion.error[0] ? completion.error :
-                                  "report_build_failed");
                 }
 #endif
             }
@@ -1415,6 +1460,7 @@ struct ReportTask::Runtime {
         const bool succeeded =
             completion.outcome.disposition ==
             OperationDisposition::Succeeded;
+        const bool post_therapy = completion.request.artifact == post_therapy_build;
 
         if (completion.request.artifact == capture_build) {
             if (succeeded) {
@@ -1432,10 +1478,10 @@ struct ReportTask::Runtime {
 #ifdef ARDUINO
             char day[9] = {};
             completed_day.format_yyyymmdd(day, sizeof(day));
-            Log::logf(CAT_REPORT, succeeded ? LOG_INFO : LOG_WARN,
-                      "post-therapy report %s night=%s error=%s",
-                      succeeded ? "ready" : "failed", day,
-                      completion.error[0] ? completion.error : "--");
+            if (succeeded) {
+                Log::logf(CAT_REPORT, LOG_INFO,
+                          "post-therapy report ready night=%s error=--", day);
+            }
 #endif
         }
 
@@ -1444,7 +1490,14 @@ struct ReportTask::Runtime {
         } else if (completion.outcome.disposition !=
                    OperationDisposition::Cancelled) {
             remember_failure(completion, now_ms);
-            ++command_failures;
+            ReportNightFailureStatus failure;
+            find_failure(completed_day, failure, 0);
+            const char *operation = rebuilding ? "rebuild" :
+                post_therapy ? "post_therapy" :
+                completion.request.priority == ReportRequestPriority::Foreground
+                    ? "build" : "build_background";
+            record_failure(operation,
+                           completion.error, completed_day, failure.retry_after_ms);
         }
 
         if (completion.request.priority !=
@@ -1610,6 +1663,7 @@ struct ReportTask::Runtime {
         out.catalog_nights = catalog ? catalog->size() : 0;
         out.materialized_nights = store_catalog ? store_catalog->size() : 0;
         out.command_failures = command_failures;
+        out.last_failure = last_failure;
         out.catalog_generation = catalog_generation;
         out.durable_catalog_generation = durable_catalog_generation;
         out.foreground_active = engine_status.foreground_active;
@@ -1752,6 +1806,7 @@ struct ReportTask::Runtime {
     size_t command_count = 0;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
+    ReportTaskFailure last_failure;
 
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog;
@@ -2265,7 +2320,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     (void)runtime.enqueue(command);
                 } else if (queued.status ==
                            ReportRequestEnqueueStatus::Invalid) {
-                    ++runtime.command_failures;
+                    runtime.record_failure("queue_build", "report_request_rejected",
+                                           command.sleep_day);
                 } else {
                     runtime.clear_failure(command.sleep_day);
                 }
@@ -2299,8 +2355,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                             runtime.catalog_generation;
                         break;
                     }
-                } else if (!runtime.catalog) {
-                    runtime.schedule_reconcile(now_ms, false);
+                } else {
+                    if (strcmp(status.error, "read_not_found") != 0) {
+                        runtime.record_failure("load_catalog", status.error);
+                    }
+                    if (!runtime.catalog) runtime.schedule_reconcile(now_ms, false);
                 }
             } else if (completed == CatalogStorePurpose::SourceUpdate) {
                 const auto replacement = std::move(runtime.pending_source_update);
@@ -2317,8 +2376,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     if (summary && prior) {
                         const auto repaired = NightCatalogSummarySnapshot::replace_night(
                             *summary, *replacement, prior->summary_identity);
-                        if (repaired) runtime.summary_acquisition.seed(repaired);
-                        else ++runtime.command_failures;
+                        if (repaired) {
+                            runtime.summary_acquisition.seed(repaired);
+                        } else {
+                            runtime.record_failure(
+                                "merge_summary", "report_summary_merge_failed", day);
+                        }
                     }
 
                     if (night && runtime.post_therapy_build.sleep_day == day) {
@@ -2354,7 +2417,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     if (runtime.engine.status().state == ReportEngineState::Idle) {
                         runtime.catalog = runtime.catalog_store.snapshot();
                         runtime.engine.publish_catalog(runtime.catalog);
-                        if (!runtime.publish_state()) ++runtime.command_failures;
+                        if (!runtime.publish_state()) {
+                            runtime.record_failure("publish_status", "report_snapshot_alloc_failed");
+                        }
                     }
                     runtime.pending_catalog_save.reset();
                     runtime.pending_catalog_save_generation = 0;
@@ -2366,6 +2431,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_store_retry_at_ms =
                     now_ms + retry_delay(runtime.catalog_store_retry_attempt);
                 advance_retry(runtime.catalog_store_retry_attempt);
+                runtime.record_failure("save_catalog", status.error,
+                                       runtime.post_therapy_build.sleep_day,
+                                       deadline_remaining(now_ms, runtime.catalog_store_retry_at_ms));
             }
             worked = true;
         }
@@ -2382,7 +2450,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         } else if (admitted == OperationAdmission::Rejected) {
             runtime.catalog_load_pending = false;
             if (!runtime.catalog) runtime.schedule_reconcile(now_ms, false);
-            ++runtime.command_failures;
+            runtime.record_failure("load_catalog", "report_catalog_load_rejected");
         }
         worked = true;
     }
@@ -2412,6 +2480,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     if (runtime.summary_acquisition.active()) {
         worked = runtime.summary_acquisition.poll() || worked;
+        if (runtime.summary_acquisition.status().state == ReportSummaryAcquisitionState::Error) {
+            runtime.record_failure("fetch_summary", runtime.summary_acquisition.status().error,
+                                   runtime.pending_refresh.target.sleep_day);
+        }
     }
     if (runtime.pending_refresh.valid() &&
         !runtime.pending_refresh.summary_attempted &&
@@ -2429,7 +2501,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_refresh.summary_attempted = true;
             } else if (admitted == OperationAdmission::Rejected) {
                 runtime.pending_refresh.summary_attempted = true;
-                ++runtime.command_failures;
+                runtime.record_failure("fetch_summary", "report_summary_request_rejected",
+                                       runtime.pending_refresh.target.sleep_day);
             }
         }
         worked = true;
@@ -2491,7 +2564,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     now_ms + retry_delay(
                                  runtime.catalog_refresh_retry_attempt);
                 advance_retry(runtime.catalog_refresh_retry_attempt);
-                ++runtime.command_failures;
             } else {
                 if (runtime.refresh_post_therapy ||
                     runtime.refresh_target.valid()) {
@@ -2500,22 +2572,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         true,
                         false);
                 }
-                ++runtime.command_failures;
             }
 
-            if (status.state == NightCatalogRefreshState::Error &&
-                strcmp(runtime.catalog_refresh_logged_error, status.error) != 0) {
-#ifdef ARDUINO
-                char day[9] = "--";
-                if (runtime.refresh_target.valid()) {
-                    runtime.refresh_target.sleep_day.format_yyyymmdd(day, sizeof(day));
-                }
-                Log::logf(CAT_REPORT, LOG_WARN,
-                          "catalog refresh failed night=%s error=%s retry_ms=%lu",
-                          day, status.error,
-                          static_cast<unsigned long>(deadline_remaining(
-                              now_ms, runtime.catalog_refresh_retry_at_ms)));
-#endif
+            if (status.state == NightCatalogRefreshState::Error) {
+                runtime.record_failure("refresh_catalog", status.error,
+                                       runtime.refresh_target.sleep_day,
+                                       deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms),
+                                       strcmp(runtime.catalog_refresh_logged_error, status.error) != 0);
                 copy_cstr(runtime.catalog_refresh_logged_error,
                           sizeof(runtime.catalog_refresh_logged_error), status.error);
             }
@@ -2574,7 +2637,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.catalog_refresh_retry_at_ms =
                 now_ms + retry_delay(runtime.catalog_refresh_retry_attempt);
             advance_retry(runtime.catalog_refresh_retry_attempt);
-            ++runtime.command_failures;
+            runtime.record_failure("refresh_catalog", runtime.catalog_refresh.status().error,
+                                   runtime.pending_refresh.target.sleep_day,
+                                   deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms));
         }
         worked = true;
     }
@@ -2596,10 +2661,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.catalog_store_save_generation =
                 runtime.pending_catalog_save_generation;
         } else if (admitted == OperationAdmission::Rejected) {
-            ++runtime.command_failures;
             runtime.catalog_store_retry_at_ms =
                 now_ms + retry_delay(runtime.catalog_store_retry_attempt);
             advance_retry(runtime.catalog_store_retry_attempt);
+            runtime.record_failure("save_catalog", runtime.catalog_store.status().error,
+                                   runtime.post_therapy_build.sleep_day,
+                                   deadline_remaining(now_ms, runtime.catalog_store_retry_at_ms));
         }
         worked = true;
     }

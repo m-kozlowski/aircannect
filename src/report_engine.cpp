@@ -1008,10 +1008,10 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
         return true;
     }
 
-    const char *sink_reason =
+    const char *failure_reason =
         status.error == ReportExecutorError::SinkRejected
             ? builder_.failure_reason()
-            : nullptr;
+            : executor_.storage_error();
     builder_.discard_build();
 
     if (status.state == ReportExecutorState::Cancelled) {
@@ -1029,7 +1029,7 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     complete_active(OperationOutcome::failed(),
                     ReportPlanStatus::Ready,
                     status.error,
-                    sink_reason);
+                    failure_reason);
     return true;
 }
 

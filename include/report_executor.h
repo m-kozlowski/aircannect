@@ -130,6 +130,7 @@ public:
     void reset();
 
     ReportExecutorStatus status() const;
+    const char *storage_error() const { return storage_error_; }
 
 private:
     struct OperationContext {
@@ -172,6 +173,7 @@ private:
 
     ReportExecutorState state_ = ReportExecutorState::Idle;
     ReportExecutorError error_ = ReportExecutorError::None;
+    char storage_error_[AC_STORAGE_ERROR_MAX] = {};
     uint32_t generation_ = 0;
     size_t operation_index_ = 0;
     size_t operation_count_ = 0;

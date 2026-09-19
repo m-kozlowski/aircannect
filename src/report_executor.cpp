@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <new>
+#include <stdio.h>
 #include <utility>
 
 #include "board_report.h"
@@ -148,6 +149,7 @@ void ReportExecutor::reset() {
     release_run_resources();
     state_ = ReportExecutorState::Idle;
     error_ = ReportExecutorError::None;
+    storage_error_[0] = '\0';
     generation_ = 0;
     operation_index_ = 0;
     operation_count_ = 0;
@@ -241,6 +243,7 @@ bool ReportExecutor::poll_read() {
     }
     if (completion.outcome.disposition != OperationDisposition::Succeeded ||
         !completion.prepared.valid()) {
+        snprintf(storage_error_, sizeof(storage_error_), "%s", completion.error);
         if (completion.prepared.valid()) {
             read_port_->release_prepared(completion.prepared);
         }

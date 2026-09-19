@@ -20,12 +20,14 @@ public:
 
     bool active() const { return phase_ != Phase::Idle; }
     bool succeeded() const { return succeeded_; }
+    const char *error() const { return error_; }
 
 private:
     enum class Phase { Idle, Select, Check, Read, WaitRead, Copy, Compress,
                        Write, WaitWrite };
 
-    void advance(bool success = true);
+    void advance(bool success = true, const char *error = nullptr);
+    void remember_error(const char *error);
     void release_read();
 
     StorageReadPort *read_ = nullptr;
@@ -40,6 +42,7 @@ private:
     uint32_t generation_ = 0;
     StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;
     bool succeeded_ = true;
+    char error_[AC_STORAGE_ERROR_MAX] = {};
 
     size_t memory_offset_ = 0;
     size_t memory_prefix_ = 0;

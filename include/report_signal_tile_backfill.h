@@ -23,6 +23,7 @@ public:
 
     bool active() const { return active_; }
     bool succeeded() const { return succeeded_; }
+    const char *error() const { return error_; }
     SleepDayId sleep_day() const { return night_.night.sleep_day; }
 
 private:
@@ -31,6 +32,7 @@ private:
     bool start_next_level();
     bool level_supported(const ReportSignalStoreTrack &track,
                          ReportSignalStoreLevel level) const;
+    void remember_error(const char *error);
 
     ReportSignalTileWriter writer_;
     std::shared_ptr<const LargeByteBuffer> metadata_;
@@ -41,6 +43,7 @@ private:
     uint32_t generation_ = 0;
     bool active_ = false;
     bool succeeded_ = true;
+    char error_[AC_STORAGE_ERROR_MAX] = {};
 };
 
 }  // namespace aircannect

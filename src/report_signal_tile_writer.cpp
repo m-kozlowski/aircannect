@@ -1,7 +1,8 @@
 #include "report_signal_tile_writer.h"
 
-#include <algorithm>
 #include <string.h>
+
+#include "string_util.h"
 
 namespace aircannect {
 
@@ -27,11 +28,23 @@ void ReportSignalTileWriter::start(
     memory_prefix_ = memory_prefix;
     generation_ = generation;
     lane_ = lane;
-    succeeded_ = read_ && write_ && block_count && generation &&
+
+    const bool metadata_valid = read_ && write_ && block_count && generation;
+    const bool range_valid = metadata_valid &&
         end_slot_ <= track.block_slot_count &&
-        ReportSignalStoreFileCodec::plane_range(track,
-            track.first_block_start_ms + first_slot * REPORT_SIGNAL_STORE_BLOCK_MS,
-            block_count, level, memory_range_);
+        ReportSignalStoreFileCodec::plane_range(
+            track,
+            track.first_block_start_ms +
+                first_slot * REPORT_SIGNAL_STORE_BLOCK_MS,
+            block_count,
+            level,
+            memory_range_);
+    succeeded_ = range_valid;
+    if (!succeeded_) {
+        remember_error(metadata_valid
+                           ? "report_signal_tile_invalid_range"
+                           : "report_signal_tile_invalid_metadata");
+    }
     if (succeeded_) phase_ = Phase::Select;
 }
 
@@ -42,8 +55,15 @@ void ReportSignalTileWriter::release_read() {
     prepared_ = {};
 }
 
-void ReportSignalTileWriter::advance(bool success) {
+void ReportSignalTileWriter::remember_error(const char *error) {
+    if (error_[0] || !error || !error[0]) return;
+
+    copy_cstr(error_, sizeof(error_), error);
+}
+
+void ReportSignalTileWriter::advance(bool success, const char *error) {
     succeeded_ = succeeded_ && success;
+    if (!success) remember_error(error);
     release_read();
     input_.reset();
     output_.reset();
@@ -60,6 +80,7 @@ bool ReportSignalTileWriter::poll() {
     if (phase_ == Phase::Select) {
         if (!ReportSignalTile::describe(track_, level_, cursor_, tile_)) {
             succeeded_ = false;
+            remember_error("report_signal_tile_invalid_range");
             phase_ = Phase::Idle;
             memory_ = {};
             return true;
@@ -101,12 +122,21 @@ bool ReportSignalTileWriter::poll() {
             if (parent && tile_.range.length <= parent->size() - offset) {
                 const auto slice = LargeByteBuffer::slice(parent, offset, tile_.range.length);
                 if (encoder_.start(slice, tile_)) phase_ = Phase::Compress;
-                else advance(encoder_.succeeded());
+                else {
+                    const bool succeeded = encoder_.succeeded();
+                    advance(succeeded,
+                            succeeded
+                                ? nullptr
+                                : "report_signal_tile_encode_failed");
+                }
                 return true;
             }
 
             input_ = LargeByteBuffer::allocate(tile_.range.length);
-            if (!input_) { advance(false); return true; }
+            if (!input_) {
+                advance(false, "report_signal_tile_allocation_failed");
+                return true;
+            }
             phase_ = Phase::Copy;
         } else {
             // Existing reports are inspected only by background preparation.
@@ -121,7 +151,10 @@ bool ReportSignalTileWriter::poll() {
         const bool path_ok = checking_
             ? tile_.path(track_, level_, path, sizeof(path))
             : report_signal_store_signal_path(track_, level_, path, sizeof(path));
-        if (!path_ok) { advance(false); return true; }
+        if (!path_ok) {
+            advance(false, "report_signal_tile_invalid_metadata");
+            return true;
+        }
 
         StorageReadCommand command;
         command.path = path;
@@ -132,7 +165,10 @@ bool ReportSignalTileWriter::poll() {
             ? StorageReadLane::Foreground : StorageReadLane::Maintenance;
         const auto submitted = read_->request_read(command);
         if (submitted.admission == OperationAdmission::Busy) return false;
-        if (!submitted.accepted()) { advance(false); return true; }
+        if (!submitted.accepted()) {
+            advance(false, "report_signal_tile_read_admission_failed");
+            return true;
+        }
         read_ticket_ = submitted.ticket;
         phase_ = Phase::WaitRead;
         return true;
@@ -148,8 +184,25 @@ bool ReportSignalTileWriter::poll() {
             if (completion.outcome.disposition != OperationDisposition::Succeeded ||
                 !prepared_.valid()) {
                 release_read();
-                if (checking_) phase_ = Phase::Read;
-                else advance(false);
+                if (completion.outcome.disposition ==
+                    OperationDisposition::Cancelled) {
+                    advance();
+                } else if (checking_ &&
+                           completion.outcome.disposition ==
+                               OperationDisposition::Failed &&
+                           strcmp(completion.error, "read_not_found") == 0) {
+                    phase_ = Phase::Read;
+                } else if (checking_) {
+                    advance(false,
+                            completion.error[0]
+                                ? completion.error
+                                : "report_signal_tile_cache_read_failed");
+                } else {
+                    advance(false,
+                            completion.error[0]
+                                ? completion.error
+                                : "report_signal_tile_read_failed");
+                }
                 return true;
             }
         }
@@ -164,11 +217,14 @@ bool ReportSignalTileWriter::poll() {
             return true;
         }
         if (!view.valid() || view.length != tile_.range.length) {
-            advance(false);
+            advance(false, "report_signal_tile_short_read");
             return true;
         }
         input_ = LargeByteBuffer::allocate(view.length);
-        if (!input_) { advance(false); return true; }
+        if (!input_) {
+            advance(false, "report_signal_tile_allocation_failed");
+            return true;
+        }
         phase_ = Phase::Copy;
         return true;
     }
@@ -178,7 +234,10 @@ bool ReportSignalTileWriter::poll() {
         if (from_memory_) {
             size_t available = 0;
             const uint8_t *source = memory_.span(memory_offset_ + copied_, available);
-            if (!source || !available) { advance(false); return true; }
+            if (!source || !available) {
+                advance(false, "report_signal_tile_invalid_range");
+                return true;
+            }
             count = std::min(count, available);
             memcpy(input_->data() + copied_, source, count);
         } else {
@@ -186,7 +245,7 @@ bool ReportSignalTileWriter::poll() {
                 prepared_, copied_, input_->data() + copied_, count);
             if (read.state == PreparedByteReadState::Retry) return false;
             if (read.state != PreparedByteReadState::Data || !read.bytes) {
-                advance(false);
+                advance(false, "report_signal_tile_short_read");
                 return true;
             }
             count = read.bytes;
@@ -195,7 +254,9 @@ bool ReportSignalTileWriter::poll() {
         if (copied_ == input_->size()) {
             release_read();
             if (!encoder_.start(LargeByteBuffer::freeze(std::move(input_)), tile_)) {
-                advance(encoder_.succeeded());
+                const bool succeeded = encoder_.succeeded();
+                advance(succeeded,
+                        succeeded ? nullptr : "report_signal_tile_encode_failed");
             } else phase_ = Phase::Compress;
         }
         return true;
@@ -205,7 +266,11 @@ bool ReportSignalTileWriter::poll() {
         encoder_.poll();
         if (encoder_.active()) return true;
         output_ = encoder_.take_result();
-        if (!output_) advance(encoder_.succeeded());
+        if (!output_) {
+            advance(encoder_.succeeded(),
+                    encoder_.succeeded()
+                        ? nullptr : "report_signal_tile_encode_failed");
+        }
         else phase_ = Phase::Write;
         return true;
     }
@@ -213,7 +278,7 @@ bool ReportSignalTileWriter::poll() {
     if (phase_ == Phase::Write) {
         char path[AC_STORAGE_PATH_MAX] = {};
         if (!tile_.path(track_, level_, path, sizeof(path))) {
-            advance(false);
+            advance(false, "report_signal_tile_invalid_metadata");
             return true;
         }
         StorageRangeWriteCommand command;
@@ -225,7 +290,10 @@ bool ReportSignalTileWriter::poll() {
         command.sync_on_close = false;
         const auto submitted = write_->request_write(command);
         if (submitted.admission == OperationAdmission::Busy) return false;
-        if (!submitted.accepted()) { advance(false); return true; }
+        if (!submitted.accepted()) {
+            advance(false, "report_signal_tile_write_admission_failed");
+            return true;
+        }
         write_ticket_ = submitted.ticket;
         phase_ = Phase::WaitWrite;
         return true;
@@ -234,8 +302,18 @@ bool ReportSignalTileWriter::poll() {
     StorageRangeWriteCompletion completion;
     if (!write_->take_completion(write_ticket_, completion)) return false;
     write_ticket_ = {};
-    advance(completion.outcome.disposition == OperationDisposition::Succeeded &&
-        completion.bytes_written == output_->size());
+    if (completion.outcome.disposition == OperationDisposition::Cancelled) {
+        advance();
+    } else if (completion.outcome.disposition !=
+                   OperationDisposition::Succeeded) {
+        advance(false,
+                completion.error[0]
+                    ? completion.error : "report_signal_tile_write_failed");
+    } else if (completion.bytes_written != output_->size()) {
+        advance(false, "report_signal_tile_short_write");
+    } else {
+        advance();
+    }
     return true;
 }
 
@@ -250,6 +328,7 @@ void ReportSignalTileWriter::reset() {
     copied_ = 0;
     phase_ = Phase::Idle;
     succeeded_ = true;
+    error_[0] = '\0';
 }
 
 }  // namespace aircannect

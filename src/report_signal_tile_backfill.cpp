@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "string_util.h"
+
 namespace aircannect {
 
 ReportSignalTileBackfill::~ReportSignalTileBackfill() { reset(); }
@@ -17,6 +19,7 @@ bool ReportSignalTileBackfill::start(
     reset();
     if (!metadata.metadata || !generation) {
         succeeded_ = false;
+        remember_error("report_signal_tile_invalid_metadata");
         return false;
     }
 
@@ -25,6 +28,12 @@ bool ReportSignalTileBackfill::start(
     generation_ = generation;
     active_ = true;
     return true;
+}
+
+void ReportSignalTileBackfill::remember_error(const char *error) {
+    if (error_[0] || !error || !error[0]) return;
+
+    copy_cstr(error_, sizeof(error_), error);
 }
 
 bool ReportSignalTileBackfill::level_supported(
@@ -72,6 +81,7 @@ bool ReportSignalTileBackfill::start_next_level() {
                       StorageAtomicWriteLane::Maintenance);
         if (!writer_.active() && !writer_.succeeded()) {
             succeeded_ = false;
+            remember_error(writer_.error());
             active_ = false;
             metadata_.reset();
             return true;
@@ -92,6 +102,7 @@ bool ReportSignalTileBackfill::poll() {
         if (writer_.active()) return worked;
         if (!writer_.succeeded()) {
             succeeded_ = false;
+            remember_error(writer_.error());
             active_ = false;
             metadata_.reset();
         }
@@ -111,6 +122,7 @@ void ReportSignalTileBackfill::reset() {
     generation_ = 0;
     active_ = false;
     succeeded_ = true;
+    error_[0] = '\0';
 }
 
 }  // namespace aircannect

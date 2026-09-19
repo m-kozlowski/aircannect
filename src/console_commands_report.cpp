@@ -112,6 +112,23 @@ void print_report_stats(Print &out, const ReportTask &task) {
     out.print(" failed=");
     out.println(static_cast<unsigned long>(status.command_failures));
 
+    if (status.last_failure.operation[0]) {
+        char day[9] = "--";
+        if (status.last_failure.sleep_day.valid()) {
+            status.last_failure.sleep_day.format_yyyymmdd(day, sizeof(day));
+        }
+        out.print("[REPORT failure] op=");
+        out.print(status.last_failure.operation);
+        out.print(" night=");
+        out.print(day);
+        out.print(" error=");
+        out.print(status.last_failure.error);
+        out.print(" at_ms=");
+        out.print(static_cast<unsigned long>(status.last_failure.occurred_ms));
+        out.print(" retry_ms=");
+        out.println(static_cast<unsigned long>(status.last_failure.retry_ms));
+    }
+
     out.print("[REPORT catalog] nights=");
     out.print(static_cast<unsigned long>(status.catalog_nights));
     out.print(" materialized=");
