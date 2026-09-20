@@ -6,6 +6,7 @@
 
 #include "as11_rpc.h"
 #include "board.h"
+#include "resmed_device_protocol.h"
 #ifdef ARDUINO
 #include "debug_log.h"
 #endif
@@ -410,12 +411,8 @@ void As11DeviceService::schedule_query(QueryKind kind,
     if (kind == QueryKind::Identity &&
         state_.model() == ResmedDeviceModel::Unknown) {
         kind = QueryKind::Platform;
-    } else if (kind != QueryKind::Platform &&
-               state_.model() == ResmedDeviceModel::Unknown) {
-        return;
     }
-    if (kind == QueryKind::Timezone &&
-        state_.model() == ResmedDeviceModel::AirMini) return;
+    if (!query_params(kind)) return;
 
     ScheduledQuery &query = queries_[query_index(kind)];
     if (!query.scheduled ||
@@ -458,10 +455,16 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
                                      QueryKind kind,
                                      uint32_t now_ms) {
     ScheduledQuery &query = queries_[query_index(kind)];
+    const char *params = query_params(kind);
+    if (!params) {
+        // A model change can make an already scheduled read unsupported.
+        query = {};
+        return false;
+    }
 
     RpcRequestCommand command;
     command.method = kind == QueryKind::Clock ? "GetDateTime" : "Get";
-    command.params_json = query_params(kind);
+    command.params_json = params;
     command.source = query.source;
     command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     command.generation = next_generation();
@@ -715,30 +718,21 @@ bool As11DeviceService::completion_succeeded(
 }
 
 const char *As11DeviceService::query_params(QueryKind kind) const {
-    if (state_.model() == ResmedDeviceModel::AirMini) {
-        switch (kind) {
-            case QueryKind::Identity:
-                return "[\"ProductName\",\"SerialNumber\","
-                       "\"ApplicationIdentifier\",\"BootloaderIdentifier\","
-                       "\"PlatformIdentifier\",\"VariantIdentifier\"]";
-            case QueryKind::Runtime:
-                return "[\"TherapyMode\",\"_RUNNING_MODE_REQUEST\",\"FGState\"]";
-            case QueryKind::MotorRuntime: return "[\"MotorRunMeter\"]";
-            default: break;
-        }
-    }
+    if (kind == QueryKind::Platform) return RESMED_PLATFORM_GET_PARAMS;
+
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(state_.model());
+    if (!protocol) return nullptr;
 
     switch (kind) {
-        case QueryKind::Platform: return "[\"PlatformIdentifier\"]";
-        case QueryKind::Identity: return as11_identity_get_params_json();
-        case QueryKind::Runtime: return as11_runtime_get_params_json();
-        case QueryKind::MotorRuntime:
-            return as11_motor_runtime_get_params_json();
-        case QueryKind::Timezone: return as11_timezone_get_params_json();
-        case QueryKind::Clock:
+        case QueryKind::Identity: return protocol->identity.params_json;
+        case QueryKind::Runtime: return protocol->runtime.params_json;
+        case QueryKind::MotorRuntime: return protocol->motor_runtime.params_json;
+        case QueryKind::Timezone: return protocol->timezone.params_json;
+        case QueryKind::Clock: return "";
+        case QueryKind::Platform:
         case QueryKind::None:
         case QueryKind::Count:
-        default: return "";
+        default: return nullptr;
     }
 }
 

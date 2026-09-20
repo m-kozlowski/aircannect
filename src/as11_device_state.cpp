@@ -8,6 +8,7 @@
 
 #include "board.h"
 #include "json_util.h"
+#include "resmed_device_protocol.h"
 #include "string_util.h"
 #include "utc_time.h"
 
@@ -17,7 +18,7 @@ namespace {
 static constexpr time_t VALID_TIME_MIN_EPOCH = 1609459200;
 
 bool get_string(JsonObjectConst object, const char *name, std::string &out) {
-    return json_variant_to_string(object[name], out);
+    return name && json_variant_to_string(object[name], out);
 }
 
 bool variant_to_int(JsonVariantConst value, int32_t &out) {
@@ -163,22 +164,6 @@ bool response_midpoint_epoch_ms(int64_t request_epoch_ms,
 
 }  // namespace
 
-const char *as11_identity_get_params_json() {
-    return "[\"_PNA\",\"_SRN\",\"_SID\",\"_BID\",\"_MID\",\"_VID\"]";
-}
-
-const char *as11_runtime_get_params_json() {
-    return "[\"_MOP\",\"_ROP\"]";
-}
-
-const char *as11_motor_runtime_get_params_json() {
-    return "[\"_MHR\"]";
-}
-
-const char *as11_timezone_get_params_json() {
-    return "[\"_TZO\"]";
-}
-
 void As11DeviceState::reset() {
     *this = As11DeviceState{};
 }
@@ -227,72 +212,80 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
     if (result.isNull()) return false;
 
     bool updated = false;
-    std::string text;
-    if (get_string(result, "_PNA", text) ||
-        get_string(result, "ProductName", text)) {
-        product_name_ = text;
-        updated = true;
-    }
-    if (get_string(result, "_SRN", text) ||
-        get_string(result, "SerialNumber", text)) {
-        serial_number_ = text;
-        updated = true;
-    }
-    if (get_string(result, "_SID", text) ||
-        get_string(result, "ApplicationIdentifier", text)) {
-        software_identifier_ = text;
-        updated = true;
-    }
-    if (get_string(result, "_BID", text) ||
-        get_string(result, "BootloaderIdentifier", text)) {
-        bootloader_identifier_ = text;
-        updated = true;
-    }
     int32_t identity_number = 0;
-    if (variant_to_int(result["_MID"], identity_number) ||
-        variant_to_int(result["PlatformIdentifier"], identity_number)) {
+    const bool platform_read =
+        variant_to_int(result[RESMED_PLATFORM_FIELD], identity_number);
+    if (platform_read) {
         platform_id_ = identity_number;
         platform_id_valid_ = true;
         updated = true;
     }
-    if (variant_to_int(result["_VID"], identity_number) ||
-        variant_to_int(result["VariantIdentifier"], identity_number)) {
+
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(model());
+    if (!protocol) return updated;
+
+    const ResmedIdentityQuery &identity = protocol->identity;
+    std::string text;
+    if (get_string(result, identity.product_name, text)) {
+        product_name_ = text;
+        updated = true;
+    }
+    if (get_string(result, identity.serial_number, text)) {
+        serial_number_ = text;
+        updated = true;
+    }
+    if (get_string(result, identity.software_identifier, text)) {
+        software_identifier_ = text;
+        updated = true;
+    }
+    if (get_string(result, identity.bootloader_identifier, text)) {
+        bootloader_identifier_ = text;
+        updated = true;
+    }
+    if (!platform_read &&
+        variant_to_int(result[identity.platform_id], identity_number)) {
+        platform_id_ = identity_number;
+        platform_id_valid_ = true;
+        updated = true;
+    }
+    if (variant_to_int(result[identity.variant_id], identity_number)) {
         variant_id_ = identity_number;
         variant_id_valid_ = true;
         updated = true;
     }
-    if (get_string(result, "_MOP", text) ||
-        get_string(result, "TherapyMode", text)) {
+
+    const ResmedRuntimeQuery &runtime = protocol->runtime;
+    if (get_string(result, runtime.therapy_profile, text)) {
         active_therapy_profile_ = text;
         updated = true;
     }
-    if (get_string(result, "_MHR", text) ||
-        get_string(result, "MotorRunMeter", text)) {
+
+    if (get_string(result, protocol->motor_runtime.field, text)) {
         mhr_ = text;
         updated = true;
     }
 
     int32_t timezone = 0;
-    if (parse_timezone_offset_minutes(result["_TZO"], timezone)) {
+    if (protocol->timezone.field &&
+        parse_timezone_offset_minutes(result[protocol->timezone.field], timezone)) {
         timezone_offset_minutes_ = timezone;
         timezone_offset_valid_ = true;
         updated = true;
     }
 
-    if (get_string(result, "_ROP", text) || get_string(result, "ROP", text)) {
-        update_rop(text, now_ms);
+    if (get_string(result, runtime.running_mode, text) ||
+        get_string(result, runtime.running_mode_alias, text)) {
+        if (runtime.therapy_state) {
+            rop_ = text;
+        } else {
+            update_rop(text, now_ms);
+        }
         updated = true;
     }
 
-    if (model() == ResmedDeviceModel::AirMini) {
-        if (get_string(result, "_RUNNING_MODE_REQUEST", text)) {
-            rop_ = text;
-            updated = true;
-        }
-        if (get_string(result, "FGState", text)) {
-            update_fg_state(text, now_ms);
-            updated = true;
-        }
+    if (get_string(result, runtime.therapy_state, text)) {
+        update_fg_state(text, now_ms);
+        updated = true;
     }
 
     if (updated) {
@@ -338,15 +331,17 @@ bool As11DeviceState::apply_datetime_response(
 
 bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
                                                  uint32_t now_ms) {
-    if (model() == ResmedDeviceModel::AirMini &&
-        (frame.data_id == "FGState" || frame.data_id == "TherapyMode")) {
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(model());
+    if (protocol && protocol->runtime.therapy_state &&
+        (frame.data_id == protocol->runtime.therapy_state ||
+         frame.data_id == protocol->runtime.therapy_profile)) {
         bool updated = false;
         for (size_t i = 0; i < frame.event_count; ++i) {
             const As11EventRecord &event = frame.events[i];
             if (event.kind != As11EventRecordKind::ValueChange ||
                 event.text_value.empty()) continue;
 
-            if (frame.data_id == "FGState") {
+            if (frame.data_id == protocol->runtime.therapy_state) {
                 const As11TherapyState previous = therapy_state_;
                 update_fg_state(event.text_value, now_ms);
                 if (previous != As11TherapyState::Unknown &&

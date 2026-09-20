@@ -10,11 +10,6 @@
 
 namespace aircannect {
 
-const char *as11_identity_get_params_json();
-const char *as11_runtime_get_params_json();
-const char *as11_motor_runtime_get_params_json();
-const char *as11_timezone_get_params_json();
-
 enum class As11Availability : uint8_t {
     Unknown,
     Available,
