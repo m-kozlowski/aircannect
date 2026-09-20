@@ -213,9 +213,8 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
 
     bool updated = false;
     int32_t identity_number = 0;
-    const bool platform_read =
-        variant_to_int(result[RESMED_PLATFORM_FIELD], identity_number);
-    if (platform_read) {
+    const ResmedIdentityQuery &identity = RESMED_IDENTITY;
+    if (variant_to_int(result[identity.platform_id], identity_number)) {
         platform_id_ = identity_number;
         platform_id_valid_ = true;
         updated = true;
@@ -224,7 +223,6 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
     const ResmedDeviceProtocol *protocol = resmed_device_protocol(model());
     if (!protocol) return updated;
 
-    const ResmedIdentityQuery &identity = protocol->identity;
     std::string text;
     if (get_string(result, identity.product_name, text)) {
         product_name_ = text;
@@ -242,12 +240,6 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
         bootloader_identifier_ = text;
         updated = true;
     }
-    if (!platform_read &&
-        variant_to_int(result[identity.platform_id], identity_number)) {
-        platform_id_ = identity_number;
-        platform_id_valid_ = true;
-        updated = true;
-    }
     if (variant_to_int(result[identity.variant_id], identity_number)) {
         variant_id_ = identity_number;
         variant_id_valid_ = true;
@@ -260,14 +252,14 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
         updated = true;
     }
 
-    if (get_string(result, protocol->motor_runtime.field, text)) {
+    if (get_string(result, RESMED_MOTOR_RUNTIME, text)) {
         mhr_ = text;
         updated = true;
     }
 
     int32_t timezone = 0;
-    if (protocol->timezone.field &&
-        parse_timezone_offset_minutes(result[protocol->timezone.field], timezone)) {
+    if (protocol->timezone &&
+        parse_timezone_offset_minutes(result[protocol->timezone], timezone)) {
         timezone_offset_minutes_ = timezone;
         timezone_offset_valid_ = true;
         updated = true;

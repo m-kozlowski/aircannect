@@ -109,7 +109,8 @@ private:
     static bool background_source(RpcSource source);
     static bool completion_succeeded(
         const RpcRequestCompletion &completion);
-    const char *query_params(QueryKind kind) const;
+    bool query_supported(QueryKind kind) const;
+    std::string query_params(QueryKind kind) const;
 
     As11DeviceState state_;
 

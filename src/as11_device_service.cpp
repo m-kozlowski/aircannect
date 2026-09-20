@@ -412,7 +412,7 @@ void As11DeviceService::schedule_query(QueryKind kind,
         state_.model() == ResmedDeviceModel::Unknown) {
         kind = QueryKind::Platform;
     }
-    if (!query_params(kind)) return;
+    if (!query_supported(kind)) return;
 
     ScheduledQuery &query = queries_[query_index(kind)];
     if (!query.scheduled ||
@@ -455,8 +455,7 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
                                      QueryKind kind,
                                      uint32_t now_ms) {
     ScheduledQuery &query = queries_[query_index(kind)];
-    const char *params = query_params(kind);
-    if (!params) {
+    if (!query_supported(kind)) {
         // A model change can make an already scheduled read unsupported.
         query = {};
         return false;
@@ -464,7 +463,7 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
 
     RpcRequestCommand command;
     command.method = kind == QueryKind::Clock ? "GetDateTime" : "Get";
-    command.params_json = params;
+    command.params_json = query_params(kind);
     command.source = query.source;
     command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     command.generation = next_generation();
@@ -717,22 +716,29 @@ bool As11DeviceService::completion_succeeded(
            !completion.response_error;
 }
 
-const char *As11DeviceService::query_params(QueryKind kind) const {
-    if (kind == QueryKind::Platform) return RESMED_PLATFORM_GET_PARAMS;
+bool As11DeviceService::query_supported(QueryKind kind) const {
+    if (kind == QueryKind::None || kind == QueryKind::Count) return false;
+    if (kind == QueryKind::Platform) return true;
 
     const ResmedDeviceProtocol *protocol = resmed_device_protocol(state_.model());
-    if (!protocol) return nullptr;
+    return protocol && (kind != QueryKind::Timezone || protocol->timezone);
+}
+
+std::string As11DeviceService::query_params(QueryKind kind) const {
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(state_.model());
 
     switch (kind) {
-        case QueryKind::Identity: return protocol->identity.params_json;
-        case QueryKind::Runtime: return protocol->runtime.params_json;
-        case QueryKind::MotorRuntime: return protocol->motor_runtime.params_json;
-        case QueryKind::Timezone: return protocol->timezone.params_json;
-        case QueryKind::Clock: return "";
         case QueryKind::Platform:
+            return build_get_params({RESMED_IDENTITY.platform_id});
+        case QueryKind::Identity: return RESMED_IDENTITY.params_json();
+        case QueryKind::Runtime: return protocol->runtime.params_json();
+        case QueryKind::MotorRuntime:
+            return build_get_params({RESMED_MOTOR_RUNTIME});
+        case QueryKind::Timezone: return build_get_params({protocol->timezone});
+        case QueryKind::Clock:
         case QueryKind::None:
         case QueryKind::Count:
-        default: return nullptr;
+        default: return {};
     }
 }
 

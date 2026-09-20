@@ -1,32 +1,37 @@
 #include "resmed_device_protocol.h"
 
+#include "as11_rpc.h"
+
 namespace aircannect {
 
-const char RESMED_PLATFORM_GET_PARAMS[] = "[\"PlatformIdentifier\"]";
-const char RESMED_PLATFORM_FIELD[] = "PlatformIdentifier";
+const ResmedIdentityQuery RESMED_IDENTITY = {
+    "ProductName", "SerialNumber", "ApplicationIdentifier",
+    "BootloaderIdentifier", "PlatformIdentifier", "VariantIdentifier",
+};
+const char RESMED_MOTOR_RUNTIME[] = "MotorRunMeter";
 
 namespace {
 
 const ResmedDeviceProtocol AIRSENSE11 = {
-    {"[\"_PNA\",\"_SRN\",\"_SID\",\"_BID\",\"_MID\",\"_VID\"]",
-     "_PNA", "_SRN", "_SID", "_BID", "_MID", "_VID"},
-    {"[\"_MOP\",\"_ROP\"]", "_MOP", "_ROP", "ROP", nullptr},
-    {"[\"_MHR\"]", "_MHR"},
-    {"[\"_TZO\"]", "_TZO"},
+    {"ActiveTherapyProfile", "_ROP", "ROP", nullptr},
+    "TimeZoneOffset",
 };
 
 const ResmedDeviceProtocol AIRMINI = {
-    {"[\"ProductName\",\"SerialNumber\",\"ApplicationIdentifier\","
-     "\"BootloaderIdentifier\",\"PlatformIdentifier\",\"VariantIdentifier\"]",
-     "ProductName", "SerialNumber", "ApplicationIdentifier",
-     "BootloaderIdentifier", "PlatformIdentifier", "VariantIdentifier"},
-    {"[\"TherapyMode\",\"_RUNNING_MODE_REQUEST\",\"FGState\"]",
-     "TherapyMode", "_RUNNING_MODE_REQUEST", nullptr, "FGState"},
-    {"[\"MotorRunMeter\"]", "MotorRunMeter"},
-    {nullptr, nullptr},
+    {"TherapyMode", "_RUNNING_MODE_REQUEST", nullptr, "FGState"},
+    nullptr,
 };
 
 }  // namespace
+
+std::string ResmedIdentityQuery::params_json() const {
+    return build_get_params({product_name, serial_number, software_identifier,
+                             bootloader_identifier, platform_id, variant_id});
+}
+
+std::string ResmedRuntimeQuery::params_json() const {
+    return build_get_params({therapy_profile, running_mode, therapy_state});
+}
 
 const ResmedDeviceProtocol *resmed_device_protocol(ResmedDeviceModel model) {
     switch (model) {

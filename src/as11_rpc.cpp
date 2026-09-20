@@ -181,6 +181,22 @@ std::string build_get_params(const std::string &names) {
     return out;
 }
 
+std::string build_get_params(std::initializer_list<const char *> names) {
+    std::string out = "[";
+
+    for (const char *name : names) {
+        if (!name) continue;
+
+        if (out.size() > 1) out += ',';
+        out += '"';
+        append_json_escaped(out, name);
+        out += '"';
+    }
+
+    out += ']';
+    return out;
+}
+
 std::string build_set_datetime_params(const std::string &utc_datetime) {
     std::string out;
     out.reserve(utc_datetime.size() + 20);

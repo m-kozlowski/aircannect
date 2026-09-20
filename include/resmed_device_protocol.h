@@ -1,43 +1,40 @@
 #pragma once
 
+#include <string>
+
 #include "resmed_device_model.h"
 
 namespace aircannect {
 
 struct ResmedIdentityQuery {
-    const char *params_json;
     const char *product_name;
     const char *serial_number;
     const char *software_identifier;
     const char *bootloader_identifier;
     const char *platform_id;
     const char *variant_id;
+
+    std::string params_json() const;
 };
 
 struct ResmedRuntimeQuery {
-    const char *params_json;
     const char *therapy_profile;
     const char *running_mode;
     const char *running_mode_alias;
     // Null when running_mode itself reports the current therapy state.
     const char *therapy_state;
-};
 
-struct ResmedSingleValueQuery {
-    // Null parameters mean that the device does not support this query.
-    const char *params_json;
-    const char *field;
+    std::string params_json() const;
 };
 
 struct ResmedDeviceProtocol {
-    ResmedIdentityQuery identity;
     ResmedRuntimeQuery runtime;
-    ResmedSingleValueQuery motor_runtime;
-    ResmedSingleValueQuery timezone;
+    // Null means that the device has no timezone readout.
+    const char *timezone;
 };
 
-extern const char RESMED_PLATFORM_GET_PARAMS[];
-extern const char RESMED_PLATFORM_FIELD[];
+extern const ResmedIdentityQuery RESMED_IDENTITY;
+extern const char RESMED_MOTOR_RUNTIME[];
 
 const ResmedDeviceProtocol *resmed_device_protocol(ResmedDeviceModel model);
 
