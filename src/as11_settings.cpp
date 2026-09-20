@@ -82,15 +82,6 @@ constexpr bool therapy_profiles_are_indexed() {
 static_assert(therapy_profiles_are_indexed(),
               "therapy profiles must follow mode index order");
 
-const TherapyProfileDescriptor *profile_for_mode(int mode) {
-    if (mode < 0 || mode >= static_cast<int>(THERAPY_PROFILE_COUNT)) {
-        return nullptr;
-    }
-
-    const TherapyProfileDescriptor &profile = THERAPY_PROFILES[mode];
-    return profile.mode_index == mode ? &profile : nullptr;
-}
-
 const TherapyProfileDescriptor *profile_for_id(As11ProfileId id) {
     for (const TherapyProfileDescriptor &profile : THERAPY_PROFILES) {
         if (profile.profile == id) return &profile;
@@ -196,29 +187,6 @@ bool parse_int_text(const std::string &text, int &value) {
     return true;
 }
 
-int mini_mode_index(const std::string &value) {
-    if (value == "CPAP") return 0;
-    if (value == "AutoSet") return 1;
-    if (value == "HerAuto") return 2;
-
-    int parsed = -1;
-    if (!parse_int_text(value, parsed)) return -1;
-    if (parsed == 0 || parsed == 1 || parsed == 2) return parsed;
-    if (parsed == 11) return 2;
-    return -1;
-}
-
-int mini_mask_index(const std::string &value) {
-    if (value == "Default") return 0;
-    if (value == "Pillows") return 1;
-    if (value == "FullFace") return 2;
-    if (value == "Nasal") return 3;
-
-    int parsed = -1;
-    if (!parse_int_text(value, parsed)) return -1;
-    return parsed >= 0 && parsed <= 3 ? parsed : -1;
-}
-
 int option_index_of(const As11SettingDef &def, const char *value) {
     if (!value) return -1;
     for (uint8_t i = 0; i < def.option_count; ++i) {
@@ -260,11 +228,6 @@ const As11SettingDef *setting_def_for_rpc_name(const char *rpc_name) {
         }
     }
     return nullptr;
-}
-
-const char *profile_wire_name_for_mode(int mode) {
-    const TherapyProfileDescriptor *profile = profile_for_mode(mode);
-    return profile ? profile->wire_name : nullptr;
 }
 
 const char *profile_long_name_prefix(As11ProfileId profile) {
@@ -412,12 +375,20 @@ JsonObjectConst feature_object_from_result(JsonObjectConst result,
     return nested_object(profiles, def.source_object);
 }
 
-int enum_index_from_text(const As11SettingDef &def, const char *text) {
+int enum_index_from_text(const As11SettingDef &def, const char *text,
+                         bool from_device = false) {
     int index = option_index_of(def, text);
     if (index >= 0) return index;
 
     int parsed = -1;
-    if (text && parse_int_text(text, parsed)) return parsed;
+    if (text && parse_int_text(text, parsed)) {
+        if (!from_device || !def.wire_enum_values) return parsed;
+
+        for (uint8_t i = 0; i < def.option_count; ++i) {
+            if (def.wire_enum_values[i] == parsed) return i;
+        }
+        return -1;
+    }
 
     if (!setting_is_therapy_mode(def)) return -1;
     const std::string wanted = compact_mode_key(text);
@@ -428,23 +399,15 @@ int enum_index_from_text(const As11SettingDef &def, const char *text) {
     return -1;
 }
 
-int mode_index_from_json(
-    JsonVariantConst value,
-    ResmedDeviceModel model = ResmedDeviceModel::AirSense11) {
+int enum_index_from_json(const As11SettingDef &def,
+                         JsonVariantConst value,
+                         bool from_device = false) {
     if (value.isNull()) return -1;
-    if (model == ResmedDeviceModel::AirMini) {
-        return mini_mode_index(value_to_string(value));
-    }
 
-    if (value.is<int>()) return value.as<int>();
-    if (value.is<long>()) return static_cast<int>(value.as<long>());
-    if (value.is<const char *>()) {
-        return as11_mode_index_from_value(value.as<const char *>());
-    }
-    if (value.is<std::string>()) {
-        return as11_mode_index_from_value(value.as<std::string>());
-    }
-    return as11_mode_index_from_value(value_to_string(value));
+    const std::string text = value.is<bool>()
+        ? (value.as<bool>() ? "1" : "0") : value_to_string(value);
+    const int index = enum_index_from_text(def, text.c_str(), from_device);
+    return index >= 0 && index < def.option_count ? index : -1;
 }
 
 bool setting_uses_iso_seconds(const As11SettingDef &def) {
@@ -456,16 +419,7 @@ bool setting_uses_iso_seconds(const As11SettingDef &def) {
 }
 
 std::string normalize_value_for_def(const As11SettingDef &def,
-                                    JsonVariantConst value,
-                                    ResmedDeviceModel model) {
-    if (model == ResmedDeviceModel::AirMini && def.key &&
-        (strcmp(def.key, "MOP") == 0 || strcmp(def.key, "MSK") == 0)) {
-        const int index = strcmp(def.key, "MOP") == 0
-            ? mini_mode_index(value_to_string(value))
-            : mini_mask_index(value_to_string(value));
-        return index >= 0 ? std::to_string(index) : "";
-    }
-
+                                    JsonVariantConst value) {
     if (def.kind == As11SettingKind::Number &&
         (def.scale_div > 1 || setting_uses_iso_seconds(def))) {
         double numeric = 0;
@@ -483,19 +437,9 @@ std::string normalize_value_for_def(const As11SettingDef &def,
     }
 
     if (def.kind == As11SettingKind::Enum) {
-        int index = -1;
-        if (value.is<int>()) {
-            index = value.as<int>();
-        } else if (value.is<long>()) {
-            index = static_cast<int>(value.as<long>());
-        } else if (value.is<bool>()) {
-            index = value.as<bool>() ? 1 : 0;
-        } else if (value.is<const char *>()) {
-            index = enum_index_from_text(def, value.as<const char *>());
-        }
-        if (index >= 0 && index < def.option_count) {
-            return std::to_string(index);
-        }
+        const int index = enum_index_from_json(def, value, true);
+        if (index >= 0) return std::to_string(index);
+        if (def.wire_enum_values) return "";
     }
     return value_to_string(value);
 }
@@ -526,31 +470,7 @@ bool setting_value_matches(const As11SettingDef &def,
 
 bool json_literal_for_set(const As11SettingDef &def,
                           JsonVariantConst value,
-                          std::string &out,
-                          ResmedDeviceModel model) {
-    if (model == ResmedDeviceModel::AirMini && def.key &&
-        (strcmp(def.key, "MOP") == 0 || strcmp(def.key, "MSK") == 0)) {
-        const int index = strcmp(def.key, "MOP") == 0
-            ? mini_mode_index(value_to_string(value))
-            : mini_mask_index(value_to_string(value));
-        const char *wire_value = option_wire_value_at(def, index);
-        if (!wire_value) return false;
-        out = "\"";
-        out += json_escape(wire_value);
-        out += "\"";
-        return true;
-    }
-
-    if (setting_is_therapy_mode(def)) {
-        int index = mode_index_from_json(value);
-        const char *profile = profile_wire_name_for_mode(index);
-        if (!profile) return false;
-        out = "\"";
-        out += profile;
-        out += "\"";
-        return true;
-    }
-
+                          std::string &out) {
     if (def.kind == As11SettingKind::Number) {
         if (!json_is_number(value)) return false;
         const double numeric = value.as<double>();
@@ -565,16 +485,7 @@ bool json_literal_for_set(const As11SettingDef &def,
     }
 
     if (def.kind == As11SettingKind::Enum) {
-        int index = -1;
-        if (value.is<int>()) {
-            index = value.as<int>();
-        } else if (value.is<long>()) {
-            index = static_cast<int>(value.as<long>());
-        } else if (value.is<bool>()) {
-            index = value.as<bool>() ? 1 : 0;
-        } else if (value.is<const char *>()) {
-            index = enum_index_from_text(def, value.as<const char *>());
-        }
+        const int index = enum_index_from_json(def, value);
         const char *wire_value = option_wire_value_at(def, index);
         if (!wire_value) return false;
         out = "\"";
@@ -827,7 +738,7 @@ bool As11SettingsState::apply_settings_get_response(
         ? value_for_setting(result, *mode_def, device_model_)
         : JsonVariantConst();
     if (!active.isNull()) {
-        fallback_mode = mode_index_from_json(active, device_model_);
+        fallback_mode = enum_index_from_json(*mode_def, active, true);
     }
 
     const uint16_t profile_modes = profile_modes_from_result(result);
@@ -898,8 +809,7 @@ bool As11SettingsState::apply_settings_get_response(
             value = value_for_setting(result, def, device_model_);
             if (value.isNull()) continue;
         }
-        const std::string normalized = normalize_value_for_def(
-            def, value, device_model_);
+        const std::string normalized = normalize_value_for_def(def, value);
         if (!normalized.empty()) remember_value(i, normalized);
     }
 
@@ -920,8 +830,7 @@ bool As11SettingsState::apply_settings_get_response(
         const int mode = profile_mode_index(def.profile);
         if (!as11_setting_visible_for_mode(def, mode)) continue;
 
-        const std::string normalized = normalize_value_for_def(
-            def, value, device_model_);
+        const std::string normalized = normalize_value_for_def(def, value);
         if (!normalized.empty()) {
             remember_profile_value(mode, i, normalized);
         }
@@ -954,10 +863,13 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
     int mode = mode_index();
     const As11SettingDef *mode_def = catalog_.find("MOP");
     int target_mode = mode_def
-        ? mode_index_from_json(value_for_setting(root, *mode_def, device_model_),
-                               device_model_)
+        ? enum_index_from_json(*mode_def,
+                               value_for_setting(root, *mode_def, device_model_),
+                               true)
         : -1;
-    if (target_mode < 0) target_mode = mode_index_from_json(root["MOP"]);
+    if (target_mode < 0 && mode_def) {
+        target_mode = enum_index_from_json(*mode_def, root["MOP"]);
+    }
 
     if (target_mode >= 0) mode = target_mode;
 
@@ -968,8 +880,7 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
         if (!as11_setting_visible_for_mode(def, mode)) continue;
         JsonVariantConst value = value_for_setting(root, def, device_model_);
         if (value.isNull()) continue;
-        std::string pending_value = normalize_value_for_def(
-            def, value, device_model_);
+        std::string pending_value = normalize_value_for_def(def, value);
         if (pending_value.empty()) continue;
 
         const bool was_pending = pending_[i];
@@ -1353,12 +1264,9 @@ std::string as11_build_set_params_from_json(
     }
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
-    int target_mode = mode_index_from_json(root["MOP"]);
-    if (catalog.device_model() == ResmedDeviceModel::AirMini) {
-        const std::string value = value_to_string(root["MOP"]);
-        const int mini_mode = mini_mode_index(value);
-        if (mini_mode >= 0) target_mode = mini_mode;
-    }
+    const As11SettingDef *mode_def = catalog.find("MOP");
+    const int target_mode = mode_def
+        ? enum_index_from_json(*mode_def, root["MOP"]) : -1;
     if (target_mode >= 0) mode = target_mode;
 
     std::string out = "{";
@@ -1376,8 +1284,7 @@ std::string as11_build_set_params_from_json(
             def, key, sizeof(key), catalog.device_model());
         if (!rpc_key) continue;
         std::string literal;
-        if (!json_literal_for_set(
-                def, value, literal, catalog.device_model())) {
+        if (!json_literal_for_set(def, value, literal)) {
             continue;
         }
         if (accepted) out += ",";

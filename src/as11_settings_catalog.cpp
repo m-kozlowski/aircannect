@@ -17,9 +17,11 @@ constexpr size_t NO_STOCK_SETTING = SIZE_MAX;
 const char *const MINI_MODE_OPTIONS[] = {
     "CPAP", "AutoSet", "HerAuto",
 };
+constexpr int16_t MINI_MODE_VALUES[] = {0, 1, 11};
 const char *const MINI_MASK_OPTIONS[] = {
     "Default", "Pillows", "FullFace", "Nasal",
 };
+constexpr int16_t MINI_MASK_VALUES[] = {0, 1, 2, 3};
 
 const char *const MINI_SUPPORTED_KEYS[] = {
     "MOP", "MPA", "MPI", "STU", "HMA", "HMI", "HSP", "IPC", "STP",
@@ -107,6 +109,7 @@ void apply_airmini_definition(As11SettingDef &def) {
         def.option_count = option_count(MINI_MODE_OPTIONS);
         def.mode_mask = 0x0007u;
         def.wire_options = MINI_MODE_OPTIONS;
+        def.wire_enum_values = MINI_MODE_VALUES;
         return;
     }
 
@@ -124,6 +127,7 @@ void apply_airmini_definition(As11SettingDef &def) {
         def.option_count = option_count(MINI_MASK_OPTIONS);
         def.mode_mask = 0x0007u;
         def.wire_options = MINI_MASK_OPTIONS;
+        def.wire_enum_values = MINI_MASK_VALUES;
     }
 }
 

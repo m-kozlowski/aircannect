@@ -103,7 +103,7 @@ constexpr As11SettingDef setting_definition(
         label, group, category,
         value.kind, value.min_value, value.max_value, value.step,
         value.options, value.option_count, mode_mask, value.scale_div,
-        value.decimals, value.wire_options, value.writable,
+        value.decimals, value.wire_options, nullptr, value.writable,
     };
 }
 

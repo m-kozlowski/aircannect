@@ -84,6 +84,8 @@ struct As11SettingDef {
     uint8_t decimals;
     // Optional protocol literals when display labels differ from AS11 values.
     const char *const *wire_options = nullptr;
+    // Optional device codes, indexed by option; UI values remain option indices.
+    const int16_t *wire_enum_values = nullptr;
     bool writable = true;
 };
 
