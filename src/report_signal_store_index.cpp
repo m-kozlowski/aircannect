@@ -326,6 +326,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
     put_le32(bytes + 204, night.events.unknown_apnea);
     put_le32(bytes + 208, night.events.arousal);
     put_le32(bytes + 212, night.events.csr);
+    put_le64(bytes + 224, night.rejected_source_revision.value());
 
     uint8_t *session_records = bytes + HeaderBytes;
     for (size_t i = 0; i < night.session_count; ++i) {
@@ -357,11 +358,17 @@ bool ReportSignalStoreNightCodec::decode(
     size_t length,
     ReportSignalStoreNightView &view) {
     view = {};
-    if (!bytes || length < HeaderBytes ||
+    if (!bytes || length < 224 ||
         memcmp(bytes, NIGHT_MAGIC, sizeof(NIGHT_MAGIC)) != 0 ||
-        get_le16(bytes + 8) != Version ||
-        get_le16(bytes + 10) != HeaderBytes ||
         get_le32(bytes + 12) != length) {
+        return false;
+    }
+
+    const uint16_t version = get_le16(bytes + 8);
+    const size_t header_bytes = get_le16(bytes + 10);
+    if (!((version == 2 && header_bytes == 224) ||
+          (version == Version && header_bytes == HeaderBytes)) ||
+        length < header_bytes) {
         return false;
     }
 
@@ -372,6 +379,9 @@ bool ReportSignalStoreNightCodec::decode(
     }
     night.generation = get_le32(bytes + 20);
     night.source_revision = SourceRevision(get_le64(bytes + 24));
+    if (version == Version) {
+        night.rejected_source_revision = SourceRevision(get_le64(bytes + 224));
+    }
     night.day_start_ms = get_i64(bytes + 32);
     night.day_end_ms = get_i64(bytes + 40);
     night.closed_therapy_duration_ms = get_le64(bytes + 48);
@@ -427,7 +437,7 @@ bool ReportSignalStoreNightCodec::decode(
     night.events.csr = get_le32(bytes + 212);
     if (!night_header_valid(night)) return false;
 
-    size_t expected = HeaderBytes;
+    size_t expected = header_bytes;
     if (!CheckedSize::add_array(expected,
                                 night.session_count,
                                 SessionBytes) ||
@@ -439,7 +449,7 @@ bool ReportSignalStoreNightCodec::decode(
     }
 
     view.night = night;
-    view.session_records = bytes + HeaderBytes;
+    view.session_records = bytes + header_bytes;
     view.track_records = view.session_records +
         night.session_count * SessionBytes;
 
@@ -480,6 +490,33 @@ bool ReportSignalStoreNightCodec::decode(
         }
     }
     return true;
+}
+
+ReportSignalStoreMetadata ReportSignalStoreNightCodec::reject_revision(
+    const ReportSignalStoreMetadata &saved,
+    SourceRevision revision) {
+    const auto &view = saved.view;
+    const size_t records_size = view.night.session_count * SessionBytes +
+        view.night.track_count * TrackBytes;
+    const size_t total_bytes = HeaderBytes + records_size;
+    auto output = LargeByteBuffer::allocate(total_bytes);
+    if (!output) return {};
+
+    // Both accepted versions share the first 224 bytes. No record changes.
+    uint8_t *bytes = output->data();
+    memcpy(bytes, saved.metadata->data(), 224);
+    put_le16(bytes + 8, Version);
+    put_le16(bytes + 10, HeaderBytes);
+    put_le32(bytes + 12, static_cast<uint32_t>(total_bytes));
+    put_le64(bytes + 224, revision.value());
+    memcpy(bytes + HeaderBytes, view.session_records, records_size);
+
+    auto updated = view;
+    updated.night.rejected_source_revision = revision;
+    updated.session_records = bytes + HeaderBytes;
+    updated.track_records = updated.session_records +
+        view.night.session_count * SessionBytes;
+    return {LargeByteBuffer::freeze(std::move(output)), updated};
 }
 
 ReportSignalStoreMetadata::ReportSignalStoreMetadata(

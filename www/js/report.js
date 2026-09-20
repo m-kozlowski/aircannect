@@ -2274,11 +2274,17 @@
       const invalid = {valid: false};
       const bytes = new Uint8Array(buffer);
       const view = new DataView(buffer);
-      if (buffer.byteLength < SIGNAL_STORE_NIGHT_HEADER_BYTES ||
+      if (buffer.byteLength < 224 ||
           !signalStoreMagic(bytes, "ACRNIG01") ||
-          view.getUint16(8, true) !== 2 ||
-          view.getUint16(10, true) !== SIGNAL_STORE_NIGHT_HEADER_BYTES ||
           view.getUint32(12, true) !== buffer.byteLength) {
+        return invalid;
+      }
+
+      const version = view.getUint16(8, true);
+      const headerBytes = view.getUint16(10, true);
+      if (!((version === 2 && headerBytes === 224) ||
+            (version === 3 && headerBytes === 232)) ||
+          buffer.byteLength < headerBytes) {
         return invalid;
       }
 
@@ -2288,7 +2294,7 @@
       const dayEnd = Number(view.getBigInt64(40, true));
       const sessionCount = view.getUint16(64, true);
       const trackCount = view.getUint16(66, true);
-      const expectedSize = SIGNAL_STORE_NIGHT_HEADER_BYTES +
+      const expectedSize = headerBytes +
         sessionCount * SIGNAL_STORE_SESSION_BYTES +
         trackCount * SIGNAL_STORE_TRACK_BYTES;
       if (!generation || revisionValue === 0n || !(dayEnd > dayStart) ||
@@ -2297,7 +2303,7 @@
       }
 
       const sessions = [];
-      let sessionOffset = SIGNAL_STORE_NIGHT_HEADER_BYTES;
+      let sessionOffset = headerBytes;
       let previousEnd = 0;
       let durationMs = 0;
       for (let i = 0; i < sessionCount; i++) {
@@ -3688,7 +3694,6 @@
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
     const REPORT_MIN_ZOOM_MS = 10000;
     const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
-    const SIGNAL_STORE_NIGHT_HEADER_BYTES = 224;
     const SIGNAL_STORE_SESSION_BYTES = 16;
     const SIGNAL_STORE_TRACK_BYTES = 88;
     const SIGNAL_STORE_EVENT_HEADER_BYTES = 96;

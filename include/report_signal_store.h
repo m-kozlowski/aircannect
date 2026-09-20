@@ -164,6 +164,8 @@ enum ReportSignalStoreNightFlag : uint32_t {
 struct ReportSignalStoreNight {
     SleepDayId sleep_day;
     SourceRevision source_revision;
+    // Sources already found unable to reproduce this saved report; zero if none.
+    SourceRevision rejected_source_revision;
     int64_t day_start_ms = 0;
     int64_t day_end_ms = 0;
     uint64_t closed_therapy_duration_ms = 0;
@@ -246,8 +248,8 @@ private:
 class ReportSignalStoreNightCodec {
 public:
     static constexpr size_t MaxBytes = 64 * 1024;
-    static constexpr uint16_t Version = 2;
-    static constexpr size_t HeaderBytes = 224;
+    static constexpr uint16_t Version = 3;
+    static constexpr size_t HeaderBytes = 232;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t TrackBytes = 88;
 
@@ -257,6 +259,11 @@ public:
     static bool decode(const uint8_t *bytes,
                        size_t length,
                        ReportSignalStoreNightView &view);
+
+    // Copy accepted metadata, preserving its report identity and record bytes.
+    static ReportSignalStoreMetadata reject_revision(
+        const ReportSignalStoreMetadata &saved,
+        SourceRevision revision);
 };
 
 struct ReportSignalStoreEventFileData {

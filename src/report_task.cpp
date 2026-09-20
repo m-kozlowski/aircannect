@@ -717,8 +717,9 @@ struct ReportTask::Runtime {
         out = {};
         if (!sleep_day.valid() || !lock(timeout_ms)) return false;
 
+        const auto state = published_state();
         const NightCatalogRecord *night =
-            catalog ? catalog->find(sleep_day) : nullptr;
+            state && state->catalog ? state->catalog->find(sleep_day) : nullptr;
         for (const ReportNightFailureEntry &entry : failures) {
             if (!entry.valid() || entry.sleep_day != sleep_day ||
                 !night || entry.source_revision != night->source_revision) {
@@ -733,6 +734,15 @@ struct ReportTask::Runtime {
             return true;
         }
         unlock();
+
+        const auto *stored = state && state->store_catalog
+            ? state->store_catalog->find(sleep_day) : nullptr;
+        if (night && stored && stored->view.night.rejected_source_revision ==
+                                   night->source_revision) {
+            copy_cstr(out.error, sizeof(out.error), "report_source_changed_incomplete");
+            out.retryable = false;
+            return true;
+        }
         return false;
     }
 

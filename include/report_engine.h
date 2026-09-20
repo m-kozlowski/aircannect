@@ -36,7 +36,7 @@ struct ReportEngineCompletion {
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }
-    // Rebuild was declined before writing because saved data cannot be reproduced.
+    // Rebuild declined before replacing report data; metadata records the refusal.
     bool retained_for_missing_sources() const;
 };
 
@@ -118,6 +118,7 @@ private:
     bool finish_fallback_acquisition();
     bool finish_execution(uint32_t now_ms);
     bool finish_publication();
+    bool retain_incomplete_report();
     bool retry_active(uint32_t now_ms, uint32_t delay_ms);
     void cancel_active_work();
     void complete_active(OperationOutcome outcome,

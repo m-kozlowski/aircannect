@@ -109,6 +109,12 @@ public:
         uint32_t operation_generation,
         StorageAtomicWriteLane lane);
 
+    // Replace only accepted metadata; signal, event and checkpoint files stay intact.
+    OperationAdmission start_metadata(
+        ReportSignalStoreMetadata metadata,
+        uint32_t operation_generation,
+        StorageAtomicWriteLane lane);
+
     const ReportSignalStoreStatus &status() const { return status_; }
     ReportSignalStoreMetadata take_published_metadata();
 

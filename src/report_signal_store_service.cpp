@@ -179,6 +179,33 @@ OperationAdmission ReportSignalStoreService::start(
     return OperationAdmission::Accepted;
 }
 
+OperationAdmission ReportSignalStoreService::start_metadata(
+    ReportSignalStoreMetadata metadata,
+    uint32_t operation_generation,
+    StorageAtomicWriteLane lane) {
+    if (phase_ != Phase::Idle) return OperationAdmission::Busy;
+
+    std::shared_ptr<ReportSignalStoreBundle> bundle(
+        LargeObject::create<ReportSignalStoreBundle>(),
+        LargeObject::destroy<ReportSignalStoreBundle>);
+    if (!bundle) {
+        fail("report_signal_store_allocation_failed");
+        return OperationAdmission::Rejected;
+    }
+    bundle->sleep_day = metadata.view.night.sleep_day;
+    bundle->generation = metadata.view.night.generation;
+    bundle->source_revision = metadata.view.night.source_revision;
+    bundle->metadata = std::move(metadata.metadata);
+    bundle->metadata_view = metadata.view;
+
+    const auto admitted = start(std::move(bundle), operation_generation, lane);
+    if (admitted == OperationAdmission::Accepted) {
+        phase_ = Phase::SubmitMetadata;
+        status_.state = ReportSignalStoreState::PublishingMetadata;
+    }
+    return admitted;
+}
+
 ReportSignalStoreLodBatch ReportSignalStoreService::take_lod() {
     if (phase_ != Phase::Ready) return {};
     return std::exchange(deferred_lod_, {});

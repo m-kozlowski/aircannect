@@ -500,6 +500,12 @@ bool ReportEngine::start_known_request(
     retained_metadata_ = stored
         ? ReportSignalStoreMetadata{stored->metadata, stored->view}
         : ReportSignalStoreMetadata{};
+    if (!active_request_.force_rebuild && stored &&
+        stored->view.night.rejected_source_revision ==
+            active_request_.artifact.source_revision) {
+        return retain_incomplete_report();
+    }
+
     const auto *source = catalog_->find(active_request_.artifact.sleep_day);
     const bool edf_append = source && stored &&
         (source->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
@@ -699,10 +705,7 @@ bool ReportEngine::start_build(
         if (lost_source) {
             // Local recovery has already run. Keep the published generation
             // when its input has disappeared, rather than replacing it with less data.
-            complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
-                            ReportExecutorError::None,
-                            "report_source_changed_incomplete");
-            return true;
+            return retain_incomplete_report();
         }
     }
 
@@ -878,10 +881,7 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
                 previous.track(i, track);
                 if (track.valid_sample_count &&
                     (missing & report_signal_bit(track.signal))) {
-                    complete_active(OperationOutcome::failed(), resumed.status,
-                                    ReportExecutorError::None,
-                                    "report_source_changed_incomplete");
-                    return true;
+                    return retain_incomplete_report();
                 }
             }
 
@@ -1039,6 +1039,39 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     return true;
 }
 
+bool ReportEngine::retain_incomplete_report() {
+    if (retained_metadata_.view.night.rejected_source_revision ==
+        active_request_.artifact.source_revision) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
+                        ReportExecutorError::None,
+                        "report_source_changed_incomplete");
+        return true;
+    }
+
+    auto metadata = ReportSignalStoreNightCodec::reject_revision(
+        retained_metadata_, active_request_.artifact.source_revision);
+    if (!metadata.metadata) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::AllocationFailed,
+                        ReportExecutorError::None,
+                        "report_store_metadata_allocation_failed");
+        return true;
+    }
+
+    const auto admitted = store_.start_metadata(
+        std::move(metadata), active_request_.ticket.generation,
+        write_lane(active_request_.priority));
+    if (admitted != OperationAdmission::Accepted) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None,
+                        store_.status().error[0] ? store_.status().error
+                                                : "report_store_metadata_write_rejected");
+        return true;
+    }
+
+    phase_ = ActivePhase::Publishing;
+    return true;
+}
+
 bool ReportEngine::finish_publication() {
     const ReportSignalStoreStatus status = store_.status();
     if (status.state == ReportSignalStoreState::Ready) {
@@ -1052,10 +1085,13 @@ bool ReportEngine::finish_publication() {
         }
 
         const uint32_t generation = metadata.view.night.generation;
+        const bool retained = metadata.view.night.rejected_source_revision ==
+            active_request_.artifact.source_revision;
         published_ = std::move(metadata);
-        complete_active(OperationOutcome::succeeded(),
-                        ReportPlanStatus::Ready,
-                        ReportExecutorError::None);
+        complete_active(retained ? OperationOutcome::failed() : OperationOutcome::succeeded(),
+                        retained ? ReportPlanStatus::InvalidCatalog : ReportPlanStatus::Ready,
+                        ReportExecutorError::None,
+                        retained ? "report_source_changed_incomplete" : nullptr);
         last_completion_.store_generation = generation;
         return true;
     }
