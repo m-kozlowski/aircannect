@@ -40,7 +40,8 @@ int active_settings_mode(const As11DeviceState &device,
                          const As11SettingsState &settings) {
     int mode = settings.mode_index();
     if (mode < 0) {
-        mode = as11_mode_index_from_value(device.active_therapy_profile());
+        mode = settings.mode_index_from_device_value(
+            device.active_therapy_profile());
     }
     return mode;
 }

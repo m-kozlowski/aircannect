@@ -1025,8 +1025,10 @@ static void refresh_status_presentations(uint32_t now_ms) {
     }
 
     if (display_due) {
-        const int therapy_mode = as11_mode_index_from_value(
-            as11_device_service.state().active_therapy_profile());
+        const int therapy_mode =
+            as11_settings_manager.state().mode_index_from_device_value(
+                as11_device_service.state().active_therapy_profile());
+
         const DisplaySnapshot display_snapshot = compose_display_snapshot(
             snapshot,
             session_manager.status(),
@@ -1284,7 +1286,7 @@ void setup() {
                                    session_manager);
     if (!display_telemetry_adapter.begin(
             therapy_telemetry_broker, display_manager,
-            as11_device_service.state())) {
+            as11_device_service.state(), as11_settings_manager.state())) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[DISPLAY] failed to subscribe to therapy telemetry\n");
     }

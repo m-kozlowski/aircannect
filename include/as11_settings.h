@@ -157,6 +157,7 @@ public:
     bool apply_settings_get_response(RpcPayloadView payload,
                                      uint32_t now_ms,
                                      bool *complete_snapshot = nullptr);
+    // params_json is the outgoing RPC Set body, not UI/CLI setting input.
     bool note_set_request(const std::string &params_json, uint32_t now_ms);
     void note_set_response(bool is_error, uint32_t now_ms);
     void note_set_cancelled(const char *reason, uint32_t now_ms);
@@ -184,6 +185,7 @@ public:
     uint32_t last_write_ms() const { return last_write_ms_; }
 
     int mode_index() const;
+    int mode_index_from_device_value(const std::string &value) const;
     uint16_t supported_mode_mask() const { return supported_mode_mask_; }
     bool setting_visible(size_t index, int mode) const;
     const As11SettingsCatalog &catalog() const { return catalog_; }

@@ -464,7 +464,7 @@ bool As11DeviceConsoleCommands::execute_rpc(const String &command,
             const As11DeviceState &as11 = device_.state();
             int mode = settings.mode_index();
             if (mode < 0) {
-                mode = as11_mode_index_from_value(
+                mode = settings.mode_index_from_device_value(
                     as11.active_therapy_profile());
             }
 

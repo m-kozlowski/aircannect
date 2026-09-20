@@ -9,7 +9,8 @@ namespace aircannect {
 bool DisplayTelemetryAdapter::begin(
     TherapyTelemetryBroker &telemetry,
     DisplayManager &display,
-    const As11DeviceState &device_state) {
+    const As11DeviceState &device_state,
+    const As11SettingsState &settings) {
     if (subscription_ != THERAPY_TELEMETRY_SUBSCRIPTION_INVALID) {
         return true;
     }
@@ -17,6 +18,7 @@ bool DisplayTelemetryAdapter::begin(
     telemetry_ = &telemetry;
     display_ = &display;
     device_state_ = &device_state;
+    settings_ = &settings;
     if (!display.available()) return true;
 
     TherapyTelemetryDemand demand;
@@ -31,7 +33,7 @@ void DisplayTelemetryAdapter::accept_therapy_telemetry(
     (void)now_ms;
     if (!display_ || !device_state_ || !display_->available()) return;
 
-    const int therapy_mode = as11_mode_index_from_value(
+    const int therapy_mode = settings_->mode_index_from_device_value(
         device_state_->active_therapy_profile());
     display_->publish_therapy_telemetry(snapshot, therapy_mode);
 }

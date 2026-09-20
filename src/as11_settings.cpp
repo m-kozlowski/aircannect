@@ -708,9 +708,13 @@ bool As11SettingsState::apply_settings_get_response(
     }
     if (result.isNull()) return false;
 
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(device_model());
+    if (!protocol) return false;
+
     bool catalog_changed = false;
-    if (!catalog_.apply_airbreak_info(
-            result["AirbreakInfo"].as<JsonObjectConst>(), catalog_changed)) {
+    if (protocol->settings_extensions && !catalog_.apply_airbreak_info(
+            result[protocol->settings_extensions].as<JsonObjectConst>(),
+            catalog_changed)) {
         return false;
     }
     if (catalog_changed) {
@@ -859,14 +863,11 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
     JsonObjectConst root = doc.as<JsonObjectConst>();
     int mode = mode_index();
     const As11SettingDef *mode_def = catalog_.find("MOP");
-    int target_mode = mode_def
+    const int target_mode = mode_def
         ? enum_index_from_json(*mode_def,
                                value_for_setting(root, *mode_def, device_model()),
                                true)
         : -1;
-    if (target_mode < 0 && mode_def) {
-        target_mode = enum_index_from_json(*mode_def, root["MOP"]);
-    }
 
     if (target_mode >= 0) mode = target_mode;
 
@@ -1087,6 +1088,15 @@ int As11SettingsState::mode_index() const {
     return -1;
 }
 
+int As11SettingsState::mode_index_from_device_value(
+    const std::string &value) const {
+    const As11SettingDef *def = catalog_.find("MOP");
+    if (!def || !catalog_.supports(*def)) return -1;
+
+    const int index = enum_index_from_text(*def, value.c_str(), true);
+    return index >= 0 && index < def->option_count ? index : -1;
+}
+
 size_t as11_setting_count() {
     return SETTINGS_COUNT;
 }
@@ -1232,7 +1242,7 @@ std::string as11_build_set_params_from_json(
     JsonObjectConst root = doc.as<JsonObjectConst>();
     const As11SettingDef *mode_def = catalog.find("MOP");
     const int target_mode = mode_def
-        ? enum_index_from_json(*mode_def, root["MOP"]) : -1;
+        ? enum_index_from_json(*mode_def, root[mode_def->key]) : -1;
     if (target_mode >= 0) mode = target_mode;
 
     std::string out = "{";
