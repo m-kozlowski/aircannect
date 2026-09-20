@@ -31,6 +31,11 @@ struct ResmedDeviceProtocol {
     ResmedRuntimeQuery runtime;
     // Null means that the device has no timezone readout.
     const char *timezone;
+
+    // Extra read alongside the active mode, TherapyProfiles and FeatureProfiles.
+    const char *settings_extra_field;
+    // Null when the device has no catalog of custom settings.
+    const char *settings_extensions;
 };
 
 extern const ResmedIdentityQuery RESMED_IDENTITY;

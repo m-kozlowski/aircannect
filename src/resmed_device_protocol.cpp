@@ -15,11 +15,13 @@ namespace {
 const ResmedDeviceProtocol AIRSENSE11 = {
     {"ActiveTherapyProfile", "_ROP", "ROP", nullptr},
     "TimeZoneOffset",
+    "_PHI", "AirbreakInfo",
 };
 
 const ResmedDeviceProtocol AIRMINI = {
     {"TherapyMode", "_RUNNING_MODE_REQUEST", nullptr, "FGState"},
     nullptr,
+    "MaskType", nullptr,
 };
 
 }  // namespace

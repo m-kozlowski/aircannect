@@ -13,6 +13,7 @@
 #include "as11_rpc.h"
 #include "as11_setting_catalog_builder.h"
 #include "memory_manager.h"
+#include "resmed_device_protocol.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -356,6 +357,17 @@ const char *setting_rpc_key(const As11SettingDef &def,
 JsonVariantConst value_for_setting(JsonObjectConst object,
                                    const As11SettingDef &def,
                                    ResmedDeviceModel model) {
+    if (setting_is_therapy_mode(def)) {
+        const ResmedDeviceProtocol *protocol = resmed_device_protocol(model);
+        if (!protocol) return JsonVariantConst();
+
+        JsonVariantConst value = object[protocol->runtime.therapy_profile];
+        if (!value.isNull() || model != ResmedDeviceModel::AirSense11) {
+            return value;
+        }
+        // AS11 Set commands also accept the catalog's short RPC keys.
+    }
+
     if (model == ResmedDeviceModel::AirMini) {
         const std::string rpc_name = as11_setting_rpc_long_name(def, model);
         return rpc_name.empty() ? JsonVariantConst()
@@ -416,8 +428,14 @@ int enum_index_from_text(const As11SettingDef &def, const char *text) {
     return -1;
 }
 
-int mode_index_from_json(JsonVariantConst value) {
+int mode_index_from_json(
+    JsonVariantConst value,
+    ResmedDeviceModel model = ResmedDeviceModel::AirSense11) {
     if (value.isNull()) return -1;
+    if (model == ResmedDeviceModel::AirMini) {
+        return mini_mode_index(value_to_string(value));
+    }
+
     if (value.is<int>()) return value.as<int>();
     if (value.is<long>()) return static_cast<int>(value.as<long>());
     if (value.is<const char *>()) {
@@ -804,14 +822,14 @@ bool As11SettingsState::apply_settings_get_response(
     if (complete_snapshot_out) *complete_snapshot_out = complete_snapshot;
 
     int fallback_mode = mode_index();
-    JsonVariantConst active = device_model_ == ResmedDeviceModel::AirMini
-        ? result["TherapyMode"]
-        : result["_MOP"];
+    const As11SettingDef *mode_def = catalog_.find("MOP");
+    JsonVariantConst active = mode_def
+        ? value_for_setting(result, *mode_def, device_model_)
+        : JsonVariantConst();
     if (!active.isNull()) {
-        fallback_mode = device_model_ == ResmedDeviceModel::AirMini
-            ? mini_mode_index(value_to_string(active))
-            : as11_mode_index_from_value(value_to_string(active));
+        fallback_mode = mode_index_from_json(active, device_model_);
     }
+
     const uint16_t profile_modes = profile_modes_from_result(result);
     if (profile_modes) {
         supported_mode_mask_ = profile_modes;
@@ -934,15 +952,13 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
     int mode = mode_index();
-    int target_mode = mode_index_from_json(root["MOP"]);
-    if (device_model_ == ResmedDeviceModel::AirMini) {
-        const int mini_mode = mini_mode_index(
-            value_to_string(root["TherapyMode"]));
-        if (mini_mode >= 0) target_mode = mini_mode;
-    }
-    if (target_mode < 0) {
-        target_mode = mode_index_from_json(root["_MOP"]);
-    }
+    const As11SettingDef *mode_def = catalog_.find("MOP");
+    int target_mode = mode_def
+        ? mode_index_from_json(value_for_setting(root, *mode_def, device_model_),
+                               device_model_)
+        : -1;
+    if (target_mode < 0) target_mode = mode_index_from_json(root["MOP"]);
+
     if (target_mode >= 0) mode = target_mode;
 
     bool any = false;
@@ -1188,9 +1204,12 @@ std::string as11_setting_rpc_long_name(const As11SettingDef &def) {
 
 std::string as11_setting_rpc_long_name(const As11SettingDef &def,
                                        ResmedDeviceModel model) {
-    if (model == ResmedDeviceModel::AirMini) {
-        if (setting_is_therapy_mode(def)) return "TherapyMode";
+    if (setting_is_therapy_mode(def)) {
+        const ResmedDeviceProtocol *protocol = resmed_device_protocol(model);
+        return protocol ? protocol->runtime.therapy_profile : "";
+    }
 
+    if (model == ResmedDeviceModel::AirMini) {
         if (def.source == As11SettingSource::Flat) {
             return setting_field_name(def);
         }
@@ -1224,8 +1243,6 @@ std::string as11_setting_rpc_long_name(const As11SettingDef &def,
 
         return field;
     }
-
-    if (setting_is_therapy_mode(def)) return "ActiveTherapyProfile";
 
     if (def.source == As11SettingSource::Flat) {
         std::string out("_");
@@ -1289,18 +1306,17 @@ std::string as11_settings_get_params_json() {
 
 std::string as11_settings_get_params_json(
     const As11SettingsCatalog &catalog) {
-    if (catalog.device_model() == ResmedDeviceModel::Unknown) {
-        return "[]";
-    }
+    const ResmedDeviceProtocol *protocol =
+        resmed_device_protocol(catalog.device_model());
+    if (!protocol) return "[]";
 
-    if (catalog.device_model() == ResmedDeviceModel::AirMini) {
-        return "[\"TherapyMode\",\"TherapyProfiles\",\"FeatureProfiles\","
-               "\"MaskType\"]";
-    }
+    std::string out = build_get_params({
+        protocol->runtime.therapy_profile, "TherapyProfiles", "FeatureProfiles",
+        protocol->settings_extra_field, protocol->settings_extensions});
+    if (!protocol->settings_extensions) return out;
 
-    std::string out = "[";
-    out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\",\"_PHI\",";
-    out += "\"AirbreakInfo\"";
+    out.pop_back();
+
     for (size_t i = 0; i < catalog.count(); ++i) {
         const As11SettingDef &def = catalog.setting(i);
         if (!def.mode_mask || !catalog.overlaid(def.key)) continue;
