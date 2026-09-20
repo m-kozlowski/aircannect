@@ -4,9 +4,21 @@
 
 namespace aircannect {
 
+void As11SettingsManager::set_device_model(ResmedDeviceModel model) {
+    if (device_model_ == model && state_.device_model() == model) return;
+
+    state_.set_device_model(model);
+    if (state_.device_model() != model) return;
+
+    device_model_ = model;
+    model_change_pending_ = true;
+    note_change();
+}
+
 bool As11SettingsManager::request_refresh(RpcRequestPort &rpc,
                                           RpcSource source,
                                           uint32_t now_ms) {
+    if (device_model_ == ResmedDeviceModel::Unknown) return false;
     if (refresh_ticket_.valid()) return true;
 
     if (submit_refresh(rpc, source)) return true;
@@ -20,6 +32,9 @@ OperationSubmission As11SettingsManager::write(
     const std::string &params_json,
     RpcSource source,
     uint32_t now_ms) {
+    if (device_model_ == ResmedDeviceModel::Unknown) {
+        return OperationSubmission::rejected();
+    }
     if (write_ticket_.valid()) return OperationSubmission::busy();
 
     RpcRequestCommand command;
@@ -42,6 +57,7 @@ OperationSubmission As11SettingsManager::write(
 void As11SettingsManager::invalidate(RpcRequestPort &rpc,
                                      RpcSource source,
                                      uint32_t now_ms) {
+    if (device_model_ == ResmedDeviceModel::Unknown) return;
     note_change();
     if (refresh_ticket_.valid()) {
         refresh_again_pending_ = true;
@@ -74,6 +90,22 @@ void As11SettingsManager::device_reset(RpcRequestPort &rpc) {
 void As11SettingsManager::poll(RpcRequestPort &rpc,
                                uint32_t now_ms,
                                bool suspended) {
+    if (model_change_pending_) {
+        model_change_pending_ = false;
+        device_reset(rpc);
+
+        // Cancellation publishes completions synchronously; discard the old model.
+        RpcRequestCompletion discarded;
+        (void)rpc.take_completion(write_ticket_, discarded);
+        (void)rpc.take_completion(refresh_ticket_, discarded);
+        write_ticket_ = {};
+        refresh_ticket_ = {};
+
+        if (device_model_ != ResmedDeviceModel::Unknown) {
+            schedule_refresh(RpcSource::Scheduler, now_ms, 0);
+        }
+    }
+
     RpcRequestCompletion completion;
     if (write_ticket_.valid() &&
         rpc.take_completion(write_ticket_, completion)) {

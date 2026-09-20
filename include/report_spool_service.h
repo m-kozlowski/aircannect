@@ -6,6 +6,7 @@
 #include "report_spool_port.h"
 #include "report_spool_runtime.h"
 #include "rpc_request_port.h"
+#include "resmed_device_model.h"
 
 #ifdef ARDUINO
 #include <freertos/FreeRTOS.h>
@@ -36,7 +37,8 @@ public:
     bool enqueue_notification(const RpcPayloadRef &payload);
     bool poll(bool normal_rpc_available,
               bool transport_backpressure_active,
-              uint32_t rx_queue_full_alerts);
+              uint32_t rx_queue_full_alerts,
+              ResmedDeviceModel model = ResmedDeviceModel::AirSense11);
     bool active() const;
 
 private:

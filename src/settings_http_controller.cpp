@@ -137,15 +137,20 @@ void append_setting_json(LargeTextBuffer &json,
 }
 
 void append_catalog_setting_json(LargeTextBuffer &json,
+                                 const As11SettingsCatalog &catalog,
                                  const As11SettingDef &def,
                                  size_t &emitted) {
-    if (!def.mode_mask || !as11_setting_readable_via_rpc(def)) return;
+    if (!catalog.supports(def) || !def.mode_mask ||
+        !as11_setting_readable_via_rpc(def)) {
+        return;
+    }
 
     if (emitted++) json += ',';
     json += '{';
     json_add_string(json, "key", def.key, false);
     json_add_string(json, "label", def.label);
-    const std::string rpc_name = as11_setting_rpc_long_name(def);
+    const std::string rpc_name = as11_setting_rpc_long_name(
+        def, catalog.device_model());
     json_add_string(json, "rpc_name", rpc_name.c_str());
     json_add_string(json, "group", def.group);
     json_add_string(json, "category", def.category);
@@ -174,6 +179,8 @@ void append_catalog_setting_json(LargeTextBuffer &json,
 void append_catalog_composite_json(LargeTextBuffer &json,
                                    const As11SettingsCatalog &catalog,
                                    size_t index, size_t &emitted) {
+    if (catalog.device_model() != ResmedDeviceModel::AirSense11) return;
+
     const As11SettingCompositeDef &def = as11_setting_composite(index);
     if (catalog.overlaid(def.enum_key) || catalog.overlaid(def.numeric_key)) {
         return;
@@ -486,6 +493,7 @@ void SettingsHttpController::advance_snapshot_build() {
             case BuildPhase::Catalog:
                 if (build_.index < catalog.count()) {
                     append_catalog_setting_json(catalog_build_json_,
+                                                catalog,
                                                 catalog.setting(build_.index++),
                                                 build_.emitted);
 

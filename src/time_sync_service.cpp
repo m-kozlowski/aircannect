@@ -83,6 +83,10 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
         last_status_ = "esp_clock_not_valid";
         return false;
     }
+    if (device_->state().model() != ResmedDeviceModel::AirSense11) {
+        last_status_ = "resmed_push_method_unavailable";
+        return false;
+    }
     if (therapy_running()) {
         last_status_ = "resmed_push_deferred_therapy_active";
         Log::logf(CAT_GENERAL, LOG_INFO,
@@ -384,6 +388,10 @@ void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
         return;
     }
     if (!ntp_synced_ || !esp_clock_valid()) return;
+    if (!device_ || device_->state().model() != ResmedDeviceModel::AirSense11) {
+        next_resmed_push_ms_ = 0;
+        return;
+    }
     if (!resmed_push_available_) {
         next_resmed_push_ms_ = 0;
         return;

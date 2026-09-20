@@ -81,7 +81,7 @@ const char *As11ServiceManager::state_name(State state) {
 }
 
 bool As11ServiceManager::acquire(As11ServiceOwner owner) {
-    if (!available_) {
+    if (!available()) {
         error_ = As11ServiceTransactionError::Unavailable;
         return false;
     }
@@ -108,7 +108,7 @@ bool As11ServiceManager::submit_packet(
     std::unique_ptr<LargeByteBuffer> request,
     bool enter_allowed,
     uint32_t now_ms) {
-    if (!available_) {
+    if (!available()) {
         error_ = As11ServiceTransactionError::Unavailable;
         return false;
     }

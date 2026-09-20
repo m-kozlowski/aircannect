@@ -228,38 +228,46 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
 
     bool updated = false;
     std::string text;
-    if (get_string(result, "_PNA", text)) {
+    if (get_string(result, "_PNA", text) ||
+        get_string(result, "ProductName", text)) {
         product_name_ = text;
         updated = true;
     }
-    if (get_string(result, "_SRN", text)) {
+    if (get_string(result, "_SRN", text) ||
+        get_string(result, "SerialNumber", text)) {
         serial_number_ = text;
         updated = true;
     }
-    if (get_string(result, "_SID", text)) {
+    if (get_string(result, "_SID", text) ||
+        get_string(result, "ApplicationIdentifier", text)) {
         software_identifier_ = text;
         updated = true;
     }
-    if (get_string(result, "_BID", text)) {
+    if (get_string(result, "_BID", text) ||
+        get_string(result, "BootloaderIdentifier", text)) {
         bootloader_identifier_ = text;
         updated = true;
     }
     int32_t identity_number = 0;
-    if (variant_to_int(result["_MID"], identity_number)) {
+    if (variant_to_int(result["_MID"], identity_number) ||
+        variant_to_int(result["PlatformIdentifier"], identity_number)) {
         platform_id_ = identity_number;
         platform_id_valid_ = true;
         updated = true;
     }
-    if (variant_to_int(result["_VID"], identity_number)) {
+    if (variant_to_int(result["_VID"], identity_number) ||
+        variant_to_int(result["VariantIdentifier"], identity_number)) {
         variant_id_ = identity_number;
         variant_id_valid_ = true;
         updated = true;
     }
-    if (get_string(result, "_MOP", text)) {
+    if (get_string(result, "_MOP", text) ||
+        get_string(result, "TherapyMode", text)) {
         active_therapy_profile_ = text;
         updated = true;
     }
-    if (get_string(result, "_MHR", text)) {
+    if (get_string(result, "_MHR", text) ||
+        get_string(result, "MotorRunMeter", text)) {
         mhr_ = text;
         updated = true;
     }
@@ -274,6 +282,17 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
     if (get_string(result, "_ROP", text) || get_string(result, "ROP", text)) {
         update_rop(text, now_ms);
         updated = true;
+    }
+
+    if (model() == ResmedDeviceModel::AirMini) {
+        if (get_string(result, "_RUNNING_MODE_REQUEST", text)) {
+            rop_ = text;
+            updated = true;
+        }
+        if (get_string(result, "FGState", text)) {
+            update_fg_state(text, now_ms);
+            updated = true;
+        }
     }
 
     if (updated) {
@@ -319,6 +338,35 @@ bool As11DeviceState::apply_datetime_response(
 
 bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
                                                  uint32_t now_ms) {
+    if (model() == ResmedDeviceModel::AirMini &&
+        (frame.data_id == "FGState" || frame.data_id == "TherapyMode")) {
+        bool updated = false;
+        for (size_t i = 0; i < frame.event_count; ++i) {
+            const As11EventRecord &event = frame.events[i];
+            if (event.kind != As11EventRecordKind::ValueChange ||
+                event.text_value.empty()) continue;
+
+            if (frame.data_id == "FGState") {
+                const As11TherapyState previous = therapy_state_;
+                update_fg_state(event.text_value, now_ms);
+                if (previous != As11TherapyState::Unknown &&
+                    previous != therapy_state_) {
+                    last_therapy_transition_event_ = event.text_value;
+                    last_therapy_transition_report_time_ = event.report_time;
+                    last_therapy_transition_ms_ = now_ms;
+                    last_therapy_transition_state_ = therapy_state_;
+                }
+            } else {
+                active_therapy_profile_ = event.text_value;
+            }
+            last_activity_event_ = event.text_value;
+            last_activity_event_report_time_ = event.report_time;
+            last_activity_event_ms_ = now_ms;
+            updated = true;
+        }
+        return updated;
+    }
+
     if (!as11_event_data_id_is_activity(frame.data_id)) return false;
     bool updated = false;
     for (size_t i = 0; i < frame.event_count; ++i) {
@@ -333,6 +381,7 @@ bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
             last_therapy_transition_event_ = event.name;
             last_therapy_transition_report_time_ = event.report_time;
             last_therapy_transition_ms_ = now_ms;
+            last_therapy_transition_state_ = event_state;
             therapy_state_ = event_state;
             status_valid_ = true;
             status_updated_ms_ = now_ms;
@@ -414,6 +463,26 @@ const char *As11DeviceState::therapy_target_name(As11TherapyTarget target) {
 void As11DeviceState::update_rop(const std::string &value, uint32_t now_ms) {
     rop_ = value;
     therapy_state_ = classify_rop(value);
+    confirm_pending_if_matched(now_ms);
+}
+
+void As11DeviceState::update_fg_state(const std::string &value,
+                                     uint32_t now_ms) {
+    if (value == "Therapy") {
+        therapy_state_ = As11TherapyState::Running;
+    } else if (value == "Standby") {
+        therapy_state_ = As11TherapyState::Standby;
+    } else if (value == "Reset" || value == "ResetCompliance" ||
+               value == "MaskFit" || value == "TestMode" ||
+               value == "SystemError" || value == "Upgrade" ||
+               value == "UpgradePreparation") {
+        therapy_state_ = As11TherapyState::Other;
+    } else {
+        therapy_state_ = As11TherapyState::Unknown;
+    }
+
+    status_valid_ = true;
+    status_updated_ms_ = now_ms;
     confirm_pending_if_matched(now_ms);
 }
 

@@ -27,14 +27,7 @@ bool recent_therapy_transition(const As11DeviceState &as11,
         age_ms > static_cast<int32_t>(AC_SESSION_RECENT_ACTIVITY_START_MS)) {
         return false;
     }
-    const std::string &event = as11.last_therapy_transition_event();
-    if (expected_state == As11TherapyState::Running) {
-        return event == "TherapyStarted" || event == "TherapyStart";
-    }
-    if (expected_state == As11TherapyState::Standby) {
-        return event == "StandbyStarted" || event == "TherapyStop";
-    }
-    return false;
+    return as11.last_therapy_transition_state() == expected_state;
 }
 
 }  // namespace

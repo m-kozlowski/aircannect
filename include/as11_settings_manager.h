@@ -4,6 +4,7 @@
 #include <string>
 
 #include "as11_settings.h"
+#include "resmed_device_model.h"
 #include "rpc_request_port.h"
 
 namespace aircannect {
@@ -11,6 +12,8 @@ namespace aircannect {
 class As11SettingsManager {
 public:
     const As11SettingsState &state() const { return state_; }
+    void set_device_model(ResmedDeviceModel model);
+    ResmedDeviceModel device_model() const { return device_model_; }
 
     bool request_refresh(RpcRequestPort &rpc,
                          RpcSource source,
@@ -60,10 +63,12 @@ private:
     bool refresh_retry_pending_ = false;
     bool refresh_again_pending_ = false;
     bool history_change_pending_ = false;
+    bool model_change_pending_ = false;
     uint32_t next_refresh_retry_ms_ = 0;
 
     uint32_t next_generation_ = 0;
     uint32_t revision_ = 0;
+    ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
 };
 
 }  // namespace aircannect

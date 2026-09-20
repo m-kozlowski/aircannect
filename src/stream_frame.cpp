@@ -79,7 +79,8 @@ bool parse_value_array(JsonCursor &json,
 
 bool parse_signal_object(JsonCursor &json,
                          StreamFrameData &frame,
-                         uint32_t fallback_interval_ms) {
+                         uint32_t fallback_interval_ms,
+                         ResmedDeviceModel model) {
     if (!json.consume('{')) {
         json.fail("expected signal object");
         return false;
@@ -103,11 +104,12 @@ bool parse_signal_object(JsonCursor &json,
         if (first_member && frame.signal_count < AC_STREAM_FRAME_SIGNAL_MAX) {
             StreamSignalSpan &span = frame.signals[frame.signal_count++];
             copy_cstr(span.name, sizeof(span.name), name);
-            span.id = as11_stream_signal_id_from_name(name);
+            span.id = as11_stream_signal_id_from_name(name, model);
             span.value_offset = frame.value_count;
             span.sample_interval_ms =
                 as11_stream_signal_sample_interval_ms(name,
-                                                      fallback_interval_ms);
+                                                      fallback_interval_ms,
+                                                      model);
             if (!parse_value_array(json, frame, span)) return false;
         } else {
             if (first_member) frame.values_truncated = true;
@@ -132,7 +134,9 @@ bool parse_signal_object(JsonCursor &json,
     return false;
 }
 
-bool parse_data_array(JsonCursor &json, StreamFrameData &frame) {
+bool parse_data_array(JsonCursor &json,
+                      StreamFrameData &frame,
+                      ResmedDeviceModel model) {
     if (!json.consume('[')) {
         json.fail("expected data array");
         return false;
@@ -145,7 +149,7 @@ bool parse_data_array(JsonCursor &json, StreamFrameData &frame) {
     }
 
     while (json.pos < json.end) {
-        if (!parse_signal_object(json, frame, frame.interval_ms)) {
+        if (!parse_signal_object(json, frame, frame.interval_ms, model)) {
             return false;
         }
 
@@ -168,7 +172,8 @@ bool parse_data_array(JsonCursor &json, StreamFrameData &frame) {
 
 bool parse_params(JsonCursor &json,
                   StreamFrameData *frame,
-                  StreamFrameMetadata *metadata) {
+                  StreamFrameMetadata *metadata,
+                  ResmedDeviceModel model) {
     if (!json.consume('{')) {
         json.fail("expected params object");
         return false;
@@ -212,7 +217,7 @@ bool parse_params(JsonCursor &json,
                           start_time);
             }
         } else if (strcmp(key, "data") == 0 && frame) {
-            if (!parse_data_array(json, *frame)) return false;
+            if (!parse_data_array(json, *frame, model)) return false;
         } else {
             if (!json.skip_value()) return false;
         }
@@ -236,7 +241,8 @@ bool parse_params(JsonCursor &json,
 
 bool parse_top(JsonCursor &json,
                StreamFrameData *frame,
-               StreamFrameMetadata *metadata) {
+               StreamFrameMetadata *metadata,
+               ResmedDeviceModel model) {
     if (!json.consume('{')) {
         json.fail("expected top object");
         return false;
@@ -257,7 +263,7 @@ bool parse_top(JsonCursor &json,
         }
 
         if (strcmp(key, "params") == 0) {
-            if (!parse_params(json, frame, metadata)) return false;
+            if (!parse_params(json, frame, metadata, model)) return false;
         } else {
             if (!json.skip_value()) return false;
         }
@@ -490,7 +496,7 @@ bool stream_parse_metadata(const char *payload,
                            size_t error_len) {
     metadata = {};
     JsonCursor json(payload, payload_len, error, error_len);
-    return parse_top(json, nullptr, &metadata);
+    return parse_top(json, nullptr, &metadata, ResmedDeviceModel::Unknown);
 }
 
 bool stream_parse_frame(const char *payload,
@@ -498,7 +504,8 @@ bool stream_parse_frame(const char *payload,
                         uint32_t now_ms,
                         StreamFrameData &frame,
                         char *error,
-                        size_t error_len) {
+                        size_t error_len,
+                        ResmedDeviceModel model) {
     const uint32_t sequence = frame.sequence;
     stream_frame_reset(frame);
     frame.sequence = sequence;
@@ -510,7 +517,7 @@ bool stream_parse_frame(const char *payload,
     const size_t payload_size = payload ? payload_len : 0;
 
     JsonCursor json(payload_data, payload_size, error, error_len);
-    if (!parse_top(json, &frame, nullptr)) return false;
+    if (!parse_top(json, &frame, nullptr, model)) return false;
     for (size_t i = 0; i < frame.signal_count; ++i) {
         if (frame.signals[i].sample_interval_ms == 0) {
             frame.signals[i].sample_interval_ms = frame.interval_ms;

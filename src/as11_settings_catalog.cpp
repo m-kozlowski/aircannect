@@ -14,6 +14,18 @@ namespace {
 
 constexpr size_t NO_STOCK_SETTING = SIZE_MAX;
 
+const char *const MINI_MODE_OPTIONS[] = {
+    "CPAP", "AutoSet", "HerAuto",
+};
+const char *const MINI_MASK_OPTIONS[] = {
+    "Default", "Pillows", "FullFace", "Nasal",
+};
+
+const char *const MINI_SUPPORTED_KEYS[] = {
+    "MOP", "MPA", "MPI", "STU", "HMA", "HMI", "HSP", "IPC", "STP",
+    "AFC", "EPX", "EPT", "EPR", "RMT", "RMA", "SST", "SSP", "MSK",
+};
+
 bool selector_key(const char *selector, const char *&key, size_t &key_len) {
     if (!selector || selector[0] != '_') return false;
 
@@ -72,6 +84,47 @@ size_t stock_setting_index(const char *key) {
 
 bool same_text(const char *a, const char *b) {
     return strcmp(a ? a : "", b ? b : "") == 0;
+}
+
+bool mini_setting_key(const char *key) {
+    if (!key) return false;
+    for (const char *supported : MINI_SUPPORTED_KEYS) {
+        if (strcmp(key, supported) == 0) return true;
+    }
+    return false;
+}
+
+void apply_airmini_definition(As11SettingDef &def) {
+    if (strcmp(def.key, "MOP") == 0) {
+        def.source = As11SettingSource::Flat;
+        def.profile = As11ProfileId::None;
+        def.source_object = nullptr;
+        def.source_field = "TherapyMode";
+        def.min_value = 0.0f;
+        def.max_value = 2.0f;
+        def.step = 1.0f;
+        def.options = MINI_MODE_OPTIONS;
+        def.option_count = option_count(MINI_MODE_OPTIONS);
+        def.mode_mask = 0x0007u;
+        def.wire_options = MINI_MODE_OPTIONS;
+        return;
+    }
+
+    if (strcmp(def.key, "AFC") == 0) {
+        def.mode_mask = 0x0007u;
+        return;
+    }
+
+    if (strcmp(def.key, "MSK") == 0) {
+        def.source = As11SettingSource::Flat;
+        def.profile = As11ProfileId::None;
+        def.source_object = nullptr;
+        def.source_field = "MaskType";
+        def.options = MINI_MASK_OPTIONS;
+        def.option_count = option_count(MINI_MASK_OPTIONS);
+        def.mode_mask = 0x0007u;
+        def.wire_options = MINI_MASK_OPTIONS;
+    }
 }
 
 }  // namespace
@@ -133,10 +186,49 @@ bool As11SettingsCatalog::overlaid(const char *key) const {
     return false;
 }
 
-bool As11SettingsCatalog::apply_airbreak_info(JsonObjectConst info,
-                                               bool &changed) {
-    changed = false;
+bool As11SettingsCatalog::supports(const As11SettingDef &def) const {
+    if (device_model_ == ResmedDeviceModel::Unknown) return false;
+    return device_model_ != ResmedDeviceModel::AirMini ||
+           mini_setting_key(def.key);
+}
+
+bool As11SettingsCatalog::set_device_model(ResmedDeviceModel model) {
+    if (device_model_ == model) return false;
+
     As11SettingsCatalog candidate;
+    candidate.device_model_ = model;
+    if (model == ResmedDeviceModel::AirMini) {
+        constexpr const char *OVERRIDES[] = {"MOP", "AFC", "MSK"};
+        candidate.item_count_ = option_count(OVERRIDES);
+        candidate.allocation_ = Memory::calloc_large(
+            candidate.item_count_, sizeof(RuntimeItem), false);
+        if (!candidate.allocation_) return false;
+
+        candidate.items_ = static_cast<RuntimeItem *>(candidate.allocation_);
+        for (size_t i = 0; i < candidate.item_count_; ++i) {
+            candidate.items_[i].stock_index = stock_setting_index(OVERRIDES[i]);
+            if (candidate.items_[i].stock_index == NO_STOCK_SETTING) {
+                candidate.clear_overlay();
+                return false;
+            }
+            candidate.items_[i].def = as11_setting(
+                candidate.items_[i].stock_index);
+            apply_airmini_definition(candidate.items_[i].def);
+        }
+    }
+
+    candidate.revision_ = revision_ + 1;
+    if (candidate.revision_ == 0) candidate.revision_ = 1;
+    swap(candidate);
+    return true;
+}
+
+bool As11SettingsCatalog::apply_airbreak_info(JsonObjectConst info,
+    bool &changed) {
+    changed = false;
+    if (device_model_ != ResmedDeviceModel::AirSense11) return true;
+    As11SettingsCatalog candidate;
+    candidate.device_model_ = device_model_;
 
     JsonObjectConst data_items;
     if (!info.isNull() && info["schema"].as<int>() == 4) {
@@ -282,17 +374,22 @@ bool As11SettingsCatalog::apply_airbreak_info(JsonObjectConst info,
 
 bool As11SettingsCatalog::equivalent(
     const As11SettingsCatalog &other) const {
-    if (item_count_ != other.item_count_) return false;
+    if (device_model_ != other.device_model_ ||
+        item_count_ != other.item_count_) return false;
 
     for (size_t i = 0; i < item_count_; ++i) {
         const RuntimeItem &a = items_[i];
         const RuntimeItem &b = other.items_[i];
         if (a.stock_index != b.stock_index ||
+            a.def.source != b.def.source ||
+            a.def.profile != b.def.profile ||
             a.def.kind != b.def.kind ||
             a.def.mode_mask != b.def.mode_mask ||
             a.def.option_count != b.def.option_count ||
             a.def.writable != b.def.writable ||
             !same_text(a.def.key, b.def.key) ||
+            !same_text(a.def.source_object, b.def.source_object) ||
+            !same_text(a.def.source_field, b.def.source_field) ||
             !same_text(a.def.label, b.def.label) ||
             !same_text(a.def.group, b.def.group)) {
             return false;
@@ -326,6 +423,10 @@ void As11SettingsCatalog::swap(As11SettingsCatalog &other) {
     size_t item_count = item_count_;
     item_count_ = other.item_count_;
     other.item_count_ = item_count;
+
+    const ResmedDeviceModel device_model = device_model_;
+    device_model_ = other.device_model_;
+    other.device_model_ = device_model;
 
     uint32_t revision = revision_;
     revision_ = other.revision_;

@@ -13,9 +13,7 @@ const char *const LIVE_CHART_STREAM_IDS =
     "_MKP,"
     "_LKF,"
     "_MKI,"
-    "_MKE,"
-    "_HRT,"
-    "_SAO";
+    "_MKE";
 
 constexpr uint32_t LIVE_CHART_ATTACH_RETRY_MS = 2000;
 
@@ -236,6 +234,9 @@ void LiveChartService::attach_stream(uint32_t now_ms) {
     next_attach_ms_ = now_ms + LIVE_CHART_ATTACH_RETRY_MS;
     StreamSubscription subscription;
     subscription.data_ids_csv = LIVE_CHART_STREAM_IDS;
+    if (device_state_->model() != ResmedDeviceModel::AirMini) {
+        subscription.data_ids_csv += ",_HRT,_SAO";
+    }
     subscription.sample_ms = 40;
     subscription.report_ms = 200;
     StreamAcquireResult result =

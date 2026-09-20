@@ -147,6 +147,8 @@ bool build_status_json(LargeTextBuffer &json,
     }
     json_add_bool(json, "resmed_time_sync_enabled",
                   time.resmed_time_sync_enabled);
+    json_add_bool(json, "resmed_time_write_supported",
+                  time.resmed_time_write_supported);
     json_add_bool(json, "ntp_synced", time.ntp_synced);
     json_add_bool(json, "esp_time_valid", time.esp_time_valid);
     json_add_string_view(json, "esp_time_source", time.esp_time_source);

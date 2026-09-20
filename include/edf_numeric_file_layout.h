@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "edf_file_writer.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -19,10 +20,14 @@ bool edf_accepted_data_ids_contain(const char *accepted_data_ids_csv,
                                    const char *data_id);
 bool edf_short_tag_is_accepted(const char *accepted_data_ids_csv,
                                const char *short_tag);
-bool edf_numeric_stream_available(const char *accepted_data_ids_csv);
+bool edf_numeric_stream_available(
+    const char *accepted_data_ids_csv,
+    ResmedDeviceModel model = ResmedDeviceModel::Unknown);
 bool edf_build_numeric_file_layout(EdfFileKind kind,
                                    const char *accepted_data_ids_csv,
-                                   EdfNumericFileLayout &layout);
+                                   EdfNumericFileLayout &layout,
+                                   ResmedDeviceModel model =
+                                       ResmedDeviceModel::Unknown);
 bool edf_build_full_numeric_file_layout(EdfFileKind kind,
                                         EdfNumericFileLayout &layout);
 

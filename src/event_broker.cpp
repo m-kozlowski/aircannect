@@ -25,6 +25,33 @@ const char *const BASE_EVENT_DATA_IDS[] = {
     SETTINGS_HISTORY_CHANGE_DATA_ID,
 };
 
+struct EventSelector {
+    const char *canonical;
+    const char *airmini;
+};
+
+const EventSelector AIRMINI_EVENTS[] = {
+    {"SystemActivityEvents-FrequentActivityEvents",
+     "SystemActivityEvents-FrequentActivityEvent"},
+    {"SystemActivityEvents-SporadicActivityEvents",
+     "SystemActivityEvents-SporadicActivityEvent"},
+    {"UsageEvents-TherapyStatusEvents", "UsageEvents-TherapyStatusEvent"},
+    {"TherapyEvents-RespiratoryEvents", "TherapyEvents-RespiratoryEvent"},
+    {SETTINGS_HISTORY_CHANGE_DATA_ID, "_SETTINGS_HISTORY_UPDATE_COUNT"},
+    {"_ZLE", "_BREATH_LOGGING_ENABLED"},
+    {"FGState", "FGState"},
+    {"TherapyMode", "TherapyMode"},
+};
+
+const char *event_selector(const std::string &id, bool to_wire) {
+    for (const EventSelector &selector : AIRMINI_EVENTS) {
+        if (id == (to_wire ? selector.canonical : selector.airmini)) {
+            return to_wire ? selector.airmini : selector.canonical;
+        }
+    }
+    return nullptr;
+}
+
 static constexpr DataIdCsvLimits EVENT_DATA_ID_LIMITS = {
     32,
     63,
@@ -75,9 +102,12 @@ bool extract_subscription_id(JsonDocument &doc, uint32_t &subscription_id) {
     return variant_to_uint32(result["subscriptionId"], subscription_id);
 }
 
-bool event_data_id_is_base(const char *data_id) {
+bool event_data_id_is_base(const char *data_id, ResmedDeviceModel model) {
     if (!data_id || !*data_id) return true;
     for (const char *base : BASE_EVENT_DATA_IDS) {
+        if (model == ResmedDeviceModel::AirMini) {
+            base = event_selector(base, true);
+        }
         if (strcmp(data_id, base) == 0) return true;
     }
     return false;
@@ -101,11 +131,14 @@ bool response_has_valid_activity_selector(JsonArrayConst ids) {
         std::string returned_id;
         if (!json_variant_to_string(item["dataId"], returned_id)) continue;
         if ((returned_id == "SystemActivityEvents-FrequentActivityEvents" ||
-             returned_id == "SystemActivityEvents-SporadicActivityEvents") &&
+             returned_id == "SystemActivityEvents-SporadicActivityEvents" ||
+             returned_id == "SystemActivityEvents-FrequentActivityEvent" ||
+             returned_id == "SystemActivityEvents-SporadicActivityEvent") &&
             item["valid"].as<bool>()) {
             system_activity_valid = true;
         }
-        if (returned_id == "UsageEvents-TherapyStatusEvents" &&
+        if ((returned_id == "UsageEvents-TherapyStatusEvents" ||
+             returned_id == "UsageEvents-TherapyStatusEvent") &&
             item["valid"].as<bool>()) {
             usage_events_valid = true;
         }
@@ -206,6 +239,9 @@ bool parse_event_notification(RpcPayloadView payload,
         (void)json_variant_to_string(event["reportTime"],
                                      record.report_time);
         record.has_value = variant_to_int32(event["value"], record.value);
+        if (event["value"].is<const char *>()) {
+            record.text_value = event["value"].as<const char *>();
+        }
         record.has_duration =
             parse_event_duration_ms(event, record.duration_ms);
         record.has_backdate =
@@ -228,6 +264,13 @@ bool settings_history_change_notification(const As11EventFrame &frame) {
 
 }  // namespace
 
+void EventBroker::set_device_model(ResmedDeviceModel model) {
+    if (model_ == model) return;
+
+    model_ = model;
+    mark_desired_params_dirty();
+}
+
 void EventBroker::poll(RpcRequestPort &rpc,
                        uint32_t now_ms,
                        bool background_suspended) {
@@ -241,6 +284,7 @@ void EventBroker::poll(RpcRequestPort &rpc,
 
     if (command_ticket_.valid()) return;
     if (background_suspended && !quiesce_requested_) return;
+    if (model_ == ResmedDeviceModel::Unknown && !quiesce_requested_) return;
 
     EventCommand command = next_command(now_ms);
     if (command.type == EventCommandType::None) return;
@@ -390,7 +434,7 @@ bool EventBroker::accept_subscribe_response(
     for (JsonVariantConst item : requested_ids) {
         std::string requested_id;
         if (!json_variant_to_string(item, requested_id)) continue;
-        if (event_data_id_is_base(requested_id.c_str())) continue;
+        if (event_data_id_is_base(requested_id.c_str(), model_)) continue;
         if (!response_data_id_valid(response_ids, requested_id.c_str())) {
             return false;
         }
@@ -539,6 +583,11 @@ EventPublishResult EventBroker::publish_notification(RpcPayloadView payload,
     EventPublishResult result;
     if (!parse_event_notification(payload, frame)) return result;
 
+    if (model_ == ResmedDeviceModel::AirMini) {
+        const char *canonical = event_selector(frame.data_id, false);
+        if (canonical) frame.data_id = canonical;
+    }
+
     result.accepted = true;
     result.truncated = frame.truncated;
     last_notification_ms_ = now_ms;
@@ -680,6 +729,24 @@ bool EventBroker::build_desired_params(std::string &params_json) const {
                                EVENT_DATA_ID_LIMITS)) {
             return false;
         }
+    }
+
+    if (model_ == ResmedDeviceModel::AirMini) {
+        std::string mapped;
+        size_t count = 0;
+        size_t start = 0;
+        while (start < csv.size()) {
+            const size_t end = csv.find(',', start);
+            const std::string id = csv.substr(start, end - start);
+            const char *wire = event_selector(id, true);
+            if (!wire || !data_id_csv_add(mapped, count, wire, strlen(wire),
+                                          EVENT_DATA_ID_LIMITS)) return false;
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        if (!data_id_csv_merge(mapped, count, "FGState,TherapyMode",
+                              EVENT_DATA_ID_LIMITS)) return false;
+        csv = std::move(mapped);
     }
 
     params_json = "{\"dataIds\":";

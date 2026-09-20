@@ -132,7 +132,8 @@ bool ReportSpoolService::enqueue_notification(const RpcPayloadRef &payload) {
 
 bool ReportSpoolService::poll(bool normal_rpc_available,
                               bool transport_backpressure_active,
-                              uint32_t rx_queue_full_alerts) {
+                              uint32_t rx_queue_full_alerts,
+                              ResmedDeviceModel model) {
     if (!initialized_) return false;
 
     OperationTicket cancelled;
@@ -151,6 +152,12 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
     ReportSpoolFetchCommand command;
     OperationTicket ticket;
     if (take_queued(command, ticket)) {
+        if (model != ResmedDeviceModel::AirSense11) {
+            publish_completion(ticket, OperationOutcome::failed(), nullptr,
+                               "device_spools_unsupported");
+            return true;
+        }
+
         if (!normal_rpc_available) {
             publish_completion(ticket,
                                OperationOutcome::failed(),

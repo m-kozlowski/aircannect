@@ -19,10 +19,20 @@ void strip_identification_whitespace(std::string &json) {
     json.resize(out);
 }
 
+bool copy_identification_member(JsonObject target,
+                               JsonObjectConst source,
+                               const char *name) {
+    JsonVariantConst value = source[name];
+    if (value.isNull()) return false;
+    target[name] = value;
+    return true;
+}
+
 }  // namespace
 
 bool edf_build_identification_json(RpcPayloadView get_response,
-                                   std::string &json_out) {
+                                   std::string &json_out,
+                                   ResmedDeviceModel model) {
     json_out.clear();
 
     JsonDocument doc;
@@ -32,19 +42,52 @@ bool edf_build_identification_json(RpcPayloadView get_response,
     if (err) return false;
 
     JsonObjectConst result = doc["result"].as<JsonObjectConst>();
-    if (result.isNull() ||
-        result["IdentificationProfiles"].as<JsonObjectConst>().isNull()) {
-        return false;
+    if (result.isNull()) return false;
+
+    const JsonObjectConst profiles =
+        result["IdentificationProfiles"].as<JsonObjectConst>();
+    if (!profiles.isNull()) {
+        std::string result_json;
+        serializeJson(result, result_json);
+        if (result_json.empty()) return false;
+
+        json_out.reserve(result_json.size() + 20);
+        json_out = "{\"FlowGenerator\":";
+        json_out += result_json;
+        json_out += '}';
+    } else {
+        if (model != ResmedDeviceModel::AirMini) return false;
+
+        JsonDocument normalized;
+        JsonObject flow = normalized["FlowGenerator"].to<JsonObject>();
+        JsonObject normalized_profiles =
+            flow["IdentificationProfiles"].to<JsonObject>();
+        JsonObject product = normalized_profiles["Product"].to<JsonObject>();
+        JsonObject software = normalized_profiles["Software"].to<JsonObject>();
+        bool copied = false;
+        copied = copy_identification_member(product, result, "ProductName") ||
+                 copied;
+        copied = copy_identification_member(product, result, "SerialNumber") ||
+                 copied;
+        copied = copy_identification_member(product, result, "ProductCode") ||
+                 copied;
+        copied = copy_identification_member(
+                     software, result, "ApplicationIdentifier") ||
+                 copied;
+        copied = copy_identification_member(
+                     software, result, "BootloaderIdentifier") ||
+                 copied;
+        copied = copy_identification_member(
+                     software, result, "PlatformIdentifier") ||
+                 copied;
+        copied = copy_identification_member(
+                     software, result, "VariantIdentifier") ||
+                 copied;
+        if (!copied) return false;
+        serializeJson(normalized, json_out);
+        if (json_out.empty()) return false;
     }
 
-    std::string result_json;
-    serializeJson(result, result_json);
-    if (result_json.empty()) return false;
-
-    json_out.reserve(result_json.size() + 20);
-    json_out = "{\"FlowGenerator\":";
-    json_out += result_json;
-    json_out += '}';
     strip_identification_whitespace(json_out);
     return true;
 }

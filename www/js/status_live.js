@@ -121,7 +121,8 @@
       let source = data.esp_time_source === "ntp" ? "NTP" :
         data.esp_time_source === "resmed" ? "ResMed" : "Clock";
       if (data.ntp_synced) source = "NTP";
-      return source + (data.resmed_time_sync_enabled ? " -> ResMed" : "");
+      return source + (data.resmed_time_sync_enabled &&
+        data.resmed_time_write_supported ? " -> ResMed" : "");
     }
 
     function renderStorageStatus(data) {
@@ -524,6 +525,8 @@
       AirCANnect.ui.text("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
       AirCANnect.ui.text("timeSync", fmtSync(data));
+      const timeToResmed = document.getElementById("timeToResmed");
+      if (timeToResmed) timeToResmed.disabled = !data.resmed_time_write_supported;
       renderOximetryRuntime(data);
 
       const badge = document.getElementById("therapyBadge");

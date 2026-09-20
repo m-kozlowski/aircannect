@@ -7,6 +7,7 @@
 #include "can_driver.h"
 #include "large_byte_buffer.h"
 #include "rpc_transport_ports.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -43,7 +44,10 @@ public:
 
     // Session ownership
     void set_available(bool available);
-    bool available() const { return available_; }
+    void set_device_model(ResmedDeviceModel model) { model_ = model; }
+    bool available() const {
+        return available_ && model_ != ResmedDeviceModel::AirMini;
+    }
     bool acquire(As11ServiceOwner owner);
     void release(As11ServiceOwner owner);
     bool owned_by(As11ServiceOwner owner) const { return owner_ == owner; }
@@ -157,6 +161,7 @@ private:
     bool tcp_reset_boot_wait_ = false;
     bool close_after_response_ = false;
     bool available_ = true;
+    ResmedDeviceModel model_ = ResmedDeviceModel::Unknown;
     As11ServiceOwner owner_ = As11ServiceOwner::None;
     State state_ = State::Idle;
 };

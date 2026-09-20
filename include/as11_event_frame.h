@@ -17,6 +17,7 @@ struct As11EventRecord {
     As11EventRecordKind kind = As11EventRecordKind::Named;
     std::string name;
     std::string report_time;
+    std::string text_value;
     int32_t value = 0;
     int32_t duration_ms = 0;
     int32_t backdate_ms = 0;

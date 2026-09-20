@@ -45,14 +45,27 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
     return nullptr;
 }
 
+bool edf_stream_signal_supported_for_model(ResmedDeviceModel model,
+                                           StreamSignalId id) {
+    const EdfStreamSignalDescriptor *descriptor =
+        edf_stream_signal_descriptor_for_stream(id);
+    return descriptor &&
+        as11_stream_signal_wire_name(descriptor->short_tag, model) != nullptr;
+}
+
 static std::string stream_ids_csv(EdfSeriesId excluded_series,
-                                  bool required_only) {
+                                  bool required_only,
+                                  ResmedDeviceModel model) {
     std::string out;
     size_t count = 0;
     const EdfStreamSignalDescriptor *signals =
         edf_stream_signal_descriptors(count);
     for (size_t i = 0; i < count; ++i) {
         if (signals[i].series == excluded_series) continue;
+        if (!edf_stream_signal_supported_for_model(model,
+                                                   signals[i].stream_id)) {
+            continue;
+        }
 
         const EdfFileSchema *schema =
             edf_numeric_schema_for_series(signals[i].series);
@@ -64,13 +77,15 @@ static std::string stream_ids_csv(EdfSeriesId excluded_series,
     return out;
 }
 
-std::string edf_stream_ids_csv(bool required_only) {
-    return stream_ids_csv(EdfSeriesId::Count, required_only);
+std::string edf_stream_ids_csv(bool required_only,
+                               ResmedDeviceModel model) {
+    return stream_ids_csv(EdfSeriesId::Count, required_only, model);
 }
 
 std::string edf_stream_ids_csv_excluding(EdfSeriesId excluded_series,
-                                         bool required_only) {
-    return stream_ids_csv(excluded_series, required_only);
+                                         bool required_only,
+                                         ResmedDeviceModel model) {
+    return stream_ids_csv(excluded_series, required_only, model);
 }
 
 }  // namespace aircannect

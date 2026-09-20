@@ -52,12 +52,16 @@ bool edf_short_tag_is_accepted(const char *accepted_data_ids_csv,
     return false;
 }
 
-bool edf_numeric_stream_available(const char *accepted_data_ids_csv) {
+bool edf_numeric_stream_available(const char *accepted_data_ids_csv,
+                                  ResmedDeviceModel model) {
     size_t descriptor_count = 0;
     const EdfStreamSignalDescriptor *descriptors =
         edf_stream_signal_descriptors(descriptor_count);
     for (size_t i = 0; i < descriptor_count; ++i) {
         const EdfStreamSignalDescriptor &entry = descriptors[i];
+        if (!edf_stream_signal_supported_for_model(model, entry.stream_id)) {
+            continue;
+        }
         if (edf_short_tag_is_accepted(accepted_data_ids_csv,
                                       entry.short_tag)) {
             return true;
@@ -68,7 +72,8 @@ bool edf_numeric_stream_available(const char *accepted_data_ids_csv) {
 
 bool edf_build_numeric_file_layout(EdfFileKind kind,
                                    const char *accepted_data_ids_csv,
-                                   EdfNumericFileLayout &layout) {
+                                   EdfNumericFileLayout &layout,
+                                   ResmedDeviceModel model) {
     edf_reset_numeric_file_layout(layout);
 
     const EdfFileSchema &base = edf_numeric_schema(kind);
@@ -83,6 +88,7 @@ bool edf_build_numeric_file_layout(EdfFileKind kind,
     for (size_t i = 0; i < descriptor_count; ++i) {
         const EdfStreamSignalDescriptor &entry = descriptors[i];
         if (entry.series != base.series ||
+            !edf_stream_signal_supported_for_model(model, entry.stream_id) ||
             !edf_short_tag_is_accepted(accepted_data_ids_csv,
                                        entry.short_tag)) {
             continue;

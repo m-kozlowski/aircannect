@@ -6,6 +6,7 @@
 
 #include "board.h"
 #include "fixed_queue.h"
+#include "resmed_device_model.h"
 #include "rpc_request_port.h"
 #include "stream_frame.h"
 
@@ -69,6 +70,8 @@ using StreamFrameObserver = void (*)(void *context,
 
 class StreamBroker {
 public:
+    void set_device_model(ResmedDeviceModel model);
+
     void poll(RpcRequestPort &rpc, uint32_t now_ms);
     void transport_reset(RpcRequestPort &rpc, uint32_t now_ms);
 
@@ -209,10 +212,10 @@ private:
 
     static bool parse_external_subscription(const std::string &params_json,
                                             StreamSubscription &subscription);
-    static std::string build_subscription_params(
-        const StreamSubscription &subscription);
-    static bool normalize_subscription(const StreamSubscription &input,
-                                       StreamSubscription &subscription);
+    std::string build_subscription_params(
+        const StreamSubscription &subscription) const;
+    bool normalize_subscription(const StreamSubscription &input,
+                                StreamSubscription &subscription) const;
     static bool add_data_id(StreamSubscription &subscription,
                             const std::string &data_id);
     static bool merge_data_ids(StreamSubscription &subscription,
@@ -220,9 +223,9 @@ private:
     static bool merge_subscription(StreamSubscription &subscription,
                                    bool &have_interval,
                                    const StreamSubscription &input);
-    static bool parse_start_response(RpcPayloadView payload,
-                                     StreamSubscription &accepted,
-                                     uint32_t &stream_id);
+    bool parse_start_response(RpcPayloadView payload,
+                              StreamSubscription &accepted,
+                              uint32_t &stream_id) const;
 
     bool build_desired_subscription(StreamSubscription &subscription) const;
     bool build_desired_with_extra(const StreamSubscription &extra,
@@ -231,6 +234,9 @@ private:
                                         const StreamSubscription &replacement,
                                         StreamSubscription &subscription) const;
     void apply_desired_subscription(const StreamSubscription &subscription);
+    void normalize_desired_subscription(StreamSubscription &subscription) const;
+    bool build_wire_subscription(const StreamSubscription &subscription,
+                                 StreamSubscription &wire) const;
     static void clear_subscription(StreamSubscription &subscription);
 
     StreamFramePool frame_pool_;
@@ -259,6 +265,9 @@ private:
     OperationTicket command_ticket_;
     StreamCommandType command_type_ = StreamCommandType::None;
     uint32_t request_generation_ = 0;
+
+    ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
+    bool reconfigure_after_pending_ = false;
 
     StreamFrameObserver frame_observer_ = nullptr;
     void *frame_observer_context_ = nullptr;

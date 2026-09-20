@@ -6,6 +6,7 @@
 #include "as11_event_frame.h"
 #include "as11_therapy_state.h"
 #include "rpc_payload.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -78,6 +79,10 @@ public:
     const std::string &mhr() const { return mhr_; }
     bool platform_id_valid() const { return platform_id_valid_; }
     int32_t platform_id() const { return platform_id_; }
+    ResmedDeviceModel model() const {
+        return platform_id_valid_ ? resmed_device_model(platform_id_)
+                                  : ResmedDeviceModel::Unknown;
+    }
     bool variant_id_valid() const { return variant_id_valid_; }
     int32_t variant_id() const { return variant_id_; }
     bool timezone_offset_valid() const { return timezone_offset_valid_; }
@@ -105,6 +110,9 @@ public:
     uint32_t last_therapy_transition_ms() const {
         return last_therapy_transition_ms_;
     }
+    As11TherapyState last_therapy_transition_state() const {
+        return last_therapy_transition_state_;
+    }
     As11TherapyState therapy_state() const { return therapy_state_; }
     bool therapy_command_pending() const {
         return pending_therapy_target_ != As11TherapyTarget::None;
@@ -123,6 +131,7 @@ public:
     static const char *therapy_target_name(As11TherapyTarget target);
 
 private:
+    void update_fg_state(const std::string &value, uint32_t now_ms);
     void update_rop(const std::string &value, uint32_t now_ms);
     void confirm_pending_if_matched(uint32_t now_ms);
 
@@ -157,6 +166,7 @@ private:
     std::string last_therapy_transition_event_;
     std::string last_therapy_transition_report_time_;
     uint32_t last_therapy_transition_ms_ = 0;
+    As11TherapyState last_therapy_transition_state_ = As11TherapyState::Unknown;
 
     std::string device_datetime_;
 

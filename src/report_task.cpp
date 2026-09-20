@@ -1121,7 +1121,8 @@ struct ReportTask::Runtime {
     }
 
     bool start_spool_probe(uint32_t now_ms) {
-        if (!spool_availability_needed || !activity.as11_rpc_available ||
+        if (!spool_availability_needed || !activity.supports_as11_spools ||
+            !activity.as11_rpc_available ||
             spool_availability_probe.status().active() ||
             !deadline_due(now_ms, spool_availability_retry_at_ms)) {
             return false;
@@ -1263,11 +1264,12 @@ struct ReportTask::Runtime {
             ++idle_cursor;
             return true;
         }
-        if (spool_availability_needed &&
+        if (activity.supports_as11_spools && spool_availability_needed &&
             !local_source_available(*night)) {
             return false;
         }
-        if (!activity.as11_rpc_available && !local_source_available(*night)) {
+        if ((!activity.as11_rpc_available || !activity.supports_as11_spools) &&
+            !local_source_available(*night)) {
             ++idle_cursor;
             return true;
         }
@@ -2514,7 +2516,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !local_blocked && startup_allowed &&
         runtime.catalog_storage_ready() &&
         deadline_due(now_ms, runtime.pending_refresh.due_ms)) {
-        if (!runtime.activity.as11_rpc_available) {
+        if (!runtime.activity.as11_rpc_available ||
+            !runtime.activity.supports_as11_spools) {
             runtime.pending_refresh.summary_attempted = true;
         } else {
             const OperationAdmission admitted =

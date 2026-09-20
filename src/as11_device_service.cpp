@@ -78,9 +78,9 @@ bool As11DeviceService::request_healthcheck(RpcRequestPort &rpc,
                                             RpcSource source,
                                             uint32_t now_ms) {
     if (unavailable()) {
-        schedule_query(QueryKind::Identity, now_ms, source);
+        schedule_query(QueryKind::Platform, now_ms, source);
         if (!query_ticket_.valid()) {
-            (void)submit_query(rpc, QueryKind::Identity, now_ms);
+            (void)submit_query(rpc, QueryKind::Platform, now_ms);
         }
         return true;
     }
@@ -132,7 +132,9 @@ OperationSubmission As11DeviceService::request_therapy(
     As11TherapyTarget target,
     RpcSource source,
     uint32_t now_ms) {
-    if (unavailable()) return OperationSubmission::rejected();
+    if (unavailable() || state_.model() == ResmedDeviceModel::Unknown) {
+        return OperationSubmission::rejected();
+    }
 
     const char *method = therapy_method(target);
     if (!method) return OperationSubmission::rejected();
@@ -160,7 +162,9 @@ OperationSubmission As11DeviceService::request_reset(
     RpcRequestPort &rpc,
     As11ResetMode mode,
     RpcSource source) {
-    if (unavailable()) return OperationSubmission::rejected();
+    if (unavailable() || state_.model() != ResmedDeviceModel::AirSense11) {
+        return OperationSubmission::rejected();
+    }
 
     const char *params = reset_params(mode);
     if (!params) return OperationSubmission::rejected();
@@ -185,7 +189,9 @@ OperationSubmission As11DeviceService::request_set_datetime_now(
     RpcSource source,
     uint32_t now_ms,
     int64_t utc_ms) {
-    if (unavailable()) return OperationSubmission::rejected();
+    if (unavailable() || state_.model() != ResmedDeviceModel::AirSense11) {
+        return OperationSubmission::rejected();
+    }
     if (clock_write_ticket_.valid()) return OperationSubmission::busy();
     if (utc_ms < ValidUtcMinMs) return OperationSubmission::rejected();
 
@@ -350,6 +356,13 @@ void As11DeviceService::note_change() {
 void As11DeviceService::initialize_schedule(uint32_t now_ms) {
     clear_schedule();
     schedule_initialized_ = true;
+    if (state_.model() == ResmedDeviceModel::Unknown) {
+        schedule_query(QueryKind::Platform,
+                       now_ms + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS,
+                       RpcSource::Scheduler);
+        return;
+    }
+
     schedule_query(QueryKind::Identity,
                    now_ms + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS,
                    RpcSource::Scheduler);
@@ -394,6 +407,16 @@ void As11DeviceService::schedule_query(QueryKind kind,
                                        RpcSource source) {
     if (kind == QueryKind::None || kind == QueryKind::Count) return;
 
+    if (kind == QueryKind::Identity &&
+        state_.model() == ResmedDeviceModel::Unknown) {
+        kind = QueryKind::Platform;
+    } else if (kind != QueryKind::Platform &&
+               state_.model() == ResmedDeviceModel::Unknown) {
+        return;
+    }
+    if (kind == QueryKind::Timezone &&
+        state_.model() == ResmedDeviceModel::AirMini) return;
+
     ScheduledQuery &query = queries_[query_index(kind)];
     if (!query.scheduled ||
         static_cast<int32_t>(due_ms - query.due_ms) < 0) {
@@ -412,7 +435,7 @@ As11DeviceService::QueryKind As11DeviceService::next_due_query(
     QueryKind selected = QueryKind::None;
     uint32_t selected_due_ms = 0;
 
-    for (size_t i = query_index(QueryKind::Identity);
+    for (size_t i = query_index(QueryKind::Platform);
          i < query_index(QueryKind::Count); ++i) {
         const ScheduledQuery &query = queries_[i];
         if (!query.scheduled ||
@@ -442,7 +465,7 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
     command.source = query.source;
     command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     command.generation = next_generation();
-    if (unavailable()) {
+    if (unavailable() || kind == QueryKind::Platform) {
         command.admission = RpcRequestAdmission::PresenceProbe;
     }
 
@@ -497,6 +520,17 @@ void As11DeviceService::complete_query(
     note_change();
 
     switch (active_query_kind_) {
+        case QueryKind::Platform:
+            if (state_.model() != ResmedDeviceModel::Unknown) {
+                initialize_recovery_schedule(now_ms);
+                schedule_query(QueryKind::Identity, now_ms,
+                               RpcSource::Scheduler);
+            } else {
+                schedule_query(QueryKind::Platform,
+                               now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
+                               RpcSource::Scheduler);
+            }
+            break;
         case QueryKind::Identity:
             identity_revision_++;
             if (identity_revision_ == 0) identity_revision_++;
@@ -585,7 +619,7 @@ void As11DeviceService::note_query_timeout(uint32_t now_ms) {
 void As11DeviceService::enter_unavailable(uint32_t now_ms) {
     clear_schedule();
     schedule_initialized_ = true;
-    schedule_query(QueryKind::Identity,
+    schedule_query(QueryKind::Platform,
                    now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
                    RpcSource::Scheduler);
     consecutive_query_timeouts_ = 0;
@@ -680,8 +714,22 @@ bool As11DeviceService::completion_succeeded(
            !completion.response_error;
 }
 
-const char *As11DeviceService::query_params(QueryKind kind) {
+const char *As11DeviceService::query_params(QueryKind kind) const {
+    if (state_.model() == ResmedDeviceModel::AirMini) {
+        switch (kind) {
+            case QueryKind::Identity:
+                return "[\"ProductName\",\"SerialNumber\","
+                       "\"ApplicationIdentifier\",\"BootloaderIdentifier\","
+                       "\"PlatformIdentifier\",\"VariantIdentifier\"]";
+            case QueryKind::Runtime:
+                return "[\"TherapyMode\",\"_RUNNING_MODE_REQUEST\",\"FGState\"]";
+            case QueryKind::MotorRuntime: return "[\"MotorRunMeter\"]";
+            default: break;
+        }
+    }
+
     switch (kind) {
+        case QueryKind::Platform: return "[\"PlatformIdentifier\"]";
         case QueryKind::Identity: return as11_identity_get_params_json();
         case QueryKind::Runtime: return as11_runtime_get_params_json();
         case QueryKind::MotorRuntime:

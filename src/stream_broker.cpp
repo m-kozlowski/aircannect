@@ -65,6 +65,27 @@ const char *stream_acquire_status_name(StreamAcquireStatus status) {
     }
 }
 
+void StreamBroker::set_device_model(ResmedDeviceModel model) {
+    if (device_model_ == model) return;
+
+    device_model_ = model;
+    reconfigure_after_pending_ = pending_start();
+
+    StreamSubscription desired;
+    if (!build_desired_subscription(desired)) {
+        params_json_.clear();
+        clear_subscription(desired_subscription_);
+        clear_subscription(accepted_subscription_);
+        actual_active_ = false;
+        return;
+    }
+
+    desired_subscription_ = desired;
+    params_json_ = build_subscription_params(desired);
+    clear_subscription(accepted_subscription_);
+    if (!reconfigure_after_pending_) actual_active_ = false;
+}
+
 void StreamBroker::poll(RpcRequestPort &rpc, uint32_t now_ms) {
     RpcRequestCompletion completion;
     if (command_ticket_.valid() &&
@@ -75,6 +96,11 @@ void StreamBroker::poll(RpcRequestPort &rpc, uint32_t now_ms) {
     }
 
     if (command_ticket_.valid()) return;
+
+    if (device_model_ == ResmedDeviceModel::Unknown &&
+        !quiesce_requested_) {
+        return;
+    }
 
     StreamCommand command = next_command(now_ms,
                                          AC_STREAM_RESYNC_INTERVAL_MS);
@@ -115,6 +141,15 @@ StreamAcquireResult StreamBroker::acquire(
     if (!normalize_subscription(subscription, requested) ||
         requested.data_id_count == 0) {
         return result;
+    }
+    if (device_model_ == ResmedDeviceModel::AirMini) {
+        std::string wire_ids;
+        if (!as11_stream_signal_wire_ids(requested.data_ids_csv,
+                                         device_model_, wire_ids) ||
+            wire_ids.empty()) {
+            result.status = StreamAcquireStatus::Incompatible;
+            return result;
+        }
     }
 
     StreamSubscription desired;
@@ -169,6 +204,15 @@ StreamAcquireResult StreamBroker::update(
     if (!normalize_subscription(subscription, requested) ||
         requested.data_id_count == 0) {
         return result;
+    }
+    if (device_model_ == ResmedDeviceModel::AirMini) {
+        std::string wire_ids;
+        if (!as11_stream_signal_wire_ids(requested.data_ids_csv,
+                                         device_model_, wire_ids) ||
+            wire_ids.empty()) {
+            result.status = StreamAcquireStatus::Incompatible;
+            return result;
+        }
     }
 
     StreamSubscription desired;
@@ -333,6 +377,7 @@ StreamCommand StreamBroker::next_command(uint32_t now_ms,
         command.params_json =
             "{\"dataIds\":[],\"sampleIntervalMs\":200,\"reportIntervalMs\":1000}";
     } else if (desired_active() && !actual_active_) {
+        if (params_json_.empty()) return command;
         command.type = StreamCommandType::Start;
         command.params_json = params_json_;
     } else if (!desired_active() && actual_active_) {
@@ -401,6 +446,12 @@ void StreamBroker::mark_command_response(StreamCommandType type,
             accepted_subscription_ = accepted;
             if (stream_id) last_stream_id_ = stream_id;
         } else {
+            clear_subscription(accepted_subscription_);
+        }
+
+        if (reconfigure_after_pending_) {
+            reconfigure_after_pending_ = false;
+            actual_active_ = false;
             clear_subscription(accepted_subscription_);
         }
     } else if (type == StreamCommandType::Stop) {
@@ -491,7 +542,8 @@ StreamPublishResult StreamBroker::publish_stream_data(RpcPayloadView payload,
 
     char error[96] = {};
     if (!stream_parse_frame(payload_data, payload_len, now_ms,
-                            *frame.mutable_data(), error, sizeof(error))) {
+                            *frame.mutable_data(), error, sizeof(error),
+                            device_model_)) {
         (void)error;
         result.parse_error = true;
         parse_errors_++;
@@ -735,13 +787,21 @@ bool StreamBroker::parse_external_subscription(
 }
 
 std::string StreamBroker::build_subscription_params(
-    const StreamSubscription &subscription) {
-    return build_stream_params(subscription.data_ids_csv, subscription.sample_ms,
+    const StreamSubscription &subscription) const {
+    if (device_model_ != ResmedDeviceModel::AirMini) {
+        return build_stream_params(subscription.data_ids_csv,
+                                   subscription.sample_ms,
+                                   subscription.report_ms);
+    }
+
+    StreamSubscription wire;
+    if (!build_wire_subscription(subscription, wire)) return {};
+    return build_stream_params(wire.data_ids_csv, subscription.sample_ms,
                                subscription.report_ms);
 }
 
 bool StreamBroker::normalize_subscription(const StreamSubscription &input,
-                                          StreamSubscription &subscription) {
+                                          StreamSubscription &subscription) const {
     clear_subscription(subscription);
     if (!data_id_csv_merge(subscription.data_ids_csv,
                            subscription.data_id_count,
@@ -750,10 +810,15 @@ bool StreamBroker::normalize_subscription(const StreamSubscription &input,
         return false;
     }
 
-    subscription.sample_ms = input.sample_ms;
-    subscription.report_ms = input.report_ms;
-    normalize_stream_intervals(subscription.sample_ms,
-                               subscription.report_ms);
+    if (device_model_ == ResmedDeviceModel::AirMini) {
+        subscription.sample_ms = 40;
+        subscription.report_ms = 200;
+    } else {
+        subscription.sample_ms = input.sample_ms;
+        subscription.report_ms = input.report_ms;
+        normalize_stream_intervals(subscription.sample_ms,
+                                   subscription.report_ms);
+    }
     return true;
 }
 
@@ -797,7 +862,7 @@ bool StreamBroker::merge_subscription(StreamSubscription &subscription,
 
 bool StreamBroker::parse_start_response(RpcPayloadView payload,
                                         StreamSubscription &accepted,
-                                        uint32_t &stream_id) {
+                                        uint32_t &stream_id) const {
     clear_subscription(accepted);
     stream_id = 0;
 
@@ -873,7 +938,13 @@ bool StreamBroker::parse_start_response(RpcPayloadView payload,
                         }
                         if (!json.consume('}')) return false;
                         if (saw_data_id && valid) {
-                            if (!add_data_id(accepted, data_id)) return false;
+                            const char *canonical =
+                                as11_stream_signal_canonical_name(
+                                    data_id, device_model_);
+                            if (canonical &&
+                                !add_data_id(accepted, canonical)) {
+                                return false;
+                            }
                         }
 
                         json.skip_ws();
@@ -935,6 +1006,7 @@ bool StreamBroker::build_desired_subscription(
         }
     }
 
+    if (have_interval) normalize_desired_subscription(subscription);
     return have_interval;
 }
 
@@ -958,6 +1030,7 @@ bool StreamBroker::build_desired_with_extra(
     }
     if (!merge_subscription(subscription, have_interval, extra)) return false;
     if (!have_interval) return false;
+    normalize_desired_subscription(subscription);
     return true;
 }
 
@@ -986,6 +1059,7 @@ bool StreamBroker::build_desired_with_replacement(
         }
     }
     if (!have_interval) subscription = replacement;
+    normalize_desired_subscription(subscription);
     return true;
 }
 
@@ -996,6 +1070,50 @@ void StreamBroker::apply_desired_subscription(
     desired_subscription_ = subscription;
     params_json_ = build_subscription_params(subscription);
     actual_active_ = false;
+}
+
+void StreamBroker::normalize_desired_subscription(
+    StreamSubscription &subscription) const {
+    if (device_model_ != ResmedDeviceModel::AirMini || consumer_count() == 0) {
+        return;
+    }
+    subscription.sample_ms = 40;
+    subscription.report_ms = 200;
+}
+
+bool StreamBroker::build_wire_subscription(
+    const StreamSubscription &subscription,
+    StreamSubscription &wire) const {
+    clear_subscription(wire);
+
+    if (device_model_ != ResmedDeviceModel::AirMini) {
+        wire = subscription;
+        return wire.data_id_count > 0;
+    }
+
+    wire.sample_ms = subscription.sample_ms;
+    wire.report_ms = subscription.report_ms;
+
+    if (external_active_ &&
+        !merge_data_ids(wire, external_subscription_)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        if (!consumers_[i].active) continue;
+
+        std::string mapped_ids;
+        if (!as11_stream_signal_wire_ids(consumers_[i].subscription.data_ids_csv,
+                                         device_model_, mapped_ids)) {
+            return false;
+        }
+        if (!data_id_csv_merge(wire.data_ids_csv, wire.data_id_count,
+                               mapped_ids.c_str(), STREAM_DATA_ID_LIMITS)) {
+            return false;
+        }
+    }
+
+    return wire.data_id_count > 0;
 }
 
 void StreamBroker::clear_subscription(StreamSubscription &subscription) {

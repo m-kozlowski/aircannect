@@ -363,7 +363,7 @@ private:
 
     // device time
     void freeze_session_clock(uint32_t now_ms);
-    void freeze_session_timezone();
+    void freeze_session_timezone(int64_t session_epoch_ms = 0);
     void apply_pending_mask_event(uint32_t now_ms);
     bool parse_session_raw_time(const char *text, int64_t &epoch_ms) const;
     bool parse_session_utc_time(const char *text, int64_t &epoch_ms) const;

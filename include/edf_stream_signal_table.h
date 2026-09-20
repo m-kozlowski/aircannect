@@ -7,6 +7,7 @@
 #include "as11_stream_signals.h"
 #include "edf_file_writer.h"
 #include "edf_series.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -21,8 +22,14 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptors(
     size_t &count);
 const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
     StreamSignalId id);
-std::string edf_stream_ids_csv(bool required_only = false);
+bool edf_stream_signal_supported_for_model(ResmedDeviceModel model,
+                                           StreamSignalId id);
+std::string edf_stream_ids_csv(
+    bool required_only = false,
+    ResmedDeviceModel model = ResmedDeviceModel::Unknown);
 std::string edf_stream_ids_csv_excluding(EdfSeriesId excluded_series,
-                                         bool required_only = false);
+                                         bool required_only = false,
+                                         ResmedDeviceModel model =
+                                             ResmedDeviceModel::Unknown);
 
 }  // namespace aircannect

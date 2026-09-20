@@ -2384,6 +2384,10 @@ bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
     if (!rpc_ || !device_) return false;
 
     const As11DeviceState &as11 = device_->state();
+    if (as11.model() != ResmedDeviceModel::AirSense11) {
+        if (reason) *reason = "device_model_unsupported";
+        return false;
+    }
     if (as11.therapy_command_pending()) {
         if (reason) *reason = "therapy_transition_pending";
         return false;

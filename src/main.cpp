@@ -551,6 +551,8 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      bool ota_storage_upload_active,
                                      bool therapy_active,
                                      bool as11_rpc_available) {
+    const bool supports_as11_spools =
+        as11_device_service.state().model() == ResmedDeviceModel::AirSense11;
     const bool changed =
         !runtime_activity_published ||
         storage_activity.foreground_report_demand != foreground_report_demand ||
@@ -559,7 +561,8 @@ static void publish_runtime_activity(bool foreground_report_demand,
         storage_activity.ota_install_active != ota_install_active ||
         ota_storage_upload_active_published != ota_storage_upload_active ||
         storage_activity.therapy_active != therapy_active ||
-        storage_activity.as11_rpc_available != as11_rpc_available;
+        storage_activity.as11_rpc_available != as11_rpc_available ||
+        storage_activity.supports_as11_spools != supports_as11_spools;
     if (!changed) return;
 
     storage_activity.foreground_report_demand = foreground_report_demand;
@@ -568,6 +571,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.ota_install_active = ota_install_active;
     storage_activity.therapy_active = therapy_active;
     storage_activity.as11_rpc_available = as11_rpc_available;
+    storage_activity.supports_as11_spools = supports_as11_spools;
     ota_storage_upload_active_published = ota_storage_upload_active;
     storage_activity.generation++;
     if (storage_activity.generation == 0) storage_activity.generation++;
@@ -664,7 +668,8 @@ static void sync_network_services() {
 }
 
 static void configure_oximetry(const AppConfigData &config) {
-    const bool local_sa2 = config.as11_transport == As11Transport::Ble;
+    const bool local_sa2 = config.as11_transport == As11Transport::Ble ||
+        as11_device_service.state().model() == ResmedDeviceModel::AirMini;
 
     edf_recorder_manager.set_sa2_input(
         local_sa2 ? EdfSa2Input::LocalOximetry
@@ -1497,19 +1502,31 @@ void loop() {
         rpc_quiesce_coordinator.timed_out(), now_ms);
     as11_service_manager.poll(now_ms);
     sync_rpc_transport_generation(now_ms);
+    as11_device_service.poll(
+        rpc_transport, now_ms,
+        as11_application_quiesce_requested ||
+            resmed_ota_transport_active || !as11_link_ready);
+    const ResmedDeviceModel device_model = as11_device_service.state().model();
+    stream_broker.set_device_model(device_model);
+    event_broker.set_device_model(device_model);
+    as11_settings_manager.set_device_model(device_model);
+    as11_service_manager.set_device_model(device_model);
+    static ResmedDeviceModel oximetry_device_model = ResmedDeviceModel::Unknown;
+    if (device_model != oximetry_device_model) {
+        oximetry_device_model = device_model;
+        configure_oximetry(config_service.data());
+    }
+
     stream_broker.poll(rpc_transport, now_ms);
     event_broker.poll(rpc_transport, now_ms,
                       resmed_ota_transport_active ||
                           !as11_link_ready ||
                           as11_device_service.unavailable());
-    as11_device_service.poll(
-        rpc_transport, now_ms,
-        as11_application_quiesce_requested ||
-            resmed_ota_transport_active || !as11_link_ready);
     const bool as11_device_unavailable =
         as11_device_service.unavailable();
     const bool as11_rpc_available =
-        as11_link_ready && !as11_device_unavailable;
+        as11_link_ready && !as11_device_unavailable &&
+        device_model != ResmedDeviceModel::Unknown;
     rpc_transport.set_as11_unavailable(!as11_rpc_available);
 
     resmed_firmware_preparer.publish_device_identifier(
@@ -1540,7 +1557,7 @@ void loop() {
     report_spool_service.poll(
         as11_rpc_available,
         rpc_transport.background_backpressure_active(),
-        can_driver.stats().rx_queue_full_alerts);
+        can_driver.stats().rx_queue_full_alerts, device_model);
     poll_as11_ble_recovery(now_ms);
     drain_can_rx();
 

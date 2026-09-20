@@ -38,8 +38,16 @@ const char *const EDF_RECORDING_GATE_DATA_ID = "_ZLE";
 const char *const EDF_SUMMARY_NOTIFICATION_DATA_ID = "_SNC";
 const char *const EDF_MASK_ON_EVENT = "MaskOn";
 const char *const EDF_MASK_OFF_EVENT = "MaskOff";
-const char *const EDF_CAPTURE_EVENT_IDS =
-    "_ZLE,_SNC,TherapyEvents-RespiratoryEvents";
+
+ResmedDeviceModel recorder_model(const As11DeviceState *state) {
+    return state ? state->model() : ResmedDeviceModel::Unknown;
+}
+
+const char *edf_capture_event_ids(ResmedDeviceModel model) {
+    return model == ResmedDeviceModel::AirMini
+        ? "_ZLE,TherapyEvents-RespiratoryEvents"
+        : "_ZLE,_SNC,TherapyEvents-RespiratoryEvents";
+}
 
 struct StatusCarryover {
     bool enabled = false;
@@ -210,6 +218,10 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         !session_ || !time_sync_) {
         return;
     }
+    if (recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+        release_stream();
+        return;
+    }
 
     (void)queue_pending_final_metadata();
     cold_->metadata_publisher.poll(now_ms);
@@ -286,6 +298,9 @@ OperationAdmission EdfRecorderManager::request_str_summary_refresh(
     SleepDayId start_day,
     SleepDayId end_day,
     uint32_t generation) {
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11) {
+        return OperationAdmission::Rejected;
+    }
     if (!initialized_ || !cold_ || status_.active ||
         str_record_pending_write_ || str_summary_.active()) {
         return OperationAdmission::Busy;
@@ -401,6 +416,9 @@ bool EdfRecorderManager::latest_catalog_refresh_hint(
 bool EdfRecorderManager::handle_recording_gate_frame(
     const As11EventFrame &frame,
     uint32_t now_ms) {
+    if (recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+        return false;
+    }
     if (frame.data_id != EDF_RECORDING_GATE_DATA_ID) return false;
 
     for (size_t i = 0; i < frame.event_count; ++i) {
@@ -573,7 +591,8 @@ bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
 
 void EdfRecorderManager::begin_recording_gate(const char *start_time,
                                               uint32_t now_ms) {
-    if (!start_time || !start_time[0]) {
+    if (recorder_model(device_state_) == ResmedDeviceModel::Unknown ||
+        !start_time || !start_time[0]) {
         status_.recording_gate_bad_events++;
         return;
     }
@@ -586,6 +605,12 @@ void EdfRecorderManager::begin_recording_gate(const char *start_time,
     }
 
     if (!session_clock_frozen_) freeze_session_clock(now_ms);
+    if (!session_timezone_frozen_) {
+        int64_t start_epoch_ms = 0;
+        if (parse_session_utc_time(start_time, start_epoch_ms)) {
+            freeze_session_timezone(start_epoch_ms);
+        }
+    }
     if (str_start_pending_) (void)ensure_str_session_started(now_ms);
     apply_pending_mask_event(now_ms);
 
@@ -787,7 +812,10 @@ bool EdfRecorderManager::queue_pending_final_metadata() {
 
 void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
                                             uint32_t now_ms) {
-    if (!status_.enabled) return;
+    if (!status_.enabled ||
+        recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+        return;
+    }
 
     observe_str_summary_event(frame, now_ms);
     (void)handle_mask_event_frame(frame, now_ms);
@@ -853,6 +881,10 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
                                        uint32_t now_ms,
                                        const char *reason) {
     if (status_.active && status_.session_id == session.session_id) return;
+    if (recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+        next_session_start_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        return;
+    }
 
     if (cold_->segment_metadata_active && session.start_device_time[0]) {
         finalize_segment_metadata(session.start_device_time,
@@ -1205,19 +1237,20 @@ bool EdfRecorderManager::build_numeric_schemas() {
                                ? stream_->accepted_data_ids_csv().c_str()
                                : "";
     bool any_enabled = false;
+    const ResmedDeviceModel model = recorder_model(device_state_);
     size_t count = 0;
     const EdfFileSchema *schemas = edf_numeric_schemas(count);
     for (size_t i = 0; i < count; ++i) {
         NumericSchemaState &state = cold_->numeric_schemas[i];
-        const bool local_sa2 =
-            schemas[i].series == EdfSeriesId::Sa2 &&
+        const bool local_sa2 = schemas[i].series == EdfSeriesId::Sa2 &&
             active_sa2_input_ == EdfSa2Input::LocalOximetry;
         const bool built = local_sa2
             ? edf_build_full_numeric_file_layout(schemas[i].kind,
                                                  state.layout)
             : edf_build_numeric_file_layout(schemas[i].kind,
                                             accepted,
-                                            state.layout);
+                                            state.layout,
+                                            model);
         if (!built) {
             set_error("numeric_schema_failed");
             return false;
@@ -1243,7 +1276,8 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     }
 
     return edf_numeric_stream_available(
-        stream_->accepted_data_ids_csv().c_str());
+        stream_->accepted_data_ids_csv().c_str(),
+        recorder_model(device_state_));
 }
 
 bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
@@ -1612,11 +1646,22 @@ void EdfRecorderManager::freeze_session_clock(uint32_t now_ms) {
               "AS11 timestamps\n");
 }
 
-void EdfRecorderManager::freeze_session_timezone() {
-    if (session_timezone_frozen_ || !device_state_ ||
-        !device_state_->timezone_offset_valid()) {
+void EdfRecorderManager::freeze_session_timezone(int64_t session_epoch_ms) {
+    if (session_timezone_frozen_) return;
+
+    if (recorder_model(device_state_) == ResmedDeviceModel::AirMini) {
+        int32_t offset_minutes = 0;
+        if (session_epoch_ms <= 0 ||
+            !edf_configured_timezone_offset_minutes(session_epoch_ms,
+                                                    offset_minutes)) {
+            return;
+        }
+        session_timezone_offset_minutes_ = offset_minutes;
+        session_timezone_frozen_ = true;
         return;
     }
+
+    if (!device_state_ || !device_state_->timezone_offset_valid()) return;
 
     session_timezone_offset_minutes_ =
         device_state_->timezone_offset_minutes();
@@ -1711,12 +1756,17 @@ bool EdfRecorderManager::begin_str_session_at(const EdfLocalDateTime &start,
         return false;
     }
 
-    (void)request_str_settings();
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirMini) {
+        (void)request_str_settings();
+    }
     (void)request_identification();
     return true;
 }
 
 bool EdfRecorderManager::request_str_settings() {
+    if (recorder_model(device_state_) == ResmedDeviceModel::AirMini) {
+        return false;
+    }
     if (str_settings_rpc_.active()) return false;
 
     const std::string names = edf_str_setting_get_names();
@@ -1741,11 +1791,18 @@ bool EdfRecorderManager::request_str_settings() {
 }
 
 bool EdfRecorderManager::request_identification() {
+    const ResmedDeviceModel model = recorder_model(device_state_);
+    if (model == ResmedDeviceModel::Unknown) return false;
     if (identification_rpc_.active()) return false;
 
     RpcRequestCommand command;
     command.method = "Get";
-    command.params_json = build_get_params("IdentificationProfiles");
+    command.params_json = model == ResmedDeviceModel::AirMini
+        ? build_get_params(
+              "ProductName SerialNumber ApplicationIdentifier "
+              "BootloaderIdentifier PlatformIdentifier VariantIdentifier "
+              "ProductCode")
+        : build_get_params("IdentificationProfiles");
     command.source = RpcSource::EdfRecorder;
     command.timeout_ms = AC_EDF_IDENTIFICATION_TIMEOUT_MS;
     command.generation = identification_rpc_.next_generation();
@@ -1829,6 +1886,9 @@ void EdfRecorderManager::cancel_session_rpc_requests() {
 bool EdfRecorderManager::begin_str_summary_wait(
     const SessionStatus &session,
     uint32_t now_ms) {
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11) {
+        return false;
+    }
     if (!report_spool_ || str_summary_.active() ||
         !str_record_pending_write_) {
         return false;
@@ -1872,7 +1932,8 @@ bool EdfRecorderManager::begin_str_summary_wait(
 }
 
 bool EdfRecorderManager::submit_str_summary_fetch(uint32_t now_ms) {
-    if (!report_spool_ || !str_summary_.waiting ||
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11 ||
+        !report_spool_ || !str_summary_.waiting ||
         static_cast<int32_t>(now_ms - str_summary_.retry_at_ms) < 0) {
         return false;
     }
@@ -1903,7 +1964,10 @@ bool EdfRecorderManager::submit_str_summary_fetch(uint32_t now_ms) {
 }
 
 void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
-    if (!str_summary_.active() || !report_spool_) return;
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11 ||
+        !str_summary_.active() || !report_spool_) {
+        return;
+    }
 
     if (str_summary_.ticket.valid()) {
         ReportSpoolFetchRound round;
@@ -1994,6 +2058,9 @@ void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
 void EdfRecorderManager::observe_str_summary_event(
     const As11EventFrame &frame,
     uint32_t now_ms) {
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11) {
+        return;
+    }
     for (size_t i = 0; i < frame.event_count; ++i) {
         const As11EventRecord &record = frame.events[i];
         if (status_.active &&
@@ -2111,7 +2178,9 @@ void EdfRecorderManager::handle_str_settings_response(
 void EdfRecorderManager::handle_identification_response(
     RpcPayloadView payload) {
     std::string json;
-    if (!edf_build_identification_json(payload, json)) {
+    if (!edf_build_identification_json(payload,
+                                       json,
+                                       recorder_model(device_state_))) {
         status_.metadata_failures++;
         set_error("identification_json_failed");
         return;
@@ -2194,6 +2263,7 @@ bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
 
     str_record_pending_write_ = true;
     if (summary_session &&
+        recorder_model(device_state_) == ResmedDeviceModel::AirSense11 &&
         begin_str_summary_wait(*summary_session, now_ms)) {
         return true;
     }
@@ -2245,6 +2315,11 @@ bool EdfRecorderManager::write_str_day_record() {
 }
 
 void EdfRecorderManager::attach_events() {
+    if (recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+        status_.event_attached = false;
+        status_.event_handle = EVENT_CONSUMER_INVALID;
+        return;
+    }
     if (!events_) {
         status_.event_attached = false;
         status_.event_handle = EVENT_CONSUMER_INVALID;
@@ -2257,7 +2332,8 @@ void EdfRecorderManager::attach_events() {
         return;
     }
 
-    EventAcquireResult result = events_->acquire(EDF_CAPTURE_EVENT_IDS);
+    EventAcquireResult result = events_->acquire(
+        edf_capture_event_ids(recorder_model(device_state_)));
     if (result.status == EventAcquireStatus::Acquired ||
         result.status == EventAcquireStatus::AlreadyActive) {
         status_.event_handle = result.handle;
@@ -2319,6 +2395,8 @@ void EdfRecorderManager::update_event_coverage() {
 }
 
 void EdfRecorderManager::attach_stream(uint32_t now_ms) {
+    const ResmedDeviceModel model = recorder_model(device_state_);
+    if (model == ResmedDeviceModel::Unknown) return;
     if (status_.stream_handle != STREAM_CONSUMER_INVALID &&
         stream_->consumer_active(status_.stream_handle)) {
         status_.stream_attached = true;
@@ -2331,10 +2409,12 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
 
     next_attach_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
 
-    const std::string data_ids =
+    const EdfSeriesId excluded_series =
         active_sa2_input_ == EdfSa2Input::LocalOximetry
-            ? edf_stream_ids_csv_excluding(EdfSeriesId::Sa2)
-            : edf_stream_ids_csv();
+            ? EdfSeriesId::Sa2
+            : EdfSeriesId::Count;
+    const std::string data_ids = edf_stream_ids_csv_excluding(
+        excluded_series, false, model);
     StreamSubscription subscription;
     subscription.data_ids_csv = data_ids;
     subscription.sample_ms = 40;

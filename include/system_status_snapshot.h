@@ -65,6 +65,7 @@ struct TimeStatusSnapshot {
     std::string_view esp_time_source;
     char esp_datetime[AC_STATUS_ISO_TIME_TEXT_MAX] = "";
     bool resmed_time_sync_enabled = false;
+    bool resmed_time_write_supported = false;
     bool ntp_synced = false;
     bool esp_time_valid = false;
 };

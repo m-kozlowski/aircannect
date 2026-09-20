@@ -6,6 +6,7 @@
 
 #include <ArduinoJson.h>
 
+#include "resmed_device_model.h"
 #include "rpc_payload.h"
 
 namespace aircannect {
@@ -97,6 +98,9 @@ public:
     const As11SettingDef &setting(size_t index) const;
     const As11SettingDef *find(const char *key) const;
     bool overlaid(const char *key) const;
+    bool supports(const As11SettingDef &def) const;
+    ResmedDeviceModel device_model() const { return device_model_; }
+    bool set_device_model(ResmedDeviceModel model);
     uint32_t revision() const { return revision_; }
 
 private:
@@ -113,6 +117,7 @@ private:
     RuntimeItem *items_ = nullptr;
     size_t item_count_ = 0;
     uint32_t revision_ = 1;
+    ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
 };
 
 struct As11SettingCompositeOption {
@@ -156,6 +161,7 @@ public:
     bool expire_pending(uint32_t now_ms, uint32_t timeout_ms);
 
     void clear();
+    void set_device_model(ResmedDeviceModel model);
 
     bool valid() const { return valid_; }
     uint32_t updated_ms() const { return updated_ms_; }
@@ -179,6 +185,7 @@ public:
     uint16_t supported_mode_mask() const { return supported_mode_mask_; }
     bool setting_visible(size_t index, int mode) const;
     const As11SettingsCatalog &catalog() const { return catalog_; }
+    ResmedDeviceModel device_model() const { return device_model_; }
 
 private:
     struct ProfileValueSlot {
@@ -217,6 +224,7 @@ private:
     uint32_t last_write_ms_ = 0;
     uint32_t updated_ms_ = 0;
     uint16_t supported_mode_mask_ = 0;
+    ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
     bool valid_ = false;
 };
 
@@ -224,6 +232,8 @@ size_t as11_setting_count();
 const As11SettingDef &as11_setting(size_t index);
 const As11SettingDef *as11_find_setting(const char *key);
 std::string as11_setting_rpc_long_name(const As11SettingDef &def);
+std::string as11_setting_rpc_long_name(const As11SettingDef &def,
+                                       ResmedDeviceModel model);
 
 size_t as11_setting_composite_count();
 const As11SettingCompositeDef &as11_setting_composite(size_t index);

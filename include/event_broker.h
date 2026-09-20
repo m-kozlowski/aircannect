@@ -6,6 +6,7 @@
 
 #include "as11_event_frame.h"
 #include "rpc_request_port.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -69,6 +70,7 @@ using SettingsHistoryObserver = void (*)(void *context, uint32_t now_ms);
 
 class EventBroker {
 public:
+    void set_device_model(ResmedDeviceModel model);
     void poll(RpcRequestPort &rpc,
               uint32_t now_ms,
               bool background_suspended = false);
@@ -131,6 +133,7 @@ private:
     void release_command_ticket(RpcRequestPort &rpc);
 
     bool subscription_active_ = false;
+    ResmedDeviceModel model_ = ResmedDeviceModel::AirSense11;
     bool subscribe_pending_ = false;
     bool pending_quiesce_ = false;
     bool quiesce_requested_ = false;

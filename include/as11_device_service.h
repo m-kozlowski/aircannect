@@ -62,6 +62,7 @@ public:
 private:
     enum class QueryKind : uint8_t {
         None,
+        Platform,
         Identity,
         Runtime,
         MotorRuntime,
@@ -108,7 +109,7 @@ private:
     static bool background_source(RpcSource source);
     static bool completion_succeeded(
         const RpcRequestCompletion &completion);
-    static const char *query_params(QueryKind kind);
+    const char *query_params(QueryKind kind) const;
 
     As11DeviceState state_;
 

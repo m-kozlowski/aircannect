@@ -111,6 +111,8 @@ bool stream_parse_frame(const char *payload,
                         uint32_t now_ms,
                         StreamFrameData &frame,
                         char *error = nullptr,
-                        size_t error_len = 0);
+                        size_t error_len = 0,
+                        ResmedDeviceModel model =
+                            ResmedDeviceModel::Unknown);
 
 }  // namespace aircannect
