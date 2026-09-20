@@ -13,13 +13,14 @@ const char RESMED_MOTOR_RUNTIME[] = "MotorRunMeter";
 namespace {
 
 const ResmedDeviceProtocol AIRSENSE11 = {
-    {"ActiveTherapyProfile", "_ROP", "ROP", nullptr},
+    // ROP and PHI have no registered long names in the AS11 DataItem map.
+    {"ActiveTherapyProfile", "_ROP", nullptr},
     "TimeZoneOffset",
     "_PHI", "AirbreakInfo",
 };
 
 const ResmedDeviceProtocol AIRMINI = {
-    {"TherapyMode", "_RUNNING_MODE_REQUEST", nullptr, "FGState"},
+    {"TherapyMode", "_RUNNING_MODE_REQUEST", "FGState"},
     nullptr,
     "MaskType", nullptr,
 };

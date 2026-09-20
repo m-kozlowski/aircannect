@@ -20,7 +20,6 @@ struct ResmedIdentityQuery {
 struct ResmedRuntimeQuery {
     const char *therapy_profile;
     const char *running_mode;
-    const char *running_mode_alias;
     // Null when running_mode itself reports the current therapy state.
     const char *therapy_state;
 

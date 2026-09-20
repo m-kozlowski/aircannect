@@ -265,8 +265,7 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
         updated = true;
     }
 
-    if (get_string(result, runtime.running_mode, text) ||
-        get_string(result, runtime.running_mode_alias, text)) {
+    if (get_string(result, runtime.running_mode, text)) {
         if (runtime.therapy_state) {
             rop_ = text;
         } else {
