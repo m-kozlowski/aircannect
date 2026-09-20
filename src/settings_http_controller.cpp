@@ -179,9 +179,12 @@ void append_catalog_setting_json(LargeTextBuffer &json,
 void append_catalog_composite_json(LargeTextBuffer &json,
                                    const As11SettingsCatalog &catalog,
                                    size_t index, size_t &emitted) {
-    if (catalog.device_model() != ResmedDeviceModel::AirSense11) return;
-
     const As11SettingCompositeDef &def = as11_setting_composite(index);
+    const As11SettingDef *enum_def = catalog.find(def.enum_key);
+    const As11SettingDef *numeric_def = catalog.find(def.numeric_key);
+    if (!enum_def || !numeric_def || !catalog.supports(*enum_def) ||
+        !catalog.supports(*numeric_def)) return;
+
     if (catalog.overlaid(def.enum_key) || catalog.overlaid(def.numeric_key)) {
         return;
     }
@@ -197,13 +200,10 @@ void append_catalog_composite_json(LargeTextBuffer &json,
     json_add_string(json, "group", def.group);
     json_add_string(json, "category", def.category);
 
-    const As11SettingDef *enum_def = catalog.find(def.enum_key);
-    const As11SettingDef *numeric_def = catalog.find(def.numeric_key);
     const std::string enum_rpc_name =
-        enum_def ? as11_setting_rpc_long_name(*enum_def) : def.enum_key;
+        as11_setting_rpc_long_name(*enum_def, catalog.device_model());
     const std::string numeric_rpc_name =
-        numeric_def ? as11_setting_rpc_long_name(*numeric_def)
-                    : def.numeric_key;
+        as11_setting_rpc_long_name(*numeric_def, catalog.device_model());
     const std::string rpc_name = enum_rpc_name + " + " + numeric_rpc_name;
     json_add_string(json, "rpc_name", rpc_name.c_str());
     json_add_string(json, "enum_rpc_name", enum_rpc_name.c_str());

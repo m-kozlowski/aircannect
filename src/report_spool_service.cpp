@@ -136,6 +136,12 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
                               ResmedDeviceModel model) {
     if (!initialized_) return false;
 
+    if (model != ResmedDeviceModel::AirSense11) {
+        if (!lock(0)) return true;
+        if (active_ticket_.valid()) cancel_ticket_ = active_ticket_;
+        unlock();
+    }
+
     OperationTicket cancelled;
     if (take_cancel_request(cancelled)) {
         runtime_.reset();

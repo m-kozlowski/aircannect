@@ -59,7 +59,7 @@ bool edf_numeric_stream_available(const char *accepted_data_ids_csv,
         edf_stream_signal_descriptors(descriptor_count);
     for (size_t i = 0; i < descriptor_count; ++i) {
         const EdfStreamSignalDescriptor &entry = descriptors[i];
-        if (!edf_stream_signal_supported_for_model(model, entry.stream_id)) {
+        if (!as11_stream_signal_wire_name(entry.short_tag, model)) {
             continue;
         }
         if (edf_short_tag_is_accepted(accepted_data_ids_csv,
@@ -88,7 +88,7 @@ bool edf_build_numeric_file_layout(EdfFileKind kind,
     for (size_t i = 0; i < descriptor_count; ++i) {
         const EdfStreamSignalDescriptor &entry = descriptors[i];
         if (entry.series != base.series ||
-            !edf_stream_signal_supported_for_model(model, entry.stream_id) ||
+            !as11_stream_signal_wire_name(entry.short_tag, model) ||
             !edf_short_tag_is_accepted(accepted_data_ids_csv,
                                        entry.short_tag)) {
             continue;

@@ -22,12 +22,12 @@ bool edf_short_tag_is_accepted(const char *accepted_data_ids_csv,
                                const char *short_tag);
 bool edf_numeric_stream_available(
     const char *accepted_data_ids_csv,
-    ResmedDeviceModel model = ResmedDeviceModel::Unknown);
+    ResmedDeviceModel model = ResmedDeviceModel::AirSense11);
 bool edf_build_numeric_file_layout(EdfFileKind kind,
                                    const char *accepted_data_ids_csv,
                                    EdfNumericFileLayout &layout,
                                    ResmedDeviceModel model =
-                                       ResmedDeviceModel::Unknown);
+                                       ResmedDeviceModel::AirSense11);
 bool edf_build_full_numeric_file_layout(EdfFileKind kind,
                                         EdfNumericFileLayout &layout);
 

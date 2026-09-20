@@ -45,14 +45,6 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
     return nullptr;
 }
 
-bool edf_stream_signal_supported_for_model(ResmedDeviceModel model,
-                                           StreamSignalId id) {
-    const EdfStreamSignalDescriptor *descriptor =
-        edf_stream_signal_descriptor_for_stream(id);
-    return descriptor &&
-        as11_stream_signal_wire_name(descriptor->short_tag, model) != nullptr;
-}
-
 static std::string stream_ids_csv(EdfSeriesId excluded_series,
                                   bool required_only,
                                   ResmedDeviceModel model) {
@@ -62,8 +54,7 @@ static std::string stream_ids_csv(EdfSeriesId excluded_series,
         edf_stream_signal_descriptors(count);
     for (size_t i = 0; i < count; ++i) {
         if (signals[i].series == excluded_series) continue;
-        if (!edf_stream_signal_supported_for_model(model,
-                                                   signals[i].stream_id)) {
+        if (!as11_stream_signal_wire_name(signals[i].short_tag, model)) {
             continue;
         }
 

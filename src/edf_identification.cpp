@@ -2,6 +2,8 @@
 
 #include <ArduinoJson.h>
 
+#include "resmed_device_protocol.h"
+
 namespace aircannect {
 namespace {
 
@@ -34,6 +36,8 @@ bool edf_build_identification_json(RpcPayloadView get_response,
                                    std::string &json_out,
                                    ResmedDeviceModel model) {
     json_out.clear();
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(model);
+    if (!protocol) return false;
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(
@@ -44,9 +48,11 @@ bool edf_build_identification_json(RpcPayloadView get_response,
     JsonObjectConst result = doc["result"].as<JsonObjectConst>();
     if (result.isNull()) return false;
 
-    const JsonObjectConst profiles =
-        result["IdentificationProfiles"].as<JsonObjectConst>();
-    if (!profiles.isNull()) {
+    if (protocol->identification_profiles) {
+        if (result[protocol->identification_profiles].as<JsonObjectConst>().isNull()) {
+            return false;
+        }
+
         std::string result_json;
         serializeJson(result, result_json);
         if (result_json.empty()) return false;
@@ -56,8 +62,7 @@ bool edf_build_identification_json(RpcPayloadView get_response,
         json_out += result_json;
         json_out += '}';
     } else {
-        if (model != ResmedDeviceModel::AirMini) return false;
-
+        const ResmedIdentityQuery &identity = RESMED_IDENTITY;
         JsonDocument normalized;
         JsonObject flow = normalized["FlowGenerator"].to<JsonObject>();
         JsonObject normalized_profiles =
@@ -65,23 +70,23 @@ bool edf_build_identification_json(RpcPayloadView get_response,
         JsonObject product = normalized_profiles["Product"].to<JsonObject>();
         JsonObject software = normalized_profiles["Software"].to<JsonObject>();
         bool copied = false;
-        copied = copy_identification_member(product, result, "ProductName") ||
+        copied = copy_identification_member(product, result, identity.product_name) ||
                  copied;
-        copied = copy_identification_member(product, result, "SerialNumber") ||
+        copied = copy_identification_member(product, result, identity.serial_number) ||
                  copied;
         copied = copy_identification_member(product, result, "ProductCode") ||
                  copied;
         copied = copy_identification_member(
-                     software, result, "ApplicationIdentifier") ||
+                     software, result, identity.software_identifier) ||
                  copied;
         copied = copy_identification_member(
-                     software, result, "BootloaderIdentifier") ||
+                     software, result, identity.bootloader_identifier) ||
                  copied;
         copied = copy_identification_member(
-                     software, result, "PlatformIdentifier") ||
+                     software, result, identity.platform_id) ||
                  copied;
         copied = copy_identification_member(
-                     software, result, "VariantIdentifier") ||
+                     software, result, identity.variant_id) ||
                  copied;
         if (!copied) return false;
         serializeJson(normalized, json_out);

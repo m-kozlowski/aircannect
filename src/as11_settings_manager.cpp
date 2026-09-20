@@ -5,12 +5,11 @@
 namespace aircannect {
 
 void As11SettingsManager::set_device_model(ResmedDeviceModel model) {
-    if (device_model_ == model && state_.device_model() == model) return;
+    if (device_model() == model) return;
 
     state_.set_device_model(model);
     if (state_.device_model() != model) return;
 
-    device_model_ = model;
     model_change_pending_ = true;
     note_change();
 }
@@ -18,7 +17,7 @@ void As11SettingsManager::set_device_model(ResmedDeviceModel model) {
 bool As11SettingsManager::request_refresh(RpcRequestPort &rpc,
                                           RpcSource source,
                                           uint32_t now_ms) {
-    if (device_model_ == ResmedDeviceModel::Unknown) return false;
+    if (device_model() == ResmedDeviceModel::Unknown) return false;
     if (refresh_ticket_.valid()) return true;
 
     if (submit_refresh(rpc, source)) return true;
@@ -32,7 +31,7 @@ OperationSubmission As11SettingsManager::write(
     const std::string &params_json,
     RpcSource source,
     uint32_t now_ms) {
-    if (device_model_ == ResmedDeviceModel::Unknown) {
+    if (device_model() == ResmedDeviceModel::Unknown) {
         return OperationSubmission::rejected();
     }
     if (write_ticket_.valid()) return OperationSubmission::busy();
@@ -57,7 +56,7 @@ OperationSubmission As11SettingsManager::write(
 void As11SettingsManager::invalidate(RpcRequestPort &rpc,
                                      RpcSource source,
                                      uint32_t now_ms) {
-    if (device_model_ == ResmedDeviceModel::Unknown) return;
+    if (device_model() == ResmedDeviceModel::Unknown) return;
     note_change();
     if (refresh_ticket_.valid()) {
         refresh_again_pending_ = true;
@@ -101,7 +100,7 @@ void As11SettingsManager::poll(RpcRequestPort &rpc,
         write_ticket_ = {};
         refresh_ticket_ = {};
 
-        if (device_model_ != ResmedDeviceModel::Unknown) {
+        if (device_model() != ResmedDeviceModel::Unknown) {
             schedule_refresh(RpcSource::Scheduler, now_ms, 0);
         }
     }

@@ -17,12 +17,18 @@ const ResmedDeviceProtocol AIRSENSE11 = {
     {"ActiveTherapyProfile", "_ROP", nullptr},
     "TimeZoneOffset",
     "_PHI", "AirbreakInfo",
+    true, "Cpap",
+    "IdentificationProfiles",
+    0, 0,
 };
 
 const ResmedDeviceProtocol AIRMINI = {
     {"TherapyMode", "_RUNNING_MODE_REQUEST", "FGState"},
     nullptr,
     "MaskType", nullptr,
+    false, "CPAP",
+    nullptr,
+    40, 200,
 };
 
 }  // namespace
@@ -34,6 +40,17 @@ std::string ResmedIdentityQuery::params_json() const {
 
 std::string ResmedRuntimeQuery::params_json() const {
     return build_get_params({therapy_profile, running_mode, therapy_state});
+}
+
+std::string ResmedDeviceProtocol::identification_params_json() const {
+    if (identification_profiles) return build_get_params({identification_profiles});
+
+    const ResmedIdentityQuery &identity = RESMED_IDENTITY;
+    return build_get_params({identity.product_name, identity.serial_number,
+                             identity.software_identifier,
+                             identity.bootloader_identifier,
+                             identity.platform_id, identity.variant_id,
+                             "ProductCode"});
 }
 
 const ResmedDeviceProtocol *resmed_device_protocol(ResmedDeviceModel model) {

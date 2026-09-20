@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "resmed_device_model.h"
@@ -32,11 +33,11 @@ enum class StreamSignalId : uint8_t {
 
 StreamSignalId as11_stream_signal_id_from_name(
     const char *name,
-    ResmedDeviceModel model = ResmedDeviceModel::Unknown);
+    ResmedDeviceModel model = ResmedDeviceModel::AirSense11);
 uint32_t as11_stream_signal_sample_interval_ms(
     const char *name,
     uint32_t fallback_interval_ms,
-    ResmedDeviceModel model = ResmedDeviceModel::Unknown);
+    ResmedDeviceModel model = ResmedDeviceModel::AirSense11);
 
 const char *as11_stream_signal_wire_name(
     const char *canonical_name,
@@ -46,6 +47,7 @@ const char *as11_stream_signal_canonical_name(
     ResmedDeviceModel model);
 bool as11_stream_signal_wire_ids(const std::string &canonical_ids_csv,
                                  ResmedDeviceModel model,
-                                 std::string &wire_ids_csv);
+                                 std::string &wire_ids_csv,
+                                 size_t &wire_count);
 
 }  // namespace aircannect

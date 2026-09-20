@@ -7,6 +7,7 @@
 #include "as11_rpc.h"
 #include "data_id_csv.h"
 #include "json_cursor.h"
+#include "resmed_device_protocol.h"
 
 namespace aircannect {
 namespace {
@@ -142,18 +143,9 @@ StreamAcquireResult StreamBroker::acquire(
         requested.data_id_count == 0) {
         return result;
     }
-    if (device_model_ == ResmedDeviceModel::AirMini) {
-        std::string wire_ids;
-        if (!as11_stream_signal_wire_ids(requested.data_ids_csv,
-                                         device_model_, wire_ids) ||
-            wire_ids.empty()) {
-            result.status = StreamAcquireStatus::Incompatible;
-            return result;
-        }
-    }
 
     StreamSubscription desired;
-    if (!build_desired_with_extra(requested, desired)) {
+    if (!build_desired_subscription(desired, &requested)) {
         result.status = StreamAcquireStatus::Incompatible;
         return result;
     }
@@ -205,18 +197,9 @@ StreamAcquireResult StreamBroker::update(
         requested.data_id_count == 0) {
         return result;
     }
-    if (device_model_ == ResmedDeviceModel::AirMini) {
-        std::string wire_ids;
-        if (!as11_stream_signal_wire_ids(requested.data_ids_csv,
-                                         device_model_, wire_ids) ||
-            wire_ids.empty()) {
-            result.status = StreamAcquireStatus::Incompatible;
-            return result;
-        }
-    }
 
     StreamSubscription desired;
-    if (!build_desired_with_replacement(handle, requested, desired)) {
+    if (!build_desired_subscription(desired, &requested, handle)) {
         result.status = StreamAcquireStatus::Incompatible;
         return result;
     }
@@ -787,21 +770,14 @@ bool StreamBroker::parse_external_subscription(
 }
 
 std::string StreamBroker::build_subscription_params(
-    const StreamSubscription &subscription) const {
-    if (device_model_ != ResmedDeviceModel::AirMini) {
-        return build_stream_params(subscription.data_ids_csv,
-                                   subscription.sample_ms,
-                                   subscription.report_ms);
-    }
-
-    StreamSubscription wire;
-    if (!build_wire_subscription(subscription, wire)) return {};
-    return build_stream_params(wire.data_ids_csv, subscription.sample_ms,
-                               subscription.report_ms);
+    const StreamSubscription &subscription) {
+    return build_stream_params(subscription.data_ids_csv,
+                                subscription.sample_ms,
+                                subscription.report_ms);
 }
 
 bool StreamBroker::normalize_subscription(const StreamSubscription &input,
-                                          StreamSubscription &subscription) const {
+                                          StreamSubscription &subscription) {
     clear_subscription(subscription);
     if (!data_id_csv_merge(subscription.data_ids_csv,
                            subscription.data_id_count,
@@ -810,15 +786,10 @@ bool StreamBroker::normalize_subscription(const StreamSubscription &input,
         return false;
     }
 
-    if (device_model_ == ResmedDeviceModel::AirMini) {
-        subscription.sample_ms = 40;
-        subscription.report_ms = 200;
-    } else {
-        subscription.sample_ms = input.sample_ms;
-        subscription.report_ms = input.report_ms;
-        normalize_stream_intervals(subscription.sample_ms,
-                                   subscription.report_ms);
-    }
+    subscription.sample_ms = input.sample_ms;
+    subscription.report_ms = input.report_ms;
+    normalize_stream_intervals(subscription.sample_ms,
+                               subscription.report_ms);
     return true;
 }
 
@@ -989,7 +960,9 @@ bool StreamBroker::parse_start_response(RpcPayloadView payload,
 }
 
 bool StreamBroker::build_desired_subscription(
-    StreamSubscription &subscription) const {
+    StreamSubscription &subscription,
+    const StreamSubscription *extra,
+    StreamConsumerHandle replaced) const {
     clear_subscription(subscription);
     bool have_interval = false;
 
@@ -1000,67 +973,21 @@ bool StreamBroker::build_desired_subscription(
     }
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         if (!consumers_[i].active) continue;
-        if (!merge_subscription(subscription, have_interval,
-                                consumers_[i].subscription)) {
+        const StreamSubscription &input =
+            extra && static_cast<StreamConsumerHandle>(i) == replaced
+                ? *extra : consumers_[i].subscription;
+
+        if (!merge_internal_subscription(subscription, have_interval, input)) {
             return false;
         }
     }
 
-    if (have_interval) normalize_desired_subscription(subscription);
+    if (extra && replaced == STREAM_CONSUMER_INVALID &&
+        !merge_internal_subscription(subscription, have_interval, *extra)) {
+        return false;
+    }
+
     return have_interval;
-}
-
-bool StreamBroker::build_desired_with_extra(
-    const StreamSubscription &extra,
-    StreamSubscription &subscription) const {
-    clear_subscription(subscription);
-    bool have_interval = false;
-
-    if (external_active_ &&
-        !merge_subscription(subscription, have_interval,
-                            external_subscription_)) {
-        return false;
-    }
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        if (!consumers_[i].active) continue;
-        if (!merge_subscription(subscription, have_interval,
-                                consumers_[i].subscription)) {
-            return false;
-        }
-    }
-    if (!merge_subscription(subscription, have_interval, extra)) return false;
-    if (!have_interval) return false;
-    normalize_desired_subscription(subscription);
-    return true;
-}
-
-bool StreamBroker::build_desired_with_replacement(
-    StreamConsumerHandle handle,
-    const StreamSubscription &replacement,
-    StreamSubscription &subscription) const {
-    clear_subscription(subscription);
-    bool have_interval = false;
-
-    if (external_active_ &&
-        !merge_subscription(subscription, have_interval,
-                            external_subscription_)) {
-        return false;
-    }
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        if (!consumers_[i].active) continue;
-        if (static_cast<StreamConsumerHandle>(i) == handle) {
-            if (!merge_subscription(subscription, have_interval,
-                                    replacement)) {
-                return false;
-            }
-        } else if (!merge_subscription(subscription, have_interval,
-                                       consumers_[i].subscription)) {
-            return false;
-        }
-    }
-    if (!have_interval) subscription = replacement;
-    normalize_desired_subscription(subscription);
-    return true;
 }
 
 void StreamBroker::apply_desired_subscription(
@@ -1072,48 +999,25 @@ void StreamBroker::apply_desired_subscription(
     actual_active_ = false;
 }
 
-void StreamBroker::normalize_desired_subscription(
-    StreamSubscription &subscription) const {
-    if (device_model_ != ResmedDeviceModel::AirMini || consumer_count() == 0) {
-        return;
-    }
-    subscription.sample_ms = 40;
-    subscription.report_ms = 200;
-}
+bool StreamBroker::merge_internal_subscription(
+    StreamSubscription &subscription,
+    bool &have_interval,
+    const StreamSubscription &input) const {
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(device_model_);
+    if (!protocol) return false;
 
-bool StreamBroker::build_wire_subscription(
-    const StreamSubscription &subscription,
-    StreamSubscription &wire) const {
-    clear_subscription(wire);
-
-    if (device_model_ != ResmedDeviceModel::AirMini) {
-        wire = subscription;
-        return wire.data_id_count > 0;
-    }
-
-    wire.sample_ms = subscription.sample_ms;
-    wire.report_ms = subscription.report_ms;
-
-    if (external_active_ &&
-        !merge_data_ids(wire, external_subscription_)) {
+    StreamSubscription wire;
+    if (!as11_stream_signal_wire_ids(input.data_ids_csv, device_model_,
+                                     wire.data_ids_csv, wire.data_id_count) ||
+        wire.data_ids_csv.empty()) {
         return false;
     }
 
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        if (!consumers_[i].active) continue;
-
-        std::string mapped_ids;
-        if (!as11_stream_signal_wire_ids(consumers_[i].subscription.data_ids_csv,
-                                         device_model_, mapped_ids)) {
-            return false;
-        }
-        if (!data_id_csv_merge(wire.data_ids_csv, wire.data_id_count,
-                               mapped_ids.c_str(), STREAM_DATA_ID_LIMITS)) {
-            return false;
-        }
-    }
-
-    return wire.data_id_count > 0;
+    wire.sample_ms = protocol->stream_sample_ms
+        ? protocol->stream_sample_ms : input.sample_ms;
+    wire.report_ms = protocol->stream_report_ms
+        ? protocol->stream_report_ms : input.report_ms;
+    return merge_subscription(subscription, have_interval, wire);
 }
 
 void StreamBroker::clear_subscription(StreamSubscription &subscription) {

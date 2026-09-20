@@ -76,7 +76,7 @@ private:
     BleConnectCommand connect_ble_ = nullptr;
     void *connect_context_ = nullptr;
     MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
-    std::atomic<bool> as11_unavailable_{false};
+    std::atomic<bool> as11_unavailable_{true};
 
     PublishedJsonSnapshot ble_pairing_snapshot_;
     LargeTextBuffer ble_pairing_build_json_;

@@ -19,6 +19,7 @@
 #include "edf_str_settings.h"
 #include "edf_time.h"
 #include "memory_manager.h"
+#include "resmed_device_protocol.h"
 #include "string_util.h"
 #include "time_sync_service.h"
 
@@ -1791,18 +1792,14 @@ bool EdfRecorderManager::request_str_settings() {
 }
 
 bool EdfRecorderManager::request_identification() {
-    const ResmedDeviceModel model = recorder_model(device_state_);
-    if (model == ResmedDeviceModel::Unknown) return false;
+    const ResmedDeviceProtocol *protocol =
+        resmed_device_protocol(recorder_model(device_state_));
+    if (!protocol) return false;
     if (identification_rpc_.active()) return false;
 
     RpcRequestCommand command;
     command.method = "Get";
-    command.params_json = model == ResmedDeviceModel::AirMini
-        ? build_get_params(
-              "ProductName SerialNumber ApplicationIdentifier "
-              "BootloaderIdentifier PlatformIdentifier VariantIdentifier "
-              "ProductCode")
-        : build_get_params("IdentificationProfiles");
+    command.params_json = protocol->identification_params_json();
     command.source = RpcSource::EdfRecorder;
     command.timeout_ms = AC_EDF_IDENTIFICATION_TIMEOUT_MS;
     command.generation = identification_rpc_.next_generation();

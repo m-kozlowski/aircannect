@@ -75,7 +75,7 @@ const SignalAlias SIGNAL_ALIASES[] = {
 
 StreamSignalId as11_stream_signal_id_from_name(const char *name,
                                               ResmedDeviceModel model) {
-    if (!name) return StreamSignalId::Unknown;
+    if (!name || model == ResmedDeviceModel::Unknown) return StreamSignalId::Unknown;
 
     if (model == ResmedDeviceModel::AirMini) {
         for (const AirMiniSelector &selector : AIRMINI_SELECTORS) {
@@ -99,7 +99,7 @@ uint32_t as11_stream_signal_sample_interval_ms(
     uint32_t fallback_interval_ms,
     ResmedDeviceModel model) {
     if (!name) return fallback_interval_ms;
-    if (model == ResmedDeviceModel::AirMini) return fallback_interval_ms;
+    if (model != ResmedDeviceModel::AirSense11) return fallback_interval_ms;
     if (strstr(name, "-100hz")) return 10;
     if (strstr(name, "-50hz")) return 20;
     return fallback_interval_ms;
@@ -107,7 +107,7 @@ uint32_t as11_stream_signal_sample_interval_ms(
 
 const char *as11_stream_signal_wire_name(const char *canonical_name,
                                          ResmedDeviceModel model) {
-    if (!canonical_name) return nullptr;
+    if (!canonical_name || model == ResmedDeviceModel::Unknown) return nullptr;
     if (model != ResmedDeviceModel::AirMini) return canonical_name;
 
     for (const AirMiniSelector &selector : AIRMINI_SELECTORS) {
@@ -120,7 +120,7 @@ const char *as11_stream_signal_wire_name(const char *canonical_name,
 
 const char *as11_stream_signal_canonical_name(const char *wire_name,
                                              ResmedDeviceModel model) {
-    if (!wire_name) return nullptr;
+    if (!wire_name || model == ResmedDeviceModel::Unknown) return nullptr;
     if (model != ResmedDeviceModel::AirMini) return wire_name;
 
     for (const AirMiniSelector &selector : AIRMINI_SELECTORS) {
@@ -133,15 +133,17 @@ const char *as11_stream_signal_canonical_name(const char *wire_name,
 
 bool as11_stream_signal_wire_ids(const std::string &canonical_ids_csv,
                                  ResmedDeviceModel model,
-                                 std::string &wire_ids_csv) {
+                                 std::string &wire_ids_csv,
+                                 size_t &wire_count) {
     wire_ids_csv.clear();
+    wire_count = 0;
+    if (model == ResmedDeviceModel::Unknown) return false;
+
     const DataIdCsvLimits limits = {
         AC_STREAM_FRAME_SIGNAL_MAX,
         AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
         AC_STREAM_FRAME_SIGNAL_MAX * AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
     };
-    size_t wire_count = 0;
-
     if (model != ResmedDeviceModel::AirMini) {
         return data_id_csv_merge(wire_ids_csv, wire_count,
                                  canonical_ids_csv.c_str(), limits);

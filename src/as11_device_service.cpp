@@ -103,7 +103,7 @@ bool As11DeviceService::request_healthcheck(RpcRequestPort &rpc,
 bool As11DeviceService::request_clock_read(RpcRequestPort &rpc,
                                            RpcSource source,
                                            uint32_t now_ms) {
-    if (unavailable()) return false;
+    if (unavailable() || !query_supported(QueryKind::Clock)) return false;
 
     schedule_initialized_ = true;
     schedule_query(QueryKind::Clock, now_ms, source);
@@ -600,7 +600,7 @@ void As11DeviceService::note_query_response(uint32_t now_ms) {
 
 void As11DeviceService::note_query_timeout(uint32_t now_ms) {
     if (unavailable()) {
-        schedule_query(QueryKind::Identity,
+        schedule_query(QueryKind::Platform,
                        now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
                        RpcSource::Scheduler);
         return;

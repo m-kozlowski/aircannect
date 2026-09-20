@@ -13,7 +13,7 @@ class As11SettingsManager {
 public:
     const As11SettingsState &state() const { return state_; }
     void set_device_model(ResmedDeviceModel model);
-    ResmedDeviceModel device_model() const { return device_model_; }
+    ResmedDeviceModel device_model() const { return state_.device_model(); }
 
     bool request_refresh(RpcRequestPort &rpc,
                          RpcSource source,
@@ -68,7 +68,6 @@ private:
 
     uint32_t next_generation_ = 0;
     uint32_t revision_ = 0;
-    ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
 };
 
 }  // namespace aircannect

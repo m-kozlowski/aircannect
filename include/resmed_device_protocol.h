@@ -35,6 +35,19 @@ struct ResmedDeviceProtocol {
     const char *settings_extra_field;
     // Null when the device has no catalog of custom settings.
     const char *settings_extensions;
+
+    // AS11 writes catalog tags; AirMini requires full setting selectors.
+    bool settings_short_selectors;
+    const char *cpap_setting_prefix;
+
+    // Null uses the common flat identity fields instead of this object.
+    const char *identification_profiles;
+
+    // Zero preserves the intervals requested by internal stream consumers.
+    uint32_t stream_sample_ms;
+    uint32_t stream_report_ms;
+
+    std::string identification_params_json() const;
 };
 
 extern const ResmedIdentityQuery RESMED_IDENTITY;

@@ -8,6 +8,7 @@
 #include "checked_size.h"
 #include "as11_setting_catalog_builder.h"
 #include "memory_manager.h"
+#include "resmed_device_protocol.h"
 
 namespace aircannect {
 namespace {
@@ -101,7 +102,8 @@ void apply_airmini_definition(As11SettingDef &def) {
         def.source = As11SettingSource::Flat;
         def.profile = As11ProfileId::None;
         def.source_object = nullptr;
-        def.source_field = "TherapyMode";
+        def.source_field = resmed_device_protocol(ResmedDeviceModel::AirMini)
+                               ->runtime.therapy_profile;
         def.min_value = 0.0f;
         def.max_value = 2.0f;
         def.step = 1.0f;

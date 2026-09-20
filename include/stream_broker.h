@@ -212,10 +212,10 @@ private:
 
     static bool parse_external_subscription(const std::string &params_json,
                                             StreamSubscription &subscription);
-    std::string build_subscription_params(
-        const StreamSubscription &subscription) const;
-    bool normalize_subscription(const StreamSubscription &input,
-                                StreamSubscription &subscription) const;
+    static std::string build_subscription_params(
+        const StreamSubscription &subscription);
+    static bool normalize_subscription(const StreamSubscription &input,
+                                       StreamSubscription &subscription);
     static bool add_data_id(StreamSubscription &subscription,
                             const std::string &data_id);
     static bool merge_data_ids(StreamSubscription &subscription,
@@ -223,20 +223,18 @@ private:
     static bool merge_subscription(StreamSubscription &subscription,
                                    bool &have_interval,
                                    const StreamSubscription &input);
+    bool merge_internal_subscription(StreamSubscription &subscription,
+                                     bool &have_interval,
+                                     const StreamSubscription &input) const;
     bool parse_start_response(RpcPayloadView payload,
                               StreamSubscription &accepted,
                               uint32_t &stream_id) const;
 
-    bool build_desired_subscription(StreamSubscription &subscription) const;
-    bool build_desired_with_extra(const StreamSubscription &extra,
-                                  StreamSubscription &subscription) const;
-    bool build_desired_with_replacement(StreamConsumerHandle handle,
-                                        const StreamSubscription &replacement,
-                                        StreamSubscription &subscription) const;
+    bool build_desired_subscription(
+        StreamSubscription &subscription,
+        const StreamSubscription *extra = nullptr,
+        StreamConsumerHandle replaced = STREAM_CONSUMER_INVALID) const;
     void apply_desired_subscription(const StreamSubscription &subscription);
-    void normalize_desired_subscription(StreamSubscription &subscription) const;
-    bool build_wire_subscription(const StreamSubscription &subscription,
-                                 StreamSubscription &wire) const;
     static void clear_subscription(StreamSubscription &subscription);
 
     StreamFramePool frame_pool_;

@@ -796,6 +796,8 @@ struct ReportTask::Runtime {
              next.export_work_claimed);
         const bool rpc_became_available =
             !activity.as11_rpc_available && next.as11_rpc_available;
+        const bool spool_support_changed =
+            activity.supports_as11_spools != next.supports_as11_spools;
 
         if (therapy_ended || next.ota_install_active || next.export_work_claimed) {
             capture_input.reset();
@@ -823,7 +825,7 @@ struct ReportTask::Runtime {
             activity.foreground_report_demand ||
             activity.ota_install_active || activity.export_work_claimed;
 
-        if (therapy_ended) invalidate_spool_availability();
+        if (therapy_ended || spool_support_changed) invalidate_spool_availability();
         if (rpc_became_available) reset_background_pass();
         if (!became_blocked) return true;
 

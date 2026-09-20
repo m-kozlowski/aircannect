@@ -101,8 +101,10 @@ void DeviceHttpController::register_routes(HttpRouteRegistry &server) {
 void DeviceHttpController::poll() {
     if (!rpc_ || !device_ || !time_sync_ || !ble_link_) return;
 
-    as11_unavailable_.store(device_->unavailable(),
-                            std::memory_order_release);
+    as11_unavailable_.store(
+        device_->unavailable() ||
+            device_->state().model() == ResmedDeviceModel::Unknown,
+        std::memory_order_release);
 
     for (size_t i = 0; i < CommandsPerPoll; ++i) {
         Command command;

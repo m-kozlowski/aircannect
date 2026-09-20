@@ -22,14 +22,12 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptors(
     size_t &count);
 const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
     StreamSignalId id);
-bool edf_stream_signal_supported_for_model(ResmedDeviceModel model,
-                                           StreamSignalId id);
 std::string edf_stream_ids_csv(
     bool required_only = false,
-    ResmedDeviceModel model = ResmedDeviceModel::Unknown);
+    ResmedDeviceModel model = ResmedDeviceModel::AirSense11);
 std::string edf_stream_ids_csv_excluding(EdfSeriesId excluded_series,
                                          bool required_only = false,
                                          ResmedDeviceModel model =
-                                             ResmedDeviceModel::Unknown);
+                                             ResmedDeviceModel::AirSense11);
 
 }  // namespace aircannect

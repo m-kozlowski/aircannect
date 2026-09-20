@@ -187,7 +187,7 @@ public:
     uint16_t supported_mode_mask() const { return supported_mode_mask_; }
     bool setting_visible(size_t index, int mode) const;
     const As11SettingsCatalog &catalog() const { return catalog_; }
-    ResmedDeviceModel device_model() const { return device_model_; }
+    ResmedDeviceModel device_model() const { return catalog_.device_model(); }
 
 private:
     struct ProfileValueSlot {
@@ -226,7 +226,6 @@ private:
     uint32_t last_write_ms_ = 0;
     uint32_t updated_ms_ = 0;
     uint16_t supported_mode_mask_ = 0;
-    ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
     bool valid_ = false;
 };
 

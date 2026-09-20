@@ -6,6 +6,7 @@
 #include "board_can.h"
 #include "data_id_csv.h"
 #include "json_util.h"
+#include "resmed_device_protocol.h"
 #ifdef ARDUINO
 #include "debug_log.h"
 #endif
@@ -39,13 +40,23 @@ const EventSelector AIRMINI_EVENTS[] = {
     {"TherapyEvents-RespiratoryEvents", "TherapyEvents-RespiratoryEvent"},
     {SETTINGS_HISTORY_CHANGE_DATA_ID, "_SETTINGS_HISTORY_UPDATE_COUNT"},
     {"_ZLE", "_BREATH_LOGGING_ENABLED"},
-    {"FGState", "FGState"},
-    {"TherapyMode", "TherapyMode"},
 };
 
-const char *event_selector(const std::string &id, bool to_wire) {
+const char *event_selector(const char *id, ResmedDeviceModel model,
+                           bool to_wire) {
+    if (model == ResmedDeviceModel::AirSense11) return id;
+    const ResmedDeviceProtocol *protocol = resmed_device_protocol(model);
+    if (!protocol) return nullptr;
+
+    const ResmedRuntimeQuery &runtime = protocol->runtime;
+    if (runtime.therapy_state &&
+        (strcmp(id, runtime.therapy_state) == 0 ||
+         strcmp(id, runtime.therapy_profile) == 0)) {
+        return id;
+    }
+
     for (const EventSelector &selector : AIRMINI_EVENTS) {
-        if (id == (to_wire ? selector.canonical : selector.airmini)) {
+        if (strcmp(id, to_wire ? selector.canonical : selector.airmini) == 0) {
             return to_wire ? selector.airmini : selector.canonical;
         }
     }
@@ -105,10 +116,8 @@ bool extract_subscription_id(JsonDocument &doc, uint32_t &subscription_id) {
 bool event_data_id_is_base(const char *data_id, ResmedDeviceModel model) {
     if (!data_id || !*data_id) return true;
     for (const char *base : BASE_EVENT_DATA_IDS) {
-        if (model == ResmedDeviceModel::AirMini) {
-            base = event_selector(base, true);
-        }
-        if (strcmp(data_id, base) == 0) return true;
+        const char *wire = event_selector(base, model, true);
+        if (wire && strcmp(data_id, wire) == 0) return true;
     }
     return false;
 }
@@ -123,22 +132,23 @@ bool response_data_id_valid(JsonArrayConst ids, const char *data_id) {
     return false;
 }
 
-bool response_has_valid_activity_selector(JsonArrayConst ids) {
+bool response_has_valid_activity_selector(JsonArrayConst ids,
+                                          ResmedDeviceModel model) {
     bool system_activity_valid = false;
     bool usage_events_valid = false;
 
     for (JsonObjectConst item : ids) {
         std::string returned_id;
         if (!json_variant_to_string(item["dataId"], returned_id)) continue;
-        if ((returned_id == "SystemActivityEvents-FrequentActivityEvents" ||
-             returned_id == "SystemActivityEvents-SporadicActivityEvents" ||
-             returned_id == "SystemActivityEvents-FrequentActivityEvent" ||
-             returned_id == "SystemActivityEvents-SporadicActivityEvent") &&
+        const char *canonical = event_selector(returned_id.c_str(), model, false);
+        if (!canonical) continue;
+
+        if ((strcmp(canonical, BASE_EVENT_DATA_IDS[0]) == 0 ||
+             strcmp(canonical, BASE_EVENT_DATA_IDS[1]) == 0) &&
             item["valid"].as<bool>()) {
             system_activity_valid = true;
         }
-        if ((returned_id == "UsageEvents-TherapyStatusEvents" ||
-             returned_id == "UsageEvents-TherapyStatusEvent") &&
+        if (strcmp(canonical, BASE_EVENT_DATA_IDS[2]) == 0 &&
             item["valid"].as<bool>()) {
             usage_events_valid = true;
         }
@@ -420,7 +430,7 @@ bool EventBroker::accept_subscribe_response(
     }
     if (!response_has_ids) return false;
 
-    if (!response_has_valid_activity_selector(response_ids)) return false;
+    if (!response_has_valid_activity_selector(response_ids, model_)) return false;
 
     JsonDocument request_doc;
     DeserializationError request_error =
@@ -583,10 +593,8 @@ EventPublishResult EventBroker::publish_notification(RpcPayloadView payload,
     EventPublishResult result;
     if (!parse_event_notification(payload, frame)) return result;
 
-    if (model_ == ResmedDeviceModel::AirMini) {
-        const char *canonical = event_selector(frame.data_id, false);
-        if (canonical) frame.data_id = canonical;
-    }
+    const char *canonical = event_selector(frame.data_id.c_str(), model_, false);
+    if (canonical && canonical != frame.data_id.c_str()) frame.data_id = canonical;
 
     result.accepted = true;
     result.truncated = frame.truncated;
@@ -731,21 +739,27 @@ bool EventBroker::build_desired_params(std::string &params_json) const {
         }
     }
 
-    if (model_ == ResmedDeviceModel::AirMini) {
+    {
         std::string mapped;
         size_t count = 0;
         size_t start = 0;
         while (start < csv.size()) {
             const size_t end = csv.find(',', start);
             const std::string id = csv.substr(start, end - start);
-            const char *wire = event_selector(id, true);
+            const char *wire = event_selector(id.c_str(), model_, true);
             if (!wire || !data_id_csv_add(mapped, count, wire, strlen(wire),
                                           EVENT_DATA_ID_LIMITS)) return false;
             if (end == std::string::npos) break;
             start = end + 1;
         }
-        if (!data_id_csv_merge(mapped, count, "FGState,TherapyMode",
-                              EVENT_DATA_ID_LIMITS)) return false;
+        const ResmedDeviceProtocol *protocol = resmed_device_protocol(model_);
+        if (protocol && protocol->runtime.therapy_state) {
+            for (const char *field : {protocol->runtime.therapy_state,
+                                     protocol->runtime.therapy_profile}) {
+                if (!data_id_csv_add(mapped, count, field, strlen(field),
+                                     EVENT_DATA_ID_LIMITS)) return false;
+            }
+        }
         csv = std::move(mapped);
     }
 
