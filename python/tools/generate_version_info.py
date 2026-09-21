@@ -1,5 +1,5 @@
 """
-Pre-build script: write src/version_info.h without changing global flags.
+Pre-build script: generate version metadata separately for each environment.
 """
 
 import os
@@ -10,6 +10,8 @@ Import("env")
 
 project_dir = env.get("PROJECT_DIR", ".")
 script = os.path.join(project_dir, "python", "tools", "version.py")
-header = os.path.join(project_dir, "src", "version_info.h")
+output_dir = os.path.join(env.subst("$BUILD_DIR"), "generated")
+header = os.path.join(output_dir, "version_info_generated.h")
 
 subprocess.run(["python3", script, "--header", header], check=True)
+env.Append(CPPPATH=[output_dir])
