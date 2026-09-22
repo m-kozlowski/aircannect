@@ -11,6 +11,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import zipfile
 import zlib
 
 
@@ -129,24 +130,20 @@ def package_firmware(
         filename_component(version),
         filename_component(environment_name),
     ))
-    raw_path = output_dir / f"{stem}.bin"
     compressed_path = output_dir / f"{stem}.bin.zlib"
-    initial_path = output_dir / f"{stem}-initial.bin"
+    initial_path = output_dir / f"{stem}-initial.zip"
 
-    shutil.copyfile(firmware_path, raw_path)
-    compress_zlib(raw_path, compressed_path)
-    shutil.copyfile(initial_image_path, initial_path)
+    compress_zlib(firmware_path, compressed_path)
+    with zipfile.ZipFile(
+        initial_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+    ) as archive:
+        archive.write(initial_image_path, arcname=f"{stem}-initial.bin")
 
-    raw = artifact_record(raw_path)
+    raw = artifact_record(firmware_path)
     compressed = artifact_record(compressed_path)
     initial = artifact_record(initial_path)
 
     target = {
-        "raw": {
-            "url": raw["file"],
-            "size": raw["size"],
-            "sha256": raw["sha256"],
-        },
         "zlib": {
             "url": compressed["file"],
             "size": compressed["size"],
@@ -155,7 +152,7 @@ def package_firmware(
             "decoded_sha256": raw["sha256"],
         },
     }
-    return target, [raw, compressed, initial]
+    return target, [compressed, initial]
 
 
 def write_checksums(output_dir: pathlib.Path, artifacts: list[dict[str, object]]) -> None:

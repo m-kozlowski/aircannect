@@ -5,15 +5,19 @@ the [hardware](hardware.md) is wired up.
 
 ## 1. Install firmware
 
-Download the `-initial.bin` matching the board from the
-[latest release](https://github.com/m-kozlowski/aircannect/releases/latest).
+Download the `-initial.zip` matching the board from the
+[latest release](https://github.com/m-kozlowski/aircannect/releases/latest)
+and extract the `-initial.bin` image.
 
 Open [ESPWebTool](https://esptool.spacehuhn.com/) in Chrome or Edge:
 
 1. Connect the board to the computer over USB.
 2. Select **Connect** and choose its serial port.
-3. Add the downloaded `-initial.bin` at address `0x0`.
+3. Add the extracted `-initial.bin` at address `0x0`.
 4. Select **Program** and wait for flashing to finish.
+
+For later updates through the WebUI, use the matching `.bin.zlib` file
+instead of the initial image.
 
 To build from source instead, check out the matching release tag and use
 PlatformIO:

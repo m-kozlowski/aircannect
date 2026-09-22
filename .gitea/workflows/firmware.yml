@@ -83,7 +83,7 @@ jobs:
           token: ${{ secrets.GITEA_TOKEN }}
           body_path: dist/RELEASE_NOTES.md
           files: |-
-            dist/aircannect-*.bin
+            dist/aircannect-*-initial.zip
             dist/aircannect-*.bin.zlib
             dist/aircannect-release.json
             dist/RELEASE_NOTES.md
