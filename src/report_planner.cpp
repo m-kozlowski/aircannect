@@ -1057,7 +1057,7 @@ bool count_event_operations(const ReportPlanRequest &request,
                  ++section_index) {
                 const NightCatalogFallbackSection &section =
                     sections[section_index];
-                if (section.kind != ReportFallbackSectionKind::Events ||
+                if (!report_fallback_has_events(section.kind) ||
                     section.record_count == 0 ||
                     (section.event_mask & fallback_mask) == 0 ||
                     !night_catalog_intersection(filter,
@@ -1317,8 +1317,7 @@ bool append_event_operations(const ReportPlanRequest &request,
                         sections[section_index];
                     const uint8_t selected_mask =
                         section.event_mask & fallback_mask;
-                    if (section.kind !=
-                            ReportFallbackSectionKind::Events ||
+                    if (!report_fallback_has_events(section.kind) ||
                         section.record_count == 0 || selected_mask == 0 ||
                         !night_catalog_intersection(
                             filter, section.coverage).valid() ||
@@ -1902,7 +1901,8 @@ ReportPlanResult ReportPlanner::build(
     plan->requested_signal_mask_ = request.signal_mask;
     plan->requested_event_mask_ = request.event_mask;
     plan->fallback_acquisition_allowed_ =
-        (night->source_flags & NIGHT_CATALOG_SOURCE_EDF) == 0;
+        (night->source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                NIGHT_CATALOG_SOURCE_LOCAL_HISTORY)) == 0;
     size_t fallback_read_capacity = 0;
     size_t decoder_capacity = 0;
     if (!fill_sessions(request,

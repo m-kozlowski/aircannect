@@ -6,6 +6,7 @@
 
 #include "large_byte_buffer.h"
 #include "operation_outcome.h"
+#include "report_source_change.h"
 #include "report_spool_port.h"
 #include "sleep_day_id.h"
 #include "storage_file_client.h"
@@ -52,6 +53,8 @@ public:
                StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
                StoragePathPort &path_port);
+    void set_source_change_callback(ReportSourceChangeCallback callback,
+                                    void *context);
 
     OperationAdmission request(SleepDayId start_day,
                                SleepDayId end_day,
@@ -71,6 +74,7 @@ private:
     void finish();
     void fail(const char *error);
     void clear_work();
+    bool deliver_source_change();
 
     ReportSpoolPort *spool_port_ = nullptr;
     StorageFileClient storage_file_;
@@ -79,6 +83,11 @@ private:
     StoragePreparedFile source_file_;
     std::unique_ptr<LargeByteBuffer> file_buffer_;
     std::shared_ptr<const LargeByteBuffer> output_file_;
+
+    ReportSourceChangeCallback source_change_callback_ = nullptr;
+    void *source_change_context_ = nullptr;
+    bool source_change_pending_ = false;
+    ReportSourceChange pending_source_change_;
 
     EdfStrSummaryRefreshEntry *summary_entries_ = nullptr;
     size_t summary_capacity_ = 0;

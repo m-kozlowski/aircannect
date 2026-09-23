@@ -94,6 +94,7 @@ struct JobSlot {
     size_t record_size = 0;
     bool recording_start = false;
     bool str_replace_existing = false;
+    SleepDayId source_change_day;
 
     EdfFileSchema numeric_schema;
     EdfSignalSpec numeric_signals[AC_EDF_NUMERIC_SIGNAL_MAX + 1] = {};
@@ -173,6 +174,8 @@ struct ReadCompletionSlot {
 };
 
 void close_file(OpenFile &state);
+bool lock_queue(uint32_t timeout_ms = 10);
+void unlock_queue();
 
 void publish_edf_progress();
 std::shared_ptr<const EdfStorageProgress> read_edf_progress_snapshot();
@@ -195,6 +198,12 @@ bool processing_job = false;
 std::shared_ptr<EdfStorageProgress> edf_progress_state;
 bool edf_progress_dirty = false;
 std::shared_ptr<const EdfStorageProgress> published_edf_progress;
+
+ReportSourceChange pending_report_source_changes[
+    AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
+size_t pending_report_source_change_count = 0;
+ReportSourceChangeCallback report_source_change_callback = nullptr;
+void *report_source_change_context = nullptr;
 
 ReadJob read_jobs[AC_STORAGE_PREPARED_READ_CAPACITY];
 PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
@@ -379,6 +388,44 @@ uint32_t retry_delay(uint8_t attempt,
 
 void advance_retry(uint8_t &attempt) {
     if (attempt < 8) ++attempt;
+}
+
+void queue_report_source_change(const JobSlot &job) {
+    if (!job.source_change_day.valid()) {
+        return;
+    }
+
+    merge_report_source_change(
+        pending_report_source_changes,
+        pending_report_source_change_count,
+        ReportSourceChange{job.source_change_day,
+                           job.source_change_day,
+                           0});
+}
+
+bool deliver_report_source_change() {
+    if (pending_report_source_change_count == 0) return false;
+
+    ReportSourceChangeCallback callback = nullptr;
+    void *context = nullptr;
+    if (!lock_queue(0)) return false;
+
+    callback = report_source_change_callback;
+    context = report_source_change_context;
+    unlock_queue();
+
+    if (!callback || callback(context, pending_report_source_changes[0]) !=
+                         OperationAdmission::Accepted) {
+        return false;
+    }
+
+    // Only this storage worker appends and consumes pending notices.
+    for (size_t i = 1; i < pending_report_source_change_count; ++i) {
+        pending_report_source_changes[i - 1] =
+            pending_report_source_changes[i];
+    }
+    pending_report_source_changes[--pending_report_source_change_count] = {};
+    return true;
 }
 
 static constexpr size_t AC_EDF_STORAGE_NUMERIC_VALUE_MAX = max_size(
@@ -585,7 +632,7 @@ bool valid_path(const char *path) {
     return len > 1 && len < AC_STORAGE_WRITE_PATH_MAX;
 }
 
-bool lock_queue(uint32_t timeout_ms = 10) {
+bool lock_queue(uint32_t timeout_ms) {
     if (!queue_lock) return false;
     return xSemaphoreTake(queue_lock, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
@@ -2335,32 +2382,24 @@ bool process_foreground_step() {
     return false;
 }
 
-void process_job(JobSlot &job) {
+bool process_job(JobSlot &job) {
     switch (job.type) {
         case JobType::Open:
-            (void)process_open(job);
-            break;
+            return process_open(job);
         case JobType::Close:
-            (void)process_close(job);
-            break;
+            return process_close(job);
         case JobType::CloseAll:
-            (void)process_close_all();
-            break;
+            return process_close_all();
         case JobType::Record:
-            (void)process_record(job);
-            break;
+            return process_record(job);
         case JobType::NumericRecord:
-            (void)process_numeric_record(job);
-            break;
+            return process_numeric_record(job);
         case JobType::StrRecord:
-            (void)process_str_record(job);
-            break;
+            return process_str_record(job);
         case JobType::Identification:
-            (void)process_identification_files(job);
-            break;
+            return process_identification_files(job);
         default:
-            (void)process_record(job);
-            break;
+            return process_record(job);
     }
 }
 
@@ -2398,7 +2437,10 @@ void task_entry(void *) {
 
             if (have_job) {
                 Storage::release_write_handles();
-                process_job(slots[slot_index]);
+                const bool completed = process_job(slots[slot_index]);
+                if (completed && slots[slot_index].type == JobType::StrRecord) {
+                    queue_report_source_change(slots[slot_index]);
+                }
                 if (lock_queue(50)) {
                     clear_slot(slots[slot_index]);
                     processing_job = false;
@@ -2452,6 +2494,8 @@ void task_entry(void *) {
                 }
             }
         }
+
+        if (deliver_report_source_change()) did_work = true;
 
         if (did_work) {
             // Recheck EDF before every step; bound consecutive work, not an SD call.
@@ -2625,6 +2669,18 @@ void begin() {
               storage_resources_ready ? "ready" : "recovering");
 }
 
+bool set_report_source_change_callback(ReportSourceChangeCallback callback,
+                                       void *context) {
+    if (!service_state.initialized) begin();
+    if (!service_state.initialized || !lock_queue(50)) return false;
+
+    report_source_change_callback = callback;
+    report_source_change_context = context;
+    unlock_queue();
+    wake_service_task();
+    return true;
+}
+
 bool request_mount() {
     if (!service_state.initialized || !service_state.available) return false;
 
@@ -2736,7 +2792,8 @@ bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
 bool enqueue_edf_str_record(const char *path,
                             const EdfHeaderInfo &info,
                             const EdfStrRecordView &record,
-                            bool replace_existing) {
+                            bool replace_existing,
+                            SleepDayId changed_day) {
     if (!valid_path(path) || edf_str_record_size() > AC_EDF_STORAGE_SLOT_BYTES) {
         return false;
     }
@@ -2744,6 +2801,7 @@ bool enqueue_edf_str_record(const char *path,
         [&](JobSlot &job) {
             job.type = JobType::StrRecord;
             job.str_replace_existing = replace_existing;
+            job.source_change_day = changed_day;
             copy_cstr(job.path, sizeof(job.path), path);
             copy_cstr(job.patient_id, sizeof(job.patient_id),
                       info.patient_id);

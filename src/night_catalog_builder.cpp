@@ -40,6 +40,7 @@ struct BuildNight {
     bool has_str = false;
     bool has_summary = false;
     bool has_fallback = false;
+    bool local_history = false;
     bool fallback_joins_summary = false;
     bool summary_metrics_valid = false;
     bool timezone_offset_valid = false;
@@ -792,6 +793,7 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
     fallback->source = source;
     fallback->time_adjust_ms = adjustment_ms;
     night->has_fallback = true;
+    night->local_history = source.local_history;
     return true;
 }
 
@@ -1296,6 +1298,9 @@ struct NightCatalogBuilder::Runtime {
         if (source.has_str) record.source_flags |= NIGHT_CATALOG_SOURCE_STR;
         if (source.has_fallback) {
             record.source_flags |= NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
+        }
+        if (source.local_history) {
+            record.source_flags |= NIGHT_CATALOG_SOURCE_LOCAL_HISTORY;
         }
 
         if (source.has_str) {

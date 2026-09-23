@@ -20,6 +20,9 @@ enum class AirMiniHistoryPhase : uint8_t {
     ReadingEdf,
     Saving,
     Finalizing,
+    ReadingReport,
+    BuildingReport,
+    SavingReport,
     RecordReady,
     Finishing,
     Complete,
@@ -75,6 +78,8 @@ private:
     void poll_transfer(uint32_t now_ms);
     void start_day();
     void poll_day();
+    void poll_report();
+    bool poll_publication();
 
     RpcRequestPort &rpc_;
     StorageReadPort *read_ = nullptr;

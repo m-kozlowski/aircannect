@@ -541,7 +541,7 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
         read.state == PreparedByteReadState::Data &&
         read.bytes == preserve_section_->data_size;
     const bool adjusted = payload_valid &&
-        (preserve_section_->kind != ReportFallbackSectionKind::Events ||
+        (!report_fallback_has_events(preserve_section_->kind) ||
          preserve_file_->time_adjust_ms == 0 ||
          report_adjust_event_payload(
              preserve_payload_,
@@ -553,7 +553,7 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
         return true;
     }
 
-    if (preserve_section_->kind == ReportFallbackSectionKind::Events) {
+    if (report_fallback_has_events(preserve_section_->kind)) {
         const size_t record_bytes = report_event_record_wire_size();
         const size_t record_count = read.bytes / record_bytes;
         for (size_t i = 0; i < record_count; ++i) {
@@ -591,7 +591,7 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
 bool ReportFallbackAcquisitionService::should_preserve(
     const NightCatalogFallbackSection &section) const {
     if (section.kind == ReportFallbackSectionKind::Series ||
-        section.kind == ReportFallbackSectionKind::Events) {
+        report_fallback_has_events(section.kind)) {
         return true;
     }
 

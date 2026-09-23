@@ -423,6 +423,16 @@ static void route_history_notification(void *context,
         payload);
 }
 
+static OperationAdmission route_report_source_change(
+    void *context,
+    const ReportSourceChange &change) {
+    ReportTask *task = static_cast<ReportTask *>(context);
+    if (!task) return OperationAdmission::Busy;
+    const OperationAdmission admission = task->publish_source_change(change);
+    return admission == OperationAdmission::Rejected
+        ? OperationAdmission::Busy : admission;
+}
+
 static bool history_transfer_active(void *context) {
     const auto *recorder = static_cast<const EdfRecorderManager *>(context);
     return recorder && recorder->history_active();
@@ -1362,6 +1372,13 @@ void setup() {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
+    if (!StorageService::set_report_source_change_callback(
+            route_report_source_change, &report_task)) {
+        Log::logf(CAT_REPORT, LOG_ERROR,
+                  "report source change callback registration failed\n");
+    }
+    edf_recorder_manager.set_str_summary_refresh_source_change_callback(
+        route_report_source_change, &report_task);
     if (!report_preferences_service.begin(
             StorageService::read_port(),
             StorageService::atomic_write_port())) {

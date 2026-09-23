@@ -64,7 +64,13 @@ enum class ReportFallbackSectionKind : uint8_t {
     Series = 1,
     Events = 2,
     Unavailable = 3,
+    PartialEvents = 4,
 };
+
+constexpr bool report_fallback_has_events(ReportFallbackSectionKind kind) {
+    return kind == ReportFallbackSectionKind::Events ||
+           kind == ReportFallbackSectionKind::PartialEvents;
+}
 
 struct ReportSourceDef {
     ReportSourceId id;

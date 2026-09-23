@@ -165,6 +165,8 @@ public:
         SleepDayId end_day,
         uint32_t generation);
     const EdfStrSummaryRefreshStatus &str_summary_refresh_status() const;
+    void set_str_summary_refresh_source_change_callback(
+        ReportSourceChangeCallback callback, void *context);
 
     OperationAdmission request_airmini_history(SleepDayId start_day,
                                                SleepDayId end_day,
@@ -370,7 +372,8 @@ private:
     void handle_identification_response(RpcPayloadView payload);
     bool write_str_day_record();
     bool write_str_day_record(const EdfStrSessionAccumulator &record,
-                              bool replace_existing = false);
+                              bool replace_existing = false,
+                              bool notify_report_source_change = false);
     void poll_airmini_history(uint32_t now_ms);
 
     // device time

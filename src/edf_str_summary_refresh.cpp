@@ -149,9 +149,18 @@ void EdfStrSummaryRefresh::begin(ReportSpoolPort &spool_port,
                                  StorageAtomicWritePort &write_port,
                                  StoragePathPort &path_port) {
     clear_work();
+    source_change_pending_ = false;
+    pending_source_change_ = {};
     spool_port_ = &spool_port;
     storage_file_.begin(read_port, write_port, path_port);
     status_ = {};
+}
+
+void EdfStrSummaryRefresh::set_source_change_callback(
+    ReportSourceChangeCallback callback,
+    void *context) {
+    source_change_callback_ = callback;
+    source_change_context_ = context;
 }
 
 OperationAdmission EdfStrSummaryRefresh::request(SleepDayId start_day,
@@ -162,7 +171,9 @@ OperationAdmission EdfStrSummaryRefresh::request(SleepDayId start_day,
         end_day.epoch_days() > INT16_MAX || generation == 0) {
         return OperationAdmission::Rejected;
     }
-    if (status_.active()) return OperationAdmission::Busy;
+    if (status_.active() || source_change_pending_) {
+        return OperationAdmission::Busy;
+    }
 
     clear_work();
     status_ = {};
@@ -384,7 +395,10 @@ void EdfStrSummaryRefresh::finish_update() {
 }
 
 void EdfStrSummaryRefresh::poll() {
-    if (!status_.active()) return;
+    if (!status_.active()) {
+        (void)deliver_source_change();
+        return;
+    }
 
     if (status_.state == EdfStrSummaryRefreshState::FetchingSummary) {
         ReportSpoolFetchRound round;
@@ -488,7 +502,17 @@ void EdfStrSummaryRefresh::poll() {
             fail(storage_file_.error());
             return;
         }
-        if (result == StorageFileClientResult::Ready) finish();
+        if (result == StorageFileClientResult::Ready) {
+            source_change_pending_ = status_.updated != 0;
+            if (source_change_pending_) {
+                pending_source_change_ = {
+                    status_.start_day,
+                    status_.end_day,
+                    0};
+            }
+            finish();
+            (void)deliver_source_change();
+        }
     }
 }
 
@@ -505,6 +529,20 @@ void EdfStrSummaryRefresh::fail(const char *error) {
              sizeof(status_.error),
              "%s",
              error && error[0] ? error : "str_refresh_failed");
+}
+
+bool EdfStrSummaryRefresh::deliver_source_change() {
+    if (!source_change_pending_ || !source_change_callback_) return false;
+
+    if (source_change_callback_(source_change_context_,
+                                pending_source_change_) !=
+        OperationAdmission::Accepted) {
+        return false;
+    }
+
+    source_change_pending_ = false;
+    pending_source_change_ = {};
+    return true;
 }
 
 void EdfStrSummaryRefresh::clear_work() {

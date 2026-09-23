@@ -737,21 +737,14 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
         roots[root_count++] = {runtime_->metadata_root, true};
         roots[root_count++] = {"/STR.edf", false};
 
-        const NightCatalogRecord *previous_night =
-            runtime_->previous_catalog->find(target.sleep_day);
-
-        if (previous_night &&
-            (previous_night->source_flags &
-             NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) {
-            if (!report_fallback_artifact_path(target.sleep_day,
-                                               runtime_->fallback_root,
-                                               sizeof(runtime_->fallback_root))) {
-                reset_transient();
-                return OperationAdmission::Rejected;
-            }
-
-            roots[root_count++] = {runtime_->fallback_root, false};
+        // A source-change hint may refer to the first historical import.
+        if (!report_fallback_artifact_path(target.sleep_day,
+                                           runtime_->fallback_root,
+                                           sizeof(runtime_->fallback_root))) {
+            reset_transient();
+            return OperationAdmission::Rejected;
         }
+        roots[root_count++] = {runtime_->fallback_root, false};
     } else {
         roots[root_count++] = {"/DATALOG", true};
         roots[root_count++] = {EDF_SESSION_METADATA_ROOT, true};
@@ -1420,11 +1413,14 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
     out.metadata_bytes = static_cast<uint32_t>(info.metadata_bytes);
     out.source_timezone_offset_minutes = info.timezone_offset_minutes;
     out.source_timezone_offset_valid = info.timezone_offset_valid;
+    out.coordinates_are_resolved = info.canonical_clock;
+    out.retain_with_edf = info.canonical_clock;
+    out.local_history = info.canonical_clock;
     const NightCatalog *previous_catalog = runtime.previous_fallback
         ? runtime.previous_fallback.get()
         : runtime.previous_catalog.get();
 
-    if (previous_catalog) {
+    if (previous_catalog && !info.canonical_clock) {
         const NightCatalogRecord *previous_night =
             previous_catalog->find(info.sleep_day);
         size_t previous_count = 0;

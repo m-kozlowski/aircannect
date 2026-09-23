@@ -122,6 +122,7 @@ struct NightCatalogFallbackInput {
     bool resolved_timezone_offset_valid = false;
     bool coordinates_are_resolved = false;
     bool retain_with_edf = false;
+    bool local_history = false;
 };
 
 struct NightCatalogBuildInput {

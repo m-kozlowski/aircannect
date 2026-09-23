@@ -11,6 +11,7 @@
 #include "edf_file_writer.h"
 #include "file_log_sink_port.h"
 #include "runtime_snapshots.h"
+#include "report_source_change.h"
 #include "storage_archive_port.h"
 #include "storage_admission.h"
 #include "storage_atomic_write_port.h"
@@ -146,6 +147,11 @@ public:
 
 namespace StorageService {
 
+// Called from the storage task after a replacement STR record has been
+// durably published. Busy admission keeps the bounded notification pending.
+bool set_report_source_change_callback(ReportSourceChangeCallback callback,
+                                       void *context);
+
 // lifecycle
 void begin();
 bool request_mount();
@@ -170,7 +176,8 @@ bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
 bool enqueue_edf_str_record(const char *path,
                             const EdfHeaderInfo &info,
                             const EdfStrRecordView &record,
-                            bool replace_existing = false);
+                            bool replace_existing = false,
+                            SleepDayId changed_day = {});
 
 // EDF metadata and closes
 bool enqueue_edf_identification_files(const std::string &json);

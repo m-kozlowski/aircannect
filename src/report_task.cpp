@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "board_report.h"
+#include "edf_file_inventory.h"
 #include "night_catalog_builder.h"
 #include "night_catalog_capture.h"
 #include "report_fallback_artifact.h"
@@ -63,6 +64,7 @@ struct PendingCatalogRefresh {
     int32_t current_offset_minutes = 0;
     bool summary_attempted = false;
     bool post_therapy = false;
+    bool source_change = false;
     NightCatalogRefreshTarget target;
 
     bool valid() const { return generation != 0; }
@@ -149,7 +151,53 @@ void advance_retry(uint8_t &attempt) {
 bool local_source_available(const NightCatalogRecord &night) {
     return (night.source_flags &
             (NIGHT_CATALOG_SOURCE_EDF |
-             NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK)) != 0;
+             NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
+             NIGHT_CATALOG_SOURCE_LOCAL_HISTORY)) != 0;
+}
+
+NightCatalogRefreshTarget source_change_target(
+    const NightCatalog *catalog,
+    SleepDayId day) {
+    NightCatalogRefreshTarget target;
+    target.sleep_day = day;
+
+    // Canonical sleep days and device DATALOG directories can differ. Keep
+    // the existing EDF directory when this night already has EDF provenance.
+    const NightCatalogRecord *night = catalog ? catalog->find(day) : nullptr;
+    if (night && (night->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
+        night->sources_external) {
+        return target;
+    }
+    size_t file_count = 0;
+    const NightCatalogSourceFile *files = night && catalog
+        ? catalog->files(*night, file_count) : nullptr;
+    for (size_t i = 0; files && i < file_count; ++i) {
+        const char *path = catalog->path(files[i]);
+        EdfInventoryEntry entry;
+        if (!path || !edf_inventory_describe_path(path, entry) ||
+            entry.sleep_day[0] == '\0') continue;
+        if (target.datalog_sleep_day[0] == '\0') {
+            copy_cstr(target.datalog_sleep_day,
+                      sizeof(target.datalog_sleep_day), entry.sleep_day);
+        } else if (strcmp(target.datalog_sleep_day, entry.sleep_day) != 0) {
+            // One canonical night can span multiple raw DATALOG directories.
+            // A targeted scan cannot represent that without dropping files.
+            target.datalog_sleep_day[0] = '\0';
+            return target;
+        }
+    }
+
+    if (target.datalog_sleep_day[0] != '\0') return target;
+
+    if (night && (night->source_flags & NIGHT_CATALOG_SOURCE_EDF)) {
+        return target;
+    }
+
+    if (!day.format_yyyymmdd(target.datalog_sleep_day,
+                             sizeof(target.datalog_sleep_day))) {
+        target = {};
+    }
+    return target;
 }
 
 int64_t align_block_start(int64_t timestamp_ms) {
@@ -466,6 +514,45 @@ struct ReportTask::Runtime {
         unlock();
         wake();
         return OperationAdmission::Accepted;
+    }
+
+    OperationAdmission publish_source_change(
+        const ReportSourceChange &change) {
+        if (!change.valid()) return OperationAdmission::Rejected;
+        if (!lock()) return OperationAdmission::Busy;
+
+        ReportSourceChange stamped = change;
+        source_change_revision = increment_generation(
+            source_change_revision);
+        stamped.revision = source_change_revision;
+        merge_report_source_change(pending_source_changes,
+                                   pending_source_change_count,
+                                   stamped);
+
+        control.background_active = true;
+        unlock();
+        wake();
+        return OperationAdmission::Accepted;
+    }
+
+    bool apply_pending_source_changes() {
+        ReportSourceChange pending[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
+        size_t pending_count = 0;
+        if (!lock()) return false;
+
+        pending_count = pending_source_change_count;
+        for (size_t i = 0; i < pending_count; ++i) {
+            pending[i] = pending_source_changes[i];
+        }
+        pending_source_change_count = 0;
+        unlock();
+
+        for (size_t i = 0; i < pending_count; ++i) {
+            merge_report_source_change(source_changes,
+                                       source_change_count,
+                                       pending[i]);
+        }
+        return pending_count != 0;
     }
 
     std::shared_ptr<const ReportPublishedState> published_state() const {
@@ -845,13 +932,17 @@ struct ReportTask::Runtime {
                 pending_refresh.target = refresh_target;
                 pending_refresh.summary_attempted = true;
                 pending_refresh.post_therapy = refresh_post_therapy;
+                pending_refresh.source_change = refresh_source_change;
             } else {
                 pending_refresh.post_therapy =
                     pending_refresh.post_therapy || refresh_post_therapy;
+                pending_refresh.source_change =
+                    pending_refresh.source_change || refresh_source_change;
             }
             catalog_refresh.cancel();
             refresh_generation = 0;
             refresh_post_therapy = false;
+            refresh_source_change = false;
         }
         if (store_catalog_loader.status().active()) {
             store_catalog_loader.cancel();
@@ -920,6 +1011,7 @@ struct ReportTask::Runtime {
                           int32_t offset_minutes,
                           const NightCatalogRefreshTarget &target,
                           bool post_therapy,
+                          bool source_change = false,
                           bool reset_post_therapy_deadline = false) {
         if (pending_refresh.valid()) {
             const bool same_target = same_refresh_target(
@@ -937,6 +1029,8 @@ struct ReportTask::Runtime {
             pending_refresh.current_offset_minutes = offset_minutes;
             pending_refresh.post_therapy =
                 pending_refresh.post_therapy || post_therapy;
+            pending_refresh.source_change =
+                pending_refresh.source_change || source_change;
             return;
         }
 
@@ -944,9 +1038,77 @@ struct ReportTask::Runtime {
         pending_refresh.due_ms = due_ms;
         pending_refresh.current_offset_valid = offset_valid;
         pending_refresh.current_offset_minutes = offset_minutes;
-        pending_refresh.summary_attempted = target.valid() && catalog;
+        pending_refresh.summary_attempted = source_change ||
+            (target.valid() && catalog);
         pending_refresh.post_therapy = post_therapy;
+        pending_refresh.source_change = source_change;
         pending_refresh.target = target;
+    }
+
+    bool schedule_source_change_refresh(uint32_t now_ms,
+                                        bool local_blocked,
+                                        bool startup_allowed) {
+        if (source_change_count == 0 || local_blocked || !startup_allowed ||
+            !catalog || pending_refresh.valid() || refresh_generation != 0 ||
+            summary_acquisition.active() || catalog_refresh.active() ||
+            catalog_load_pending || !catalog_storage_ready() ||
+            pending_catalog_save || pending_catalog_save_source_change ||
+            store_purpose != CatalogStorePurpose::None) {
+            return false;
+        }
+
+        ReportSourceChange covered = source_changes[0];
+        bool full_local_refresh = false;
+        for (size_t i = 0; i < source_change_count; ++i) {
+            const ReportSourceChange &change = source_changes[i];
+            covered.merge(change);
+
+            const NightCatalogRefreshTarget candidate =
+                source_change_target(catalog.get(), change.first_day);
+            if (candidate.sleep_day.valid() && !candidate.valid()) {
+                full_local_refresh = true;
+            }
+        }
+
+        NightCatalogRefreshTarget target =
+            source_change_target(catalog.get(), source_changes[0].first_day);
+        if (!target.sleep_day.valid()) {
+            consume_source_change_coverage(source_changes[0]);
+            return true;
+        }
+
+        if (full_local_refresh) {
+            // A canonical night can map to more than one raw DATALOG day, or
+            // the catalog may keep its EDF files outside the runtime index.
+            // One local scan covers all notifications accepted in this pass;
+            // do not turn a multi-day range into one full scan per day.
+            source_changes[0] = covered;
+            source_change_count = 1;
+            target = {};
+        }
+
+        (void)engine.cancel_background();
+        cancel_signal_tile_backfill();
+
+        bool offset_valid = false;
+        int32_t offset_minutes = 0;
+        if (lock()) {
+            offset_valid = timezone_offset_valid;
+            offset_minutes = timezone_offset_minutes;
+            unlock();
+        }
+        schedule_refresh(now_ms,
+                         offset_valid,
+                         offset_minutes,
+                         target,
+                         false,
+                         true);
+        refresh_source_change_covered = full_local_refresh
+            ? covered
+            : ReportSourceChange{source_changes[0].first_day,
+                                  source_changes[0].first_day,
+                                  source_changes[0].revision};
+        return true;
     }
 
     bool apply_pending_refresh_inputs(uint32_t now_ms) {
@@ -1001,6 +1163,7 @@ struct ReportTask::Runtime {
                     offset_minutes,
                     session.target,
                     true,
+                    false,
                     true);
                 schedule_reconcile(
                     now_ms + CATALOG_RECONCILE_IDLE_MS,
@@ -1179,7 +1342,9 @@ struct ReportTask::Runtime {
     }
 
     bool schedule_post_therapy_build() {
-        if (!post_therapy_build.valid()) return false;
+        if (!post_therapy_build.valid()) {
+            return false;
+        }
 
         const NightCatalogRecord *night =
             catalog->find(post_therapy_build.sleep_day);
@@ -1210,6 +1375,79 @@ struct ReportTask::Runtime {
             post_therapy_build = {};
         }
         return true;
+    }
+
+    void clear_failures(ReportSourceChange covered) {
+        if (!covered.valid() || !lock(20)) return;
+
+        for (ReportNightFailureEntry &entry : failures) {
+            if (!entry.valid() || !entry.sleep_day.valid() ||
+                entry.sleep_day < covered.first_day ||
+                covered.last_day < entry.sleep_day) {
+                continue;
+            }
+            entry = {};
+        }
+        unlock();
+    }
+
+    bool consume_source_change_coverage(ReportSourceChange covered) {
+        if (!covered.valid()) return false;
+
+        size_t write = 0;
+        bool consumed = false;
+        for (size_t i = 0; i < source_change_count; ++i) {
+            ReportSourceChange change = source_changes[i];
+            if (change.revision > covered.revision ||
+                change.last_day < covered.first_day ||
+                covered.last_day < change.first_day) {
+                source_changes[write++] = change;
+                continue;
+            }
+
+            if (!(change.first_day < covered.first_day) &&
+                !(covered.last_day < change.last_day)) {
+                consumed = true;
+                continue;
+            }
+
+            if (change.first_day < covered.first_day &&
+                covered.last_day < change.last_day) {
+                // The worker normally consumes a queue prefix. Preserve the
+                // conservative whole entry if a future producer creates an
+                // interior overlap rather than splitting the bounded queue.
+                source_changes[write++] = change;
+                continue;
+            }
+
+            if (change.first_day < covered.first_day) {
+                SleepDayId last;
+                if (SleepDayId::from_epoch_days(
+                        covered.first_day.epoch_days() - 1, last)) {
+                    change.last_day = last;
+                    source_changes[write++] = change;
+                    consumed = true;
+                } else {
+                    source_changes[write++] = change;
+                }
+                continue;
+            }
+
+            SleepDayId first;
+            if (SleepDayId::from_epoch_days(
+                    covered.last_day.epoch_days() + 1, first)) {
+                change.first_day = first;
+                source_changes[write++] = change;
+                consumed = true;
+            } else {
+                source_changes[write++] = change;
+            }
+        }
+        for (size_t i = write; i < source_change_count; ++i) {
+            source_changes[i] = {};
+        }
+        source_change_count = write;
+        return consumed;
     }
 
     bool schedule_background(uint32_t now_ms) {
@@ -1478,7 +1716,6 @@ struct ReportTask::Runtime {
             completion.outcome.disposition ==
             OperationDisposition::Succeeded;
         const bool post_therapy = completion.request.artifact == post_therapy_build;
-
         if (completion.request.artifact == capture_build) {
             if (succeeded) {
                 capture_published_end_ms = capture_attempt_end_ms;
@@ -1735,6 +1972,7 @@ struct ReportTask::Runtime {
         if (!lock(0)) return;
         const size_t queued_commands = command_count;
         const uint32_t drops = command_drops;
+        const bool pending_source_changes = pending_source_change_count != 0;
         unlock();
 
         ReportTaskControlSnapshot next;
@@ -1757,7 +1995,9 @@ struct ReportTask::Runtime {
             catalog_refresh.active() || summary_acquisition.active() ||
             spool_availability_probe.status().active() ||
             pending_catalog_save != nullptr || pending_refresh.valid() ||
-            post_therapy_build.valid() || signal_tile_backfill_started;
+            post_therapy_build.valid() || signal_tile_backfill_started ||
+            source_change_count != 0 || pending_source_changes ||
+            pending_catalog_save_source_change;
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -1863,6 +2103,15 @@ struct ReportTask::Runtime {
     std::shared_ptr<const EdfStorageProgress> capture_attempt_progress;
 
     PendingCatalogRefresh pending_refresh;
+    ReportSourceChange pending_source_changes[
+        AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
+    size_t pending_source_change_count = 0;
+    ReportSourceChange source_changes[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
+    size_t source_change_count = 0;
+    bool pending_catalog_save_source_change = false;
+    ReportSourceChange pending_catalog_save_source;
+    ReportSourceChange refresh_source_change_covered;
+    uint32_t source_change_revision = 0;
     PendingSessionEnded pending_session_ended;
     bool pending_timezone_change = false;
     uint32_t last_sessions_ended = 0;
@@ -1879,6 +2128,7 @@ struct ReportTask::Runtime {
     int32_t refresh_offset_minutes = 0;
     NightCatalogRefreshTarget refresh_target;
     bool refresh_post_therapy = false;
+    bool refresh_source_change = false;
     uint32_t catalog_refresh_retry_at_ms = 0;
     uint8_t catalog_refresh_retry_attempt = 0;
     char catalog_refresh_logged_error[AC_STORAGE_ERROR_MAX] = {};
@@ -2105,6 +2355,14 @@ OperationAdmission ReportTask::publish_timezone_change(
         revision, offset_valid, offset_minutes);
 }
 
+OperationAdmission ReportTask::publish_source_change(
+    const ReportSourceChange &change) {
+    if (!runtime_ || !runtime_->initialized) {
+        return OperationAdmission::Rejected;
+    }
+    return runtime_->publish_source_change(change);
+}
+
 void ReportTask::publish_activity(const ActivitySnapshot &activity) {
     if (runtime_ && runtime_->initialized) {
         runtime_->publish_activity(activity);
@@ -2314,6 +2572,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     runtime.last_step_ms = now_ms;
 
     bool worked = runtime.apply_pending_refresh_inputs(now_ms);
+    worked = runtime.apply_pending_source_changes() || worked;
     if (!runtime.reconcile_deadline_initialized) {
         runtime.reconcile_pending = true;
         runtime.reconcile_due_ms = now_ms + CATALOG_RECONCILE_IDLE_MS;
@@ -2441,6 +2700,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         runtime.catalog_store_save_generation &&
                     status.generation == runtime.catalog_store_save_generation;
                 if (saved_latest) {
+                    const bool source_change_saved =
+                        runtime.pending_catalog_save_source_change;
+                    const ReportSourceChange source_change =
+                        runtime.pending_catalog_save_source;
                     if (runtime.engine.status().state == ReportEngineState::Idle) {
                         runtime.catalog = runtime.catalog_store.snapshot();
                         runtime.engine.publish_catalog(runtime.catalog);
@@ -2451,6 +2714,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.pending_catalog_save.reset();
                     runtime.pending_catalog_save_generation = 0;
                     runtime.pending_catalog_save_post_therapy = false;
+                    runtime.pending_catalog_save_source_change = false;
+                    runtime.pending_catalog_save_source = {};
+                    if (source_change_saved) {
+                        runtime.clear_failures(source_change);
+                        runtime.consume_source_change_coverage(source_change);
+                        runtime.refresh_source_change_covered = {};
+                        runtime.reset_background_pass();
+                    }
                 }
                 runtime.catalog_store_retry_at_ms = 0;
                 runtime.catalog_store_retry_attempt = 0;
@@ -2504,6 +2775,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     worked = runtime.materialize_due_reconcile(now_ms) || worked;
+    worked = runtime.schedule_source_change_refresh(
+        now_ms, local_blocked, startup_allowed) || worked;
 
     if (runtime.summary_acquisition.active()) {
         worked = runtime.summary_acquisition.poll() || worked;
@@ -2567,6 +2840,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         : ReportArtifactKey{};
                 }
 
+                if (runtime.refresh_source_change) {
+                    runtime.pending_catalog_save_source_change = true;
+                    runtime.pending_catalog_save_source =
+                        runtime.refresh_source_change_covered;
+                }
+
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
                 runtime.catalog_refresh_logged_error[0] = '\0';
@@ -2583,15 +2862,35 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.pending_refresh.summary_attempted = true;
                     runtime.pending_refresh.post_therapy =
                         runtime.refresh_post_therapy;
+                    runtime.pending_refresh.source_change =
+                        runtime.refresh_source_change;
                 } else {
                     runtime.pending_refresh.post_therapy =
                         runtime.pending_refresh.post_therapy ||
                         runtime.refresh_post_therapy;
+                    runtime.pending_refresh.source_change =
+                        runtime.pending_refresh.source_change ||
+                        runtime.refresh_source_change;
                 }
                 runtime.catalog_refresh_retry_at_ms =
                     now_ms + retry_delay(
                                  runtime.catalog_refresh_retry_attempt);
                 advance_retry(runtime.catalog_refresh_retry_attempt);
+            } else if (runtime.refresh_source_change) {
+                if (!runtime.pending_refresh.valid()) {
+                    runtime.pending_refresh.generation = runtime.refresh_generation;
+                    runtime.pending_refresh.due_ms =
+                        now_ms + CATALOG_RETRY_MAX_MS;
+                    runtime.pending_refresh.current_offset_valid =
+                        runtime.refresh_offset_valid;
+                    runtime.pending_refresh.current_offset_minutes =
+                        runtime.refresh_offset_minutes;
+                    runtime.pending_refresh.summary_attempted = true;
+                    runtime.pending_refresh.source_change = true;
+                    runtime.pending_refresh.target = runtime.refresh_target;
+                }
+                runtime.catalog_refresh_retry_at_ms =
+                    now_ms + CATALOG_RETRY_MAX_MS;
             } else {
                 if (runtime.refresh_post_therapy ||
                     runtime.refresh_target.valid()) {
@@ -2614,6 +2913,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.refresh_generation = 0;
             runtime.refresh_target = {};
             runtime.refresh_post_therapy = false;
+            runtime.refresh_source_change = false;
             worked = true;
         }
     }
@@ -2630,7 +2930,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         deadline_due(now_ms, runtime.pending_refresh.due_ms) &&
         deadline_due(now_ms, runtime.catalog_refresh_retry_at_ms)) {
         std::shared_ptr<const NightCatalogSummarySnapshot> summary =
-            runtime.summary_acquisition.snapshot();
+            runtime.pending_refresh.source_change
+                ? nullptr : runtime.summary_acquisition.snapshot();
         if (summary && runtime.catalog &&
             runtime.summary_acquisition.status().state ==
                 ReportSummaryAcquisitionState::Ready &&
@@ -2659,6 +2960,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.refresh_target = runtime.pending_refresh.target;
             runtime.refresh_post_therapy =
                 runtime.pending_refresh.post_therapy;
+            runtime.refresh_source_change =
+                runtime.pending_refresh.source_change;
             runtime.pending_refresh.clear();
             runtime.catalog_refresh_retry_at_ms = 0;
         } else if (admitted == OperationAdmission::Rejected) {

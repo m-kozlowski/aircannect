@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "airmini_history_data.h"
+#include "airmini_history_report.h"
 #include "edf_bytes.h"
 #include "edf_day_statistics.h"
 #include "edf_str_file_layout.h"
@@ -61,6 +62,8 @@ struct AirMiniHistoryService::Runtime {
     EdfStrSessionAccumulator output;
     AirMiniHistoryProjectionInput projection_input;
     AirMiniHistoryStrProjection projection;
+    AirMiniHistoryReportBuilder report;
+    uint64_t report_identity = 1;
     bool seed_valid = false;
     As11ClockTransform clock;
     int32_t timezone_minutes = 0;
@@ -98,6 +101,9 @@ const char *airmini_history_phase_name(AirMiniHistoryPhase phase) {
         case AirMiniHistoryPhase::ReadingEdf: return "reading_edf";
         case AirMiniHistoryPhase::Saving: return "saving";
         case AirMiniHistoryPhase::Finalizing: return "finalizing";
+        case AirMiniHistoryPhase::ReadingReport: return "reading_report";
+        case AirMiniHistoryPhase::BuildingReport: return "building_report";
+        case AirMiniHistoryPhase::SavingReport: return "saving_report";
         case AirMiniHistoryPhase::RecordReady: return "record_ready";
         case AirMiniHistoryPhase::Finishing: return "finishing";
         case AirMiniHistoryPhase::Complete: return "complete";
@@ -546,28 +552,7 @@ void AirMiniHistoryService::poll_day() {
     }
 
     if (status_.phase == AirMiniHistoryPhase::Saving) {
-        if (!work.write_ticket.valid()) {
-            StorageAtomicWriteCommand command;
-            command.path = work.path;
-            command.bytes = work.publication;
-            command.generation = status_.generation;
-            const auto submitted = write_->request_write(command);
-            if (submitted.admission == OperationAdmission::Busy) return;
-            if (!submitted.accepted()) {
-                finish("history_write_rejected");
-                return;
-            }
-            work.write_ticket = submitted.ticket;
-            return;
-        }
-        StorageAtomicWriteCompletion completion;
-        if (!write_->take_completion(work.write_ticket, completion)) return;
-        work.write_ticket = {};
-        work.publication.reset();
-        if (completion.outcome.disposition != OperationDisposition::Succeeded) {
-            finish(completion.error);
-            return;
-        }
+        if (!poll_publication()) return;
 
         work.projection_input = {};
         AirMiniHistoryProjectionInput &input = work.projection_input;
@@ -610,8 +595,134 @@ void AirMiniHistoryService::poll_day() {
             record_published();
             return;
         }
+        if (work.projection.sessions.empty()) {
+            status_.phase = AirMiniHistoryPhase::RecordReady;
+            return;
+        }
+
+        if (!report_fallback_artifact_path(status_.current_day,
+                                           work.path, sizeof(work.path))) {
+            finish("history_report_path_invalid");
+            return;
+        }
+        work.report_identity = 1;
+        status_.phase = AirMiniHistoryPhase::ReadingReport;
+        return;
+    }
+
+    poll_report();
+}
+
+void AirMiniHistoryService::poll_report() {
+    Runtime &work = *runtime_;
+    if (status_.phase == AirMiniHistoryPhase::ReadingReport) {
+        if (!work.read_ticket.valid() && !work.prepared.valid()) {
+            StorageReadCommand command;
+            command.path = work.path;
+            command.length = ReportFallbackArtifactCodec::HeaderBytes;
+            command.generation = status_.generation;
+            command.lane = StorageReadLane::Maintenance;
+            const auto submitted = read_->request_read(command);
+            if (submitted.admission == OperationAdmission::Busy) return;
+            if (!submitted.accepted()) {
+                finish("history_report_read_rejected");
+                return;
+            }
+            work.read_ticket = submitted.ticket;
+            return;
+        }
+
+        if (work.read_ticket.valid()) {
+            StorageReadCompletion completion;
+            if (!read_->take_completion(work.read_ticket, completion)) return;
+            work.read_ticket = {};
+            if (completion.outcome.disposition != OperationDisposition::Succeeded) {
+                if (completion.prepared.valid()) read_->release_prepared(completion.prepared);
+                if (strcmp(completion.error, "read_not_found") != 0) {
+                    finish(completion.error);
+                    return;
+                }
+            } else {
+                work.prepared = completion.prepared;
+            }
+        }
+
+        if (work.prepared.valid()) {
+            const auto view = read_->view_prepared(work.prepared);
+            if (view.state == PreparedByteReadState::Retry) return;
+            ReportFallbackArtifactInfo previous;
+            const bool accepted = view.valid() &&
+                ReportFallbackArtifactCodec::inspect_header(view.data, view.length, previous);
+            read_->release_prepared(work.prepared);
+            work.prepared = {};
+
+            // A legacy spool may be the only remaining copy of AS11 data.
+            if (!accepted || !previous.canonical_clock ||
+                previous.sleep_day != status_.current_day ||
+                previous.content_identity == UINT64_MAX) {
+                finish("history_report_source_conflict");
+                return;
+            }
+            work.report_identity = previous.content_identity + 1;
+        }
+
+        if (!work.report.start(work.projection_input, work.projection,
+                               work.report_identity)) {
+            finish(airmini_history_report_error_name(work.report.error()));
+            return;
+        }
+        status_.phase = AirMiniHistoryPhase::BuildingReport;
+        return;
+    }
+
+    if (status_.phase == AirMiniHistoryPhase::BuildingReport) {
+        work.report.poll();
+        if (work.report.failed()) {
+            finish(airmini_history_report_error_name(work.report.error()));
+            return;
+        }
+        if (!work.report.ready()) return;
+        work.publication = work.report.result();
+        if (!work.publication) {
+            status_.phase = AirMiniHistoryPhase::RecordReady;
+            return;
+        }
+        status_.phase = AirMiniHistoryPhase::SavingReport;
+        return;
+    }
+
+    if (status_.phase == AirMiniHistoryPhase::SavingReport) {
+        if (!poll_publication()) return;
         status_.phase = AirMiniHistoryPhase::RecordReady;
     }
+}
+
+bool AirMiniHistoryService::poll_publication() {
+    Runtime &work = *runtime_;
+    if (!work.write_ticket.valid()) {
+        StorageAtomicWriteCommand command;
+        command.path = work.path;
+        command.bytes = work.publication;
+        command.generation = status_.generation;
+        const auto submitted = write_->request_write(command);
+        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (!submitted.accepted()) {
+            finish("history_write_rejected");
+            return false;
+        }
+        work.write_ticket = submitted.ticket;
+        return false;
+    }
+
+    StorageAtomicWriteCompletion completion;
+    if (!write_->take_completion(work.write_ticket, completion)) return false;
+    work.write_ticket = {};
+    work.publication.reset();
+    if (completion.outcome.disposition != OperationDisposition::Succeeded) {
+        finish(completion.error);
+        return false;
+    }
+    return true;
 }
 
 void AirMiniHistoryService::poll(uint32_t now_ms, bool rpc_available,

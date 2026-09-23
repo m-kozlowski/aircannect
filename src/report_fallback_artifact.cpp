@@ -27,6 +27,9 @@ constexpr uint8_t FILE_MAGIC_V5[8] = {
 constexpr uint8_t FILE_MAGIC_V6[8] = {
     'A', 'C', 'F', 'B', 'A', 'C', 'K', '6',
 };
+constexpr uint8_t FILE_MAGIC_V7[8] = {
+    'A', 'C', 'F', 'B', 'A', 'C', 'K', '7',
+};
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
 constexpr size_t TIMEZONE_OFFSET = 28;
 constexpr size_t IDENTITY_OFFSET = 56;
@@ -118,7 +121,7 @@ bool section_input_valid(const ReportFallbackSectionInput &section) {
                    REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 &&
                section.payload_size > 0;
     }
-    if (section.kind == ReportFallbackSectionKind::Events) {
+    if (report_fallback_has_events(section.kind)) {
         const size_t record_bytes = report_event_record_wire_size();
         if (section.record_count > SIZE_MAX / record_bytes) return false;
         const size_t expected =
@@ -185,7 +188,7 @@ void encode_section(uint8_t *out,
                     uint64_t data_offset) {
     out[0] = static_cast<uint8_t>(section.kind);
     out[1] = static_cast<uint8_t>(section.source);
-    out[2] = section.kind != ReportFallbackSectionKind::Events
+    out[2] = !report_fallback_has_events(section.kind)
         ? static_cast<uint8_t>(section.signal)
         : NO_SIGNAL;
     out[3] = section.event_mask;
@@ -269,14 +272,15 @@ bool ReportFallbackArtifactCodec::inspect_header(
     info = {};
     if (!header || header_length < HeaderBytes ||
         (get_le16(header + 8) != LegacyVersion &&
-         get_le16(header + 8) != Version)) {
+         get_le16(header + 8) != Version &&
+         get_le16(header + 8) != CanonicalClockVersion)) {
         return false;
     }
 
     const uint16_t version = get_le16(header + 8);
     const uint8_t *magic = version == LegacyVersion
         ? FILE_MAGIC_V5
-        : FILE_MAGIC_V6;
+        : (version == CanonicalClockVersion ? FILE_MAGIC_V7 : FILE_MAGIC_V6);
     if (memcmp(header, magic, sizeof(FILE_MAGIC_V5)) != 0 ||
         get_le16(header + 10) != HeaderBytes ||
         get_le16(header + 12) != SessionBytes ||
@@ -329,6 +333,7 @@ bool ReportFallbackArtifactCodec::inspect_header(
     }
 
     info.sleep_day = sleep_day;
+    info.canonical_clock = version == CanonicalClockVersion;
     info.day_start_ms = day_start_ms;
     info.day_end_ms = day_end_ms;
     info.content_identity = content_identity;
@@ -488,7 +493,8 @@ bool ReportFallbackArtifactBuilder::begin(
     const NightCatalogTimeRange *sessions,
     size_t session_count,
     bool timezone_valid,
-    int32_t timezone_minutes) {
+    int32_t timezone_minutes,
+    bool canonical_clock) {
     reset();
     if (!sleep_day.valid() || identity == 0 || day_start_ms <= 0 ||
         day_end_ms <= day_start_ms ||
@@ -521,6 +527,7 @@ bool ReportFallbackArtifactBuilder::begin(
     day_end_ms_ = day_end_ms;
     timezone_offset_minutes_ = timezone_minutes;
     timezone_offset_valid_ = timezone_valid;
+    canonical_clock_ = canonical_clock;
     session_count_ = session_count;
     return true;
 }
@@ -533,6 +540,7 @@ void ReportFallbackArtifactBuilder::reset() {
     day_end_ms_ = 0;
     timezone_offset_minutes_ = 0;
     timezone_offset_valid_ = false;
+    canonical_clock_ = false;
     session_count_ = 0;
     section_count_ = 0;
     payload_bytes_ = 0;
@@ -715,8 +723,11 @@ ReportFallbackArtifactBuilder::finish() {
         put_le64(record + 32, old_offset - payload_shift);
     }
 
-    memcpy(header, FILE_MAGIC_V6, sizeof(FILE_MAGIC_V6));
-    put_le16(header + 8, ReportFallbackArtifactCodec::Version);
+    memcpy(header, canonical_clock_ ? FILE_MAGIC_V7 : FILE_MAGIC_V6,
+           sizeof(FILE_MAGIC_V6));
+    put_le16(header + 8, canonical_clock_
+        ? ReportFallbackArtifactCodec::CanonicalClockVersion
+        : ReportFallbackArtifactCodec::Version);
     put_le16(header + 10, ReportFallbackArtifactCodec::HeaderBytes);
     put_le16(header + 12, ReportFallbackArtifactCodec::SessionBytes);
     put_le16(header + 14, ReportFallbackArtifactCodec::SectionBytes);

@@ -53,6 +53,8 @@ struct ReportFallbackArtifactInfo {
     size_t total_bytes = 0;
     int32_t timezone_offset_minutes = 0;
     bool timezone_offset_valid = false;
+    // Already mapped through capture provenance; never rebase using Summary.
+    bool canonical_clock = false;
 };
 
 struct ReportFallbackArtifactView {
@@ -68,6 +70,7 @@ class ReportFallbackArtifactCodec {
 public:
     static constexpr uint16_t LegacyVersion = 5;
     static constexpr uint16_t Version = 6;
+    static constexpr uint16_t CanonicalClockVersion = 7;
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t SectionBytes = 48;
@@ -106,7 +109,8 @@ public:
                const NightCatalogTimeRange *sessions,
                size_t session_count,
                bool timezone_offset_valid = false,
-               int32_t timezone_offset_minutes = 0);
+               int32_t timezone_offset_minutes = 0,
+               bool canonical_clock = false);
     void reset();
 
     bool append_section(const ReportFallbackSectionInput &section);
@@ -135,6 +139,7 @@ private:
     size_t reserved_payload_offset_ = 0;
     bool section_reserved_ = false;
     bool timezone_offset_valid_ = false;
+    bool canonical_clock_ = false;
 };
 
 bool report_fallback_artifact_path(SleepDayId sleep_day,

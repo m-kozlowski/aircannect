@@ -331,6 +331,15 @@ OperationAdmission EdfRecorderManager::request_str_summary_refresh(
     return admission;
 }
 
+void EdfRecorderManager::set_str_summary_refresh_source_change_callback(
+    ReportSourceChangeCallback callback,
+    void *context) {
+    if (cold_) {
+        cold_->str_summary_refresh.set_source_change_callback(callback,
+                                                              context);
+    }
+}
+
 const EdfStrSummaryRefreshStatus &
 EdfRecorderManager::str_summary_refresh_status() const {
     static const EdfStrSummaryRefreshStatus unavailable;
@@ -396,7 +405,8 @@ void EdfRecorderManager::poll_airmini_history(uint32_t now_ms) {
     }
 
     const EdfStrSessionAccumulator *record = cold_->history.record();
-    if (record && write_str_day_record(*record, true)) {
+    if (record && write_str_day_record(
+            *record, true, !post_therapy_history_pending_)) {
         cold_->history.record_published();
     }
     if (was_active && !history_active()) {
@@ -2370,7 +2380,8 @@ bool EdfRecorderManager::write_str_day_record() {
 
 bool EdfRecorderManager::write_str_day_record(
     const EdfStrSessionAccumulator &accumulator,
-    bool replace_existing) {
+    bool replace_existing,
+    bool notify_report_source_change) {
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     if (!edf_str_path(path, sizeof(path))) {
         set_error("str_path_failed");
@@ -2402,8 +2413,16 @@ bool EdfRecorderManager::write_str_day_record(
     EdfStrRecordView record;
     record.digital_samples = accumulator.samples();
     record.sample_count = accumulator.sample_count();
+    SleepDayId changed_day;
+    if (notify_report_source_change &&
+        !SleepDayId::from_epoch_days(accumulator.day_epoch_days(),
+                                     changed_day)) {
+        set_error("str_source_day_failed");
+        return false;
+    }
     if (!StorageService::enqueue_edf_str_record(path, info, record,
-                                               replace_existing)) {
+                                               replace_existing,
+                                               changed_day)) {
         status_.str_enqueue_failures++;
         set_error("str_queue_failed");
         return false;

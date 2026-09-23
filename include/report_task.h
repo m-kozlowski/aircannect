@@ -13,6 +13,7 @@
 #include "report_signal_store.h"
 #include "report_signal_store_catalog.h"
 #include "report_signal_store_catalog_service.h"
+#include "report_source_change.h"
 #include "report_summary_acquisition.h"
 #include "runtime_snapshots.h"
 
@@ -240,6 +241,8 @@ public:
         uint32_t revision,
         bool offset_valid,
         int32_t offset_minutes);
+    OperationAdmission publish_source_change(
+        const ReportSourceChange &change);
     void publish_activity(const ActivitySnapshot &activity);
     void publish_capture_session(const EdfSessionMetadata &metadata);
 

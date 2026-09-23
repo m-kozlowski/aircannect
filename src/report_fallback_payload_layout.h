@@ -35,7 +35,7 @@ bool report_fallback_section_valid(const Section &section,
                section.payload_schema ==
                    REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
     }
-    if (section.kind == ReportFallbackSectionKind::Events) {
+    if (report_fallback_has_events(section.kind)) {
         const size_t record_bytes = report_event_record_wire_size();
         if (section.record_count > SIZE_MAX / record_bytes) return false;
 
