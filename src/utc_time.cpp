@@ -1,6 +1,7 @@
 #include "utc_time.h"
 
 #include <stdio.h>
+#include <time.h>
 
 #include "calendar_utils.h"
 
@@ -79,6 +80,29 @@ bool parse_utc_iso8601_ms(const char *text, int64_t &epoch_ms) {
 
     return utc_fields_to_epoch_ms(year, month, day, hour, minute, second,
                                   millisecond, epoch_ms);
+}
+
+bool format_utc_iso8601_ms(int64_t epoch_ms, char *out, size_t size) {
+    if (!out || size == 0) return false;
+    out[0] = 0;
+    if (epoch_ms < VALID_TIME_MIN_EPOCH * 1000) return false;
+
+    struct tm utc = {};
+    const time_t epoch = static_cast<time_t>(epoch_ms / 1000);
+    if (!gmtime_r(&epoch, &utc)) return false;
+
+    char base[25];
+    if (strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &utc) == 0) {
+        return false;
+    }
+
+    const int written = snprintf(out, size, "%s.%03dZ", base,
+                                  static_cast<int>(epoch_ms % 1000));
+    if (written < 0 || static_cast<size_t>(written) >= size) {
+        out[0] = 0;
+        return false;
+    }
+    return true;
 }
 
 }  // namespace aircannect

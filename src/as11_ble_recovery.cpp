@@ -189,13 +189,8 @@ void As11BleRecovery::capture_disconnect_boundary(
     const As11DeviceState &device,
     uint32_t now_ms) {
     int64_t boundary_ms = latest_activity_device_ms_;
-    int64_t sampled_device_ms = 0;
-    if (device.clock_valid() &&
-        parse_utc_iso8601_ms(device.device_datetime().c_str(),
-                             sampled_device_ms)) {
-        const uint32_t elapsed_ms = now_ms - device.clock_sample_ms();
-        const int64_t estimated_device_ms =
-            sampled_device_ms + static_cast<int64_t>(elapsed_ms);
+    int64_t estimated_device_ms = 0;
+    if (device.estimate_device_epoch_ms(now_ms, estimated_device_ms)) {
         boundary_ms = std::max(boundary_ms, estimated_device_ms);
     }
 

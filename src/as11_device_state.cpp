@@ -175,6 +175,7 @@ bool As11DeviceState::set_availability(As11Availability availability,
     availability_ = availability;
     if (availability == As11Availability::Unavailable) {
         therapy_state_ = As11TherapyState::Unknown;
+        runtime_event_state_ = As11TherapyState::Unknown;
         if (therapy_command_pending()) {
             clear_pending_therapy_command("device_unavailable", now_ms);
         }
@@ -302,21 +303,35 @@ bool As11DeviceState::apply_datetime_response(
     if (!json_variant_to_string(doc["result"]["dateTime"], text)) {
         return false;
     }
+
+    int64_t device_epoch_ms = 0;
+    if (!parse_utc_iso8601_ms(text.c_str(), device_epoch_ms)) return false;
+
     device_datetime_ = text;
     clock_valid_ = true;
     clock_sample_ms_ = now_ms;
-    int64_t device_epoch_ms = 0;
+    clock_device_epoch_ms_ = device_epoch_ms;
+
     int64_t esp_epoch_ms = 0;
-    if (parse_utc_iso8601_ms(text.c_str(), device_epoch_ms) &&
-        (response_midpoint_epoch_ms(request_epoch_ms, response_epoch_ms,
-                                    request_ms, response_ms, esp_epoch_ms) ||
-         current_epoch_ms(esp_epoch_ms))) {
+    if (response_midpoint_epoch_ms(request_epoch_ms, response_epoch_ms,
+                                   request_ms, response_ms, esp_epoch_ms) ||
+        current_epoch_ms(esp_epoch_ms)) {
         const int64_t offset = device_epoch_ms - esp_epoch_ms;
         clock_offset_ms_ = offset;
         clock_offset_valid_ = true;
     } else {
         clock_offset_valid_ = false;
     }
+    return true;
+}
+
+bool As11DeviceState::estimate_device_epoch_ms(uint32_t now_ms,
+                                               int64_t &epoch_ms) const {
+    if (!clock_valid_) return false;
+
+    // A loop's timestamp can slightly precede a clock response processed in it.
+    const int32_t elapsed_ms = static_cast<int32_t>(now_ms - clock_sample_ms_);
+    epoch_ms = clock_device_epoch_ms_ + static_cast<int64_t>(elapsed_ms);
     return true;
 }
 
@@ -333,8 +348,14 @@ bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
                 event.text_value.empty()) continue;
 
             if (frame.data_id == protocol->runtime.therapy_state) {
-                const As11TherapyState previous = therapy_state_;
+                // Initial values after subscribing are not transition times.
+                const As11TherapyState previous =
+                    runtime_event_subscription_id_ == frame.subscription_id
+                        ? runtime_event_state_ : As11TherapyState::Unknown;
                 update_fg_state(event.text_value, now_ms);
+                runtime_event_subscription_id_ = frame.subscription_id;
+                runtime_event_state_ = therapy_state_;
+
                 if (previous != As11TherapyState::Unknown &&
                     previous != therapy_state_) {
                     last_therapy_transition_event_ = event.text_value;

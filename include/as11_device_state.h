@@ -58,6 +58,7 @@ public:
     uint32_t clock_sample_ms() const { return clock_sample_ms_; }
     bool clock_offset_valid() const { return clock_offset_valid_; }
     int64_t clock_offset_ms() const { return clock_offset_ms_; }
+    bool estimate_device_epoch_ms(uint32_t now_ms, int64_t &epoch_ms) const;
 
     // Identity and runtime facts
     const std::string &serial_number() const { return serial_number_; }
@@ -137,6 +138,7 @@ private:
 
     bool clock_valid_ = false;
     uint32_t clock_sample_ms_ = 0;
+    int64_t clock_device_epoch_ms_ = 0;
     bool clock_offset_valid_ = false;
     int64_t clock_offset_ms_ = 0;
 
@@ -155,6 +157,8 @@ private:
 
     std::string rop_;
     As11TherapyState therapy_state_ = As11TherapyState::Unknown;
+    As11TherapyState runtime_event_state_ = As11TherapyState::Unknown;
+    uint32_t runtime_event_subscription_id_ = 0;
     std::string last_activity_event_;
     std::string last_activity_event_report_time_;
     uint32_t last_activity_event_ms_ = 0;

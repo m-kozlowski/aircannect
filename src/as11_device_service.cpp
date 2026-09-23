@@ -7,6 +7,7 @@
 #include "as11_rpc.h"
 #include "board.h"
 #include "resmed_device_protocol.h"
+#include "utc_time.h"
 #ifdef ARDUINO
 #include "debug_log.h"
 #endif
@@ -37,21 +38,8 @@ bool event_suggests_motor_refresh(const std::string &event) {
 }
 
 std::string format_utc_ms(int64_t epoch_ms) {
-    if (epoch_ms < ValidUtcMinMs) return {};
-
-    const time_t epoch = static_cast<time_t>(epoch_ms / 1000);
-    struct tm utc = {};
-    gmtime_r(&epoch, &utc);
-
-    char base[25];
-    if (strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &utc) == 0) {
-        return {};
-    }
-
     char out[32];
-    snprintf(out, sizeof(out), "%s.%03dZ", base,
-             static_cast<int>(epoch_ms % 1000));
-    return out;
+    return format_utc_iso8601_ms(epoch_ms, out, sizeof(out)) ? out : "";
 }
 
 const char *therapy_method(As11TherapyTarget target) {

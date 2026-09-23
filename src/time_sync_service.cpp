@@ -540,25 +540,7 @@ bool TimeSyncService::set_esp_time_from_resmed(
 bool TimeSyncService::format_utc(int64_t epoch_ms,
                                  char *out,
                                  size_t size) const {
-    if (!out || size == 0) return false;
-    out[0] = 0;
-    if (epoch_ms < static_cast<int64_t>(VALID_TIME_MIN_EPOCH) * 1000) {
-        return false;
-    }
-    struct tm utc = {};
-    const time_t epoch = static_cast<time_t>(epoch_ms / 1000);
-    gmtime_r(&epoch, &utc);
-    char base[25];
-    const int millisecond = static_cast<int>(epoch_ms % 1000);
-    if (strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &utc) == 0) {
-        return false;
-    }
-    const int written = snprintf(out, size, "%s.%03dZ", base, millisecond);
-    if (written < 0 || static_cast<size_t>(written) >= size) {
-        out[0] = 0;
-        return false;
-    }
-    return true;
+    return format_utc_iso8601_ms(epoch_ms, out, size);
 }
 
 }  // namespace aircannect

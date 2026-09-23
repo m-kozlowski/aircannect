@@ -50,7 +50,6 @@ private:
     void end_session(const As11DeviceState &as11,
                      uint32_t now_ms,
                      const char *reason);
-    void copy_time(char *dst, size_t size, const std::string &value);
 
     SessionStatus status_;
     uint32_t next_session_id_ = 0;

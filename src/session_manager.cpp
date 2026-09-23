@@ -2,6 +2,7 @@
 
 #include "session_time.h"
 #include "string_util.h"
+#include "utc_time.h"
 
 #if __has_include(<Arduino.h>)
 #include "debug_log.h"
@@ -28,6 +29,21 @@ bool recent_therapy_transition(const As11DeviceState &as11,
         return false;
     }
     return as11.last_therapy_transition_state() == expected_state;
+}
+
+void copy_boundary_time(char *out, size_t size,
+                        const As11DeviceState &as11,
+                        bool use_transition, uint32_t now_ms) {
+    if (use_transition) {
+        copy_cstr(out, size, as11.last_therapy_transition_report_time().c_str());
+        return;
+    }
+
+    out[0] = 0;
+    int64_t epoch_ms = 0;
+    if (as11.estimate_device_epoch_ms(now_ms, epoch_ms)) {
+        format_utc_iso8601_ms(epoch_ms, out, size);
+    }
 }
 
 }  // namespace
@@ -113,9 +129,9 @@ void SessionManager::start_session(const As11DeviceState &as11,
     const bool transition_is_current =
         recent_therapy_transition(as11, As11TherapyState::Running, now_ms) &&
         !transition_time.empty();
-    copy_time(status_.start_device_time,
-              sizeof(status_.start_device_time),
-              transition_is_current ? transition_time : as11.device_datetime());
+    copy_boundary_time(status_.start_device_time,
+                        sizeof(status_.start_device_time),
+                        as11, transition_is_current, now_ms);
     AC_SESSION_LOG(
         CAT_STREAM, LOG_INFO,
         "[THERAPY] started time=%s\n",
@@ -141,9 +157,9 @@ void SessionManager::end_session(const As11DeviceState &as11,
     const bool transition_is_current =
         recent_therapy_transition(as11, As11TherapyState::Standby, now_ms) &&
         !transition_time.empty();
-    copy_time(status_.end_device_time,
-              sizeof(status_.end_device_time),
-              transition_is_current ? transition_time : as11.device_datetime());
+    copy_boundary_time(status_.end_device_time,
+                        sizeof(status_.end_device_time),
+                        as11, transition_is_current, now_ms);
     if (!transition_is_current &&
         session_utc_timestamp_later(status_.last_stream_start_time,
                                     status_.end_device_time)) {
@@ -167,12 +183,6 @@ void SessionManager::end_session(const As11DeviceState &as11,
                    status_.end_reason[0] ? status_.end_reason : "--",
                    static_cast<unsigned long>(status_.frame_count),
                    static_cast<unsigned long>(status_.dropped_frames));
-}
-
-void SessionManager::copy_time(char *dst,
-                               size_t size,
-                               const std::string &value) {
-    copy_cstr(dst, size, value.c_str());
 }
 
 }  // namespace aircannect
