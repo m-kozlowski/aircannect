@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -12,9 +13,20 @@ static constexpr size_t AC_RESMED_ABC_0005_HEADER_BYTES =
 static constexpr size_t AC_RESMED_ABC_SEGMENT_BYTES = 8;
 static constexpr size_t AC_RESMED_RAW_ABC_PREFIX_BYTES =
     AC_RESMED_ABC_0005_HEADER_BYTES + AC_RESMED_ABC_SEGMENT_BYTES;
+static constexpr size_t AC_RESMED_MAX_ABC_SEGMENTS = 255;
+static constexpr size_t AC_RESMED_MAX_RAW_ABC_PREFIX_BYTES =
+    AC_RESMED_ABC_0005_HEADER_BYTES +
+    AC_RESMED_MAX_ABC_SEGMENTS * AC_RESMED_ABC_SEGMENT_BYTES;
+static constexpr uint64_t AC_RESMED_AIRMINI_OTA_MAX_CONTAINER_BYTES =
+    0x00100000;
 static constexpr uint64_t AC_RESMED_FGBL_BYTES = 0x00020000;
 static constexpr uint64_t AC_RESMED_FGBL_BOOT_ID_OFFSET = 0x00004000;
 static constexpr size_t AC_RESMED_FGBL_BOOT_ID_BYTES = 16;
+
+enum class ResmedFirmwareImageProfile : uint8_t {
+    AirSense11,
+    AirMini,
+};
 
 enum class ResmedFirmwareImageKind : uint8_t {
     Unknown,
@@ -36,6 +48,25 @@ enum class ResmedFirmwareInstallTransport : uint8_t {
     Service,
 };
 
+struct ResmedFirmwareSegment {
+    uint32_t length = 0;
+    uint32_t flash_start = 0;
+};
+
+struct ResmedFirmwareSegmentPlanEntry {
+    ResmedFirmwareSegment segment;
+    uint32_t data_crc = 0;
+    uint32_t gap_crc = 0;
+    uint32_t gap_bytes = 0;
+};
+
+struct ResmedFirmwareSegmentPlan {
+    uint32_t count = 0;
+    uint64_t data_size = 0;
+    ResmedFirmwareSegmentPlanEntry entries[
+        AC_RESMED_MAX_ABC_SEGMENTS + 1] = {};
+};
+
 static constexpr ResmedFirmwareTarget AC_RESMED_FIRMWARE_DEFAULT_TARGET =
     ResmedFirmwareTarget::Apcx;
 static constexpr ResmedFirmwareInstallTransport
@@ -43,6 +74,8 @@ static constexpr ResmedFirmwareInstallTransport
         ResmedFirmwareInstallTransport::Rpc;
 
 struct ResmedFirmwareImageInfo {
+    ResmedFirmwareImageProfile profile =
+        ResmedFirmwareImageProfile::AirSense11;
     ResmedFirmwareImageKind kind = ResmedFirmwareImageKind::Unknown;
     uint64_t input_size = 0;
     uint64_t prepared_size = 0;
@@ -54,6 +87,7 @@ struct ResmedFirmwareImageInfo {
     uint32_t rest_crc = 0;
     uint32_t descriptor_word_2 = 0;
     uint32_t descriptor_word_3 = 0;
+    std::shared_ptr<const ResmedFirmwareSegmentPlan> segment_plan;
     char target[5] = {};
     char descriptor_version[16] = {};
 
@@ -72,6 +106,13 @@ struct ResmedFirmwareImageInfo {
     }
 };
 
+static_assert(sizeof(ResmedFirmwareImageInfo) <= 512,
+              "firmware image info must remain small enough for stack copies");
+
+ResmedFirmwareImageProfile resmed_firmware_image_profile_for_identifier(
+    const char *device_identifier);
+uint64_t resmed_firmware_profile_max_container_bytes(
+    ResmedFirmwareImageProfile profile);
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind);
 bool resmed_firmware_version_from_text(const char *text,
                                        char *out,
@@ -96,6 +137,11 @@ bool resmed_firmware_install_transport_parse(
 bool resmed_firmware_target_range(ResmedFirmwareTarget target,
                                   uint32_t &flash_start,
                                   uint64_t &payload_size);
+bool resmed_firmware_target_range_for_profile(
+    ResmedFirmwareImageProfile profile,
+    ResmedFirmwareTarget target,
+    uint32_t &flash_start,
+    uint64_t &payload_size);
 
 class ResmedFirmwareInspector {
 public:
@@ -127,6 +173,11 @@ private:
                      size_t length);
     bool parse_abc_0005_header();
     bool parse_segment_byte(uint8_t value);
+    bool consume_sparse_word(uint64_t payload_offset,
+                             const uint8_t word[4]);
+    bool close_sparse_segment();
+    bool merge_smallest_sparse_gap();
+    bool finalize_sparse_segments();
     bool fail(const char *error);
 
     ResmedFirmwareImageInfo info_;
@@ -144,12 +195,20 @@ private:
     uint64_t target_payload_size_ = 0;
     uint32_t first_segment_start_ = 0;
     uint32_t first_segment_length_ = 0;
+    uint32_t previous_segment_end_ = 0;
+    uint32_t sparse_current_segment_ = 0;
+    uint32_t sparse_gap_bytes_ = 0;
+    uint32_t sparse_gap_crc_state_ = 0;
+    uint32_t sparse_word_offset_ = 0;
+    size_t sparse_partial_bytes_ = 0;
     size_t header_required_ = 0;
     size_t header_received_ = 0;
     bool configured_ = false;
     bool header_parsed_ = false;
     uint8_t header_[AC_RESMED_ABC_0005_HEADER_BYTES] = {};
     uint8_t segment_partial_[AC_RESMED_ABC_SEGMENT_BYTES] = {};
+    uint8_t sparse_partial_[4] = {};
+    std::shared_ptr<ResmedFirmwareSegmentPlan> sparse_plan_;
     char filename_[96] = {};
     char device_identifier_[96] = {};
     char error_[64] = {};
@@ -157,8 +216,15 @@ private:
         AC_RESMED_FIRMWARE_DEFAULT_TARGET;
     ResmedFirmwareInstallTransport transport_ =
         AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
+    uint32_t sparse_current_data_crc_state_ = 0;
+    bool sparse_raw_ = false;
+    bool sparse_current_active_ = false;
 };
 
+size_t resmed_raw_abc_prefix_size(const ResmedFirmwareImageInfo &info);
+bool resmed_build_raw_abc_prefix(const ResmedFirmwareImageInfo &info,
+                                 uint8_t *out,
+                                 size_t out_size);
 bool resmed_build_raw_abc_prefix(
     const ResmedFirmwareImageInfo &info,
     uint8_t out[AC_RESMED_RAW_ABC_PREFIX_BYTES]);

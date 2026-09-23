@@ -255,6 +255,7 @@ void ResmedOtaManager::poll() {
     poll_service_completion();
     poll_firmware_dump();
     poll_recovery_boot();
+    poll_native_apply_boot();
     poll_prepared_transfer();
     poll_cleanup();
 
@@ -307,6 +308,13 @@ bool ResmedOtaManager::begin_prepared_install(
     if (!cold_ || !rpc_ || !stream_port_ || !path_port_) return false;
     const bool service_install =
         firmware.transport == ResmedFirmwareInstallTransport::Service;
+    const bool mini = device_ &&
+        device_->state().model() == ResmedDeviceModel::AirMini;
+    if ((service_install && mini) ||
+        (firmware.image.profile == ResmedFirmwareImageProfile::AirMini) != mini) {
+        set_error("firmware_device_mismatch");
+        return false;
+    }
     const uint64_t install_size = service_install
         ? firmware.image.service_payload_size
         : firmware.image.prepared_size;
@@ -363,6 +371,10 @@ bool ResmedOtaManager::request_firmware_dump() {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_ || !rpc_ || !device_ || !service_ ||
         !path_port_ || !upload_port_) {
+        return false;
+    }
+    if (device_->state().model() != ResmedDeviceModel::AirSense11) {
+        set_error("device_model_unsupported");
         return false;
     }
     if (!can_available_) {
@@ -433,6 +445,13 @@ bool ResmedOtaManager::discard_prepared_firmware(
 bool ResmedOtaManager::begin_protocol(size_t total_size,
                                       const String &expected_sha256,
                                       const String &filename) {
+    ncp_upgrade_ = device_ &&
+        device_->state().model() == ResmedDeviceModel::AirMini;
+    if (ncp_upgrade_ &&
+        total_size >= AC_RESMED_AIRMINI_OTA_MAX_CONTAINER_BYTES) {
+        set_error("upgrade_file_too_large");
+        return false;
+    }
     if (total_size == 0 || total_size > AC_RESMED_OTA_MAX_FILE_BYTES) {
         set_error("bad_size");
         return false;
@@ -595,7 +614,7 @@ bool ResmedOtaManager::queue_plain_apply(bool reset_settings,
     cold_->status.phase = ResmedOtaPhase::Applying;
     cold_->status.apply_mode = "plain";
     last_activity_ms_ = millis();
-    apply_auth_fallback_pending_ = allow_auth_fallback;
+    apply_auth_fallback_pending_ = allow_auth_fallback && !ncp_upgrade_;
     if (!queue_request("ApplyUpgrade", params,
                        AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
         apply_auth_fallback_pending_ = false;
@@ -806,6 +825,9 @@ bool ResmedOtaManager::queue_request(const char *method,
 
     rpc_ticket_ = submission.ticket;
     waiting_for_ = waiting;
+    if (waiting == WaitingFor::Apply && ncp_upgrade_) {
+        native_apply_boot_revision_ = device_->boot_revision();
+    }
     cold_->status.waiting = true;
     return true;
 }
@@ -819,6 +841,13 @@ void ResmedOtaManager::poll_rpc_completion() {
     rpc_ticket_ = {};
     if (completion.cause == RpcCompletionCause::Response) {
         handle_response(rpc_payload_view(completion.payload));
+        return;
+    }
+
+    if (ncp_upgrade_ && waiting_for_ == WaitingFor::Apply &&
+        completion.cause == RpcCompletionCause::Cancelled &&
+        completion.reason == "device_boot" && completion.dispatch_ms != 0) {
+        wait_native_apply_boot(false);
         return;
     }
 
@@ -865,7 +894,10 @@ void ResmedOtaManager::handle_response(RpcPayloadView payload) {
             return;
         }
 
-        set_error("rpc_error");
+        (void)json_extract_rpc_error_code(payload.data(), payload.size(),
+                                          error_code);
+        const std::string error = "rpc_error_" + std::to_string(error_code);
+        set_error(error.c_str());
         return;
     }
 
@@ -912,6 +944,8 @@ void ResmedOtaManager::handle_response(RpcPayloadView payload) {
                 cold_->status.phase = ResmedOtaPhase::Resetting;
                 cold_->status.last_result = "waiting_for_application";
                 recovery_boot_started_ms_ = millis();
+            } else if (ncp_upgrade_) {
+                wait_native_apply_boot(true);
             } else {
                 cold_->status.phase = ResmedOtaPhase::Complete;
             }
@@ -1017,6 +1051,73 @@ bool ResmedOtaManager::begin_recovery_install(
               "version=%s path=%s\n",
               cold_->dump_identity.bootloader_version, firmware.path);
     return true;
+}
+
+void ResmedOtaManager::wait_native_apply_boot(bool acknowledged) {
+    waiting_for_ = WaitingFor::None;
+    cold_->status.waiting = false;
+    cold_->status.phase = ResmedOtaPhase::Resetting;
+    native_apply_wait_ = NativeApplyWait::Boot;
+    native_apply_started_ms_ = millis();
+    if (!acknowledged) cold_->status.last_result = "apply_reply_not_observed";
+
+    Log::logf(CAT_OTA, acknowledged ? LOG_INFO : LOG_WARN,
+              "[RESMED] %s; waiting for application\n",
+              acknowledged ? "apply accepted" : "boot before apply reply");
+}
+
+void ResmedOtaManager::poll_native_apply_boot() {
+    if (native_apply_wait_ == NativeApplyWait::None || !device_) return;
+
+    const uint32_t now_ms = millis();
+    if (millis_elapsed_at_least(now_ms, native_apply_started_ms_,
+                                 AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
+        set_error("application_return_not_verified");
+        return;
+    }
+
+    if (native_apply_wait_ == NativeApplyWait::Boot) {
+        if (device_->boot_revision() == native_apply_boot_revision_) return;
+
+        // Promote the normal bootstrap query while other background RPC is paused.
+        if (!device_->request_identity_refresh(*rpc_, RpcSource::ResmedOta,
+                                                now_ms)) return;
+        native_apply_wait_ = NativeApplyWait::Platform;
+    }
+
+    if (native_apply_wait_ == NativeApplyWait::Platform) {
+        if (device_->state().model() == ResmedDeviceModel::Unknown) return;
+
+        native_apply_identity_revision_ = device_->identity_revision();
+        if (!device_->request_healthcheck(*rpc_, RpcSource::ResmedOta, now_ms)) {
+            return;
+        }
+        native_apply_wait_ = NativeApplyWait::Identity;
+    }
+
+    const As11DeviceState &state = device_->state();
+    if (device_->identity_revision() == native_apply_identity_revision_ ||
+        !state.status_valid() ||
+        static_cast<int32_t>(state.status_updated_ms() -
+                             native_apply_started_ms_) <= 0) return;
+
+    if (state.model() != ResmedDeviceModel::AirMini ||
+        state.software_identifier().empty()) {
+        set_error("application_identity_mismatch");
+        return;
+    }
+
+    clear_native_apply_wait();
+    cold_->status.phase = ResmedOtaPhase::Complete;
+    Log::logf(CAT_OTA, LOG_INFO, "[RESMED] application returned version=%s\n",
+              state.software_identifier().c_str());
+}
+
+void ResmedOtaManager::clear_native_apply_wait() {
+    if (native_apply_wait_ == NativeApplyWait::None) return;
+
+    device_->cancel_queries_for_source(*rpc_, RpcSource::ResmedOta, millis());
+    native_apply_wait_ = NativeApplyWait::None;
 }
 
 void ResmedOtaManager::poll_recovery_boot() {
@@ -2255,6 +2356,8 @@ bool ResmedOtaManager::finish_hash() {
 }
 
 void ResmedOtaManager::clear_session() {
+    clear_native_apply_wait();
+    ncp_upgrade_ = false;
     cancel_rpc_request();
     release_service();
     if (path_port_ && dump_path_ticket_.valid()) {
@@ -2344,6 +2447,7 @@ void ResmedOtaManager::set_error(const char *error) {
 }
 
 void ResmedOtaManager::finish_error(const char *error) {
+    clear_native_apply_wait();
     release_service();
     cancel_dump_upload();
     close_prepared_stream(false);
@@ -2384,8 +2488,12 @@ bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
     if (!rpc_ || !device_) return false;
 
     const As11DeviceState &as11 = device_->state();
-    if (as11.model() != ResmedDeviceModel::AirSense11) {
+    if (as11.model() == ResmedDeviceModel::Unknown) {
         if (reason) *reason = "device_model_unsupported";
+        return false;
+    }
+    if (as11.model() == ResmedDeviceModel::AirMini && !can_available_) {
+        if (reason) *reason = "can_transport_required";
         return false;
     }
     if (as11.therapy_command_pending()) {

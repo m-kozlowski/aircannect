@@ -289,6 +289,8 @@ void ResmedFirmwarePreparer::run() {
         copy_cstr(result.path, sizeof(result.path), request.path);
     }
 
+    // The published file is contiguous; the conversion plan is no longer needed.
+    result.image.segment_plan.reset();
     finish_task(ResmedFirmwarePrepareState::Ready, nullptr, &result);
     const uint64_t install_size =
         request.transport == ResmedFirmwareInstallTransport::Service
@@ -410,9 +412,12 @@ bool ResmedFirmwarePreparer::convert_raw(
         return false;
     }
 
-    uint8_t prefix[AC_RESMED_RAW_ABC_PREFIX_BYTES] = {};
-    if (!resmed_build_raw_abc_prefix(info, prefix) ||
-        !submit_upload_chunk(upload_id, 0, prefix, sizeof(prefix),
+    const size_t prefix_size = resmed_raw_abc_prefix_size(info);
+    std::unique_ptr<LargeByteBuffer> prefix =
+        LargeByteBuffer::allocate(prefix_size);
+    if (!prefix || !resmed_build_raw_abc_prefix(
+                       info, prefix->data(), prefix->size()) ||
+        !submit_upload_chunk(upload_id, 0, prefix->data(), prefix->size(),
                              error, error_size)) {
         (void)upload_port_->cancel(upload_id);
         return false;
@@ -447,8 +452,11 @@ bool ResmedFirmwarePreparer::convert_raw(
     }
 
     uint64_t input_offset = 0;
-    uint64_t output_offset = sizeof(prefix);
-    const uint64_t payload_end = info.source_offset + info.payload_size;
+    uint64_t output_offset = prefix_size;
+    size_t segment_index = 0;
+    const ResmedFirmwareSegmentPlan *plan = info.segment_plan.get();
+    const size_t segment_count = plan ? plan->count : 1;
+
     while (input_offset < info.input_size) {
         const size_t wanted = static_cast<size_t>(std::min<uint64_t>(
             scratch->size(), info.input_size - input_offset));
@@ -461,17 +469,31 @@ bool ResmedFirmwarePreparer::convert_raw(
         operation.note_progress(millis());
 
         const uint64_t chunk_end = input_offset + wanted;
-        const uint64_t copy_start = std::max(input_offset,
-                                             info.source_offset);
-        const uint64_t copy_end = std::min(chunk_end, payload_end);
-        if (copy_end > copy_start) {
+        while (segment_index < segment_count) {
+            const ResmedFirmwareSegment implicit_segment = {
+                static_cast<uint32_t>(info.payload_size), info.flash_start};
+            const ResmedFirmwareSegment &segment = plan
+                ? plan->entries[segment_index].segment
+                : implicit_segment;
+            const uint64_t segment_start =
+                info.source_offset +
+                static_cast<uint64_t>(segment.flash_start - info.flash_start);
+            const uint64_t segment_end = segment_start + segment.length;
+            if (segment_end <= input_offset) {
+                segment_index++;
+                continue;
+            }
+            if (segment_start >= chunk_end) break;
+
+            const uint64_t copy_start = std::max(input_offset, segment_start);
+            const uint64_t copy_end = std::min(chunk_end, segment_end);
             const size_t data_offset =
                 static_cast<size_t>(copy_start - input_offset);
             const size_t length =
                 static_cast<size_t>(copy_end - copy_start);
             if (!submit_upload_chunk(upload_id, output_offset,
-                                     scratch->data() + data_offset,
-                                     length, error, error_size)) {
+                                     scratch->data() + data_offset, length,
+                                     error, error_size)) {
                 reader.close(false);
                 (void)upload_port_->cancel(upload_id);
                 return false;
@@ -480,6 +502,9 @@ bool ResmedFirmwarePreparer::convert_raw(
             operation.note_progress(millis());
             publish_state(ResmedFirmwarePrepareState::Converting,
                           info.prepared_size, output_offset, info.target);
+
+            if (copy_end >= segment_end) segment_index++;
+            else break;
         }
         input_offset = chunk_end;
     }

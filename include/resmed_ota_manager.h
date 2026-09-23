@@ -158,6 +158,8 @@ private:
         Bootloader,
     };
 
+    enum class NativeApplyWait : uint8_t { None, Boot, Platform, Identity };
+
     bool begin_protocol(size_t total_size,
                         const String &expected_sha256,
                         const String &filename);
@@ -174,6 +176,9 @@ private:
     void poll_preparer_result();
     bool begin_recovery_install(const ResmedPreparedFirmware &firmware);
     void poll_recovery_boot();
+    void wait_native_apply_boot(bool acknowledged);
+    void poll_native_apply_boot();
+    void clear_native_apply_wait();
 
     void poll_firmware_dump();
     bool begin_dump_identity_refresh(bool after_recovery);
@@ -251,8 +256,15 @@ private:
     bool sha_started_ = false;
     bool sha_finished_ = false;
     bool apply_auth_fallback_pending_ = false;
+    bool ncp_upgrade_ = false;
     uint32_t last_activity_ms_ = 0;
     mbedtls_sha256_context sha_ctx_;
+
+    // Native apply acknowledgement precedes the actual device restart.
+    NativeApplyWait native_apply_wait_ = NativeApplyWait::None;
+    uint32_t native_apply_started_ms_ = 0;
+    uint32_t native_apply_boot_revision_ = 0;
+    uint32_t native_apply_identity_revision_ = 0;
 
     // Bootloader service protocol
     ServiceWaitingFor service_waiting_for_ = ServiceWaitingFor::None;

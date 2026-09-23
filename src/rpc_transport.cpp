@@ -557,7 +557,8 @@ void RpcTransport::cancel_pending_request(const char *reason) {
                      OperationOutcome::cancelled(),
                      RpcCompletionCause::Cancelled, RpcPayloadRef(),
                      reason ? reason : "cancelled", false,
-                     request_completions_);
+                     request_completions_, pending_.dispatch_utc_ms, 0,
+                     pending_.dispatch_ms, 0);
     set_presence_probe_active(false);
     pending_ = {};
 }
