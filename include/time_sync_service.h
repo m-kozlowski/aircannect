@@ -68,12 +68,10 @@ private:
     bool resmed_pull_due(uint32_t now_ms) const;
     void poll_resmed_pull(uint32_t now_ms);
     void poll_resmed_push_result(uint32_t now_ms);
-    void poll_airmini_clock_result();
     void poll_resmed_push(uint32_t now_ms);
     bool therapy_running() const;
     bool history_transfer_active() const;
-    bool airmini_clock_blocked();
-    bool request_airmini_clock_write(RpcSource source);
+    bool request_airmini_clock_write();
     bool set_esp_time_from_resmed(const std::string &utc_datetime);
     bool format_utc(int64_t epoch_ms, char *out, size_t size) const;
 

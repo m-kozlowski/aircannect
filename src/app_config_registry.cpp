@@ -275,8 +275,8 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CFG_OFFSET(timezone)},
     {"resmed_time", AppConfigFieldId::ResMedTimeSync, AppConfigGroup::Time,
      20, AppConfigFieldType::Bool, PROVISIONABLE,
-     AC_CONFIG_DIRTY_RESMED_TIME, "AS11 time sync",
-     "Synchronize AS11 clock.", nullptr, 0, -1,
+     AC_CONFIG_DIRTY_RESMED_TIME, "ResMed time sync",
+     "Synchronize ResMed clock.", nullptr, 0, -1,
      AC_CFG_OFFSET(resmed_time_sync_enabled)},
 
     {"oxi_en", AppConfigFieldId::OximetryEnabled, AppConfigGroup::Oximetry,
