@@ -96,6 +96,10 @@ size_t edf_annotation_record_size();
 
 uint16_t edf_crc16_ccitt_false(const uint8_t *data, size_t len);
 
+// Patches the fixed 256-byte header and its first ResMed checksum.
+bool edf_patch_header_record_count(uint8_t *header, size_t size,
+                                   uint32_t record_count);
+
 int16_t edf_encode_physical_sample(const EdfSignalSpec &spec,
                                    float physical_value);
 

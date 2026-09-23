@@ -95,21 +95,15 @@ bool edf_str_patch_header_timeline(uint8_t *header,
     if (!header || header_size != edf_str_header_size()) return false;
 
     char date[9] = {};
-    char count[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
     if (!format_header_date(start_day, date) ||
-        !edf_str_format_record_count_field(record_count,
-                                           count,
-                                           sizeof(count))) {
+        record_count > 99999999) {
         return false;
     }
 
     memcpy(header + AC_EDF_HEADER_START_DATE_OFFSET,
            date,
            AC_EDF_HEADER_START_DATE_WIDTH);
-    memcpy(header + AC_EDF_HEADER_RECORD_COUNT_OFFSET,
-           count,
-           AC_EDF_HEADER_RECORD_COUNT_WIDTH);
-    return true;
+    return edf_patch_header_record_count(header, header_size, record_count);
 }
 
 bool edf_str_timeline_record_day(int32_t header_start_day,

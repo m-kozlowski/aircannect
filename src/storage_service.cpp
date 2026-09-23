@@ -1333,22 +1333,16 @@ bool ensure_parent_dirs(const char *path) {
 }
 
 bool patch_record_count(OpenFile &state) {
-    if (!state.open || !state.file) return false;
-    char field[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
-    memset(field, ' ', sizeof(field));
-    char text[16] = {};
-    snprintf(text, sizeof(text), "%lu",
-             static_cast<unsigned long>(state.record_count));
-    const size_t len = strlen(text);
-    if (len > sizeof(field)) return false;
-    memcpy(field, text, len);
-    if (!state.file.seek(AC_EDF_HEADER_RECORD_COUNT_OFFSET)) return false;
-    const size_t written = state.file.write(
-        reinterpret_cast<const uint8_t *>(field), sizeof(field));
-    if (written != sizeof(field)) return false;
+    if (!state.open || !state.file || !state.header) return false;
+    uint8_t header[AC_EDF_HEADER_FIXED_SIZE];
+    memcpy(header, state.header->data(), sizeof(header));
+    if (!edf_patch_header_record_count(header, sizeof(header),
+                                       state.record_count) ||
+        !state.file.seek(0)) return false;
+
+    if (state.file.write(header, sizeof(header)) != sizeof(header)) return false;
     state.file.flush();
-    state.file.seek(state.file.size());
-    return true;
+    return state.file.seek(state.file.size());
 }
 
 bool render_resume_header(const JobSlot &job,
@@ -1489,7 +1483,7 @@ bool write_open_header(OpenFile &state, const JobSlot &job) {
         if (state.file.write(job.bytes, job.len) != job.len) return false;
 
         state.header = LargeByteBuffer::copy_and_freeze(job.bytes, job.len);
-        return true;
+        return state.header != nullptr;
     }
     return write_header(state, job);
 }

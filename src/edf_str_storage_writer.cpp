@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "edf_file_reader.h"
+#include "edf_file_writer.h"
 #include "edf_file_resume.h"
 #include "edf_str_file_layout.h"
 #include "edf_str_record_merge.h"
@@ -200,15 +201,13 @@ bool scan_timeline(File &file,
 }
 
 bool patch_record_count(File &file, uint32_t record_count) {
-    char field[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
-    if (!edf_str_format_record_count_field(record_count,
-                                           field,
-                                           sizeof(field)) ||
-        !file.seek(AC_EDF_HEADER_RECORD_COUNT_OFFSET)) {
+    uint8_t header[AC_EDF_HEADER_FIXED_SIZE];
+    if (!read_exact(file, 0, header, sizeof(header)) ||
+        !edf_patch_header_record_count(header, sizeof(header), record_count) ||
+        !file.seek(0)) {
         return false;
     }
-    return file.write(reinterpret_cast<const uint8_t *>(field),
-                      sizeof(field)) == sizeof(field);
+    return file.write(header, sizeof(header)) == sizeof(header);
 }
 
 bool replace_existing_record(File &file,

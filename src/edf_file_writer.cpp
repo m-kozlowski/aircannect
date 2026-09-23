@@ -341,6 +341,24 @@ const char *record_duration_text(uint32_t seconds) {
 
 }  // namespace
 
+bool edf_patch_header_record_count(uint8_t *header, size_t size,
+                                   uint32_t record_count) {
+    if (!header || size < AC_EDF_HEADER_FIXED_SIZE ||
+        record_count > 99999999) return false;
+
+    size_t offset = AC_EDF_HEADER_RECORD_COUNT_OFFSET;
+    append_u32_field(header, size, offset, record_count,
+                     AC_EDF_HEADER_RECORD_COUNT_WIDTH);
+
+    const uint16_t crc = crc16_ccitt_false(
+        header + EDF_PATIENT_FIRST_CRC_SOURCE_OFFSET,
+        EDF_PATIENT_FIRST_CRC_SOURCE_LEN);
+    char text[5] = {};
+    snprintf(text, sizeof(text), "%04X", static_cast<unsigned>(crc));
+    memcpy(header + AC_EDF_HEADER_PATIENT_ID_OFFSET + 8, text, 4);
+    return true;
+}
+
 const EdfFileSchema &edf_numeric_schema(EdfFileKind kind) {
     size_t count = 0;
     const EdfFileSchema *schemas = edf_numeric_schemas(count);

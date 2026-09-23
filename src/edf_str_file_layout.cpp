@@ -1,8 +1,5 @@
 #include "edf_str_file_layout.h"
 
-#include <stdio.h>
-#include <string.h>
-
 #include "edf_bytes.h"
 
 namespace aircannect {
@@ -73,22 +70,6 @@ bool edf_str_header_schema_matches(const uint8_t *actual,
                                  header_size,
                                  AC_EDF_HEADER_SIGNAL_HEADER_OFFSET,
                                  header_size);
-}
-
-bool edf_str_format_record_count_field(uint32_t record_count,
-                                       char *field,
-                                       size_t field_size) {
-    if (!field || field_size != AC_EDF_HEADER_RECORD_COUNT_WIDTH) {
-        return false;
-    }
-    memset(field, ' ', field_size);
-    char text[16] = {};
-    snprintf(text, sizeof(text), "%lu",
-             static_cast<unsigned long>(record_count));
-    const size_t len = strlen(text);
-    if (len > field_size) return false;
-    memcpy(field, text, len);
-    return true;
 }
 
 size_t edf_str_record_offset(uint32_t record_index) {
