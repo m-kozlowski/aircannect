@@ -176,6 +176,7 @@ struct AirMiniHistoryStrProjection {
     bool used_local_sessions = false;
     bool has_unclosed_history = false;
     uint64_t duration_ms = 0;
+    uint16_t duration_minutes = 0;
     uint32_t mask_event_count = 0;
     int settings_profile_index = -1;
 

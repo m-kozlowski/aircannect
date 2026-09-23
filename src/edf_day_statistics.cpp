@@ -726,24 +726,8 @@ bool EdfDayStatisticsReader::apply_current_metadata() {
     const int slot = runtime_->metadata_slot;
     if (slot >= 0 && runtime_->metadata[slot].available) {
         const EdfSessionMetadata &metadata = runtime_->metadata[slot].metadata;
-        const int64_t adjustment =
-            metadata.canonical_segment_start_ms -
-            metadata.raw_segment_start_ms;
-        if ((adjustment > 0 &&
-             runtime_->current_file.header_start_ms > INT64_MAX - adjustment) ||
-            (adjustment < 0 &&
-             runtime_->current_file.header_start_ms < INT64_MIN - adjustment)) {
-            return false;
-        }
-
-        runtime_->current_header_start_ms += adjustment;
-        if (!annotation) {
-            if ((adjustment > 0 && file_end_ms > INT64_MAX - adjustment) ||
-                (adjustment < 0 && file_end_ms < INT64_MIN - adjustment)) {
-                return false;
-            }
-            file_end_ms += adjustment;
-        }
+        // EDF headers already use the recorder's canonical clock. Provenance
+        // bounds the capture; its raw-to-UTC transform is only for raw history.
         if (metadata.finalized &&
             metadata.canonical_segment_end_ms >
                 metadata.canonical_segment_start_ms) {

@@ -671,12 +671,9 @@ bool collect_history_sessions(const AirMiniHistorySeries *series,
     return true;
 }
 
-enum class StrIntervalKind { Therapy, Mask, TherapyAndMask };
-
-bool apply_session_to_str(const AirMiniHistorySession &session,
-                          int32_t timezone_offset_minutes,
-                          EdfStrSessionAccumulator &str,
-                          StrIntervalKind kind = StrIntervalKind::TherapyAndMask) {
+bool apply_mask_to_str(const AirMiniHistorySession &session,
+                       int32_t timezone_offset_minutes,
+                       EdfStrSessionAccumulator &str) {
     EdfLocalDateTime start;
     EdfLocalDateTime end;
     if (!edf_epoch_ms_to_local_datetime(session.start_ms,
@@ -687,16 +684,8 @@ bool apply_session_to_str(const AirMiniHistorySession &session,
     }
 
     EdfStrSessionStatus status = EdfStrSessionStatus::Ok;
-    if (kind != StrIntervalKind::Mask) {
-        if (!str.begin_therapy(start, status)) return false;
-        bool record_ready = false;
-        if (!str.finish_therapy(end, record_ready, status)) return false;
-    }
-    if (kind != StrIntervalKind::Therapy) {
-        if (!str.begin_mask_event(start, status)) return false;
-        if (!str.finish_mask_event(end, status)) return false;
-    }
-    return true;
+    return str.begin_mask_event(start, status) &&
+           str.finish_mask_event(end, status);
 }
 
 int str_signal_for_tag(const char *tag) {
@@ -1062,18 +1051,14 @@ bool apply_event_metrics(const AirMiniHistoryStrProjection &projection,
 
     if (!have_apnea_metrics && !have_csr_metrics) return true;
 
-    uint64_t duration_ms = projection.duration_ms;
-    if (duration_ms == 0) {
-        const size_t duration_index =
-            edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
-        const int16_t duration_minutes = str.samples()[duration_index];
-        if (duration_minutes > 0) {
-            duration_ms = static_cast<uint64_t>(duration_minutes) * 60000ULL;
-        }
-    }
+    // Use the duration written to STR, including time preserved only in its
+    // seed, so repeating an import cannot change the denominator.
+    const uint64_t duration_ms = projection.duration_minutes
+        ? static_cast<uint64_t>(projection.duration_minutes) * 60000ULL
+        : projection.duration_ms;
     if (duration_ms == 0) return true;
 
-    const float hours = static_cast<float>(duration_ms) / 3600000.0f;
+    const double hours = static_cast<double>(duration_ms) / 3600000.0;
     const uint64_t apnea_count = static_cast<uint64_t>(metrics.hypopnea) +
         metrics.central_apnea + metrics.obstructive_apnea +
         metrics.unknown_apnea;
@@ -1872,6 +1857,7 @@ void AirMiniHistoryStrProjection::clear() {
     used_local_sessions = false;
     has_unclosed_history = false;
     duration_ms = 0;
+    duration_minutes = 0;
     mask_event_count = 0;
     settings_profile_index = -1;
     sessions.clear();
@@ -1937,15 +1923,6 @@ bool AirMiniHistoryData::project_day(
                     return false;
                 }
             }
-            if (have_seed) {
-                const size_t duration_index =
-                    edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
-                if (input.local_str->samples()[duration_index] > 0) {
-                    out.duration_ms = static_cast<uint64_t>(
-                        input.local_str->samples()[duration_index]) * 60000ULL;
-                }
-                out.mask_event_count = input.local_str->mask_events();
-            }
             for (const auto &candidate : historical.sessions) {
                 if (!add_session(out, candidate.start_ms, candidate.end_ms,
                                  candidate.closed_at_observed_end,
@@ -1960,8 +1937,6 @@ bool AirMiniHistoryData::project_day(
         // Reconstruct the seed intervals so a later historical session can be
         // added without counting the recorder copy twice.
         out.used_local_sessions = true;
-        const size_t duration_index =
-            edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
         const uint32_t seed_mask_events = input.local_str->mask_events();
         const size_t mask_on_offset =
             edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL);
@@ -1978,11 +1953,6 @@ bool AirMiniHistoryData::project_day(
                 return false;
             }
         }
-        out.duration_ms = input.local_str->samples()[duration_index] > 0
-            ? static_cast<uint64_t>(input.local_str->samples()[duration_index]) *
-                  60000ULL
-            : 0;
-        out.mask_event_count = seed_mask_events;
         for (const auto &candidate : historical.sessions) {
             if (!add_session(out, candidate.start_ms, candidate.end_ms,
                              candidate.closed_at_observed_end,
@@ -1997,36 +1967,59 @@ bool AirMiniHistoryData::project_day(
         out.has_unclosed_history = historical.has_unclosed_history;
     }
 
+    // Keep intervals whose only remaining copy is STR in the coverage model.
+    const size_t on_offset = edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL);
+    const size_t off_offset = edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL);
     if (have_seed) {
-        if (input.local_sessions && input.local_session_count) {
-            out.mask_event_count = input.local_str->mask_events();
-        }
-        const size_t duration_index =
-            edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
-        const int16_t seed_duration_minutes =
-            input.local_str->samples()[duration_index];
-        if (seed_duration_minutes > 0) {
-            uint64_t preserved_duration_ms =
-                static_cast<uint64_t>(seed_duration_minutes) * 60000ULL;
-            for (const auto &session : out.sessions) {
-                uint16_t projected_end_minute = 0;
-                uint16_t seed_end_minute = 0;
-                const int seed_index = seed_session_index(
-                    session, *input.local_str, input.timezone_offset_minutes,
-                    projected_end_minute, seed_end_minute);
-                if (seed_index >= 0) {
-                    if (projected_end_minute > seed_end_minute) {
-                        preserved_duration_ms += static_cast<uint64_t>(
-                            projected_end_minute - seed_end_minute) * 60000ULL;
-                    }
-                } else {
-                    preserved_duration_ms += static_cast<uint64_t>(
-                        session.end_ms - session.start_ms);
+        for (uint32_t i = 0; i < input.local_str->mask_events(); ++i) {
+            const int16_t on = input.local_str->samples()[on_offset + i];
+            const int16_t off = input.local_str->samples()[off_offset + i];
+            const bool covered = std::any_of(
+                out.sessions.begin(), out.sessions.end(),
+                [&](const AirMiniHistorySession &session) {
+                    return (session.start_ms - input.day_start_ms) / 60000 <= on &&
+                           (session.end_ms - input.day_start_ms) / 60000 >= off;
+                });
+
+            if (!covered) {
+                if (!add_session(out,
+                        input.day_start_ms + static_cast<int64_t>(on) * 60000,
+                        input.day_start_ms + static_cast<int64_t>(off) * 60000,
+                        false, input.day_start_ms, input.day_end_ms)) {
+                    return false;
                 }
             }
-            out.duration_ms = preserved_duration_ms;
         }
     }
+
+    uint32_t duration_minutes = 0;
+    if (have_seed) {
+        const int16_t seed_minutes = input.local_str->samples()[
+            edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL)];
+        duration_minutes = std::max<int16_t>(0, seed_minutes);
+    }
+
+    // The recorder already counted local therapy, including time outside the
+    // mask intervals. Only new or extended history masks augment a saved STR.
+    const auto &duration_sessions = have_seed ? out.mask_sessions : out.sessions;
+    for (const auto &session : duration_sessions) {
+        const int64_t start = (session.start_ms - input.day_start_ms) / 60000;
+        const int64_t end = (session.end_ms - input.day_start_ms) / 60000;
+        int64_t accounted_end = start;
+        if (have_seed) {
+            uint16_t projected_end = 0;
+            uint16_t seed_end = 0;
+            if (seed_session_index(session, *input.local_str,
+                                   input.timezone_offset_minutes,
+                                   projected_end, seed_end) >= 0) {
+                accounted_end = seed_end;
+            }
+        }
+        duration_minutes += static_cast<uint32_t>(
+            std::max<int64_t>(0, end - accounted_end));
+    }
+    out.duration_minutes = static_cast<uint16_t>(
+        std::min<uint32_t>(1440, duration_minutes));
 
     for (const auto &event : resp.events) {
         int64_t timestamp_ms = 0;
@@ -2232,16 +2225,6 @@ bool airmini_history_apply_str(const AirMiniHistoryData &history,
         str.reset_day(day_epoch, sleep_day_start);
     }
 
-    if (!had_seed) {
-        for (const auto &session : projection.sessions) {
-            if (!apply_session_to_str(session, input.timezone_offset_minutes,
-                                       str, StrIntervalKind::Therapy)) {
-                error = "history_str_session_failed";
-                return false;
-            }
-        }
-    }
-
     const AirMiniHistorySessionList &sessions_to_apply =
         !had_seed && projection.mask_sessions.empty()
             ? projection.sessions : projection.mask_sessions;
@@ -2270,12 +2253,16 @@ bool airmini_history_apply_str(const AirMiniHistoryData &history,
                 continue;
             }
         }
-        if (!apply_session_to_str(session, input.timezone_offset_minutes, str,
-                had_seed ? StrIntervalKind::TherapyAndMask
-                         : StrIntervalKind::Mask)) {
+        if (!apply_mask_to_str(session, input.timezone_offset_minutes, str)) {
             error = "history_str_session_failed";
             return false;
         }
+    }
+
+    if (!str.set_signal_digital(AC_EDF_STR_DURATION_SIGNAL,
+                                projection.duration_minutes)) {
+        error = "history_str_duration_failed";
+        return false;
     }
 
     const EdfDayStatisticsResult &statistics = local_statistics.result();
