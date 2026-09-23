@@ -221,6 +221,21 @@ static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
      EdfStrNumericInput::OptionIndex},
 };
 
+// Mini exports the non-AS11 STR convention, not AS11's one-based enums.
+static constexpr int16_t MINI_STR_MODE_CODES[] = {0, 1, 11};
+static constexpr int16_t MINI_STR_MASK_CODES[] = {-1, 0, 1, 2};
+static constexpr int16_t MINI_STR_BOOL_CODES[] = {0, 1};
+static constexpr int16_t MINI_STR_RAMP_CODES[] = {0, 1, 2};
+static constexpr EdfStrDigitalRemap MINI_STR_DIGITAL_REMAPS[] = {
+    {"_MOP", MINI_STR_MODE_CODES, 3},
+    {"_MSK", MINI_STR_MASK_CODES, 4},
+    {"_AFC", MINI_STR_BOOL_CODES, 2},
+    {"_RMA", MINI_STR_RAMP_CODES, 3},
+    {"_EPX", MINI_STR_BOOL_CODES, 2},
+    {"_EPT", MINI_STR_BOOL_CODES, 2},
+    {"_SST", MINI_STR_BOOL_CODES, 2},
+};
+
 bool parse_integer_text(const char *text, int16_t &out) {
     if (!text || !text[0]) return false;
     char *end = nullptr;
@@ -322,9 +337,18 @@ bool option_index_from_text(const char *text,
 }
 
 const EdfStrDigitalRemap *str_digital_remap_for_rpc_name(
-    const char *rpc_name) {
+    const char *rpc_name,
+    ResmedDeviceModel model = ResmedDeviceModel::AirSense11) {
     if (!rpc_name) return nullptr;
-    for (const EdfStrDigitalRemap &remap : STR_DIGITAL_REMAPS) {
+    const bool mini = model == ResmedDeviceModel::AirMini;
+    const EdfStrDigitalRemap *maps = mini
+        ? MINI_STR_DIGITAL_REMAPS : STR_DIGITAL_REMAPS;
+    const size_t count = mini
+        ? sizeof(MINI_STR_DIGITAL_REMAPS) / sizeof(MINI_STR_DIGITAL_REMAPS[0])
+        : sizeof(STR_DIGITAL_REMAPS) / sizeof(STR_DIGITAL_REMAPS[0]);
+
+    for (size_t i = 0; i < count; ++i) {
+        const EdfStrDigitalRemap &remap = maps[i];
         if (strcmp(remap.rpc_name, rpc_name) == 0) return &remap;
     }
     return nullptr;
@@ -650,7 +674,7 @@ bool edf_str_apply_airmini_settings_profile(
         char rpc_name[8] = {};
         rpc_name_for_str_tag(signal->short_tag, rpc_name, sizeof(rpc_name));
         const EdfStrDigitalRemap *remap =
-            str_digital_remap_for_rpc_name(rpc_name);
+            str_digital_remap_for_rpc_name(rpc_name, ResmedDeviceModel::AirMini);
         bool applied = false;
         if (remap && def->kind == As11SettingKind::Enum) {
             int16_t digital = 0;

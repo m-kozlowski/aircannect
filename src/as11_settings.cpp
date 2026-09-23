@@ -174,7 +174,7 @@ std::string compact_mode_key(const char *value) {
         out.compare(out.size() - suffix_len, suffix_len, suffix) == 0) {
         out.resize(out.size() - suffix_len);
     }
-    if (out == "autosetforher") return "autosether";
+    if (out == "autosetforher" || out == "herauto") return "autosether";
     return out;
 }
 
