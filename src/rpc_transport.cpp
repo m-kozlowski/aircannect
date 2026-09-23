@@ -6,6 +6,7 @@
 #include <sys/time.h>
 
 #include "as11_rpc.h"
+#include "airmini_ncp_rpc.h"
 #include "debug_log.h"
 
 namespace aircannect {
@@ -86,6 +87,9 @@ void RpcTransport::process_link_events(size_t budget) {
             case RpcLinkEventKind::Payload:
                 enqueue_deferred_payload(DeferredPayload::Kind::Rpc,
                                          event.payload);
+                break;
+            case RpcLinkEventKind::NcpPayload:
+                handle_ncp_payload(event.payload);
                 break;
             case RpcLinkEventKind::FramingError:
                 stats_.rpc_framing_errors++;
@@ -808,12 +812,29 @@ void RpcTransport::dispatch_next_request() {
         }
     }
 
-    const std::string payload = build_rpc_request(request.method,
-                                                  request.params_json,
-                                                  request.id);
+    const uint8_t ncp_command = device_model_ == ResmedDeviceModel::AirMini
+        ? airmini_ncp_command(request.method) : 0;
+    const uint8_t ncp_tag = next_ncp_tag_;
+    std::string payload;
+    if (ncp_command) {
+        if (!encode_airmini_ncp_rpc(ncp_command, ncp_tag,
+                                    request.params_json, payload)) {
+            cancel_queued_request(request, "invalid_ncp_params",
+                                  RpcCompletionCause::DispatchFailure);
+            dispatch_retry_ = {};
+            dispatch_retry_active_ = false;
+            return;
+        }
+    } else {
+        payload = build_rpc_request(request.method, request.params_json,
+                                    request.id);
+    }
+
     set_presence_probe_active(
         request.admission == RpcRequestAdmission::PresenceProbe);
-    const RpcLinkSendResult send_result = send_payload(payload);
+    const RpcLinkSendResult send_result = ncp_command
+        ? link_.send_ncp(RpcPayloadView(payload.data(), payload.size()))
+        : send_payload(payload);
     if (send_result != RpcLinkSendResult::Accepted) {
         set_presence_probe_active(false);
         if (!dispatch_retry_active_) {
@@ -850,6 +871,9 @@ void RpcTransport::dispatch_next_request() {
     pending_.method = request.method;
     pending_.admission = request.admission;
     pending_.generation = request.generation;
+    pending_.ncp_command = ncp_command;
+    pending_.ncp_tag = ncp_tag;
+    if (ncp_command && ++next_ncp_tag_ == 0xff) next_ncp_tag_ = 0;
     pending_.dispatch_ms = millis();
     pending_.deadline_ms = pending_.dispatch_ms + request.timeout_ms;
     pending_.dispatch_utc_ms = 0;
@@ -867,7 +891,7 @@ void RpcTransport::dispatch_next_request() {
              static_cast<unsigned long>(request.id),
              request.method.c_str(),
              source_name(request.source));
-    Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
+    if (!ncp_command) Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
 }
 
 void RpcTransport::check_pending_timeout() {
@@ -948,7 +972,35 @@ void RpcTransport::enqueue_deferred_payload(
     }
 }
 
-void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
+void RpcTransport::handle_ncp_payload(const RpcPayloadRef &payload) {
+    if (!pending_.active || !pending_.ncp_command) return;
+
+    const RpcPayloadView bytes = rpc_payload_view(payload);
+    NcpRecordView record;
+    if (!decode_ncp_record({bytes.data(), bytes.size()}, record)) {
+        publish_framing_error("ncp", "invalid_record");
+        return;
+    }
+
+    // Late replies to cancelled/timed-out requests must not finish a new one.
+    if (record.tag != pending_.ncp_tag) return;
+    if (record.command != 0xfd &&
+        record.command != (pending_.ncp_command | 0x80)) {
+        cancel_pending_request("ncp_command_mismatch");
+        return;
+    }
+
+    RpcPayloadRef normalized = decode_airmini_ncp_rpc(record, pending_.id);
+    if (!normalized) {
+        cancel_pending_request("invalid_ncp_response");
+        return;
+    }
+
+    handle_rpc_payload(normalized, true);
+}
+
+void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload,
+                                     bool from_ncp) {
     stats_.rpc_datagrams++;
     const RpcPayloadView view = rpc_payload_view(payload);
 
@@ -994,6 +1046,7 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
             const uint32_t response_id = envelope.id;
             const bool has_response_id = true;
             if (pending_.active && has_response_id &&
+                (from_ncp == (pending_.ncp_command != 0)) &&
                 response_id == pending_.id) {
                 const uint32_t matched_id = pending_.id;
                 const std::string matched_method = pending_.method;

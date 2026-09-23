@@ -14,6 +14,7 @@ public:
     bool begin() override;
     void poll(uint32_t now_ms) override;
     RpcLinkSendResult send(RpcPayloadView payload) override;
+    RpcLinkSendResult send_ncp(RpcPayloadView payload) override;
     bool take_event(RpcLinkEvent &event) override;
     void reset() override;
     void set_peer_absence_expected(bool expected) override;

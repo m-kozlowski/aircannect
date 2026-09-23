@@ -1402,7 +1402,6 @@ void setup() {
     }
     time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
-    time_sync_service.set_airmini_ncp_clock_port(can_rpc_link);
     time_sync_service.set_history_transfer_activity_callback(
         history_transfer_active, &edf_recorder_manager);
     firmware_installer.begin();
@@ -1523,11 +1522,6 @@ void loop() {
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
 
-    if (as11_application_quiesce_requested ||
-        resmed_ota_transport_active) {
-        can_rpc_link.cancel("rpc_quiesce");
-    }
-
     const bool raw_tcp_connected = tcp_bridge.raw_client_connected();
     rpc_transport.set_raw_rpc_forwarding_enabled(raw_tcp_connected);
     stream_broker.set_external_transport_connected(raw_tcp_connected,
@@ -1549,6 +1543,7 @@ void loop() {
         as11_application_quiesce_requested ||
             resmed_ota_transport_active || !as11_link_ready);
     const ResmedDeviceModel device_model = as11_device_service.state().model();
+    rpc_transport.set_device_model(device_model);
     stream_broker.set_device_model(device_model);
     event_broker.set_device_model(device_model);
     as11_settings_manager.set_device_model(device_model);

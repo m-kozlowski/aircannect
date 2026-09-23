@@ -15,6 +15,7 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t ValidUtcMinMs = 1609459200000LL;
+constexpr uint32_t MiniSetDateTimeDispatchWindowMs = 500;
 
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||
@@ -128,6 +129,26 @@ bool As11DeviceService::request_identity_refresh(RpcRequestPort &rpc,
     return true;
 }
 
+void As11DeviceService::cancel_queries_for_source(RpcRequestPort &rpc,
+                                                  RpcSource source,
+                                                  uint32_t now_ms) {
+    for (ScheduledQuery &query : queries_) {
+        if (query.scheduled && query.source == source) {
+            query.source = RpcSource::Scheduler;
+        }
+    }
+
+    if (!query_ticket_.valid() || active_query_source_ != source) return;
+
+    const QueryKind kind = active_query_kind_;
+    cancel_ticket(rpc, query_ticket_);
+    active_query_kind_ = QueryKind::None;
+    active_query_source_ = RpcSource::Scheduler;
+    if (kind != QueryKind::None) {
+        schedule_query(kind, now_ms, RpcSource::Scheduler);
+    }
+}
+
 OperationSubmission As11DeviceService::request_therapy(
     RpcRequestPort &rpc,
     As11TherapyTarget target,
@@ -190,19 +211,26 @@ OperationSubmission As11DeviceService::request_set_datetime_now(
     RpcSource source,
     uint32_t now_ms,
     int64_t utc_ms) {
-    if (unavailable() || state_.model() != ResmedDeviceModel::AirSense11) {
+    const ResmedDeviceModel model = state_.model();
+    if (unavailable() ||
+        (model != ResmedDeviceModel::AirSense11 &&
+         model != ResmedDeviceModel::AirMini)) {
         return OperationSubmission::rejected();
     }
     if (clock_write_ticket_.valid()) return OperationSubmission::busy();
     if (utc_ms < ValidUtcMinMs) return OperationSubmission::rejected();
 
-    int64_t target_utc_ms = ((utc_ms / 1000) + 1) * 1000;
-    int64_t remaining_ms = target_utc_ms - utc_ms;
-    if (remaining_ms <=
-        static_cast<int64_t>(AC_RPC_SET_DATETIME_APPLY_LEAD_MS +
-                             AC_RPC_SET_DATETIME_TARGET_MARGIN_MS)) {
-        target_utc_ms += 1000;
-        remaining_ms += 1000;
+    int64_t target_utc_ms = utc_ms;
+    int64_t remaining_ms = 0;
+    if (model == ResmedDeviceModel::AirSense11) {
+        target_utc_ms = ((utc_ms / 1000) + 1) * 1000;
+        remaining_ms = target_utc_ms - utc_ms;
+        if (remaining_ms <=
+            static_cast<int64_t>(AC_RPC_SET_DATETIME_APPLY_LEAD_MS +
+                                 AC_RPC_SET_DATETIME_TARGET_MARGIN_MS)) {
+            target_utc_ms += 1000;
+            remaining_ms += 1000;
+        }
     }
 
     const std::string target = format_utc_ms(target_utc_ms);
@@ -214,19 +242,43 @@ OperationSubmission As11DeviceService::request_set_datetime_now(
     command.source = source;
     command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     command.generation = next_generation();
-    command.dispatch_window.enabled = true;
-    command.dispatch_window.not_before_ms =
-        now_ms + static_cast<uint32_t>(
-            remaining_ms - AC_RPC_SET_DATETIME_APPLY_LEAD_MS);
-    command.dispatch_window.deadline_ms =
-        now_ms + static_cast<uint32_t>(
-            remaining_ms + AC_RPC_SET_DATETIME_TARGET_MARGIN_MS);
+    if (model == ResmedDeviceModel::AirSense11) {
+        command.dispatch_window.enabled = true;
+        command.dispatch_window.not_before_ms =
+            now_ms + static_cast<uint32_t>(
+                remaining_ms - AC_RPC_SET_DATETIME_APPLY_LEAD_MS);
+        command.dispatch_window.deadline_ms =
+            now_ms + static_cast<uint32_t>(
+                remaining_ms + AC_RPC_SET_DATETIME_TARGET_MARGIN_MS);
+    } else {
+        command.dispatch_window.enabled = true;
+        command.dispatch_window.not_before_ms = now_ms;
+        command.dispatch_window.deadline_ms =
+            now_ms + MiniSetDateTimeDispatchWindowMs;
+    }
 
     const OperationSubmission submitted = rpc.request(command);
     if (!submitted.accepted()) return submitted;
 
     clock_write_ticket_ = submitted.ticket;
     return submitted;
+}
+
+void As11DeviceService::cancel_clock_write(RpcRequestPort &rpc,
+                                            const char *reason) {
+    if (!clock_write_ticket_.valid()) return;
+
+    cancel_ticket(rpc, clock_write_ticket_);
+    clock_write_result_ = {};
+    clock_write_result_pending_ = true;
+
+#ifdef ARDUINO
+    Log::logf(CAT_GENERAL, LOG_WARN,
+              "[TIME] SetDateTime cancelled reason=%s\n",
+              reason ? reason : "cancelled");
+#else
+    (void)reason;
+#endif
 }
 
 bool As11DeviceService::take_clock_write_result(
@@ -330,6 +382,10 @@ void As11DeviceService::poll(RpcRequestPort &rpc,
         rpc.take_completion(clock_write_ticket_, completion)) {
         clock_write_ticket_ = {};
         complete_clock_write(completion);
+    }
+
+    if (background_suspended && clock_write_ticket_.valid()) {
+        cancel_clock_write(rpc, "rpc_quiesce");
     }
 
     const bool therapy_pending = state_.therapy_command_pending();
@@ -480,6 +536,7 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
     query = {};
     query_ticket_ = submitted.ticket;
     active_query_kind_ = kind;
+    active_query_source_ = command.source;
     return true;
 }
 
@@ -497,7 +554,7 @@ void As11DeviceService::complete_query(
         }
 
         schedule_query(active_query_kind_, now_ms + QueryRetryMs,
-                       RpcSource::Scheduler);
+                       active_query_source_);
         return;
     }
 
@@ -516,7 +573,7 @@ void As11DeviceService::complete_query(
 
     if (!applied) {
         schedule_query(active_query_kind_, now_ms + QueryRetryMs,
-                       RpcSource::Scheduler);
+                       active_query_source_);
         return;
     }
     note_change();
@@ -530,7 +587,7 @@ void As11DeviceService::complete_query(
             } else {
                 schedule_query(QueryKind::Platform,
                                now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
-                               RpcSource::Scheduler);
+                               active_query_source_);
             }
             break;
         case QueryKind::Identity:
@@ -602,7 +659,7 @@ void As11DeviceService::note_query_timeout(uint32_t now_ms) {
     if (unavailable()) {
         schedule_query(QueryKind::Platform,
                        now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
-                       RpcSource::Scheduler);
+                       active_query_source_);
         return;
     }
 
@@ -615,15 +672,16 @@ void As11DeviceService::note_query_timeout(uint32_t now_ms) {
     }
 
     schedule_query(active_query_kind_, now_ms + QueryRetryMs,
-                   RpcSource::Scheduler);
+                   active_query_source_);
 }
 
 void As11DeviceService::enter_unavailable(uint32_t now_ms) {
+    const RpcSource probe_source = active_query_source_;
     clear_schedule();
     schedule_initialized_ = true;
     schedule_query(QueryKind::Platform,
                    now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
-                   RpcSource::Scheduler);
+                   probe_source);
     consecutive_query_timeouts_ = 0;
 
     if (!state_.set_availability(As11Availability::Unavailable, now_ms)) {

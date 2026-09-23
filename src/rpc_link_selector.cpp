@@ -20,6 +20,10 @@ RpcLinkSendResult RpcLinkSelector::send(RpcPayloadView payload) {
     return active_link().send(payload);
 }
 
+RpcLinkSendResult RpcLinkSelector::send_ncp(RpcPayloadView payload) {
+    return active_link().send_ncp(payload);
+}
+
 bool RpcLinkSelector::take_event(RpcLinkEvent &event) {
     if (switch_event_pending_) {
         switch_event_pending_ = false;

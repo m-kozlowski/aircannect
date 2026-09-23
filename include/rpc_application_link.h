@@ -17,6 +17,7 @@ enum class RpcLinkSendResult : uint8_t {
 
 enum class RpcLinkEventKind : uint8_t {
     Payload,
+    NcpPayload,
     FramingError,
     Disconnected,
     TransportChanged,
@@ -43,6 +44,10 @@ public:
     virtual bool begin() = 0;
     virtual void poll(uint32_t now_ms) = 0;
     virtual RpcLinkSendResult send(RpcPayloadView payload) = 0;
+    virtual RpcLinkSendResult send_ncp(RpcPayloadView payload) {
+        (void)payload;
+        return RpcLinkSendResult::Unavailable;
+    }
     virtual bool take_event(RpcLinkEvent &event) = 0;
     virtual void reset() = 0;
     virtual void set_peer_absence_expected(bool expected) {

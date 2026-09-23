@@ -9,6 +9,7 @@
 #include "fixed_queue.h"
 #include "rpc_application_link.h"
 #include "rpc_request_port.h"
+#include "resmed_device_model.h"
 #include "rpc_transport_ports.h"
 
 namespace aircannect {
@@ -69,6 +70,7 @@ public:
 
     bool background_backpressure_active() const;
     void set_as11_unavailable(bool unavailable);
+    void set_device_model(ResmedDeviceModel model) { device_model_ = model; }
     void set_quiesce_mode(bool requested) override;
     bool send_quiesce_request(const std::string &method,
                               const std::string &params_json) override;
@@ -95,6 +97,8 @@ private:
         std::string method;
         RpcRequestAdmission admission = RpcRequestAdmission::Normal;
         uint32_t generation = 0;
+        uint8_t ncp_command = 0;
+        uint8_t ncp_tag = 0;
     };
 
     struct QueuedRequest {
@@ -196,6 +200,7 @@ private:
     void check_pending_timeout();
     void process_deferred_payloads(size_t budget);
     void process_link_events(size_t budget);
+    void handle_ncp_payload(const RpcPayloadRef &payload);
 
     // Payload handling
     void handle_event_notification(const RpcPayloadRef &payload);
@@ -208,7 +213,7 @@ private:
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
                                   const RpcPayloadRef &payload);
 
-    void handle_rpc_payload(const RpcPayloadRef &payload);
+    void handle_rpc_payload(const RpcPayloadRef &payload, bool from_ncp = false);
     void handle_debug_payload(const RpcPayloadRef &payload);
 
     const char *source_name(RpcSource source) const;
@@ -228,6 +233,8 @@ private:
     size_t request_completion_reservations_ = 0;
 
     // Dispatch state
+    ResmedDeviceModel device_model_ = ResmedDeviceModel::Unknown;
+    uint8_t next_ncp_tag_ = 0;
     QueuedRequest dispatch_retry_;
     bool dispatch_retry_active_ = false;
     uint32_t dispatch_retry_deadline_ms_ = 0;

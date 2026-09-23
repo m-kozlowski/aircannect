@@ -33,6 +33,9 @@ public:
     bool request_identity_refresh(RpcRequestPort &rpc,
                                   RpcSource source,
                                   uint32_t now_ms);
+    void cancel_queries_for_source(RpcRequestPort &rpc,
+                                   RpcSource source,
+                                   uint32_t now_ms);
     OperationSubmission request_therapy(RpcRequestPort &rpc,
                                         As11TherapyTarget target,
                                         RpcSource source,
@@ -44,6 +47,8 @@ public:
                                                   RpcSource source,
                                                   uint32_t now_ms,
                                                   int64_t utc_ms);
+    bool clock_write_active() const { return clock_write_ticket_.valid(); }
+    void cancel_clock_write(RpcRequestPort &rpc, const char *reason);
 
     bool apply_activity_event_frame(const As11EventFrame &frame,
                                     uint32_t now_ms);
@@ -117,6 +122,7 @@ private:
     ScheduledQuery queries_[QueryCount];
     bool schedule_initialized_ = false;
     QueryKind active_query_kind_ = QueryKind::None;
+    RpcSource active_query_source_ = RpcSource::Scheduler;
     OperationTicket query_ticket_;
     uint8_t consecutive_query_timeouts_ = 0;
 
