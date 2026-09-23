@@ -21,6 +21,8 @@ struct EdfStrStorageWriteRequest {
     EdfHeaderInfo header;
     const uint8_t *record = nullptr;
     size_t record_size = 0;
+    // A caller that has already merged the saved day publishes a full record.
+    bool replace_existing = false;
 };
 
 struct EdfStrStorageWriteResult {

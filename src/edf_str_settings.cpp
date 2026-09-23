@@ -12,6 +12,7 @@
 #include "as11_settings.h"
 #include "edf_str_signal_table.h"
 #include "report_parser.h"
+#include "large_json_allocator.h"
 
 namespace aircannect {
 namespace {
@@ -607,6 +608,72 @@ bool edf_str_apply_settings_response(RpcPayloadView payload,
         } else {
             result.unmapped++;
         }
+    }
+
+    result.ok = true;
+    return true;
+}
+
+bool edf_str_apply_airmini_settings_profile(
+    RpcPayloadView profile, EdfStrSessionAccumulator &session,
+    EdfStrSettingsApplyResult &result) {
+    result = {};
+    LargeJsonAllocator allocator;
+    JsonDocument document(&allocator);
+    if (deserializeJson(document, profile.data(), profile.size()) ||
+        !document.is<JsonObject>()) {
+        result.error = "history_settings_invalid";
+        return false;
+    }
+
+    As11SettingsCatalog catalog;
+    if (!catalog.set_device_model(ResmedDeviceModel::AirMini)) {
+        result.error = "history_settings_allocation_failed";
+        return false;
+    }
+
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const auto *signal = edf_str_signal_descriptor(i);
+        if (!signal || signal->source != EdfStrFieldSource::SettingGet ||
+            !signal->short_tag) continue;
+
+        const As11SettingDef *def = catalog.find(signal->short_tag);
+        if (!def || !catalog.supports(*def)) continue;
+
+        const JsonVariantConst value = as11_setting_value_from_profiles(
+            *def, document.as<JsonObjectConst>());
+        if (value.isNull()) {
+            ++result.missing;
+            continue;
+        }
+
+        char rpc_name[8] = {};
+        rpc_name_for_str_tag(signal->short_tag, rpc_name, sizeof(rpc_name));
+        const EdfStrDigitalRemap *remap =
+            str_digital_remap_for_rpc_name(rpc_name);
+        bool applied = false;
+        if (remap && def->kind == As11SettingKind::Enum) {
+            int16_t digital = 0;
+            const int index = as11_setting_device_option_index(*def, value);
+            applied = digital_from_option_index(*remap, index, digital) &&
+                      session.set_signal_digital(i, digital);
+        } else if (remap) {
+            int16_t digital = 0;
+            applied = str_digital_from_json_value(value, rpc_name, *remap,
+                                                  digital) &&
+                      session.set_signal_digital(i, digital);
+        } else if (str_text_digital_map_is_exclusive(rpc_name)) {
+            int16_t digital = 0;
+            applied = str_text_digital_from_json_value(value, rpc_name, digital) &&
+                      session.set_signal_digital(i, digital);
+        } else {
+            float physical = 0;
+            applied = physical_from_json_value(value, rpc_name, physical) &&
+                      session.set_signal_physical(i, physical);
+        }
+
+        if (applied) ++result.values;
+        else ++result.unmapped;
     }
 
     result.ok = true;

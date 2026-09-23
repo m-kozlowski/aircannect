@@ -326,6 +326,13 @@ void RpcTransport::set_spool_notification_observer(
     spool_notification_context_ = observer ? context : nullptr;
 }
 
+void RpcTransport::set_history_notification_observer(
+    RpcRetainedNotificationObserver observer,
+    void *context) {
+    history_notification_observer_ = observer;
+    history_notification_context_ = observer ? context : nullptr;
+}
+
 void RpcTransport::accept_debug_payload(const RpcPayloadRef &payload) {
     enqueue_deferred_payload(DeferredPayload::Kind::DebugLog, payload);
 }
@@ -953,6 +960,8 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
             stats_.rpc_notifications++;
             const bool stream_data = envelope.method_is("StreamData");
             const bool spool_fragment = envelope.method_is("SpoolFragment");
+            const bool history_data = envelope.method_is("LoggedData") ||
+                                      envelope.method_is("HistoricalEvents");
             const bool event_notification =
                 envelope.method_is("EventNotification");
             if (stream_data) {
@@ -964,13 +973,18 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
             if (spool_fragment) {
                 handle_spool_notification(payload);
             }
-            if (!stream_data && !spool_fragment) {
+            if (history_data && history_notification_observer_) {
+                history_notification_observer_(
+                    history_notification_context_, payload, millis());
+            }
+            if (!stream_data && !spool_fragment && !history_data) {
                 Log::log_payload(CAT_RPC, LOG_DEBUG, "[NOTIFY] ",
                                  view.data(), view.size());
             }
             if (raw_rpc_forwarding_enabled_) {
                 push_event(RpcEventKind::RpcNotification, payload);
-            } else if (!stream_data && !event_notification && !spool_fragment) {
+            } else if (!stream_data && !event_notification &&
+                       !spool_fragment && !history_data) {
                 push_event(RpcEventKind::RpcNotification, payload);
             }
             break;

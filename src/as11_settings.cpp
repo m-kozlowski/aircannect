@@ -693,6 +693,25 @@ void As11SettingsState::release_storage() {
     profile_capacity_ = 0;
 }
 
+JsonVariantConst as11_setting_value_from_profiles(
+    const As11SettingDef &def, JsonObjectConst profiles) {
+    if (setting_is_therapy_mode(def)) {
+        return profiles["ActiveProfiles"]["TherapyProfile"];
+    }
+    if (def.source == As11SettingSource::TherapyProfile) {
+        return therapy_profile_object_from_result(profiles, def)[def.source_field];
+    }
+    if (def.source == As11SettingSource::FeatureProfile) {
+        return feature_object_from_result(profiles, def)[def.source_field];
+    }
+    return def.source_field ? profiles[def.source_field] : JsonVariantConst();
+}
+
+int as11_setting_device_option_index(const As11SettingDef &def,
+                                    JsonVariantConst value) {
+    return enum_index_from_json(def, value, true);
+}
+
 bool As11SettingsState::apply_settings_get_response(
     RpcPayloadView payload,
     uint32_t now_ms,

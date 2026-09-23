@@ -218,22 +218,25 @@ bool replace_existing_record(File &file,
                              uint8_t *incoming,
                              EdfStrStorageWriteResult &result) {
     const size_t offset = edf_str_record_offset(index);
-    if (!read_exact(file, offset, existing, request.record_size)) {
+    if (!request.replace_existing &&
+        !read_exact(file, offset, existing, request.record_size)) {
         return fail(result,
                     EdfStrStorageErrorKind::Read,
                     "str_existing_read_failed");
     }
 
     memcpy(incoming, request.record, request.record_size);
-    const EdfStrRecordMergeStatus merge_status =
-        edf_str_merge_existing_record(existing,
-                                      request.record_size,
-                                      incoming,
-                                      request.record_size);
-    if (merge_status != EdfStrRecordMergeStatus::Ok) {
-        return fail(result,
-                    EdfStrStorageErrorKind::Write,
-                    "str_existing_merge_failed");
+    if (!request.replace_existing) {
+        const EdfStrRecordMergeStatus merge_status =
+            edf_str_merge_existing_record(existing,
+                                          request.record_size,
+                                          incoming,
+                                          request.record_size);
+        if (merge_status != EdfStrRecordMergeStatus::Ok) {
+            return fail(result,
+                        EdfStrStorageErrorKind::Write,
+                        "str_existing_merge_failed");
+        }
     }
     if (!file.seek(offset) ||
         file.write(incoming, request.record_size) != request.record_size) {
@@ -322,7 +325,8 @@ bool rebuild_timeline(File &file,
                                                record_size),
                                            scratch,
                                            record_size,
-                                           stats) &&
+                                           stats,
+                                           request.replace_existing) &&
              edf_str_timeline_fill_missing(plan, buffer, stats) &&
              edf_str_patch_header_timeline(header,
                                            edf_str_header_size(),

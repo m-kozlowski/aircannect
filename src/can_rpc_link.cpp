@@ -1,12 +1,40 @@
 #include "can_rpc_link.h"
 
 #include <stdio.h>
+#include <utility>
 
 #include "board.h"
 #include "debug_log.h"
 #include "hex_util.h"
+#include "utc_time.h"
 
 namespace aircannect {
+namespace {
+
+constexpr uint32_t AIRMINI_NCP_TX_ID = 0x381;
+constexpr uint32_t AIRMINI_NCP_RX_ID = 0x380;
+constexpr uint32_t AIRMINI_NCP_TIMEOUT_MS = 5000;
+constexpr int64_t AIRMINI_NCP_READBACK_CLOCK_TOLERANCE_MS = 2000;
+
+bool ncp_clock_readback_matches(const std::string &requested,
+                                const std::string &returned,
+                                uint32_t elapsed_ms) {
+    int64_t requested_ms = 0;
+    int64_t returned_ms = 0;
+    if (!parse_utc_iso8601_ms(requested.c_str(), requested_ms) ||
+        !parse_utc_iso8601_ms(returned.c_str(), returned_ms)) {
+        return false;
+    }
+
+    const int64_t delta_ms = returned_ms - requested_ms;
+    const int64_t lower_bound = -AIRMINI_NCP_READBACK_CLOCK_TOLERANCE_MS;
+    const int64_t upper_bound =
+        static_cast<int64_t>(elapsed_ms) +
+        AIRMINI_NCP_READBACK_CLOCK_TOLERANCE_MS;
+    return delta_ms >= lower_bound && delta_ms <= upper_bound;
+}
+
+}  // namespace
 
 bool CanRpcLink::begin() {
     return rpc_rx_.reserve_initial() && log_rx_.reserve_initial();
@@ -25,6 +53,7 @@ bool CanRpcLink::set_physical_enabled(bool enabled) {
 
     rpc_rx_.reset();
     log_rx_.reset();
+    ncp_clock_rx_.reset();
     link_events_.clear();
     side_events_.clear();
 
@@ -33,6 +62,7 @@ bool CanRpcLink::set_physical_enabled(bool enabled) {
         return physical_enabled_;
     }
 
+    cancel("can_disabled");
     physical_enabled_ = false;
     debug_log_rx_requested_ = true;
     return can_.end();
@@ -51,6 +81,7 @@ void CanRpcLink::poll_physical(uint32_t now_ms) {
     }
 
     drain_rx();
+    poll_ncp_clock(now_ms);
     can_.poll();
     poll_debug_log_rx_filter();
 }
@@ -102,7 +133,9 @@ bool CanRpcLink::take_event(RpcLinkEvent &event) {
 }
 
 void CanRpcLink::reset() {
+    cancel("link_reset");
     rpc_rx_.reset();
+    ncp_clock_rx_.reset();
     link_events_.clear();
 }
 
@@ -131,6 +164,7 @@ void CanRpcLink::set_application_enabled(bool enabled) {
     if (enabled == application_enabled_) return;
 
     application_enabled_ = enabled;
+    if (!enabled) cancel("application_disabled");
     rpc_rx_.reset();
     link_events_.clear();
 }
@@ -151,6 +185,7 @@ bool CanRpcLink::recover_can(const char *reason) {
 
     rpc_rx_.reset();
     log_rx_.reset();
+    cancel(reason ? reason : "can_recovery");
     link_events_.clear();
 
     CanSideEvent event;
@@ -194,11 +229,28 @@ bool CanRpcLink::enqueue_datagram_frame(void *context,
     return link->can_.enqueue_tx(raw);
 }
 
+bool CanRpcLink::enqueue_ncp_frame(void *context,
+                                   const DatagramFrame &frame) {
+    auto *link = static_cast<CanRpcLink *>(context);
+    if (!link) return false;
+
+    RawCanFrame raw;
+    raw.id = AIRMINI_NCP_TX_ID;
+    raw.len = frame.len;
+    for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
+    return link->can_.enqueue_tx(raw);
+}
+
 void CanRpcLink::handle_frame(const RawCanFrame &frame, uint32_t now_ms) {
     if (frame.extended || frame.remote) return;
 
     if (frame.id == AC_CAN_RX_ID) {
         if (application_enabled_) handle_application_frame(frame, now_ms);
+        return;
+    }
+
+    if (frame.id == AIRMINI_NCP_RX_ID) {
+        handle_ncp_clock_frame(frame, now_ms);
         return;
     }
 
@@ -253,6 +305,162 @@ void CanRpcLink::handle_debug_frame(const RawCanFrame &frame,
     } else if (result.status == DatagramStatus::Error) {
         push_side_error(result.error.c_str());
     }
+}
+
+bool CanRpcLink::request_write(const char *datetime, uint32_t now_ms) {
+    if (!available() || pending() || ncp_clock_result_pending_ || !datetime) {
+        return false;
+    }
+
+    ncp_clock_requested_datetime_ = datetime;
+    ncp_clock_write_started_ms_ = now_ms;
+    ncp_clock_phase_ = NcpClockPhase::WaitingSet;
+    if (!send_ncp_record(AirMiniNcpClockCommand::Set, datetime, now_ms)) {
+        ncp_clock_phase_ = NcpClockPhase::Idle;
+        ncp_clock_requested_datetime_.clear();
+        ncp_clock_write_started_ms_ = 0;
+        return false;
+    }
+    return true;
+}
+
+bool CanRpcLink::take_result(AirMiniNcpClockResult &result) {
+    if (!ncp_clock_result_pending_) return false;
+
+    result = std::move(ncp_clock_result_);
+    ncp_clock_result_ = {};
+    ncp_clock_result_pending_ = false;
+    return true;
+}
+
+bool CanRpcLink::pending() const {
+    return ncp_clock_phase_ != NcpClockPhase::Idle;
+}
+
+void CanRpcLink::cancel(const char *reason) {
+    if (!pending()) {
+        ncp_clock_rx_.reset();
+        return;
+    }
+    finish_ncp_clock(false, reason ? reason : "cancelled");
+}
+
+bool CanRpcLink::send_ncp_record(AirMiniNcpClockCommand command,
+                                 const char *datetime,
+                                 uint32_t now_ms) {
+    uint8_t record[32] = {};
+    size_t record_size = 0;
+    ++ncp_clock_tag_;
+    if (ncp_clock_tag_ == 0 || ncp_clock_tag_ == 0xff) ncp_clock_tag_ = 1;
+    ncp_clock_expected_tag_ = ncp_clock_tag_;
+    if (!encode_airmini_ncp_clock_request(
+            command, ncp_clock_expected_tag_, datetime,
+            record, sizeof(record), record_size)) {
+        return false;
+    }
+
+    if (!ncp_clock_rx_.reserve_initial()) return false;
+
+    if (datagram_frame_count(record_size) > can_.tx_queue_free()) return false;
+
+    ncp_clock_rx_.reset();
+    if (!visit_encoded_datagram(record, record_size,
+                                enqueue_ncp_frame, this)) {
+        ncp_clock_rx_.reset();
+        return false;
+    }
+
+    ncp_clock_deadline_ms_ = now_ms + AIRMINI_NCP_TIMEOUT_MS;
+    if (ncp_clock_deadline_ms_ == 0) ncp_clock_deadline_ms_ = 1;
+    return true;
+}
+
+void CanRpcLink::poll_ncp_clock(uint32_t now_ms) {
+    if (!pending()) return;
+
+    const DatagramFeedResult timeout = ncp_clock_rx_.poll(now_ms);
+    if (timeout.status == DatagramStatus::Error) {
+        finish_ncp_clock(false, timeout.error.c_str());
+        return;
+    }
+    if (ncp_clock_deadline_ms_ != 0 &&
+        static_cast<int32_t>(now_ms - ncp_clock_deadline_ms_) >= 0) {
+        finish_ncp_clock(false, "response_timeout");
+    }
+}
+
+void CanRpcLink::handle_ncp_clock_frame(const RawCanFrame &frame,
+                                        uint32_t now_ms) {
+    if (!pending()) return;
+
+    const DatagramFeedResult result =
+        ncp_clock_rx_.feed(frame.data, frame.len, now_ms);
+    if (result.status == DatagramStatus::Error) {
+        finish_ncp_clock(false, result.error.c_str());
+        return;
+    }
+    if (result.status != DatagramStatus::Complete) return;
+
+    AirMiniNcpClockResponse response;
+    if (!decode_airmini_ncp_clock_response(
+            reinterpret_cast<const uint8_t *>(result.payload_data),
+            result.payload_len, response)) {
+        finish_ncp_clock(false, "invalid_response");
+        return;
+    }
+    if (response.tag != ncp_clock_expected_tag_) {
+        finish_ncp_clock(false, "response_mismatch");
+        return;
+    }
+    if (response.error) {
+        finish_ncp_clock(false, response.error_text.c_str(),
+                         response.error_code);
+        return;
+    }
+
+    const uint8_t expected_command =
+        ncp_clock_phase_ == NcpClockPhase::WaitingSet ? 0x85 : 0x84;
+    if (response.command != expected_command) {
+        finish_ncp_clock(false, "response_mismatch");
+        return;
+    }
+
+    if (ncp_clock_phase_ == NcpClockPhase::WaitingSet) {
+        ncp_clock_phase_ = NcpClockPhase::WaitingWriteReadback;
+        if (!send_ncp_record(AirMiniNcpClockCommand::Get, nullptr, now_ms)) {
+            finish_ncp_clock(false, "readback_queue_failed");
+        }
+        return;
+    }
+
+    if (ncp_clock_phase_ == NcpClockPhase::WaitingWriteReadback &&
+        !ncp_clock_readback_matches(
+            ncp_clock_requested_datetime_, response.datetime,
+            static_cast<uint32_t>(now_ms - ncp_clock_write_started_ms_))) {
+        finish_ncp_clock(false, "readback_mismatch", 0,
+                         response.datetime.c_str());
+        return;
+    }
+
+    finish_ncp_clock(true, nullptr, 0, response.datetime.c_str());
+}
+
+void CanRpcLink::finish_ncp_clock(bool succeeded,
+                                  const char *reason,
+                                  int16_t error_code,
+                                  const char *datetime) {
+    ncp_clock_result_ = {};
+    ncp_clock_result_.succeeded = succeeded;
+    ncp_clock_result_.datetime = datetime ? datetime : "";
+    ncp_clock_result_.error_code = error_code;
+    ncp_clock_result_.reason = reason ? reason : "";
+    ncp_clock_result_pending_ = true;
+    ncp_clock_phase_ = NcpClockPhase::Idle;
+    ncp_clock_deadline_ms_ = 0;
+    ncp_clock_write_started_ms_ = 0;
+    ncp_clock_expected_tag_ = 0;
+    ncp_clock_requested_datetime_.clear();
+    ncp_clock_rx_.reset();
 }
 
 void CanRpcLink::poll_debug_log_rx_filter() {

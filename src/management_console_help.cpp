@@ -114,9 +114,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "time") {
         out.println("[HELP time]");
         out.println("  time                      show ESP clock and sync state");
-        out.println("  time get                  request AS11 GetDateTime");
-        out.println("  time push                 push ESP UTC time to AS11");
-        out.println("  time pull                 pull AS11 UTC time into ESP");
+        out.println("  time get                  request device GetDateTime");
+        out.println("  time push                 push ESP UTC time to the device");
+        out.println("  time pull                 pull device UTC time into ESP");
         out.println("  time ntp                  trigger NTP resync");
         return;
     }
@@ -161,6 +161,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP edf]");
         out.println("  edf str refresh YYYYMMDD [YYYYMMDD]");
         out.println("                            refresh Summary fields in existing STR records");
+        out.println("  edf history YYYYMMDD [YYYYMMDD]");
+        out.println("                            import AirMini history and STR for an inclusive range");
         return;
     }
 

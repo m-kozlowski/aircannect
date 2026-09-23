@@ -55,6 +55,9 @@ public:
     void set_spool_notification_observer(
         RpcRetainedNotificationObserver observer,
         void *context);
+    void set_history_notification_observer(
+        RpcRetainedNotificationObserver observer,
+        void *context);
 
     void accept_debug_payload(const RpcPayloadRef &payload);
     void accept_debug_framing_error(const char *detail);
@@ -247,6 +250,8 @@ private:
     void *stream_notification_context_ = nullptr;
     RpcRetainedNotificationObserver spool_notification_observer_ = nullptr;
     void *spool_notification_context_ = nullptr;
+    RpcRetainedNotificationObserver history_notification_observer_ = nullptr;
+    void *history_notification_context_ = nullptr;
     uint32_t transport_generation_ = 1;
 
     // Backpressure and transport admission

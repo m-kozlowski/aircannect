@@ -17,6 +17,7 @@ enum class EdfStrSessionStatus : uint8_t {
 
 class EdfStrSessionAccumulator {
 public:
+    bool restore_record(const uint8_t *record, size_t length);
     void reset_day(uint16_t epoch_days,
                    const EdfLocalDateTime &sleep_day_start);
     bool begin_therapy(const EdfLocalDateTime &start,
@@ -27,6 +28,9 @@ public:
     bool begin_mask_event(const EdfLocalDateTime &start,
                           EdfStrSessionStatus &status);
     bool finish_mask_event(const EdfLocalDateTime &end,
+                           EdfStrSessionStatus &status);
+    bool extend_mask_event(uint8_t event_index,
+                           const EdfLocalDateTime &end,
                            EdfStrSessionStatus &status);
 
     bool set_signal_physical(size_t signal_index, float physical_value);

@@ -1,5 +1,10 @@
 #include "edf_str_session.h"
 
+#include <algorithm>
+
+#include "edf_bytes.h"
+#include "edf_str_file_layout.h"
+
 namespace aircannect {
 
 namespace {
@@ -10,6 +15,42 @@ bool offset_valid(size_t signal_index) {
 }
 
 }  // namespace
+
+bool EdfStrSessionAccumulator::restore_record(const uint8_t *record,
+                                             size_t length) {
+    if (!record || length != edf_str_record_size()) return false;
+
+    const int16_t day = edf_str_record_date_sample(record, length);
+    const int16_t count = edf_read_i16_le_sample(
+        record, edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL));
+    const size_t crc_offset = AC_EDF_STR_DATA_SAMPLES_PER_RECORD;
+    if (!edf_str_date_sample_valid(day) || count < 0 ||
+        count > static_cast<int16_t>(AC_EDF_STR_MASK_EVENT_CAPACITY) ||
+        edf_crc16_ccitt_false(record, crc_offset * 2) !=
+            static_cast<uint16_t>(edf_read_i16_le_sample(record, crc_offset))) {
+        return false;
+    }
+
+    EdfLocalDateTime start;
+    if (!edf_epoch_ms_to_local_datetime(
+            (static_cast<int64_t>(day) * 24 + 12) * 3600000, 0, start)) {
+        return false;
+    }
+    for (int i = 0; i < count; ++i) {
+        const int16_t on = edf_read_i16_le_sample(record,
+            edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL) + i);
+        const int16_t off = edf_read_i16_le_sample(record,
+            edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL) + i);
+        if (on < 0 || off < on || off > 1440) return false;
+    }
+
+    reset_day(static_cast<uint16_t>(day), start);
+    for (size_t i = 0; i < sample_count(); ++i) {
+        samples_[i] = edf_read_i16_le_sample(record, i);
+    }
+    mask_events_ = static_cast<uint8_t>(count);
+    return true;
+}
 
 bool EdfStrSessionAccumulator::reset_offsets_valid() const {
     return offset_valid(AC_EDF_STR_DATE_SIGNAL) &&
@@ -200,6 +241,47 @@ bool EdfStrSessionAccumulator::finish_mask_event(
     mask_events_++;
     samples_[events_offset] = static_cast<int16_t>(mask_events_);
     mask_event_open_ = false;
+    return true;
+}
+
+bool EdfStrSessionAccumulator::extend_mask_event(
+    uint8_t event_index,
+    const EdfLocalDateTime &end,
+    EdfStrSessionStatus &status) {
+    status = EdfStrSessionStatus::Ok;
+    if (!day_active_ || event_index >= mask_events_) {
+        status = EdfStrSessionStatus::OffsetError;
+        return false;
+    }
+
+    uint16_t end_day = 0;
+    uint16_t end_minute = 0;
+    if (!edf_sleep_day_epoch_days(end, end_day) ||
+        !edf_sleep_day_minute(end, end_minute)) {
+        status = EdfStrSessionStatus::BadSleepDay;
+        return false;
+    }
+
+    uint16_t off_minute = end_day == day_epoch_days_ ? end_minute : 1440;
+    const size_t off_offset =
+        edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL) +
+        event_index;
+    const size_t duration_offset =
+        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
+    if (off_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
+        duration_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
+        status = EdfStrSessionStatus::OffsetError;
+        return false;
+    }
+
+    const int16_t previous_off = samples_[off_offset];
+    if (previous_off < 0 || off_minute <= previous_off) return true;
+
+    samples_[off_offset] = static_cast<int16_t>(off_minute);
+    int duration = samples_[duration_offset];
+    if (duration < 0) duration = 0;
+    duration = std::min(1440, duration + off_minute - previous_off);
+    samples_[duration_offset] = static_cast<int16_t>(duration);
     return true;
 }
 

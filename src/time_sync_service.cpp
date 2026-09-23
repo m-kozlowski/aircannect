@@ -58,11 +58,23 @@ void TimeSyncService::begin(const AppConfigData &app_config,
               app_config.resmed_time_sync_enabled ? "on" : "off");
 }
 
+void TimeSyncService::set_history_transfer_activity_callback(
+    ActivityCallback callback,
+    void *context) {
+    history_transfer_activity_ = callback;
+    history_transfer_context_ = callback ? context : nullptr;
+}
+
 void TimeSyncService::poll() {
     if (!app_config_ || !wifi_manager_ || !rpc_ || !device_) return;
 
     apply_timezone();
     const uint32_t now_ms = millis();
+    if (airmini_clock_operation_active_ && airmini_clock_ &&
+        airmini_clock_->pending() && therapy_running()) {
+        airmini_clock_->cancel("therapy_started");
+    }
+    poll_airmini_clock_result();
     poll_resmed_push_result(now_ms);
     poll_ntp(now_ms);
     if (g_ntp_synced.load(std::memory_order_acquire) && !ntp_synced_) {
@@ -82,6 +94,9 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
     if (!rpc_ || !device_ || !esp_clock_valid()) {
         last_status_ = "esp_clock_not_valid";
         return false;
+    }
+    if (device_->state().model() == ResmedDeviceModel::AirMini) {
+        return request_airmini_clock_write(source);
     }
     if (device_->state().model() != ResmedDeviceModel::AirSense11) {
         last_status_ = "resmed_push_method_unavailable";
@@ -379,6 +394,35 @@ void TimeSyncService::poll_resmed_push_result(uint32_t now_ms) {
         : "esp_to_resmed_request_failed";
 }
 
+void TimeSyncService::poll_airmini_clock_result() {
+    if (!airmini_clock_) return;
+
+    AirMiniNcpClockResult result;
+    if (!airmini_clock_->take_result(result)) return;
+
+    airmini_clock_operation_active_ = false;
+
+    if (result.succeeded) {
+        if (!device_ || !rpc_ ||
+            !device_->request_clock_read(*rpc_, RpcSource::Internal,
+                                         millis())) {
+            Log::logf(CAT_GENERAL, LOG_WARN,
+                      "[TIME] AirMini JSON clock refresh queue failed\n");
+        }
+        last_status_ = "airmini_ncp_write_readback_ok";
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[TIME] AirMini NCP clock write readback ok UTC=%s\n",
+                  result.datetime.c_str());
+        return;
+    }
+
+    last_status_ = "airmini_ncp_clock_failed";
+    Log::logf(CAT_GENERAL, LOG_WARN,
+              "[TIME] AirMini NCP clock failed reason=%s code=%d\n",
+              result.reason.empty() ? "request_failed" : result.reason.c_str(),
+              static_cast<int>(result.error_code));
+}
+
 void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
     if (!app_config_ || !app_config_->resmed_time_sync_enabled) {
         next_resmed_push_ms_ = 0;
@@ -429,6 +473,65 @@ bool TimeSyncService::therapy_running() const {
                As11TherapyState::Running;
 }
 
+bool TimeSyncService::history_transfer_active() const {
+    return history_transfer_activity_ &&
+           history_transfer_activity_(history_transfer_context_);
+}
+
+bool TimeSyncService::airmini_clock_blocked() {
+    if (therapy_running()) {
+        last_status_ = "airmini_ncp_blocked_therapy_active";
+        return true;
+    }
+    if (history_transfer_active()) {
+        last_status_ = "airmini_ncp_blocked_history_active";
+        return true;
+    }
+    return false;
+}
+
+bool TimeSyncService::request_airmini_clock_write(RpcSource source) {
+    (void)source;
+    if (!airmini_clock_ || !airmini_clock_->available()) {
+        last_status_ = "airmini_ncp_unavailable";
+        return false;
+    }
+    if (airmini_clock_blocked()) {
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[TIME] AirMini NCP clock write blocked reason=%s\n",
+                  last_status_.c_str());
+        return false;
+    }
+
+    const std::string datetime = utc_now_iso();
+    if (datetime.empty()) {
+        last_status_ = "esp_clock_not_valid";
+        return false;
+    }
+    if (!airmini_clock_->request_write(datetime.c_str(), millis())) {
+        last_status_ = airmini_clock_->pending()
+            ? "airmini_ncp_busy"
+            : "airmini_ncp_queue_failed";
+        return false;
+    }
+
+    airmini_clock_operation_active_ = true;
+    last_status_ = "airmini_ncp_write_queued";
+    Log::logf(CAT_GENERAL, LOG_DEBUG,
+              "[TIME] AirMini NCP clock write queued UTC=%s\n",
+              datetime.c_str());
+    return true;
+}
+
+bool TimeSyncService::resmed_time_write_supported() const {
+    if (!device_) return false;
+    if (device_->state().model() == ResmedDeviceModel::AirSense11) {
+        return true;
+    }
+    return device_->state().model() == ResmedDeviceModel::AirMini &&
+           airmini_clock_ && airmini_clock_->available();
+}
+
 bool TimeSyncService::set_esp_time_from_resmed(
     const std::string &utc_datetime) {
     int64_t epoch_ms = 0;
@@ -447,7 +550,7 @@ bool TimeSyncService::set_esp_time_from_resmed(
     apply_timezone();
     esp_clock_source_ = EspClockSource::Resmed;
     last_status_ = "resmed_to_esp_synced";
-    Log::logf(CAT_GENERAL, LOG_INFO, "[TIME] ESP clock set from AS11 UTC=%s\n",
+    Log::logf(CAT_GENERAL, LOG_INFO, "[TIME] ESP clock set from ResMed UTC=%s\n",
               utc_datetime.c_str());
     return true;
 }

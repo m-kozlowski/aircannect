@@ -33,6 +33,8 @@ constexpr bool required_rx_filter_accepts(uint32_t id) {
 static_assert(required_rx_filter_accepts(AC_CAN_RX_ID));
 static_assert(required_rx_filter_accepts(AC_CAN_BOOT_ID));
 static_assert(required_rx_filter_accepts(AC_AS11_SERVICE_RX_ID));
+// AirMini NCP clock responses use the standard 0x380 identifier.
+static_assert(required_rx_filter_accepts(0x380));
 static_assert(!required_rx_filter_accepts(AC_CAN_LOG_ID));
 
 twai_filter_config_t can_rx_filter_config(bool debug_log_enabled) {

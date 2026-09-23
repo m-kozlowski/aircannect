@@ -29,6 +29,9 @@ bool edf_str_summary_field_for_tag(const char *tag,
 bool edf_str_apply_settings_response(RpcPayloadView payload,
                                      EdfStrSessionAccumulator &session,
                                      EdfStrSettingsApplyResult &result);
+bool edf_str_apply_airmini_settings_profile(RpcPayloadView profile,
+                                           EdfStrSessionAccumulator &session,
+                                           EdfStrSettingsApplyResult &result);
 bool edf_str_apply_summary_record(const ReportSummaryRecord &record,
                                   EdfStrSessionAccumulator &session,
                                   EdfStrSettingsApplyResult &result);

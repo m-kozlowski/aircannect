@@ -93,6 +93,7 @@ struct JobSlot {
     size_t len = 0;
     size_t record_size = 0;
     bool recording_start = false;
+    bool str_replace_existing = false;
 
     EdfFileSchema numeric_schema;
     EdfSignalSpec numeric_signals[AC_EDF_NUMERIC_SIGNAL_MAX + 1] = {};
@@ -1827,6 +1828,7 @@ bool process_str_record(const JobSlot &job) {
     request.header.record_count = 0;
     request.record = job.bytes;
     request.record_size = job.len;
+    request.replace_existing = job.str_replace_existing;
 
     EdfStrStorageWriteResult result;
     if (!edf_str_storage_write(request, result)) {
@@ -2733,13 +2735,15 @@ bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
 
 bool enqueue_edf_str_record(const char *path,
                             const EdfHeaderInfo &info,
-                            const EdfStrRecordView &record) {
+                            const EdfStrRecordView &record,
+                            bool replace_existing) {
     if (!valid_path(path) || edf_str_record_size() > AC_EDF_STORAGE_SLOT_BYTES) {
         return false;
     }
     return enqueue_rendered_slot(
         [&](JobSlot &job) {
             job.type = JobType::StrRecord;
+            job.str_replace_existing = replace_existing;
             copy_cstr(job.path, sizeof(job.path), path);
             copy_cstr(job.patient_id, sizeof(job.patient_id),
                       info.patient_id);

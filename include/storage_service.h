@@ -166,9 +166,11 @@ EdfStorageEnqueueResult enqueue_edf_numeric_record(
     const EdfCompletedRecordView &record);
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
                                    const EdfAnnotationRecord &record);
+// Replacement requires a complete day, including previously saved fields.
 bool enqueue_edf_str_record(const char *path,
                             const EdfHeaderInfo &info,
-                            const EdfStrRecordView &record);
+                            const EdfStrRecordView &record,
+                            bool replace_existing = false);
 
 // EDF metadata and closes
 bool enqueue_edf_identification_files(const std::string &json);

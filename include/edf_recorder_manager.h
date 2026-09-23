@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "as11_clock.h"
+#include "airmini_history_service.h"
 #include "as11_device_state.h"
 #include "as11_event_frame.h"
 #include "edf_numeric_file_layout.h"
@@ -153,7 +154,7 @@ public:
     void set_sa2_input(EdfSa2Input input);
     void accept_oximetry_sample(const OximetrySample &sample);
     const EdfRecorderStatus &status() const;
-    uint32_t sessions_ended() const { return status_.sessions_ended; }
+    uint32_t sessions_ended() const;
     bool latest_catalog_refresh_hint(EdfCatalogRefreshHint &out) const;
     bool active_segment_metadata(EdfSessionMetadata &out) const;
     const EdfStreamAssemblerStatus &assembler_status() const {
@@ -164,6 +165,14 @@ public:
         SleepDayId end_day,
         uint32_t generation);
     const EdfStrSummaryRefreshStatus &str_summary_refresh_status() const;
+
+    OperationAdmission request_airmini_history(SleepDayId start_day,
+                                               SleepDayId end_day,
+                                               uint32_t generation);
+    const AirMiniHistoryStatus &history_status() const;
+    bool history_active() const;
+    void set_history_activity(bool rpc_available, bool suspended);
+    void enqueue_history_notification(const RpcPayloadRef &payload);
 
     // device events
     void handle_event_frame(const As11EventFrame &frame, uint32_t now_ms);
@@ -360,6 +369,9 @@ private:
     void handle_str_settings_response(RpcPayloadView payload);
     void handle_identification_response(RpcPayloadView payload);
     bool write_str_day_record();
+    bool write_str_day_record(const EdfStrSessionAccumulator &record,
+                              bool replace_existing = false);
+    void poll_airmini_history(uint32_t now_ms);
 
     // device time
     void freeze_session_clock(uint32_t now_ms);
@@ -460,6 +472,10 @@ private:
     PendingRpc identification_rpc_;
     PendingStrSummary str_summary_;
     bool str_record_pending_write_ = false;
+    bool history_rpc_available_ = false;
+    bool history_suspended_ = false;
+    bool post_therapy_history_pending_ = false;
+    uint32_t history_generation_ = 0;
 
     // owned subsystems/status
     EdfStrSessionAccumulator str_;

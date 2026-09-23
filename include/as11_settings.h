@@ -143,6 +143,10 @@ struct As11SettingCompositeDef {
 bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
                                             const char *wire_value,
                                             int16_t &index);
+JsonVariantConst as11_setting_value_from_profiles(
+    const As11SettingDef &def, JsonObjectConst profiles);
+int as11_setting_device_option_index(const As11SettingDef &def,
+                                    JsonVariantConst value);
 
 class As11SettingsState {
 public:

@@ -195,6 +195,7 @@ private:
     uint32_t refresh_generation_ = 0;
     uint32_t refresh_session_id_ = 0;
     uint32_t refresh_wait_generation_ = 0;
+    bool history_request_ = false;
 };
 
 class OximetryConsoleCommands final : public ConsoleCommandGroup {

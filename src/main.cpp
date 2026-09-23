@@ -415,6 +415,19 @@ static void route_spool_notification(void *context,
     (void)spool->enqueue_notification(payload);
 }
 
+static void route_history_notification(void *context,
+                                       const RpcPayloadRef &payload,
+                                       uint32_t now_ms) {
+    (void)now_ms;
+    static_cast<EdfRecorderManager *>(context)->enqueue_history_notification(
+        payload);
+}
+
+static bool history_transfer_active(void *context) {
+    const auto *recorder = static_cast<const EdfRecorderManager *>(context);
+    return recorder && recorder->history_active();
+}
+
 static void route_tcp_raw_request(void *context,
                                   const char *payload,
                                   size_t payload_len,
@@ -1273,6 +1286,8 @@ void setup() {
                                                    &stream_broker);
     rpc_transport.set_spool_notification_observer(route_spool_notification,
                                                   &report_spool_service);
+    rpc_transport.set_history_notification_observer(route_history_notification,
+                                                    &edf_recorder_manager);
     can_rpc_link.set_service_frame_observer(
         route_as11_service_frame, &as11_service_manager);
     tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
@@ -1370,6 +1385,9 @@ void setup() {
     }
     time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
+    time_sync_service.set_airmini_ncp_clock_port(can_rpc_link);
+    time_sync_service.set_history_transfer_activity_callback(
+        history_transfer_active, &edf_recorder_manager);
     firmware_installer.begin();
     firmware_url_source.begin();
     arduino_ota_source.begin(config_service.data());
@@ -1488,6 +1506,11 @@ void loop() {
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
 
+    if (as11_application_quiesce_requested ||
+        resmed_ota_transport_active) {
+        can_rpc_link.cancel("rpc_quiesce");
+    }
+
     const bool raw_tcp_connected = tcp_bridge.raw_client_connected();
     rpc_transport.set_raw_rpc_forwarding_enabled(raw_tcp_connected);
     stream_broker.set_external_transport_connected(raw_tcp_connected,
@@ -1556,6 +1579,9 @@ void loop() {
     drain_can_rx();
 
     // Report RPC adapter and ResMed OTA
+    edf_recorder_manager.set_history_activity(
+        as11_rpc_available && device_model == ResmedDeviceModel::AirMini,
+        as11_application_quiesce_requested || resmed_ota_transport_active);
     report_spool_service.poll(
         as11_rpc_available,
         rpc_transport.background_backpressure_active(),

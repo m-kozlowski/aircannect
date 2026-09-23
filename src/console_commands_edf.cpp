@@ -231,19 +231,14 @@ void print_edf_recorder_stats(Print &out,
     out.println();
 }
 
-bool parse_refresh_range(const String &rest,
+bool parse_edf_range(const String &rest,
                          SleepDayId &start_day,
                          SleepDayId &end_day) {
     int position = 0;
-    String edf_object;
-    String action;
     String start;
     String end;
     String extra;
-    if (!parse_console_arg(rest, position, edf_object) ||
-        !parse_console_arg(rest, position, action) ||
-        !parse_console_arg(rest, position, start) ||
-        edf_object != "str" || action != "refresh" ||
+    if (!parse_console_arg(rest, position, start) ||
         start.length() != 8 ||
         !SleepDayId::from_yyyymmdd(start.c_str(), start_day)) {
         return false;
@@ -294,32 +289,41 @@ bool EdfConsoleCommands::execute(const String &command,
     rest.trim();
     rest.toLowerCase();
 
-    if (rest.startsWith("str refresh")) {
+    const bool history = rest == "history" || rest.startsWith("history ");
+    if (history || rest.startsWith("str refresh")) {
         SleepDayId start_day;
         SleepDayId end_day;
-        if (!parse_refresh_range(rest, start_day, end_day)) {
-            out.println("[EDF] usage: edf str refresh YYYYMMDD [YYYYMMDD]");
+        if (!parse_edf_range(rest.substring(history ? 7 : 11),
+                             start_day, end_day)) {
+            out.println(history
+                ? "[EDF] usage: edf history YYYYMMDD [YYYYMMDD]"
+                : "[EDF] usage: edf str refresh YYYYMMDD [YYYYMMDD]");
             return true;
         }
 
         refresh_generation_++;
         if (refresh_generation_ == 0) refresh_generation_++;
-        const OperationAdmission admission =
-            recorder_.request_str_summary_refresh(
-                start_day, end_day, refresh_generation_);
+        const OperationAdmission admission = history
+            ? recorder_.request_airmini_history(
+                  start_day, end_day, refresh_generation_)
+            : recorder_.request_str_summary_refresh(
+                  start_day, end_day, refresh_generation_);
         if (admission == OperationAdmission::Busy) {
-            out.println("[EDF] STR refresh busy");
+            out.println(history ? "[EDF] history busy" : "[EDF] STR refresh busy");
             return true;
         }
         if (admission != OperationAdmission::Accepted) {
-            out.println("[EDF] STR refresh rejected");
+            out.println(history ? "[EDF] history rejected (requires AirMini)"
+                                : "[EDF] STR refresh rejected");
             return true;
         }
 
         refresh_session_id_ = session.id;
         refresh_wait_generation_ = refresh_generation_;
+        history_request_ = history;
         print_refresh_range(out,
-                            "[EDF] STR refresh started ",
+                            history ? "[EDF] history started "
+                                    : "[EDF] STR refresh started ",
                             start_day,
                             end_day);
         return true;
@@ -328,13 +332,33 @@ bool EdfConsoleCommands::execute(const String &command,
     print_unknown_command(
         out,
         "EDF",
-        "edf str refresh YYYYMMDD [YYYYMMDD]");
+        "edf str refresh YYYYMMDD [YYYYMMDD], edf history YYYYMMDD [YYYYMMDD]");
     return true;
 }
 
 void EdfConsoleCommands::poll_pending(Print &out,
                                       ConsoleCommandSession &session) {
     if (!refresh_session_id_ || session.id != refresh_session_id_) return;
+
+    if (history_request_) {
+        const AirMiniHistoryStatus &status = recorder_.history_status();
+        if (status.generation == refresh_wait_generation_ && status.active()) {
+            return;
+        }
+
+        out.print("[EDF] history ");
+        out.print(airmini_history_phase_name(status.phase));
+        out.print(" records_queued=");
+        out.print(static_cast<unsigned long>(status.records_queued));
+        out.print(" empty=");
+        out.print(static_cast<unsigned long>(status.empty));
+        out.print(" error=");
+        out.println(status.generation != refresh_wait_generation_
+            ? "result_superseded" : (status.error[0] ? status.error : "--"));
+        refresh_session_id_ = 0;
+        refresh_wait_generation_ = 0;
+        return;
+    }
 
     const EdfStrSummaryRefreshStatus &status =
         recorder_.str_summary_refresh_status();

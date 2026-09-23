@@ -156,8 +156,11 @@ void log_str_refresh_result(const EdfStrSummaryRefreshStatus &status) {
 }  // namespace
 
 struct EdfRecorderManager::ColdState {
+    explicit ColdState(RpcRequestPort &rpc) : history(rpc) {}
+
     EdfSessionMetadataPublisher metadata_publisher;
     EdfStrSummaryRefresh str_summary_refresh;
+    AirMiniHistoryService history;
     EdfSessionMetadata segment_metadata;
     EdfSessionMetadata pending_final_metadata;
     EdfSessionMetadataPublication metadata_open_publication;
@@ -188,7 +191,7 @@ void EdfRecorderManager::begin(EventBroker &events,
                   "recorder cold state allocation failed\n");
         return;
     }
-    cold_ = new (memory) ColdState();
+    cold_ = new (memory) ColdState(rpc_);
 
     events_ = &events;
     stream_ = &stream;
@@ -201,6 +204,8 @@ void EdfRecorderManager::begin(EventBroker &events,
                                      storage_read,
                                      metadata_storage,
                                      storage_path);
+    cold_->history.begin(storage_read, metadata_storage,
+                         StorageService::scan_port());
 
     // EdfRecorderManager is a program-lifetime singleton; this observer hook
     // intentionally stays registered until reboot.
@@ -220,6 +225,8 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         return;
     }
     if (recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+        cold_->history.cancel("history_device_unknown");
+        post_therapy_history_pending_ = false;
         release_stream();
         return;
     }
@@ -243,6 +250,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
 
     poll_rpc_completions();
     poll_str_summary_fetch(now_ms);
+    poll_airmini_history(now_ms);
     dispatch_session_edges(now_ms);
 
     if (segment_close_pending_ && close_recording_segment()) {
@@ -327,6 +335,81 @@ const EdfStrSummaryRefreshStatus &
 EdfRecorderManager::str_summary_refresh_status() const {
     static const EdfStrSummaryRefreshStatus unavailable;
     return cold_ ? cold_->str_summary_refresh.status() : unavailable;
+}
+
+OperationAdmission EdfRecorderManager::request_airmini_history(
+    SleepDayId start_day, SleepDayId end_day, uint32_t generation) {
+    if (!cold_ || recorder_model(device_state_) != ResmedDeviceModel::AirMini) {
+        return OperationAdmission::Rejected;
+    }
+    if (status_.active || history_suspended_ ||
+        time_sync_->clock_write_active() ||
+        session_->status().state == SessionState::Active) {
+        return OperationAdmission::Busy;
+    }
+
+    int32_t timezone = 0;
+    const int64_t noon = (static_cast<int64_t>(start_day.epoch_days()) * 24 +
+                          12) * 60 * 60 * 1000;
+    if (!edf_configured_timezone_offset_minutes(noon, timezone)) {
+        return OperationAdmission::Rejected;
+    }
+    return cold_->history.request(start_day, end_day, generation, millis(),
+                                  0, timezone);
+}
+
+const AirMiniHistoryStatus &EdfRecorderManager::history_status() const {
+    static const AirMiniHistoryStatus idle;
+    return cold_ ? cold_->history.status() : idle;
+}
+
+bool EdfRecorderManager::history_active() const {
+    return history_status().active();
+}
+
+uint32_t EdfRecorderManager::sessions_ended() const {
+    return post_therapy_history_pending_ && status_.sessions_ended
+        ? status_.sessions_ended - 1 : status_.sessions_ended;
+}
+
+void EdfRecorderManager::set_history_activity(bool rpc_available,
+                                             bool suspended) {
+    history_rpc_available_ = rpc_available;
+    history_suspended_ = suspended;
+}
+
+void EdfRecorderManager::enqueue_history_notification(
+    const RpcPayloadRef &payload) {
+    if (cold_) cold_->history.enqueue_notification(payload);
+}
+
+void EdfRecorderManager::poll_airmini_history(uint32_t now_ms) {
+    const bool was_active = history_active();
+    if (recorder_model(device_state_) != ResmedDeviceModel::AirMini) {
+        cold_->history.cancel("history_device_model");
+        post_therapy_history_pending_ = false;
+    } else if (history_suspended_) {
+        cold_->history.cancel("history_suspended");
+    } else if (!time_sync_->clock_write_active()) {
+        cold_->history.poll(now_ms, history_rpc_available_,
+                            session_->status().state == SessionState::Active);
+    }
+
+    const EdfStrSessionAccumulator *record = cold_->history.record();
+    if (record && write_str_day_record(*record, true)) {
+        cold_->history.record_published();
+    }
+    if (was_active && !history_active()) {
+        const AirMiniHistoryStatus &result = history_status();
+        Log::logf(CAT_EDF,
+                  result.phase == AirMiniHistoryPhase::Complete
+                      ? LOG_INFO : LOG_WARN,
+                  "AirMini history %s records_queued=%lu error=%s",
+                  airmini_history_phase_name(result.phase),
+                  static_cast<unsigned long>(result.records_queued),
+                  result.error[0] ? result.error : "--");
+        post_therapy_history_pending_ = false;
+    }
 }
 
 void EdfRecorderManager::set_enabled(bool enabled) {
@@ -1023,6 +1106,18 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     pending_mask_event_start_time_[0] = 0;
     numeric_open_frame_buffer_.clear();
     status_.sessions_ended++;
+    if (recording_gate_seen && str_.active() &&
+        recorder_model(device_state_) == ResmedDeviceModel::AirMini) {
+        SleepDayId day;
+        (void)SleepDayId::from_epoch_days(str_.day_epoch_days(), day);
+        if (++history_generation_ == 0) ++history_generation_;
+
+        post_therapy_history_pending_ = cold_->history.request(
+            day, day, history_generation_, now_ms,
+            AC_EDF_STR_SUMMARY_TRIGGER_WAIT_MS,
+            session_timezone_offset_minutes_, session_clock_) ==
+            OperationAdmission::Accepted;
+    }
     cold_->latest_catalog_refresh_hint = {};
     if (metadata_finalized) {
         EdfCatalogRefreshHint &hint =
@@ -2270,6 +2365,12 @@ bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
 }
 
 bool EdfRecorderManager::write_str_day_record() {
+    return write_str_day_record(str_);
+}
+
+bool EdfRecorderManager::write_str_day_record(
+    const EdfStrSessionAccumulator &accumulator,
+    bool replace_existing) {
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     if (!edf_str_path(path, sizeof(path))) {
         set_error("str_path_failed");
@@ -2278,14 +2379,14 @@ bool EdfRecorderManager::write_str_day_record() {
 
     char date[9] = {};
     char time[9] = {};
-    if (!edf_header_date(str_.day_start(), date, sizeof(date)) ||
-        !edf_header_time(str_.day_start(), time, sizeof(time))) {
+    if (!edf_header_date(accumulator.day_start(), date, sizeof(date)) ||
+        !edf_header_time(accumulator.day_start(), time, sizeof(time))) {
         set_error("bad_str_header_time");
         return false;
     }
 
     char recording_id[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
-    if (!build_recording_id(str_.day_start(), recording_id,
+    if (!build_recording_id(accumulator.day_start(), recording_id,
                             sizeof(recording_id))) {
         set_error("str_identity_unavailable");
         return false;
@@ -2299,9 +2400,10 @@ bool EdfRecorderManager::write_str_day_record() {
     info.record_count = 0;
 
     EdfStrRecordView record;
-    record.digital_samples = str_.samples();
-    record.sample_count = str_.sample_count();
-    if (!StorageService::enqueue_edf_str_record(path, info, record)) {
+    record.digital_samples = accumulator.samples();
+    record.sample_count = accumulator.sample_count();
+    if (!StorageService::enqueue_edf_str_record(path, info, record,
+                                               replace_existing)) {
         status_.str_enqueue_failures++;
         set_error("str_queue_failed");
         return false;

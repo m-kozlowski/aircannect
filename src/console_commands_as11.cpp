@@ -135,9 +135,18 @@ void handle_time(Print &out,
     }
     if (rest == "set" || rest == "push" || rest == "sync-to-resmed") {
         if (time_sync.request_push_esp_to_resmed(RpcSource::Console)) {
-            out.println("[TIME] SetDateTime queued");
+            if (device.state().model() == ResmedDeviceModel::AirMini) {
+                out.println("[TIME] AirMini NCP SetDateTime queued; readback pending");
+            } else {
+                out.println("[TIME] SetDateTime queued");
+            }
         } else {
-            out.println("[TIME] ESP clock is not ready or queue is full");
+            if (device.state().model() == ResmedDeviceModel::AirMini) {
+                out.print("[TIME] AirMini NCP SetDateTime ");
+                out.println(time_sync.last_status());
+            } else {
+                out.println("[TIME] ESP clock is not ready or queue is full");
+            }
         }
         return;
     }

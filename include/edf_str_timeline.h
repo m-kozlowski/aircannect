@@ -74,7 +74,8 @@ bool edf_str_timeline_place_record(const EdfStrTimelinePlan &plan,
                                    int32_t day,
                                    uint8_t *record,
                                    size_t record_size,
-                                   EdfStrTimelineBuildStats &stats);
+                                   EdfStrTimelineBuildStats &stats,
+                                   bool replace_existing = false);
 bool edf_str_timeline_fill_missing(const EdfStrTimelinePlan &plan,
                                    EdfStrTimelineBuffer &buffer,
                                    EdfStrTimelineBuildStats &stats);

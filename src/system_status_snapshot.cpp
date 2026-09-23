@@ -122,7 +122,7 @@ SystemStatusSnapshot collect_system_status(
     out.time.resmed_time_sync_enabled =
         sources.app_config.resmed_time_sync_enabled;
     out.time.resmed_time_write_supported =
-        as11.model() == ResmedDeviceModel::AirSense11;
+        sources.time_sync_service.resmed_time_write_supported();
     out.time.ntp_synced = sources.time_sync_service.ntp_synced();
     out.time.esp_time_valid =
         sources.time_sync_service.esp_clock_valid();

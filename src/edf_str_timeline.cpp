@@ -248,7 +248,8 @@ bool edf_str_timeline_place_record(const EdfStrTimelinePlan &plan,
                                    int32_t day,
                                    uint8_t *record,
                                    size_t record_size,
-                                   EdfStrTimelineBuildStats &stats) {
+                                   EdfStrTimelineBuildStats &stats,
+                                   bool replace_existing) {
     if (!buffer.records || !buffer.present ||
         buffer.capacity < plan.record_count || !record ||
         record_size != edf_str_record_size()) {
@@ -262,7 +263,7 @@ bool edf_str_timeline_place_record(const EdfStrTimelinePlan &plan,
 
     const uint32_t index = static_cast<uint32_t>(day - plan.start_day);
     uint8_t *destination = buffer.records + index * record_size;
-    if (buffer.present[index]) {
+    if (buffer.present[index] && !replace_existing) {
         const EdfStrRecordMergeStatus status =
             edf_str_merge_existing_record(destination,
                                           record_size,
