@@ -366,7 +366,7 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
 #endif
 
 #if AC_DISPLAY_DRIVER != AC_DISPLAY_DRIVER_NONE
-    {"display_orientation", AppConfigFieldId::DisplayOrientation,
+    {"display_orient", AppConfigFieldId::DisplayOrientation,
      AppConfigGroup::Display, 10, AppConfigFieldType::Enum,
      PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
      "Initial orientation", "Display orientation used at startup.",
@@ -375,7 +375,7 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
          sizeof(DISPLAY_ORIENTATION_VALUES[0]),
      -1, AC_CFG_OFFSET(display_orientation)},
 #if AC_MOTION_DRIVER != AC_MOTION_DRIVER_NONE
-    {"display_auto_rotate", AppConfigFieldId::DisplayAutoRotate,
+    {"display_autorot", AppConfigFieldId::DisplayAutoRotate,
      AppConfigGroup::Display, 20, AppConfigFieldType::Bool,
      PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
      "Automatic rotation", "Rotate the display with the device.",
