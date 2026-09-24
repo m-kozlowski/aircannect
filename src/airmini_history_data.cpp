@@ -1051,11 +1051,7 @@ bool apply_event_metrics(const AirMiniHistoryStrProjection &projection,
 
     if (!have_apnea_metrics && !have_csr_metrics) return true;
 
-    // Use the duration written to STR, including time preserved only in its
-    // seed, so repeating an import cannot change the denominator.
-    const uint64_t duration_ms = projection.duration_minutes
-        ? static_cast<uint64_t>(projection.duration_minutes) * 60000ULL
-        : projection.duration_ms;
+    const uint64_t duration_ms = projection.duration_ms;
     if (duration_ms == 0) return true;
 
     const double hours = static_cast<double>(duration_ms) / 3600000.0;
@@ -1933,33 +1929,6 @@ bool AirMiniHistoryData::project_day(
         } catch (const std::bad_alloc &) {
             return false;
         }
-    } else if (have_seed) {
-        // Reconstruct the seed intervals so a later historical session can be
-        // added without counting the recorder copy twice.
-        out.used_local_sessions = true;
-        const uint32_t seed_mask_events = input.local_str->mask_events();
-        const size_t mask_on_offset =
-            edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL);
-        const size_t mask_off_offset =
-            edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL);
-        for (uint32_t i = 0; i < seed_mask_events; ++i) {
-            const int16_t on = input.local_str->samples()[mask_on_offset + i];
-            const int16_t off = input.local_str->samples()[mask_off_offset + i];
-            if (on < 0 || off < on) continue;
-            if (!add_session(out,
-                             input.day_start_ms + static_cast<int64_t>(on) * 60000,
-                             input.day_start_ms + static_cast<int64_t>(off) * 60000,
-                             false, input.day_start_ms, input.day_end_ms)) {
-                return false;
-            }
-        }
-        for (const auto &candidate : historical.sessions) {
-            if (!add_session(out, candidate.start_ms, candidate.end_ms,
-                             candidate.closed_at_observed_end,
-                             input.day_start_ms, input.day_end_ms)) {
-                return false;
-            }
-        }
     } else {
         out.sessions.swap(historical.sessions);
         out.duration_ms = historical.duration_ms;
@@ -1982,6 +1951,7 @@ bool AirMiniHistoryData::project_day(
                 });
 
             if (!covered) {
+                out.used_local_sessions = true;
                 if (!add_session(out,
                         input.day_start_ms + static_cast<int64_t>(on) * 60000,
                         input.day_start_ms + static_cast<int64_t>(off) * 60000,
@@ -1992,34 +1962,10 @@ bool AirMiniHistoryData::project_day(
         }
     }
 
-    uint32_t duration_minutes = 0;
-    if (have_seed) {
-        const int16_t seed_minutes = input.local_str->samples()[
-            edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL)];
-        duration_minutes = std::max<int16_t>(0, seed_minutes);
-    }
-
-    // The recorder already counted local therapy, including time outside the
-    // mask intervals. Only new or extended history masks augment a saved STR.
-    const auto &duration_sessions = have_seed ? out.mask_sessions : out.sessions;
-    for (const auto &session : duration_sessions) {
-        const int64_t start = (session.start_ms - input.day_start_ms) / 60000;
-        const int64_t end = (session.end_ms - input.day_start_ms) / 60000;
-        int64_t accounted_end = start;
-        if (have_seed) {
-            uint16_t projected_end = 0;
-            uint16_t seed_end = 0;
-            if (seed_session_index(session, *input.local_str,
-                                   input.timezone_offset_minutes,
-                                   projected_end, seed_end) >= 0) {
-                accounted_end = seed_end;
-            }
-        }
-        duration_minutes += static_cast<uint32_t>(
-            std::max<int64_t>(0, end - accounted_end));
-    }
+    // Local therapy and retained history share one union of intervals. The
+    // saved STR total cannot identify which of those intervals it counted.
     out.duration_minutes = static_cast<uint16_t>(
-        std::min<uint32_t>(1440, duration_minutes));
+        std::min<uint64_t>(1440, out.duration_ms / 60000));
 
     for (const auto &event : resp.events) {
         int64_t timestamp_ms = 0;
