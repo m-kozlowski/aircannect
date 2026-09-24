@@ -63,14 +63,21 @@ void RpcQuiesceCoordinator::event_observer(
 void RpcQuiesceCoordinator::update(bool requested,
                                    bool controlled_disconnect_required,
                                    bool ble_selected,
-                                   uint32_t now_ms) {
+                                   uint32_t now_ms,
+                                   RpcQuiesceMode mode) {
     configure_ble_control(ble_selected);
+    if (ble_selected) mode = RpcQuiesceMode::RemoteStop;
     requested = requested || connection_held_;
     controlled_disconnect_required =
         controlled_disconnect_required || connection_held_;
 
+    if (requested_ && requested && mode != mode_) {
+        end(now_ms);
+    }
+
     if (requested != requested_) {
         if (requested) {
+            mode_ = mode;
             begin(now_ms);
         } else {
             end(now_ms);
@@ -87,16 +94,19 @@ void RpcQuiesceCoordinator::poll_quiesce(uint32_t now_ms) {
     if (!requested_) return;
 
     RpcQuiesceStatus transport = transport_.quiesce_status();
-    if (push_traffic_quiesced(transport)) {
-        can_.request_debug_log_rx(false);
+    if (!can_ack_only() && push_traffic_quiesced(transport)) {
+        can_.request_rx_mode(CanRxMode::Application);
         transport = transport_.quiesce_status();
     }
 
     const CanQuiesceStatus can = can_.can_quiesce_status();
 
-    if (push_traffic_quiesced(transport) &&
-        !can.debug_log_rx_enabled &&
-        !can.debug_log_filter_pending) {
+    const bool traffic_ready = can_ack_only()
+        ? transport.idle : push_traffic_quiesced(transport);
+    const CanRxMode expected_mode = can_ack_only()
+        ? CanRxMode::AckOnly : CanRxMode::Application;
+
+    if (traffic_ready && can.rx_mode == expected_mode && !can.filter_pending) {
         complete_ = true;
         deadline_ms_ = 0;
         return;
@@ -140,12 +150,17 @@ void RpcQuiesceCoordinator::begin(uint32_t now_ms) {
 
 #ifdef ARDUINO
     Log::logf(CAT_RPC, LOG_INFO,
-              "quiescing AS11 push traffic\n");
+              "pausing device traffic mode=%s\n",
+              can_ack_only() ? "can_ack_only" : "remote_stop");
 #endif
 
     transport_.set_quiesce_mode(true);
-    streams_.request_quiesce(now_ms);
-    events_.request_quiesce(now_ms);
+    if (can_ack_only()) {
+        can_.request_rx_mode(CanRxMode::AckOnly);
+    } else {
+        streams_.request_quiesce(now_ms);
+        events_.request_quiesce(now_ms);
+    }
 }
 
 void RpcQuiesceCoordinator::end(uint32_t now_ms) {
@@ -163,7 +178,7 @@ void RpcQuiesceCoordinator::end(uint32_t now_ms) {
     disconnect_timed_out_ = false;
     disconnect_deadline_ms_ = 0;
 
-    can_.request_debug_log_rx(true);
+    can_.request_rx_mode(CanRxMode::All);
     transport_.set_quiesce_mode(false);
     streams_.clear_quiesce();
     events_.clear_quiesce(now_ms);
@@ -227,7 +242,7 @@ void RpcQuiesceCoordinator::log_timeout() {
 
     Log::logf(CAT_RPC, LOG_WARN,
               "AS11 quiesce timed out stream=%u event=%u pending=%u "
-              "retry=%u queue=%u payload_q=%u tx_q=%u debug_rx=%u "
+              "retry=%u queue=%u payload_q=%u tx_q=%u rx_mode=%u "
               "filter_pending=%u event_active=%u event_pending=%u\n",
               streams_.quiesced() ? 1u : 0u,
               events_.quiesced() ? 1u : 0u,
@@ -236,8 +251,8 @@ void RpcQuiesceCoordinator::log_timeout() {
               static_cast<unsigned>(transport.request_queue_depth),
               static_cast<unsigned>(transport.payload_queue_depth),
               static_cast<unsigned>(transport.tx_queue_depth),
-              can.debug_log_rx_enabled ? 1u : 0u,
-              can.debug_log_filter_pending ? 1u : 0u,
+              static_cast<unsigned>(can.rx_mode),
+              can.filter_pending ? 1u : 0u,
               events.subscription_active ? 1u : 0u,
               events.subscribe_pending ? 1u : 0u);
 #endif

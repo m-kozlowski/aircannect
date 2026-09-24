@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "can_control_port.h"
 #include "fixed_queue.h"
 
 namespace aircannect {
@@ -60,8 +61,8 @@ public:
     bool enqueue_tx(const RawCanFrame &frame);
     bool receive(RawCanFrame &frame, uint32_t wait_ms = 0);
 
-    bool set_debug_log_rx_enabled(bool enabled);
-    bool debug_log_rx_enabled() const { return debug_log_rx_enabled_; }
+    bool set_rx_mode(CanRxMode mode);
+    CanRxMode rx_mode() const { return rx_mode_; }
 
     bool recover_or_restart(const char *reason);
 
@@ -109,7 +110,7 @@ private:
     bool recovery_active_ = false;
 
     bool installed_ = false;
-    bool debug_log_rx_enabled_ = true;
+    CanRxMode rx_mode_ = CanRxMode::All;
     bool ack_gap_expected_ = false;
     bool peer_absence_expected_ = false;
     bool peer_absence_tx_failed_ = false;

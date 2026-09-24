@@ -37,8 +37,18 @@ static_assert(required_rx_filter_accepts(AC_AS11_SERVICE_RX_ID));
 static_assert(required_rx_filter_accepts(0x380));
 static_assert(!required_rx_filter_accepts(AC_CAN_LOG_ID));
 
-twai_filter_config_t can_rx_filter_config(bool debug_log_enabled) {
-    if (debug_log_enabled) return TWAI_FILTER_CONFIG_ACCEPT_ALL();
+twai_filter_config_t can_rx_filter_config(CanRxMode mode) {
+    if (mode == CanRxMode::All) return TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+    if (mode == CanRxMode::AckOnly) {
+        // Same full-close register values as IDF's twai_hal_configure_filter.
+        // Normal mode still ACKs frames rejected by the acceptance filter.
+        twai_filter_config_t config = {};
+        config.acceptance_code = UINT32_MAX;
+        config.acceptance_mask = 0;
+        config.single_filter = true;
+        return config;
+    }
 
     // One hardware mask admits a small standard-ID superset around the RPC
     // and boot IDs. The service response ID is already inside that set, while
@@ -161,7 +171,7 @@ bool CanDriver::end() {
     restart_attempts_ = 0;
 
     if (!installed_) {
-        debug_log_rx_enabled_ = true;
+        rx_mode_ = CanRxMode::All;
         return true;
     }
 
@@ -179,7 +189,7 @@ bool CanDriver::end() {
     }
 
     installed_ = false;
-    debug_log_rx_enabled_ = true;
+    rx_mode_ = CanRxMode::All;
     Log::logf(CAT_CAN, LOG_INFO, "stopped\n");
     return true;
 }
@@ -194,7 +204,7 @@ bool CanDriver::install_controller() {
 
     twai_timing_config_t timing_config = can_timing_config();
     twai_filter_config_t filter_config =
-        can_rx_filter_config(debug_log_rx_enabled_);
+        can_rx_filter_config(rx_mode_);
 
     esp_err_t err = twai_driver_install(&general_config, &timing_config,
                                         &filter_config);
@@ -383,8 +393,8 @@ bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
     return true;
 }
 
-bool CanDriver::set_debug_log_rx_enabled(bool enabled) {
-    if (enabled == debug_log_rx_enabled_) return true;
+bool CanDriver::set_rx_mode(CanRxMode mode) {
+    if (mode == rx_mode_) return true;
     if (!installed_ || recovery_active_ || tx_queue_.count()) return false;
 
     twai_status_info_t status = {};
@@ -403,7 +413,7 @@ bool CanDriver::set_debug_log_rx_enabled(bool enabled) {
         return false;
     }
 
-    const twai_filter_config_t next_filter = can_rx_filter_config(enabled);
+    const twai_filter_config_t next_filter = can_rx_filter_config(mode);
     twai_ll_set_acc_filter(&TWAI, next_filter.acceptance_code,
                            next_filter.acceptance_mask,
                            next_filter.single_filter);
@@ -411,7 +421,7 @@ bool CanDriver::set_debug_log_rx_enabled(bool enabled) {
     err = twai_start();
     if (err != ESP_OK) {
         const twai_filter_config_t previous_filter =
-            can_rx_filter_config(debug_log_rx_enabled_);
+            can_rx_filter_config(rx_mode_);
         twai_ll_set_acc_filter(&TWAI, previous_filter.acceptance_code,
                                previous_filter.acceptance_mask,
                                previous_filter.single_filter);
@@ -428,10 +438,11 @@ bool CanDriver::set_debug_log_rx_enabled(bool enabled) {
         return false;
     }
 
-    debug_log_rx_enabled_ = enabled;
+    rx_mode_ = mode;
     last_tx_success_ms_ = 0;
-    Log::logf(CAT_CAN, LOG_INFO, "RX filter AS11 debug=%s\n",
-              enabled ? "on" : "off");
+    Log::logf(CAT_CAN, LOG_INFO, "RX filter=%s\n",
+              mode == CanRxMode::All ? "all" :
+              mode == CanRxMode::AckOnly ? "ack_only" : "application");
     return true;
 }
 

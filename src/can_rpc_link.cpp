@@ -19,7 +19,7 @@ bool CanRpcLink::begin() {
 }
 
 void CanRpcLink::poll(uint32_t now_ms) {
-    if (!application_enabled_) return;
+    if (!application_enabled_ || rx_mode_requested_ == CanRxMode::AckOnly) return;
     for (DatagramRx *receiver : {&rpc_rx_, &ncp_rx_}) {
         const DatagramFeedResult timeout = receiver->poll(now_ms);
         if (timeout.status == DatagramStatus::Error) {
@@ -43,7 +43,7 @@ bool CanRpcLink::set_physical_enabled(bool enabled) {
     }
 
     physical_enabled_ = false;
-    debug_log_rx_requested_ = true;
+    rx_mode_requested_ = CanRxMode::All;
     return can_.end();
 }
 
@@ -52,7 +52,13 @@ void CanRpcLink::poll_physical(uint32_t now_ms) {
 
     can_.poll();
 
-    if (debug_log_rx_requested_) {
+    if (can_.rx_mode() == CanRxMode::AckOnly) {
+        // Deliver ApplicationReset before accepting packets on a resumed link.
+        poll_rx_filter();
+        return;
+    }
+
+    if (rx_mode_requested_ == CanRxMode::All) {
         const DatagramFeedResult log_timeout = log_rx_.poll(now_ms);
         if (log_timeout.status == DatagramStatus::Error) {
             push_side_error(log_timeout.error.c_str());
@@ -61,11 +67,11 @@ void CanRpcLink::poll_physical(uint32_t now_ms) {
 
     drain_rx();
     can_.poll();
-    poll_debug_log_rx_filter();
+    poll_rx_filter();
 }
 
 size_t CanRpcLink::drain_rx() {
-    if (!physical_enabled()) return 0;
+    if (!physical_enabled() || rx_mode_requested_ == CanRxMode::AckOnly) return 0;
 
     size_t drained = 0;
     const uint32_t start_ms = millis();
@@ -100,7 +106,9 @@ RpcLinkSendResult CanRpcLink::send_ncp(RpcPayloadView payload) {
 
 RpcLinkSendResult CanRpcLink::send_datagram(RpcPayloadView payload,
                                            uint32_t can_id) {
-    if (!application_enabled_ || !physical_enabled()) {
+    if (!application_enabled_ || !physical_enabled() ||
+        rx_mode_requested_ == CanRxMode::AckOnly ||
+        can_.rx_mode() == CanRxMode::AckOnly) {
         return RpcLinkSendResult::Unavailable;
     }
 
@@ -133,7 +141,9 @@ void CanRpcLink::set_peer_absence_expected(bool expected) {
 
 RpcApplicationLinkStatus CanRpcLink::status() const {
     RpcApplicationLinkStatus out;
-    out.ready = application_enabled_ && physical_enabled();
+    out.ready = application_enabled_ && physical_enabled() &&
+                rx_mode_requested_ != CanRxMode::AckOnly &&
+                can_.rx_mode() != CanRxMode::AckOnly;
     out.tx_idle = !physical_enabled() || can_.tx_idle();
     out.tx_queue_depth = can_.tx_queue_depth();
     out.rx_pressure_events = can_.stats().rx_queue_full_alerts;
@@ -184,24 +194,26 @@ bool CanRpcLink::recover_can(const char *reason) {
     return can_.recover_or_restart(reason);
 }
 
-void CanRpcLink::request_debug_log_rx(bool enabled) {
-    if (!physical_enabled()) return;
-    if (enabled == debug_log_rx_requested_) return;
+void CanRpcLink::request_rx_mode(CanRxMode mode) {
+    if (mode == rx_mode_requested_) return;
 
-    debug_log_rx_requested_ = enabled;
+    rx_mode_requested_ = mode;
     log_rx_.reset();
+    if (mode == CanRxMode::AckOnly) {
+        reset();
+        side_events_.clear();
+    }
 }
 
 CanQuiesceStatus CanRpcLink::can_quiesce_status() const {
     CanQuiesceStatus out;
     if (!physical_enabled()) {
-        out.debug_log_rx_enabled = false;
+        out.rx_mode = rx_mode_requested_;
         return out;
     }
 
-    out.debug_log_rx_enabled = can_.debug_log_rx_enabled();
-    out.debug_log_filter_pending =
-        debug_log_rx_requested_ != out.debug_log_rx_enabled;
+    out.rx_mode = can_.rx_mode();
+    out.filter_pending = rx_mode_requested_ != out.rx_mode;
     return out;
 }
 
@@ -272,7 +284,7 @@ void CanRpcLink::handle_application_frame(const RawCanFrame &frame,
 
 void CanRpcLink::handle_debug_frame(const RawCanFrame &frame,
                                     uint32_t now_ms) {
-    if (!debug_log_rx_requested_) return;
+    if (rx_mode_requested_ != CanRxMode::All) return;
 
     const DatagramFeedResult result = log_rx_.feed(frame.data, frame.len,
                                                    now_ms);
@@ -290,11 +302,24 @@ void CanRpcLink::handle_debug_frame(const RawCanFrame &frame,
     }
 }
 
-void CanRpcLink::poll_debug_log_rx_filter() {
-    if (can_.debug_log_rx_enabled() == debug_log_rx_requested_) return;
-    if (!can_.set_debug_log_rx_enabled(debug_log_rx_requested_)) return;
+void CanRpcLink::poll_rx_filter() {
+    const CanRxMode previous = can_.rx_mode();
+    if (previous == rx_mode_requested_) return;
+    if (!can_.set_rx_mode(rx_mode_requested_)) return;
 
     log_rx_.reset();
+    if (previous == CanRxMode::AckOnly ||
+        rx_mode_requested_ == CanRxMode::AckOnly) {
+        reset();
+        side_events_.clear();
+    }
+
+    if (previous == CanRxMode::AckOnly) {
+        CanSideEvent event;
+        event.kind = CanSideEventKind::ApplicationReset;
+        event.detail = "can_rx_resumed";
+        (void)side_events_.push(std::move(event));
+    }
 }
 
 void CanRpcLink::push_link_error(const char *detail) {

@@ -56,7 +56,7 @@ public:
                                     void *context);
     bool can_available() const override { return physical_enabled(); }
     bool recover_can(const char *reason) override;
-    void request_debug_log_rx(bool enabled) override;
+    void request_rx_mode(CanRxMode mode) override;
     CanQuiesceStatus can_quiesce_status() const override;
 
 private:
@@ -73,7 +73,7 @@ private:
     void handle_application_frame(const RawCanFrame &frame, uint32_t now_ms,
                                    DatagramRx &receiver, RpcLinkEventKind kind);
     void handle_debug_frame(const RawCanFrame &frame, uint32_t now_ms);
-    void poll_debug_log_rx_filter();
+    void poll_rx_filter();
     void push_link_error(const char *detail);
     void push_side_error(const char *detail);
     void push_boot_notification(const RawCanFrame &frame);
@@ -91,7 +91,7 @@ private:
     void *service_frame_context_ = nullptr;
     bool physical_enabled_ = false;
     bool application_enabled_ = true;
-    bool debug_log_rx_requested_ = true;
+    CanRxMode rx_mode_requested_ = CanRxMode::All;
 
 };
 

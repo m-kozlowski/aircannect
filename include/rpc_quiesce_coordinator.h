@@ -10,6 +10,11 @@ namespace aircannect {
 
 class StreamBroker;
 
+enum class RpcQuiesceMode {
+    RemoteStop,
+    CanAckOnly,
+};
+
 class RpcQuiesceCoordinator {
 public:
     RpcQuiesceCoordinator(RpcQuiescePort &transport,
@@ -21,7 +26,8 @@ public:
     void update(bool requested,
                 bool controlled_disconnect_required,
                 bool ble_selected,
-                uint32_t now_ms);
+                uint32_t now_ms,
+                RpcQuiesceMode mode = RpcQuiesceMode::RemoteStop);
 
     // Intentional connection hold, shared by local commands and AS11.
     void request_connection_hold() { connection_held_ = true; }
@@ -33,6 +39,9 @@ public:
     bool shutdown_allowed() const;
     bool reboot_allowed() const;
     bool requested() const { return requested_; }
+    bool can_ack_only() const {
+        return requested_ && mode_ == RpcQuiesceMode::CanAckOnly;
+    }
 
 private:
     static void event_observer(void *context, const As11EventFrame &frame,
@@ -58,6 +67,7 @@ private:
     EventConsumerHandle ble_events_ = EVENT_CONSUMER_INVALID;
 
     bool requested_ = false;
+    RpcQuiesceMode mode_ = RpcQuiesceMode::RemoteStop;
     bool complete_ = false;
     bool timed_out_ = false;
     uint32_t deadline_ms_ = 0;

@@ -372,7 +372,7 @@ void FirmwareInstaller::poll_prepare(bool as11_quiesced,
         status_.prepared = true;
         prepared_at_ms_ = millis();
         Log::logf(CAT_OTA, LOG_INFO,
-                  "ESP OTA prepared source=%s; AS11 quiet, oximetry suspended\n",
+                  "ESP OTA prepared source=%s; device traffic paused, oximetry suspended\n",
                   firmware_install_source_name(status_.source));
         unlock();
         return;

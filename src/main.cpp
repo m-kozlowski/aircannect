@@ -1514,7 +1514,9 @@ void loop() {
             local_poweroff_requested,
         esp_reboot_pending || local_poweroff_requested,
         rpc_link_selector.selected() == As11Transport::Ble,
-        now_ms);
+        now_ms,
+        esp_ota_quiesce_requested && !as11_service_exclusive
+            ? RpcQuiesceMode::CanAckOnly : RpcQuiesceMode::RemoteStop);
 
     const bool as11_application_quiesce_requested =
         rpc_quiesce_coordinator.requested();
@@ -1554,11 +1556,13 @@ void loop() {
         configure_oximetry(config_service.data());
     }
 
-    stream_broker.poll(rpc_transport, now_ms);
-    event_broker.poll(rpc_transport, now_ms,
-                      resmed_ota_transport_active ||
-                          !as11_link_ready ||
-                          as11_device_service.unavailable());
+    if (!rpc_quiesce_coordinator.can_ack_only()) {
+        stream_broker.poll(rpc_transport, now_ms);
+        event_broker.poll(rpc_transport, now_ms,
+                          resmed_ota_transport_active ||
+                              !as11_link_ready ||
+                              as11_device_service.unavailable());
+    }
     const bool as11_device_unavailable =
         as11_device_service.unavailable();
     const bool as11_rpc_available =
