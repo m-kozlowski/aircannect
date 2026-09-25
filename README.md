@@ -1,6 +1,6 @@
 # AirCANnect
 
-ESP32 bridge for ResMed AirSense 11 / AirCurve 11 CPAP.
+ESP32 bridge for ResMed AirSense 11 / AirCurve 11 / AirMini CPAP.
 
 Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 
@@ -9,11 +9,11 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 ## What it does
 
 - **Web UI** 
-  - live dashboard with AS11 status and identity
+  - live dashboard with device status and identity
   - read/write all therapy settings
   - live pressure / flow / leak / SpO2 charts
 - **EDF capture**
-  - record active therapy sessions to AS11-style EDF files on SD card
+  - record active therapy sessions to ResMed-style EDF files on SD card
   - browse and download captured EDF files over the Web UI
   - SMB share sync
   - SleepHQ sync
@@ -22,7 +22,8 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 - **Oximetry**
   - use supported BLE oximeters or UDP sources
   - let the AirSense record HR/SpO2 when application control uses CAN, or write
-    it directly to local SA2 EDF when application control uses BLE
+    it directly to local SA2 EDF when application control uses BLE or the
+    device is an AirMini
   - currently supported: O2Ring, O2Ring-S, Checkme O2, Nonin 3150, generic PLX/HR sensors
 - **Local display and controls**
   - optional status and therapy display with motion wake and automatic rotation
@@ -30,7 +31,7 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 - **Alerts**
   - configurable high-leak warnings with speaker output on supported hardware
 - **Time sync**
-  - NTP-first with AS11 clock fallback
+  - NTP-first with device clock fallback
   - Optional AirSense time synchronization - fixes RTC drift issue
 - **Raw TCP bridge**
   - send commands to AirSense over WiFi. \
@@ -38,7 +39,7 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 - **Multi-profile Wi-Fi**
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
 - **ResMed OTA**
-  - flash compatible AirSense 11 / AirCurve 11 firmware from web UI or CLI. \
+  - flash compatible AirSense 11 / AirCurve 11 / AirMini firmware from web UI or CLI. \
     (Autodetects raw and .abc formats; CONF, APPL, and bootloader regions can
     be selected explicitly.)
 
@@ -53,6 +54,12 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
    [quickstart](docs/quickstart.md) for installation options.
 4. Open `http://aircannect/` (default login: `admin` / `aircannect`) and follow
    the setup wizard.
+
+## AirMini
+
+AirMini connects over CAN only, with the same wiring as AirSense 11. Keep the
+AirMini app closed while AirCANnect is recording: AirMini shares one data stream
+between CAN and Bluetooth.
 
 ## Build profiles
 

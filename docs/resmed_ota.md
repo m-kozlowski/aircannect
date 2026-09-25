@@ -1,7 +1,7 @@
 # ResMed Firmware Installation
 
-AirCANnect can install compatible AirSense 11 and AirCurve 11 firmware from the
-OTA tab or management console. This page covers the choices exposed by
+AirCANnect can install compatible AirSense 11, AirCurve 11, and AirMini firmware
+from the OTA tab or management console. This page covers the choices exposed by
 AirCANnect. The container format and device protocol are documented in
 [airbreak-plus](https://github.com/m-kozlowski/airbreak-plus/blob/master/docs/as11/ota_protocol.md).
 
@@ -19,6 +19,9 @@ flash targets require particular care.
 
 Use **Native RPC** unless the device already has a compatible patched
 bootloader and there is a reason to use service mode.
+
+AirMini supports Native RPC over CAN only. Patched Bootloader and
+**Dump current** are not available for AirMini.
 
 ### Stock firmware, Airbreak, and the OTA key
 

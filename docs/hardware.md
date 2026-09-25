@@ -68,6 +68,8 @@ section below. Keep SDMMC wires short, ideally under 5 cm.
 
 ## AirSense 11 power-and-CAN connector
 
+AirMini uses the same connector, pinout, and wiring.
+
 **Pinout (device side):**
 
 | Pin | Signal |

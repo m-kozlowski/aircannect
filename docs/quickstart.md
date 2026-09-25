@@ -91,6 +91,9 @@ router or use the SoftAP URL.
 The XIAO release profiles default to CAN. Connect the transceiver as described
 in [hardware.md](hardware.md); no pairing is required.
 
+AirMini is detected automatically and is supported over CAN only. Keep the
+AirMini app closed while AirCANnect is recording.
+
 The Waveshare profile defaults to BLE. Pair it from the setup wizard or the
 AS11 section of the Config tab:
 
