@@ -78,7 +78,8 @@ struct TrackWork {
     int append_slot = 0;
     bool file_exists = false;
     std::shared_ptr<LargeByteBuffer> lod[2];
-    uint8_t lod_dirty[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
+    uint16_t lod_slots[REPORT_SIGNAL_STORE_MAX_BLOCKS] = {};
+    size_t lod_count = 0;
     size_t lod_cursor[2] = {};
     bool lod_file_exists[2] = {};
     bool lod_header_written[2] = {};
@@ -984,21 +985,49 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
         const auto lod = store_->take_lod();
         const std::shared_ptr<const LargeByteBuffer> planes[] = {
             lod.one_second, lod.ten_seconds};
+
+        // Keep only changed slots, packed in file order. Rewriting a partial
+        // block replaces its envelope instead of retaining an older copy.
+        const size_t first = std::lower_bound(
+            work.lod_slots, work.lod_slots + work.lod_count,
+            runtime_->writing_slot) - work.lod_slots;
+        const size_t last = std::lower_bound(
+            work.lod_slots + first, work.lod_slots + work.lod_count,
+            runtime_->writing_slot + runtime_->writing_count) - work.lod_slots;
+        const size_t next_count =
+            work.lod_count - (last - first) + runtime_->writing_count;
+
         for (size_t level = 0; level < 2; ++level) {
             if (!planes[level]) continue;
             const size_t block_bytes =
                 planes[level]->size() / runtime_->writing_count;
             if (!work.lod[level]) {
                 work.lod[level] = LargeByteBuffer::allocate_shared(
-                    block_bytes * runtime_->block_slot_count);
+                    block_bytes * next_count);
             }
-            if (!work.lod[level]) {
+            if (!work.lod[level] ||
+                !work.lod[level]->grow(block_bytes * next_count)) {
                 failure_reason_ = "report_signal_store_lod_allocation_failed";
                 return false;
             }
-            memcpy(work.lod[level]->data() + runtime_->writing_slot * block_bytes,
+            uint8_t *bytes = work.lod[level]->data();
+            memmove(bytes + (first + runtime_->writing_count) * block_bytes,
+                    bytes + last * block_bytes,
+                    (work.lod_count - last) * block_bytes);
+            memcpy(bytes + first * block_bytes,
                    planes[level]->data(), planes[level]->size());
         }
+
+        if (planes[0] || planes[1]) {
+            memmove(work.lod_slots + first + runtime_->writing_count,
+                    work.lod_slots + last,
+                    (work.lod_count - last) * sizeof(work.lod_slots[0]));
+            for (size_t i = 0; i < runtime_->writing_count; ++i) {
+                work.lod_slots[first + i] = runtime_->writing_slot + i;
+            }
+            work.lod_count = next_count;
+        }
+
         for (size_t i = 0; i < runtime_->writing_count; ++i) {
             const size_t slot = runtime_->writing_slot + i;
             work.raw_blocks[slot].reset();
@@ -1006,8 +1035,6 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
                 (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
                 sizeof(int16_t);
             work.written_blocks[slot / 8] |=
-                static_cast<uint8_t>(1u << (slot % 8));
-            work.lod_dirty[slot / 8] |=
                 static_cast<uint8_t>(1u << (slot % 8));
         }
         work.file_exists = true;
@@ -1127,24 +1154,24 @@ bool ReportSignalStoreBuilder::flush_lod(bool *progressed) {
             const auto &bytes = work.lod[level];
             if (!bytes) continue;
 
-            size_t slot = work.lod_cursor[level];
-            while (slot < runtime_->block_slot_count &&
-                   !(work.lod_dirty[slot / 8] & (1u << (slot % 8)))) ++slot;
-            if (slot == runtime_->block_slot_count) {
+            const size_t ordinal = std::lower_bound(
+                work.lod_slots, work.lod_slots + work.lod_count,
+                work.lod_cursor[level]) - work.lod_slots;
+            if (ordinal == work.lod_count) {
                 work.lod[level].reset();
                 continue;
             }
 
-            const size_t block_bytes = bytes->size() / runtime_->block_slot_count;
+            const size_t slot = work.lod_slots[ordinal];
+            const size_t block_bytes = bytes->size() / work.lod_count;
             const size_t limit = (AC_STORAGE_RANGE_WRITE_MAX_BYTES -
                 ReportSignalStoreFileCodec::HeaderBytes) / block_bytes;
             size_t count = 1;
-            while (count < limit && slot + count < runtime_->block_slot_count &&
-                   (work.lod_dirty[(slot + count) / 8] &
-                    (1u << ((slot + count) % 8)))) ++count;
+            while (count < limit && ordinal + count < work.lod_count &&
+                   work.lod_slots[ordinal + count] == slot + count) ++count;
 
             const auto part = LargeByteBuffer::slice(
-                bytes, slot * block_bytes, count * block_bytes);
+                bytes, ordinal * block_bytes, count * block_bytes);
             if (!part) {
                 failure_reason_ = "report_signal_store_lod_allocation_failed";
                 return false;
