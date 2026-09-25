@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <type_traits>
+#include <vector>
 
 #include "edf_file_inventory.h"
 #include "edf_report_catalog.h"
@@ -13,6 +14,7 @@
 #include "edf_session_metadata.h"
 #include "edf_str_file_layout.h"
 #include "incremental_sort.h"
+#include "large_allocator.h"
 #include "large_scratch_array.h"
 #include "night_catalog_clock.h"
 #include "night_catalog_store_service.h"
@@ -132,20 +134,23 @@ bool same_exact_session(const EdfReportSessionDescriptor &session,
            strcmp(session.session_stamp, file.inventory.session_stamp) == 0;
 }
 
-bool add_exact_session_file(EdfReportSessionDescriptor *sessions,
-                            size_t capacity,
-                            size_t &count,
+using EdfSessionBuffer = std::vector<EdfReportSessionDescriptor,
+                                     LargeAllocator<EdfReportSessionDescriptor>>;
+
+bool add_exact_session_file(EdfSessionBuffer &sessions,
                             const EdfReportFileDescriptor &file) {
-    for (size_t i = 0; i < count; ++i) {
-        if (same_exact_session(sessions[i], file)) {
-            return edf_report_session_add_file(sessions[i], file);
+    for (auto &session : sessions) {
+        if (same_exact_session(session, file)) {
+            return edf_report_session_add_file(session, file);
         }
     }
-    if (count >= capacity) return false;
 
-    edf_report_session_init(sessions[count]);
-    if (!edf_report_session_add_file(sessions[count], file)) return false;
-    ++count;
+    sessions.emplace_back();
+    edf_report_session_init(sessions.back());
+    if (!edf_report_session_add_file(sessions.back(), file)) {
+        sessions.pop_back();
+        return false;
+    }
     return true;
 }
 
@@ -294,6 +299,13 @@ struct ParsedEdfLayouts {
     char path[AC_EDF_REPORT_PATH_MAX] = {};
     uint32_t layout_offset = 0;
     uint16_t layout_count = 0;
+};
+
+struct ParsedFallback {
+    std::vector<NightCatalogTimeRange,
+                LargeAllocator<NightCatalogTimeRange>> sessions;
+    std::vector<NightCatalogFallbackSectionInput,
+                LargeAllocator<NightCatalogFallbackSectionInput>> sections;
 };
 
 struct ParsedSessionMetadata {
@@ -458,9 +470,7 @@ struct NightCatalogRefreshRuntime {
         fallback_scan_count = 0;
 
         scan.reset();
-        destroy_large_array(edf_sessions, edf_session_capacity);
-        edf_sessions = nullptr;
-        edf_session_capacity = 0;
+        EdfSessionBuffer{}.swap(edf_sessions);
         edf_session_count = 0;
 
         destroy_large_array(parsed_edf_files, parsed_edf_file_capacity);
@@ -468,10 +478,7 @@ struct NightCatalogRefreshRuntime {
         parsed_edf_file_capacity = 0;
         parsed_edf_file_count = 0;
 
-        destroy_large_array(edf_signal_layouts, edf_signal_layout_capacity);
-        edf_signal_layouts = nullptr;
-        edf_signal_layout_capacity = 0;
-        edf_signal_layout_count = 0;
+        decltype(edf_signal_layouts){}.swap(edf_signal_layouts);
 
         destroy_large_array(session_metadata, session_metadata_capacity);
         session_metadata = nullptr;
@@ -485,18 +492,10 @@ struct NightCatalogRefreshRuntime {
 
         destroy_large_array(fallback_records, fallback_record_capacity);
         fallback_records = nullptr;
+        destroy_large_array(parsed_fallbacks, fallback_record_capacity);
+        parsed_fallbacks = nullptr;
         fallback_record_capacity = 0;
         fallback_record_count = 0;
-
-        destroy_large_array(fallback_sessions, fallback_session_capacity);
-        fallback_sessions = nullptr;
-        fallback_session_capacity = 0;
-        fallback_session_count = 0;
-
-        destroy_large_array(fallback_sections, fallback_section_capacity);
-        fallback_sections = nullptr;
-        fallback_section_capacity = 0;
-        fallback_section_count = 0;
 
         scan_index = 0;
         current_path[0] = '\0';
@@ -545,15 +544,13 @@ struct NightCatalogRefreshRuntime {
     char metadata_root[AC_STORAGE_PATH_MAX] = {};
     char fallback_root[AC_STORAGE_PATH_MAX] = {};
 
-    EdfReportSessionDescriptor *edf_sessions = nullptr;
-    size_t edf_session_capacity = 0;
+    EdfSessionBuffer edf_sessions;
     size_t edf_session_count = 0;
     ParsedEdfLayouts *parsed_edf_files = nullptr;
     size_t parsed_edf_file_capacity = 0;
     size_t parsed_edf_file_count = 0;
-    EdfReportSignalLayout *edf_signal_layouts = nullptr;
-    size_t edf_signal_layout_capacity = 0;
-    size_t edf_signal_layout_count = 0;
+    std::vector<EdfReportSignalLayout,
+                LargeAllocator<EdfReportSignalLayout>> edf_signal_layouts;
     ParsedSessionMetadata *session_metadata = nullptr;
     size_t session_metadata_capacity = 0;
     size_t session_metadata_count = 0;
@@ -561,14 +558,9 @@ struct NightCatalogRefreshRuntime {
     size_t str_record_capacity = 0;
     size_t str_record_count = 0;
     NightCatalogFallbackInput *fallback_records = nullptr;
+    ParsedFallback *parsed_fallbacks = nullptr;
     size_t fallback_record_capacity = 0;
     size_t fallback_record_count = 0;
-    NightCatalogTimeRange *fallback_sessions = nullptr;
-    size_t fallback_session_capacity = 0;
-    size_t fallback_session_count = 0;
-    NightCatalogFallbackSectionInput *fallback_sections = nullptr;
-    size_t fallback_section_capacity = 0;
-    size_t fallback_section_count = 0;
 
     NightCatalogBuilder builder;
     std::shared_ptr<const NightCatalog> building_catalog;
@@ -848,59 +840,26 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
         }
     }
 
-    runtime.edf_sessions =
-        allocate_large_array<EdfReportSessionDescriptor>(report_file_count);
-    runtime.edf_session_capacity = report_file_count;
     runtime.parsed_edf_files =
         allocate_large_array<ParsedEdfLayouts>(report_file_count);
     runtime.parsed_edf_file_capacity = report_file_count;
-
-    const size_t maximum_layout_files = std::min(
-        std::numeric_limits<size_t>::max() /
-            AC_EDF_REPORT_FILE_SIGNAL_MAX,
-        static_cast<size_t>(UINT32_MAX) /
-            AC_EDF_REPORT_FILE_SIGNAL_MAX);
-    if (report_file_count > maximum_layout_files) {
-        return false;
-    }
-    runtime.edf_signal_layout_capacity =
-        report_file_count * AC_EDF_REPORT_FILE_SIGNAL_MAX;
-    runtime.edf_signal_layouts = allocate_large_array<EdfReportSignalLayout>(
-        runtime.edf_signal_layout_capacity);
 
     runtime.session_metadata_capacity = metadata_file_count;
     runtime.session_metadata =
         allocate_large_array<ParsedSessionMetadata>(metadata_file_count);
 
-    const size_t maximum_fallback_files = std::min(
-        std::numeric_limits<size_t>::max() /
-            ReportFallbackArtifactCodec::MaxSessions,
-        std::numeric_limits<size_t>::max() /
-            ReportFallbackArtifactCodec::MaxSections);
-    if (fallback_file_count > maximum_fallback_files) return false;
-
     runtime.fallback_record_capacity = fallback_file_count;
     runtime.fallback_records =
         allocate_large_array<NightCatalogFallbackInput>(fallback_file_count);
-    runtime.fallback_session_capacity =
-        fallback_file_count * ReportFallbackArtifactCodec::MaxSessions;
-    runtime.fallback_sessions = allocate_large_array<NightCatalogTimeRange>(
-        runtime.fallback_session_capacity);
-    runtime.fallback_section_capacity =
-        fallback_file_count * ReportFallbackArtifactCodec::MaxSections;
-    runtime.fallback_sections =
-        allocate_large_array<NightCatalogFallbackSectionInput>(
-            runtime.fallback_section_capacity);
+    runtime.parsed_fallbacks =
+        allocate_large_array<ParsedFallback>(fallback_file_count);
 
-    if (report_file_count > 0 &&
-        (!runtime.edf_sessions || !runtime.parsed_edf_files ||
-         !runtime.edf_signal_layouts)) {
+    if (report_file_count > 0 && !runtime.parsed_edf_files) {
         return false;
     }
     if (metadata_file_count > 0 && !runtime.session_metadata) return false;
     if (fallback_file_count > 0 &&
-        (!runtime.fallback_records || !runtime.fallback_sessions ||
-         !runtime.fallback_sections)) {
+        (!runtime.fallback_records || !runtime.parsed_fallbacks)) {
         return false;
     }
 
@@ -965,8 +924,10 @@ bool submit_next_edf(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
-    normalize_edf_report_sessions(runtime.edf_sessions,
+    runtime.edf_session_count = runtime.edf_sessions.size();
+    normalize_edf_report_sessions(runtime.edf_sessions.data(),
                                   runtime.edf_session_count);
+    runtime.edf_sessions.resize(runtime.edf_session_count);
     status.sessions = static_cast<uint32_t>(std::min(
         runtime.edf_session_count,
         static_cast<size_t>(UINT32_MAX)));
@@ -998,7 +959,8 @@ void skip_current_edf(NightCatalogRefreshRuntime &runtime,
 
 bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
                      StorageReadPort &read_port,
-                     NightCatalogRefreshStatus &status) {
+                     NightCatalogRefreshStatus &status,
+                     const char *&error) {
     const SourceReadState read_state = runtime.source_read.poll(
         read_port, runtime.read_buffer, SOURCE_READ_BUFFER_BYTES);
     if (read_state == SourceReadState::Waiting) return false;
@@ -1025,28 +987,37 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
         0,
         file);
     size_t signal_layout_count = 0;
-    const size_t remaining_layouts =
-        runtime.edf_signal_layout_capacity - runtime.edf_signal_layout_count;
+    EdfReportSignalLayout layouts[AC_EDF_REPORT_FILE_SIGNAL_MAX];
     const bool layouts_ready = file_status == EdfReportFileStatus::Ok &&
         runtime.parsed_edf_file_count < runtime.parsed_edf_file_capacity &&
         edf_report_file_signal_layouts(
-            file,
-            runtime.edf_signal_layouts + runtime.edf_signal_layout_count,
-            remaining_layouts,
+            file, layouts, AC_EDF_REPORT_FILE_SIGNAL_MAX,
             signal_layout_count) &&
         signal_layout_count <= UINT16_MAX;
-    if (layouts_ready &&
-        add_exact_session_file(runtime.edf_sessions,
-                               runtime.edf_session_capacity,
-                               runtime.edf_session_count,
-                               file)) {
+
+    bool accepted = false;
+    const size_t layout_offset = runtime.edf_signal_layouts.size();
+    try {
+        if (layouts_ready && add_exact_session_file(runtime.edf_sessions, file)) {
+            if (signal_layout_count > UINT32_MAX - layout_offset) {
+                error = "night_catalog_source_count_overflow";
+                return true;
+            }
+            runtime.edf_signal_layouts.insert(runtime.edf_signal_layouts.end(),
+                                              layouts, layouts + signal_layout_count);
+            accepted = true;
+        }
+    } catch (const std::bad_alloc &) {
+        error = "night_catalog_edf_alloc_failed";
+        return true;
+    }
+
+    if (accepted) {
         ParsedEdfLayouts &parsed =
             runtime.parsed_edf_files[runtime.parsed_edf_file_count++];
         copy_cstr(parsed.path, sizeof(parsed.path), file.path);
-        parsed.layout_offset =
-            static_cast<uint32_t>(runtime.edf_signal_layout_count);
+        parsed.layout_offset = static_cast<uint32_t>(layout_offset);
         parsed.layout_count = static_cast<uint16_t>(signal_layout_count);
-        runtime.edf_signal_layout_count += signal_layout_count;
         ++status.files_indexed;
     } else {
         ++status.files_skipped;
@@ -1344,7 +1315,8 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
 
 bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
                           StorageReadPort &read_port,
-                          NightCatalogRefreshStatus &status) {
+                          NightCatalogRefreshStatus &status,
+                          const char *&error) {
     const SourceReadState read_state = runtime.source_read.poll(
         read_port, runtime.read_buffer, SOURCE_READ_BUFFER_BYTES);
     if (read_state == SourceReadState::Waiting) return false;
@@ -1380,15 +1352,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
         strcmp(scan_entry.path, runtime.current_path) == 0;
     if (!metadata_valid ||
         runtime.fallback_record_count >=
-            runtime.fallback_record_capacity ||
-        runtime.fallback_session_count >
-            runtime.fallback_session_capacity ||
-        runtime.fallback_section_count >
-            runtime.fallback_section_capacity ||
-        info.session_count > runtime.fallback_session_capacity -
-                                 runtime.fallback_session_count ||
-        info.section_count > runtime.fallback_section_capacity -
-                                 runtime.fallback_section_count) {
+            runtime.fallback_record_capacity) {
         skip_current_fallback(runtime,
                               status,
                               "night_catalog_fallback_invalid");
@@ -1397,13 +1361,19 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
 
     NightCatalogFallbackInput &out =
         runtime.fallback_records[runtime.fallback_record_count];
+    ParsedFallback &parsed = runtime.parsed_fallbacks[runtime.fallback_record_count];
+    try {
+        parsed.sessions.resize(info.session_count);
+        parsed.sections.resize(info.section_count);
+    } catch (const std::bad_alloc &) {
+        error = "night_catalog_fallback_alloc_failed";
+        return true;
+    }
+
     out.sleep_day = info.sleep_day;
     out.day_start_ms = info.day_start_ms;
     out.day_end_ms = info.day_end_ms;
-    const size_t session_offset = runtime.fallback_session_count;
-    const size_t section_offset = runtime.fallback_section_count;
-    out.sessions = runtime.fallback_sessions +
-        session_offset;
+    out.sessions = parsed.sessions.data();
     out.session_count = info.session_count;
     out.path = scan_entry.path;
     out.file_size = runtime.current_size;
@@ -1445,13 +1415,11 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
             }
         }
     }
-    out.sections = runtime.fallback_sections +
-        section_offset;
+    out.sections = parsed.sections.data();
     out.section_count = info.section_count;
 
     for (size_t i = 0; i < info.session_count; ++i) {
-        NightCatalogTimeRange &session =
-            runtime.fallback_sessions[session_offset + i];
+        NightCatalogTimeRange &session = parsed.sessions[i];
         if (!view.session(i, session)) {
             skip_current_fallback(runtime,
                                   status,
@@ -1468,8 +1436,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
             return true;
         }
 
-        NightCatalogFallbackSectionInput &section =
-            runtime.fallback_sections[section_offset + i];
+        NightCatalogFallbackSectionInput &section = parsed.sections[i];
         section.kind = source.kind;
         section.source = source.source;
         section.signal = source.signal;
@@ -1483,8 +1450,6 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
         section.data_crc32 = source.data_crc32;
     }
 
-    runtime.fallback_session_count += info.session_count;
-    runtime.fallback_section_count += info.section_count;
     runtime.previous_fallback.reset();
     runtime.previous_sources_requested = false;
 
@@ -1828,14 +1793,14 @@ bool prepare_build_session(NightCatalogRefreshRuntime &runtime, const char *&err
                                  return strcmp(candidate.path, path) < 0;
                              });
         if (parsed == end || strcmp(parsed->path, stored_source.path) != 0 ||
-            parsed->layout_offset > runtime.edf_signal_layout_count ||
+            parsed->layout_offset > runtime.edf_signal_layouts.size() ||
             parsed->layout_count >
-                runtime.edf_signal_layout_count - parsed->layout_offset) {
+                runtime.edf_signal_layouts.size() - parsed->layout_offset) {
             error = "night_catalog_signal_layout_missing";
             return false;
         }
         file.signal_layouts = parsed->layout_count > 0
-                                  ? runtime.edf_signal_layouts + parsed->layout_offset
+                                  ? runtime.edf_signal_layouts.data() + parsed->layout_offset
                                   : nullptr;
         file.signal_layout_count = parsed->layout_count;
         ++out.file_count;
@@ -1903,9 +1868,10 @@ bool NightCatalogRefreshService::poll() {
             return submit_next_edf(*runtime_, *read_port_, status_);
 
         case NightCatalogRefreshRuntime::Phase::WaitEdf:
-            if (!finish_edf_read(*runtime_, *read_port_, status_)) {
+            if (!finish_edf_read(*runtime_, *read_port_, status_, error)) {
                 return false;
             }
+            if (error) fail(error, true);
             return true;
 
         case NightCatalogRefreshRuntime::Phase::SelectMetadata:
@@ -1935,9 +1901,10 @@ bool NightCatalogRefreshService::poll() {
         }
 
         case NightCatalogRefreshRuntime::Phase::WaitFallback:
-            if (!finish_fallback_read(*runtime_, *read_port_, status_)) {
+            if (!finish_fallback_read(*runtime_, *read_port_, status_, error)) {
                 return false;
             }
+            if (error) fail(error, true);
             return true;
 
         case NightCatalogRefreshRuntime::Phase::SubmitStr:
