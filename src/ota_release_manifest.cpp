@@ -5,8 +5,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
-#include "hex_util.h"
 #include <strings.h>
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -258,24 +256,19 @@ bool parse_artifact(JsonObjectConst artifact,
     parsed = {};
 
     const char *url = artifact["url"].as<const char *>();
-    const char *sha256 = artifact["sha256"].as<const char *>();
     const uint64_t wire_size = artifact["size"].as<uint64_t>();
     if (!url || !*url ||
         strlen(url) >= sizeof(parsed.url) ||
         !artifact["size"].is<uint64_t>() ||
-        wire_size == 0 || wire_size > SIZE_MAX ||
-        !sha256_text_valid(sha256)) {
+        wire_size == 0 || wire_size > SIZE_MAX) {
         return false;
     }
 
     uint64_t image_size = wire_size;
     if (zlib) {
-        const char *decoded_sha256 =
-            artifact["decoded_sha256"].as<const char *>();
         image_size = artifact["decoded_size"].as<uint64_t>();
         if (!artifact["decoded_size"].is<uint64_t>() ||
-            image_size == 0 || image_size > SIZE_MAX ||
-            !sha256_text_valid(decoded_sha256)) {
+            image_size == 0 || image_size > SIZE_MAX) {
             return false;
         }
     }
