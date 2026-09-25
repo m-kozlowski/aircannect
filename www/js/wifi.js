@@ -52,19 +52,11 @@
       }
     }
 
-    async function requestWifiAction(action, extra) {
-      const body = Object.assign({action}, extra || {});
-      const response = await AirCANnect.http.requestOk("/api/wifi", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(body),
-      });
-      return await response.json();
-    }
-
     async function wifiAction(action, extra) {
       try {
-        const data = await requestWifiAction(action, extra);
+        const data = await AirCANnect.http.postJson("/api/wifi",
+          Object.assign({action}, extra || {}));
+
         AirCANnect.ui.message("wifiMsg", data.result, data.ok);
         setTimeout(loadWifi, 600);
       } catch (error) {

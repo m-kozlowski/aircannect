@@ -946,7 +946,10 @@
 
       const password = document.getElementById("onboardingWifiPass").value;
       try {
-        await requestWifiAction("add", {ssid, pass: password});
+        await AirCANnect.http.postJson("/api/wifi", {
+          action: "add", ssid, pass: password,
+        });
+
         AirCANnect.ui.message("onboardingMsg", "Wi-Fi profile queued", true);
         return true;
       } catch (error) {

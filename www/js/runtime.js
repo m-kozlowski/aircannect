@@ -98,6 +98,16 @@
         return response;
       }
 
+      async function postJson(url, body) {
+        const response = await requestOk(url, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+
+        return await response.json();
+      }
+
       function upload(url, body, options) {
         const settings = options || {};
         return new Promise((resolve, reject) => {
@@ -761,7 +771,7 @@
           pad2,
           rssi: formatRssi,
         }),
-        http: Object.freeze({request, requestBody, requestOk, upload}),
+        http: Object.freeze({request, requestBody, requestOk, postJson, upload}),
         pages: Object.freeze({
           active: activePageId,
           define: definePages,
