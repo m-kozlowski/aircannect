@@ -90,6 +90,12 @@ struct EdfStorageOpenResult {
     char error[96] = {};
 };
 
+enum class EdfStorageOpenRead : uint8_t {
+    Invalid,
+    Unavailable,
+    Known,
+};
+
 enum class EdfStorageEnqueueResult : uint8_t {
     Accepted,
     Busy,
@@ -184,8 +190,8 @@ bool enqueue_edf_identification_files(const std::string &json);
 bool enqueue_edf_close_numeric(EdfFileKind kind);
 bool enqueue_edf_close_annotation(EdfAnnotationKind kind);
 EdfStorageEnqueueResult enqueue_edf_close_all();
-bool edf_open_result(const EdfStorageOpenHandle &handle,
-                     EdfStorageOpenResult &result);
+EdfStorageOpenRead edf_open_result(const EdfStorageOpenHandle &handle,
+                                   EdfStorageOpenResult &result);
 
 // Prepared bounded reads
 StorageReadPort &read_port();

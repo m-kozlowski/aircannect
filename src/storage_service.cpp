@@ -986,12 +986,9 @@ EdfStorageOpenHandle reserve_open_handle(StoredFileKind kind) {
 void store_open_result(const OpenRequestResult &result,
                        StoredFileKind kind) {
     const size_t index = file_index(kind);
-    if (lock_queue(50)) {
-        open_results[index] = result;
-        unlock_queue();
-        return;
-    }
+    xSemaphoreTake(queue_lock, portMAX_DELAY);
     open_results[index] = result;
+    unlock_queue();
 }
 
 void mark_open_result(const JobSlot &job,
@@ -1026,12 +1023,9 @@ uint8_t count_open_files() {
 
 void refresh_open_file_count() {
     const uint8_t count = count_open_files();
-    if (lock_queue(50)) {
-        service_state.open_file_count = count;
-        unlock_queue();
-        return;
-    }
+    xSemaphoreTake(queue_lock, portMAX_DELAY);
     service_state.open_file_count = count;
+    unlock_queue();
 }
 
 size_t free_slots() {
@@ -1293,25 +1287,6 @@ bool process_mount_recovery(uint32_t now_ms) {
                              STORAGE_MOUNT_RETRY_MIN_MS,
                              STORAGE_MOUNT_RETRY_MAX_MS);
     advance_retry(mount_retry_attempt);
-    return true;
-}
-
-bool push_slot(const JobSlot &job) {
-    if (!slot_storage_available() ||
-        queued >= AC_EDF_STORAGE_QUEUE_CAPACITY) {
-        return false;
-    }
-    uint8_t *bytes = slots[tail].bytes;
-    float *numeric_values = slots[tail].numeric_values;
-    uint8_t *numeric_present = slots[tail].numeric_present;
-    uint8_t *numeric_valid = slots[tail].numeric_valid;
-    slots[tail] = job;
-    slots[tail].bytes = bytes;
-    slots[tail].numeric_values = numeric_values;
-    slots[tail].numeric_present = numeric_present;
-    slots[tail].numeric_valid = numeric_valid;
-    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued++;
     return true;
 }
 
@@ -2435,13 +2410,10 @@ void task_entry(void *) {
                 if (completed && slots[slot_index].type == JobType::StrRecord) {
                     queue_report_source_change(slots[slot_index]);
                 }
-                if (lock_queue(50)) {
-                    clear_slot(slots[slot_index]);
-                    processing_job = false;
-                    unlock_queue();
-                } else {
-                    processing_job = false;
-                }
+                xSemaphoreTake(queue_lock, portMAX_DELAY);
+                clear_slot(slots[slot_index]);
+                processing_job = false;
+                unlock_queue();
                 did_work = true;
                 file_log_burst = 0;
             } else {
@@ -2508,32 +2480,6 @@ void task_entry(void *) {
         batch_started_us = micros();
         batch_steps = 0;
     }
-}
-
-bool enqueue(JobSlot &job) {
-    if (!service_state.initialized) begin();
-    if (!service_state.available) return false;
-    if (!lock_queue()) {
-        service_state.queue_drops++;
-        set_error("queue_lock_failed");
-        log_worker_failure(LOG_WARN, "queue_lock_failed", job.path);
-        return false;
-    }
-    if (!slot_storage_available()) {
-        unlock_queue();
-        return false;
-    }
-
-    const bool ok = push_slot(job);
-    unlock_queue();
-    if (!ok) {
-        service_state.queue_drops++;
-        set_error("queue_full");
-        log_worker_failure(LOG_WARN, "queue_full", job.path);
-        return false;
-    }
-    wake_service_task();
-    return true;
 }
 
 template <typename Prepare>
@@ -2738,19 +2684,24 @@ bool enqueue_edf_open_annotation(const char *path,
     const EdfStorageOpenHandle reserved = reserve_open_handle(stored);
     if (!reserved.valid()) return false;
 
-    JobSlot job;
-    job.type = JobType::Open;
-    job.kind = stored;
-    job.request_id = reserved.request_id;
-    job.record_count = info.record_count;
-    job.record_size = edf_annotation_record_size();
-    job.recording_start = true;
-    copy_cstr(job.path, sizeof(job.path), path);
-    copy_cstr(job.patient_id, sizeof(job.patient_id), info.patient_id);
-    copy_cstr(job.recording_id, sizeof(job.recording_id), info.recording_id);
-    copy_cstr(job.start_date, sizeof(job.start_date), info.start_date);
-    copy_cstr(job.start_time, sizeof(job.start_time), info.start_time);
-    if (!enqueue(job)) return false;
+    const bool queued = enqueue_prepared_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Open;
+            job.kind = stored;
+            job.request_id = reserved.request_id;
+            job.record_count = info.record_count;
+            job.record_size = edf_annotation_record_size();
+            job.recording_start = true;
+            copy_cstr(job.path, sizeof(job.path), path);
+            copy_cstr(job.patient_id, sizeof(job.patient_id), info.patient_id);
+            copy_cstr(job.recording_id, sizeof(job.recording_id), info.recording_id);
+            copy_cstr(job.start_date, sizeof(job.start_date), info.start_date);
+            copy_cstr(job.start_time, sizeof(job.start_time), info.start_time);
+            return true;
+        },
+        "annotation_open_prepare_failed");
+
+    if (!queued) return false;
     if (handle) *handle = reserved;
     return true;
 }
@@ -2835,17 +2786,23 @@ bool enqueue_edf_identification_files(const std::string &json) {
 }
 
 bool enqueue_edf_close_numeric(EdfFileKind kind) {
-    JobSlot job;
-    job.type = JobType::Close;
-    job.kind = stored_kind(kind);
-    return enqueue(job);
+    return enqueue_prepared_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Close;
+            job.kind = stored_kind(kind);
+            return true;
+        },
+        "numeric_close_prepare_failed");
 }
 
 bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
-    JobSlot job;
-    job.type = JobType::Close;
-    job.kind = stored_kind(kind);
-    return enqueue(job);
+    return enqueue_prepared_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Close;
+            job.kind = stored_kind(kind);
+            return true;
+        },
+        "annotation_close_prepare_failed");
 }
 
 EdfStorageEnqueueResult enqueue_edf_close_all() {
@@ -3026,20 +2983,17 @@ uint32_t stack_high_water_bytes() {
 }
 #endif
 
-bool edf_open_result(const EdfStorageOpenHandle &handle,
-                     EdfStorageOpenResult &result) {
+EdfStorageOpenRead edf_open_result(const EdfStorageOpenHandle &handle,
+                                   EdfStorageOpenResult &result) {
     result = {};
-    if (!handle.valid()) return false;
+    if (!handle.valid()) return EdfStorageOpenRead::Invalid;
     const size_t index = edf_storage_file_index(handle.file);
-    if (index >= AC_EDF_STORAGE_FILE_COUNT) return false;
+    if (index >= AC_EDF_STORAGE_FILE_COUNT) return EdfStorageOpenRead::Invalid;
 
-    OpenRequestResult stored;
-    if (lock_queue()) {
-        stored = open_results[index];
-        unlock_queue();
-    } else {
-        stored = open_results[index];
-    }
+    if (!lock_queue(0)) return EdfStorageOpenRead::Unavailable;
+
+    const OpenRequestResult stored = open_results[index];
+    unlock_queue();
 
     if (stored.request_id == handle.request_id && stored.complete) {
         result.complete = true;
@@ -3049,7 +3003,7 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
         result.record_count = stored.record_count;
         copy_cstr(result.path, sizeof(result.path), stored.path);
         copy_cstr(result.error, sizeof(result.error), stored.error);
-        return true;
+        return EdfStorageOpenRead::Known;
     }
 
     if (stored.request_id > handle.request_id) {
@@ -3058,7 +3012,7 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
         result.superseded = true;
         copy_cstr(result.error, sizeof(result.error), "open_superseded");
     }
-    return true;
+    return EdfStorageOpenRead::Known;
 }
 
 }  // namespace StorageService

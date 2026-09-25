@@ -1609,13 +1609,20 @@ void EdfRecorderManager::sync_annotation_open_status() {
 
     EdfStorageOpenResult eve;
     EdfStorageOpenResult csl;
-    const bool eve_known =
+    const EdfStorageOpenRead eve_read =
         StorageService::edf_open_result(eve_open_handle_, eve);
-    const bool csl_known =
+    const EdfStorageOpenRead csl_read =
         StorageService::edf_open_result(csl_open_handle_, csl);
 
+    const bool eve_known = eve_read == EdfStorageOpenRead::Known;
+    const bool csl_known = csl_read == EdfStorageOpenRead::Known;
+    if (eve_read == EdfStorageOpenRead::Unavailable ||
+        csl_read == EdfStorageOpenRead::Unavailable ||
+        (eve_known && !eve.complete) || (csl_known && !csl.complete)) {
+        return;
+    }
+
     if (eve_known && csl_known &&
-        eve.complete && csl.complete &&
         eve.success && csl.success &&
         eve.open && csl.open) {
         annotation_open_synced_ = true;
@@ -1628,33 +1635,21 @@ void EdfRecorderManager::sync_annotation_open_status() {
         return;
     }
 
-    const bool completed_failure =
-        (eve_known && eve.complete && !eve.success) ||
-        (csl_known && csl.complete && !csl.success);
-    const StorageWorkloadSnapshot storage =
-        StorageService::workload_snapshot();
-    if (!storage.valid) return;
-    if (!completed_failure && (storage.edf_queued > 0 || storage.busy)) return;
-
-    if (completed_failure || !eve_known || !csl_known ||
-        !eve.complete || !csl.complete || !eve.open || !csl.open) {
-        status_.file_open_failures++;
-        if (eve_known && eve.complete && !eve.success) {
-            set_error(open_result_error(eve, "annotation_open_failed"));
-        } else if (csl_known && csl.complete && !csl.success) {
-            set_error(open_result_error(csl, "annotation_open_failed"));
-        } else {
-            set_error("annotation_open_failed");
-        }
-        (void)StorageService::enqueue_edf_close_annotation(
-            EdfAnnotationKind::Eve);
-        (void)StorageService::enqueue_edf_close_annotation(
-            EdfAnnotationKind::Csl);
-        files_open_ = false;
-        annotation_open_synced_ = true;
-        eve_open_handle_ = {};
-        csl_open_handle_ = {};
+    status_.file_open_failures++;
+    if (eve_known && !eve.success) {
+        set_error(open_result_error(eve, "annotation_open_failed"));
+    } else if (csl_known && !csl.success) {
+        set_error(open_result_error(csl, "annotation_open_failed"));
+    } else {
+        set_error("annotation_open_failed");
     }
+
+    (void)StorageService::enqueue_edf_close_annotation(EdfAnnotationKind::Eve);
+    (void)StorageService::enqueue_edf_close_annotation(EdfAnnotationKind::Csl);
+    files_open_ = false;
+    annotation_open_synced_ = true;
+    eve_open_handle_ = {};
+    csl_open_handle_ = {};
 }
 
 bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
@@ -1664,7 +1659,6 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     EdfStorageOpenResult results[AC_EDF_NUMERIC_SERIES_COUNT];
     bool known[AC_EDF_NUMERIC_SERIES_COUNT] = {};
     bool all_ready = true;
-    bool completed_failure = false;
     for (size_t i = 0; i < AC_EDF_NUMERIC_SERIES_COUNT; ++i) {
         const NumericSchemaState &state = cold_->numeric_schemas[i];
         if (!state.open) {
@@ -1672,29 +1666,25 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
             continue;
         }
 
-        known[i] = StorageService::edf_open_result(
+        const EdfStorageOpenRead read = StorageService::edf_open_result(
             state.open_handle, results[i]);
-        const bool ready = known[i] && results[i].complete &&
-            results[i].success && results[i].open;
-        all_ready = all_ready && ready;
-        completed_failure = completed_failure ||
-            (known[i] && results[i].complete && !results[i].success);
-    }
 
-    if (!all_ready) {
-        const StorageWorkloadSnapshot storage =
-            StorageService::workload_snapshot();
-        if (!storage.valid) return false;
-        if (!completed_failure &&
-            (storage.edf_queued > 0 || storage.busy)) {
+        known[i] = read == EdfStorageOpenRead::Known;
+        if (read == EdfStorageOpenRead::Unavailable ||
+            (known[i] && !results[i].complete)) {
             return false;
         }
 
+        const bool ready = known[i] && results[i].success && results[i].open;
+        all_ready = all_ready && ready;
+    }
+
+    if (!all_ready) {
         status_.file_open_failures++;
         const char *error = "numeric_open_failed";
         for (size_t i = 0; i < AC_EDF_NUMERIC_SERIES_COUNT; ++i) {
             if (cold_->numeric_schemas[i].open && known[i] &&
-                results[i].complete && !results[i].success) {
+                !results[i].success) {
                 error = open_result_error(results[i], error);
                 break;
             }
