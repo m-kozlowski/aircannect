@@ -33,6 +33,9 @@ public:
     bool next_page();
 
 private:
+    struct Field;
+    struct RenderState;
+
     static void task_entry(void *context);
     void run();
 
@@ -42,16 +45,28 @@ private:
     bool navigate_page(int8_t direction);
     bool temporary_wake_active(uint32_t now_ms) const;
     bool motion_wake_blocked(uint32_t now_ms) const;
-    void render(const DisplaySnapshot &snapshot);
-    void render_idle(const DisplaySnapshot &snapshot);
+    void render(const DisplaySnapshot &snapshot, bool force);
+    void render_idle(const DisplaySnapshot &snapshot, uint8_t page);
     void render_idle_dashboard(const DisplaySnapshot &snapshot);
     void render_idle_latest(const DisplaySnapshot &snapshot);
     void render_idle_period(const DisplaySnapshot &snapshot);
-    void render_therapy(const DisplaySnapshot &snapshot);
+    void render_therapy(const DisplaySnapshot &snapshot,
+                        uint8_t page, uint8_t count);
     void render_therapy_primary(const DisplaySnapshot &snapshot);
     void render_therapy_detail(const DisplaySnapshot &snapshot);
     void draw_page_indicator(uint8_t page, uint8_t count);
 
+    Field &next_field();
+    void flush_fields(bool full);
+    void draw_text(int16_t x, int16_t y, int16_t width,
+                   const char *text, uint16_t color, uint8_t size,
+                   bool centered = false);
+    void draw_panel(int16_t x, int16_t y,
+                    int16_t width, int16_t height,
+                    const char *label, const char *value,
+                    uint16_t value_color, uint8_t value_size,
+                    int16_t inset = 8, int16_t label_y = 5,
+                    int16_t value_y = 18);
     void draw_centered(int16_t y,
                        const char *text,
                        uint16_t color,
@@ -73,6 +88,9 @@ private:
     DisplaySnapshot pending_snapshot_;
     uint32_t published_generation_ = 0;
     uint32_t rendered_generation_ = 0;
+
+    // Display-task-only field descriptions, allocated in PSRAM.
+    RenderState *render_state_ = nullptr;
 
     // Main-loop presentation cadence, independent of telemetry updates.
     uint32_t last_snapshot_ms_ = 0;

@@ -22,6 +22,8 @@ public:
                            const char *text,
                            uint16_t color,
                            uint8_t size) = 0;
+    virtual void flush_rect(int16_t x, int16_t y,
+                            int16_t width, int16_t height) = 0;
     virtual void flush() = 0;
 };
 

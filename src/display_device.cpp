@@ -100,6 +100,87 @@ public:
         canvas_.print(text ? text : "");
     }
 
+    void flush_rect(int16_t x, int16_t y,
+                    int16_t width, int16_t height) override {
+        if (width <= 0 || height <= 0) return;
+
+        const int32_t logical_width = canvas_.width();
+        const int32_t logical_height = canvas_.height();
+        int32_t x0 = x;
+        int32_t y0 = y;
+        int32_t x1 = x0 + width;
+        int32_t y1 = y0 + height;
+
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > logical_width) x1 = logical_width;
+        if (y1 > logical_height) y1 = logical_height;
+        if (x0 >= x1 || y0 >= y1) return;
+
+        const int32_t framebuffer_width = AC_DISPLAY_WIDTH;
+        const int32_t framebuffer_height = AC_DISPLAY_HEIGHT;
+        int32_t framebuffer_x = x0;
+        int32_t framebuffer_y = y0;
+        int32_t framebuffer_rect_width = x1 - x0;
+        int32_t framebuffer_rect_height = y1 - y0;
+
+        switch (canvas_.getRotation() & 0x03u) {
+        case 1:
+            framebuffer_x = framebuffer_width - y1;
+            framebuffer_y = x0;
+            framebuffer_rect_width = y1 - y0;
+            framebuffer_rect_height = x1 - x0;
+            break;
+        case 2:
+            framebuffer_x = framebuffer_width - x1;
+            framebuffer_y = framebuffer_height - y1;
+            break;
+        case 3:
+            framebuffer_x = y0;
+            framebuffer_y = framebuffer_height - x1;
+            framebuffer_rect_width = y1 - y0;
+            framebuffer_rect_height = x1 - x0;
+            break;
+        default:
+            break;
+        }
+
+        uint16_t *framebuffer = canvas_.getFramebuffer();
+        if (!framebuffer) return;
+
+        panel_.startWrite();
+        panel_.writeAddrWindow(
+            static_cast<int16_t>(framebuffer_x),
+            static_cast<int16_t>(framebuffer_y),
+            static_cast<uint16_t>(framebuffer_rect_width),
+            static_cast<uint16_t>(framebuffer_rect_height));
+
+        // Arduino_ESP32SPI reads pairs even when passed an odd pixel count.
+        const auto write_pixels = [this](uint16_t *pixels,
+                                         uint32_t count) {
+            const uint32_t even_count = count & ~1u;
+            if (even_count) panel_.writePixels(pixels, even_count);
+            if (even_count != count) panel_.writeColor(pixels[even_count]);
+        };
+
+        uint16_t *row = framebuffer +
+                        framebuffer_y * framebuffer_width + framebuffer_x;
+        if (framebuffer_rect_width == framebuffer_width) {
+            write_pixels(
+                row,
+                static_cast<uint32_t>(framebuffer_rect_width) *
+                    framebuffer_rect_height);
+        } else {
+            for (int32_t row_index = 0;
+                 row_index < framebuffer_rect_height; ++row_index) {
+                write_pixels(row, framebuffer_rect_width);
+                row += framebuffer_width;
+            }
+        }
+
+        panel_.endWrite();
+    }
+
     void flush() override {
         canvas_.flush(true);
     }

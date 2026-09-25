@@ -1,6 +1,7 @@
 #include "display_manager.h"
 
 #include <Arduino.h>
+#include <assert.h>
 #include <esp_heap_caps.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include "debug_log.h"
 #include "display_device.h"
 #include "display_page_navigation.h"
+#include "large_object.h"
 #include "memory_manager.h"
 #include "motion_device.h"
 
@@ -146,6 +148,59 @@ uint16_t export_state_color(DisplayExportState state) {
 
 }  // namespace
 
+struct DisplayManager::Field {
+    struct Text {
+        int16_t x = 0;
+        int16_t y = 0;
+        uint16_t color = 0;
+        uint8_t size = 1;
+        char value[40] = {};
+
+        void set(int16_t left, int16_t top, const char *text,
+                 uint16_t text_color, uint8_t text_size) {
+            x = left;
+            y = top;
+            color = text_color;
+            size = text_size;
+            snprintf(value, sizeof(value), "%s", text);
+        }
+
+        bool equals(const Text &other) const {
+            return x == other.x && y == other.y &&
+                   color == other.color && size == other.size &&
+                   strcmp(value, other.value) == 0;
+        }
+    };
+
+    int16_t x = 0;
+    int16_t y = 0;
+    int16_t width = 0;
+    int16_t height = 0;
+    uint16_t background = COLOR_BACKGROUND;
+    Text text[2];
+
+    bool same_layout(const Field &other) const {
+        return x == other.x && y == other.y &&
+               width == other.width && height == other.height &&
+               background == other.background;
+    }
+
+    bool same_content(const Field &other) const {
+        return text[0].equals(other.text[0]) &&
+               text[1].equals(other.text[1]);
+    }
+};
+
+struct DisplayManager::RenderState {
+    static constexpr size_t MAX_FIELDS = 16;
+    Field fields[MAX_FIELDS];
+    Field rendered[MAX_FIELDS];
+    size_t count = 0;
+    size_t rendered_count = 0;
+    bool therapy = false;
+    uint8_t page = 0;
+};
+
 void DisplayManager::configure(DisplayOrientation orientation,
                                bool auto_rotate) {
     configured_rotation_.store(display_orientation_rotation(
@@ -179,6 +234,13 @@ bool DisplayManager::begin() {
     snapshot_lock_ = xSemaphoreCreateMutexStatic(&snapshot_lock_storage_);
     if (!snapshot_lock_) return false;
 
+    render_state_ = LargeObject::create<RenderState>();
+    if (!render_state_) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[DISPLAY] field buffer allocation failed\n");
+        return false;
+    }
+
     BaseType_t created = pdFAIL;
     if (Memory::psram_available()) {
         created = xTaskCreatePinnedToCoreWithCaps(
@@ -189,6 +251,8 @@ bool DisplayManager::begin() {
 
     if (created != pdPASS || !task_) {
         task_ = nullptr;
+        LargeObject::destroy(render_state_);
+        render_state_ = nullptr;
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[DISPLAY] PSRAM task creation failed\n");
         return false;
@@ -356,7 +420,7 @@ void DisplayManager::run() {
             continue;
         }
 
-        render(snapshot);
+        render(snapshot, force);
         rendered_generation_ = snapshot.generation;
 
         if (waking) {
@@ -422,17 +486,25 @@ bool DisplayManager::motion_wake_blocked(uint32_t now_ms) const {
            static_cast<int32_t>(motion_wake_blocked_until_ms_ - now_ms) > 0;
 }
 
-void DisplayManager::render(const DisplaySnapshot &snapshot) {
-    device_->fill(COLOR_BACKGROUND);
+void DisplayManager::render(const DisplaySnapshot &snapshot, bool force) {
+    RenderState &state = *render_state_;
+    state.count = 0;
+    const uint8_t count = snapshot.therapy_active
+        ? therapy_page_count_.load() : IDLE_PAGE_COUNT;
+    const uint8_t page = (snapshot.therapy_active
+        ? therapy_page_.load() : idle_page_.load()) % count;
 
-    if (snapshot.therapy_active) render_therapy(snapshot);
-    else render_idle(snapshot);
+    if (snapshot.therapy_active) render_therapy(snapshot, page, count);
+    else render_idle(snapshot, page);
 
-    device_->flush();
+    flush_fields(force || state.therapy != snapshot.therapy_active ||
+                 state.page != page);
+    state.therapy = snapshot.therapy_active;
+    state.page = page;
 }
 
-void DisplayManager::render_idle(const DisplaySnapshot &snapshot) {
-    const uint8_t page = idle_page_.load() % IDLE_PAGE_COUNT;
+void DisplayManager::render_idle(const DisplaySnapshot &snapshot,
+                                 uint8_t page) {
     if (page == 1) render_idle_latest(snapshot);
     else if (page == 2) render_idle_period(snapshot);
     else render_idle_dashboard(snapshot);
@@ -562,9 +634,8 @@ void DisplayManager::render_idle_period(const DisplaySnapshot &snapshot) {
     draw_status_row(y, row_height, "LEAK P50 / P95", value, COLOR_TEXT);
 }
 
-void DisplayManager::render_therapy(const DisplaySnapshot &snapshot) {
-    const uint8_t count = therapy_page_count_.load();
-    const uint8_t page = therapy_page_.load() % count;
+void DisplayManager::render_therapy(const DisplaySnapshot &snapshot,
+                                    uint8_t page, uint8_t count) {
     if (page == 1) render_therapy_detail(snapshot);
     else render_therapy_primary(snapshot);
 
@@ -577,14 +648,13 @@ void DisplayManager::render_therapy_primary(
     const int16_t height = device_->height();
     const int16_t margin = width / 20;
 
-    device_->draw_text(margin, margin, snapshot.local_time,
-                       COLOR_TEXT, 2);
+    draw_text(margin, margin, 60, snapshot.local_time, COLOR_TEXT, 2);
 
     const char *therapy_label = "THERAPY";
     const int16_t therapy_label_width =
         static_cast<int16_t>(strlen(therapy_label) * 6);
-    device_->draw_text(width - margin - therapy_label_width,
-                       margin + 4, therapy_label, COLOR_ACCENT, 1);
+    draw_text(width - margin - therapy_label_width, margin + 4,
+              therapy_label_width, therapy_label, COLOR_ACCENT, 1);
 
     char elapsed[12] = {};
     const uint32_t hours = snapshot.therapy_elapsed_s / 3600;
@@ -600,9 +670,8 @@ void DisplayManager::render_therapy_primary(
     const int16_t pressure_label_y = height / 3;
     const int16_t pressure_value_y = height * 2 / 5;
 
-    device_->draw_text(margin, pressure_label_y,
-                       pressure_pair ? "PRESSURES" : "PRESSURE",
-                       COLOR_MUTED, 1);
+    draw_text(margin, pressure_label_y, width - margin * 2,
+              pressure_pair ? "PRESSURES" : "PRESSURE", COLOR_MUTED, 1);
 
     if (snapshot.pressure.kind ==
         DisplayPressureSnapshot::Kind::Unavailable) {
@@ -618,23 +687,12 @@ void DisplayManager::render_therapy_primary(
         snprintf(epap, sizeof(epap), "%.1f",
                  snapshot.pressure.expiratory);
 
-        device_->fill_rect(margin, pressure_panel_y,
-                           column_width, pressure_panel_height,
-                           COLOR_PANEL);
-        device_->fill_rect(margin * 2 + column_width,
-                           pressure_panel_y,
-                           column_width, pressure_panel_height,
-                           COLOR_PANEL);
-        device_->draw_text(margin + 8, pressure_panel_y + 6,
-                           "IPAP", COLOR_MUTED, 1);
-        device_->draw_text(margin + 8, pressure_panel_y + 22,
-                           ipap, COLOR_TEXT, 3);
-        device_->draw_text(margin * 2 + column_width + 8,
-                           pressure_panel_y + 6,
-                           "EPAP", COLOR_MUTED, 1);
-        device_->draw_text(margin * 2 + column_width + 8,
-                           pressure_panel_y + 22,
-                           epap, COLOR_TEXT, 3);
+        draw_panel(margin, pressure_panel_y,
+                   column_width, pressure_panel_height,
+                   "IPAP", ipap, COLOR_TEXT, 3, 8, 6, 22);
+        draw_panel(margin * 2 + column_width, pressure_panel_y,
+                   column_width, pressure_panel_height,
+                   "EPAP", epap, COLOR_TEXT, 3, 8, 6, 22);
     } else {
         char pressure[12] = {};
         snprintf(pressure, sizeof(pressure), "%.1f",
@@ -655,10 +713,8 @@ void DisplayManager::render_therapy_primary(
                            int16_t y,
                            const char *label,
                            const char *value) {
-        device_->fill_rect(x, y, metric_width, metric_height,
-                           COLOR_PANEL);
-        device_->draw_text(x + 7, y + 5, label, COLOR_MUTED, 1);
-        device_->draw_text(x + 7, y + 17, value, COLOR_TEXT, 2);
+        draw_panel(x, y, metric_width, metric_height,
+                   label, value, COLOR_TEXT, 2, 7, 5, 17);
     };
 
     char leak[12] = "--";
@@ -694,8 +750,8 @@ void DisplayManager::render_therapy_detail(
 
     if (snapshot.pressure.kind == DisplayPressureSnapshot::Kind::Pair) {
         char pressure[24] = {};
-        device_->draw_text(margin, margin, "IPAP / EPAP",
-                           COLOR_MUTED, 1);
+        draw_text(margin, margin, width - margin * 2,
+                  "IPAP / EPAP", COLOR_MUTED, 1);
         snprintf(pressure, sizeof(pressure), "%.1f / %.1f",
                  snapshot.pressure.inspiratory,
                  snapshot.pressure.expiratory);
@@ -703,12 +759,14 @@ void DisplayManager::render_therapy_detail(
     } else if (snapshot.pressure.kind ==
                DisplayPressureSnapshot::Kind::Single) {
         char pressure[20] = {};
-        device_->draw_text(margin, margin, "PRESSURE", COLOR_MUTED, 1);
+        draw_text(margin, margin, width - margin * 2,
+                  "PRESSURE", COLOR_MUTED, 1);
         snprintf(pressure, sizeof(pressure), "%.1f",
                  snapshot.pressure.inspiratory);
         draw_centered(margin + 14, pressure, COLOR_ACCENT, 2);
     } else {
-        device_->draw_text(margin, margin, "PRESSURE", COLOR_MUTED, 1);
+        draw_text(margin, margin, width - margin * 2,
+                  "PRESSURE", COLOR_MUTED, 1);
         draw_centered(margin + 14, "--", COLOR_MUTED, 2);
     }
 
@@ -739,9 +797,91 @@ void DisplayManager::draw_page_indicator(uint8_t page, uint8_t count) {
              static_cast<unsigned>(count));
     const int16_t width = device_->width();
     const int16_t text_width = static_cast<int16_t>(strlen(text) * 6);
-    device_->draw_text(width - width / 20 - text_width,
-                       device_->height() - 10,
-                       text, COLOR_MUTED, 1);
+    draw_text(width - width / 20 - text_width, device_->height() - 10,
+              text_width, text, COLOR_MUTED, 1);
+}
+
+DisplayManager::Field &DisplayManager::next_field() {
+    RenderState &state = *render_state_;
+    assert(state.count < RenderState::MAX_FIELDS);
+    Field &field = state.fields[state.count++];
+    field = {};
+    return field;
+}
+
+void DisplayManager::flush_fields(bool full) {
+    RenderState &state = *render_state_;
+    // Fixed, non-overlapping fields can be repainted independently.
+    // A layout change must also erase the areas occupied by the old fields.
+    full = full || state.count != state.rendered_count;
+    for (size_t i = 0; !full && i < state.count; ++i) {
+        full = !state.fields[i].same_layout(state.rendered[i]);
+    }
+
+    if (full) device_->fill(COLOR_BACKGROUND);
+
+    bool changed[RenderState::MAX_FIELDS] = {};
+    for (size_t i = 0; i < state.count; ++i) {
+        const Field &field = state.fields[i];
+        changed[i] = full || !field.same_content(state.rendered[i]);
+        if (!changed[i]) continue;
+
+        if (!full || field.background != COLOR_BACKGROUND) {
+            device_->fill_rect(field.x, field.y, field.width,
+                               field.height, field.background);
+        }
+
+        for (const Field::Text &text : field.text) {
+            if (!text.value[0]) continue;
+
+            device_->draw_text(field.x + text.x, field.y + text.y,
+                               text.value, text.color, text.size);
+        }
+        state.rendered[i] = field;
+    }
+    state.rendered_count = state.count;
+
+    if (full) {
+        device_->flush();
+        return;
+    }
+
+    for (size_t i = 0; i < state.count; ++i) {
+        if (!changed[i]) continue;
+
+        const Field &field = state.fields[i];
+        device_->flush_rect(field.x, field.y, field.width, field.height);
+    }
+}
+
+void DisplayManager::draw_text(int16_t x, int16_t y, int16_t width,
+                               const char *text, uint16_t color,
+                               uint8_t size, bool centered) {
+    Field &field = next_field();
+    field.x = x;
+    field.y = y;
+    field.width = width;
+    field.height = size * 8;
+
+    const int16_t text_width = static_cast<int16_t>(strlen(text) * 6 * size);
+    field.text[0].set(centered ? (width - text_width) / 2 : 0,
+                      0, text, color, size);
+}
+
+void DisplayManager::draw_panel(int16_t x, int16_t y,
+                                int16_t width, int16_t height,
+                                const char *label, const char *value,
+                                uint16_t value_color, uint8_t value_size,
+                                int16_t inset, int16_t label_y,
+                                int16_t value_y) {
+    Field &field = next_field();
+    field.x = x;
+    field.y = y;
+    field.width = width;
+    field.height = height;
+    field.background = COLOR_PANEL;
+    field.text[0].set(inset, label_y, label, COLOR_MUTED, 1);
+    field.text[1].set(inset, value_y, value, value_color, value_size);
 }
 
 void DisplayManager::draw_centered(int16_t y,
@@ -751,9 +891,7 @@ void DisplayManager::draw_centered(int16_t y,
     const int16_t width = device_->width();
     const uint8_t size = text_size_for_width(
         text, preferred_size, width - width / 10);
-    const int16_t text_width =
-        static_cast<int16_t>(strlen(text) * 6 * size);
-    device_->draw_text((width - text_width) / 2, y, text, color, size);
+    draw_text(0, y, width, text, color, size, true);
 }
 
 void DisplayManager::draw_status_row(int16_t y,
@@ -763,14 +901,10 @@ void DisplayManager::draw_status_row(int16_t y,
                                      uint16_t value_color) {
     const int16_t width = device_->width();
     const int16_t margin = width / 20;
-    device_->fill_rect(margin, y + 2,
-                       width - margin * 2, height - 4,
-                       COLOR_PANEL);
-    device_->draw_text(margin + 8, y + 7, label, COLOR_MUTED, 1);
-
     const uint8_t size = text_size_for_width(
         value, 2, width - margin * 2 - 16);
-    device_->draw_text(margin + 8, y + 20, value, value_color, size);
+    draw_panel(margin, y + 2, width - margin * 2, height - 4,
+               label, value, value_color, size);
 }
 
 uint8_t DisplayManager::text_size_for_width(const char *text,
