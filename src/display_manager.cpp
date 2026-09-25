@@ -211,14 +211,14 @@ void DisplayManager::publish(const DisplaySnapshot &snapshot, uint32_t now_ms) {
     therapy_page_count_.store(therapy_page_count);
     if (therapy_page_.load() >= therapy_page_count) {
         therapy_page_.store(0);
-        page_dirty_.store(true);
+        presentation_dirty_.store(true);
     }
 
     if (published_generation_ != 0 &&
         pending_snapshot_.therapy_active != snapshot.therapy_active) {
         if (snapshot.therapy_active) therapy_page_.store(0);
         else idle_page_.store(0);
-        page_dirty_.store(true);
+        presentation_dirty_.store(true);
     }
 
     pending_snapshot_ = snapshot;
@@ -291,7 +291,7 @@ bool DisplayManager::navigate_page(int8_t direction) {
     }
 
     page.store(navigation.page);
-    page_dirty_.store(navigation.changed);
+    if (navigation.changed) presentation_dirty_.store(true);
     if (task_) xTaskNotifyGive(task_);
     return true;
 }
@@ -313,18 +313,17 @@ void DisplayManager::run() {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(poll_ms));
 
         const uint32_t now_ms = millis();
-        bool rotation_changed = false;
 
         if (config_dirty_.exchange(false)) {
             apply_display_config();
-            rotation_changed = true;
+            presentation_dirty_.store(true);
         }
 
         if (motion_ &&
             (last_motion_poll_ms == 0 ||
              now_ms - last_motion_poll_ms >= AC_MOTION_POLL_MS)) {
             last_motion_poll_ms = now_ms;
-            rotation_changed = poll_motion(now_ms);
+            if (poll_motion(now_ms)) presentation_dirty_.store(true);
         }
 
         if (manual_backlight_off_.exchange(false)) {
@@ -338,20 +337,33 @@ void DisplayManager::run() {
 
         const bool visible = backlight_requested_.load() ||
                              temporary_wake_active(now_ms);
-        if (visible != backlight_applied_) {
-            device_->set_backlight(visible);
-            backlight_applied_ = visible;
-            backlight_visible_.store(visible);
+        const bool waking = visible && !backlight_applied_;
+        if (!visible) {
+            if (backlight_applied_) {
+                device_->set_backlight(false);
+                backlight_applied_ = false;
+                backlight_visible_.store(false);
+            }
+            continue;
         }
 
         DisplaySnapshot snapshot;
-        const bool page_changed = page_dirty_.exchange(false);
-        if (!take_snapshot(snapshot, rotation_changed || page_changed)) {
+        const bool presentation_dirty = presentation_dirty_.exchange(false);
+        const bool force = waking || presentation_dirty;
+        const bool frame_pending = take_snapshot(snapshot, force);
+        if (!frame_pending) {
+            if (presentation_dirty) presentation_dirty_.store(true);
             continue;
         }
 
         render(snapshot);
         rendered_generation_ = snapshot.generation;
+
+        if (waking) {
+            device_->set_backlight(true);
+            backlight_applied_ = true;
+            backlight_visible_.store(true);
+        }
     }
 }
 

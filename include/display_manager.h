@@ -88,7 +88,7 @@ private:
     std::atomic<bool> backlight_visible_{false};
     std::atomic<bool> manual_backlight_off_{false};
     std::atomic<bool> navigation_wake_requested_{false};
-    std::atomic<bool> page_dirty_{false};
+    std::atomic<bool> presentation_dirty_{false};
     std::atomic<bool> therapy_active_{false};
     std::atomic<uint8_t> idle_page_{0};
     std::atomic<uint8_t> therapy_page_{0};
