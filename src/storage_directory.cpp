@@ -7,16 +7,19 @@ namespace aircannect {
 
 bool storage_read_next_dir_child(File &dir, StorageDirChild &out) {
     out = StorageDirChild();
-    File child = dir.openNextFile();
-    if (!child) return false;
+
+    String path = dir.getNextFileName(nullptr);
+    if (!path.length()) return false;
+
+    struct stat info {};
+    if (!Storage::file_stat(path.c_str(), info)) return false;
 
     copy_cstr(out.name,
               sizeof(out.name),
-              storage_basename_from_path(child.name()));
-    out.is_dir = child.isDirectory();
-    out.size = out.is_dir ? 0 : static_cast<uint64_t>(child.size());
-    out.last_write = child.getLastWrite();
-    child.close();
+              storage_basename_from_path(path.c_str()));
+    out.is_dir = S_ISDIR(info.st_mode);
+    out.size = out.is_dir ? 0 : static_cast<uint64_t>(info.st_size);
+    out.last_write = info.st_mtime;
     return true;
 }
 

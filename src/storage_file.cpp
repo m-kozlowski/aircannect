@@ -74,8 +74,8 @@ public:
         VFSFileImpl::close();
     }
 
-    FileImplPtr openNextFile(const char *mode) override {
-        if (!_d) return {};
+    bool next_dir_entry(char *path, size_t path_size, bool *is_dir) {
+        if (!_d || !path || path_size == 0) return false;
 
         struct dirent *entry;
         do {
@@ -83,23 +83,41 @@ public:
             entry = readdir(_d);
             if (!entry) {
                 if (errno) log_io_error("readdir", _path, errno);
-                return {};
+                return false;
             }
-        } while (entry->d_type != DT_REG && entry->d_type != DT_DIR);
+        } while ((entry->d_type != DT_REG && entry->d_type != DT_DIR) ||
+                 strcmp(entry->d_name, ".") == 0 ||
+                 strcmp(entry->d_name, "..") == 0);
 
-        char path[AC_STORAGE_PATH_MAX] = {};
         const char *separator = _path[strlen(_path) - 1] == '/' ? "" : "/";
-        const int length = snprintf(path, sizeof(path), "%s%s%s",
-                                    _path, separator, entry->d_name);
-
-        if (length < 0 || static_cast<size_t>(length) >= sizeof(path)) {
+        const int length = snprintf(path,
+                                    path_size,
+                                    "%s%s%s",
+                                    _path,
+                                    separator,
+                                    entry->d_name);
+        if (length < 0 || static_cast<size_t>(length) >= path_size) {
             log_io_error("open", _path, ENAMETOOLONG);
-            return {};
+            return false;
         }
+
+        if (is_dir) *is_dir = entry->d_type == DT_DIR;
+        return true;
+    }
+
+    FileImplPtr openNextFile(const char *mode) override {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        if (!next_dir_entry(path, sizeof(path), nullptr)) return {};
 
         auto file = open_observed(_fs, path, mode);
         if (!*file) log_io_error("open", path, errno);
         return file;
+    }
+
+    String getNextFileName(bool *is_dir) override {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        if (!next_dir_entry(path, sizeof(path), is_dir)) return String();
+        return String(path);
     }
 
     static FileImplPtr open_observed(VFSImpl *fs, const char *path,
