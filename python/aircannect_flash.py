@@ -667,33 +667,60 @@ def upload_multipart(
         conn.close()
 
 
+def read_reboot_baseline(
+    target: Target, *, auth: str | None, timeout: float,
+) -> tuple[int, float]:
+    observed = time.monotonic()
+    status, body = request_json(
+        target, "GET", "/api/status", auth=auth, timeout=timeout
+    )
+    uptime = body.get("uptime")
+    if status != 200 or type(uptime) is not int or uptime < 0:
+        die("cannot read device uptime before update")
+    return uptime, observed
+
+
 def wait_for_reboot(
     target: Target,
     *,
+    baseline: tuple[int, float],
     auth: str | None,
     timeout: float,
     reboot_timeout: float,
 ) -> None:
     emit("waiting for reboot/API...")
     deadline = time.monotonic() + reboot_timeout
-    saw_down = False
     while time.monotonic() < deadline:
-        time.sleep(1.0)
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
         try:
             status, body = request_json(
-                target, "GET", "/api/ota", auth=auth, timeout=timeout
+                target, "GET", "/api/ota", auth=auth,
+                timeout=min(timeout, 1.0, remaining),
+            )
+            if status != 200 or body.get("reboot_pending") or body.get("http_ready"):
+                continue
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            status, body = request_json(
+                target, "GET", "/api/status", auth=auth,
+                timeout=min(timeout, 1.0, remaining),
             )
         except (OSError, http.client.HTTPException, socket.timeout):
-            saw_down = True
             continue
-        if status == 200:
-            if saw_down:
-                emit("device API is back")
-                return
-            if not body.get("reboot_pending") and not body.get("http_ready"):
-                emit("device API is reachable")
-                return
-    die("timed out waiting for device API after upload", code=2)
+
+        uptime = body.get("uptime")
+        expected_uptime = baseline[0] + time.monotonic() - baseline[1]
+        if (status == 200 and type(uptime) is int and uptime >= 0
+                and uptime < expected_uptime - 2):
+            emit(f"reboot confirmed, version={body.get('version', 'unknown')}")
+            return
+    die("timed out waiting for confirmed device restart", code=2)
 
 
 def run_target(
@@ -863,6 +890,9 @@ def main() -> int:
         encoding = url_source_encoding(args.compress)
 
         def install_url(target: Target) -> None:
+            baseline = None if args.no_wait else read_reboot_baseline(
+                target, auth=authorization, timeout=args.timeout
+            )
             body = start_url_update(
                 target,
                 source_url=args.source_url,
@@ -882,9 +912,10 @@ def main() -> int:
                 f"wire_bytes={body.get('wire_bytes', 0)} "
                 f"partition={body.get('partition') or '--'}"
             )
-            if not args.no_wait:
+            if baseline is not None:
                 wait_for_reboot(
                     target,
+                    baseline=baseline,
                     auth=authorization,
                     timeout=args.timeout,
                     reboot_timeout=args.reboot_timeout,
@@ -952,6 +983,9 @@ def main() -> int:
         else:
             emit("transport: plain")
 
+        baseline = None if args.no_wait else read_reboot_baseline(
+            target, auth=authorization, timeout=args.timeout
+        )
         prepare_upload(
             target,
             payload=payload,
@@ -972,9 +1006,10 @@ def main() -> int:
             f"wire_bytes={body.get('wire_bytes', payload.wire_size)} "
             f"partition={partition}"
         )
-        if not args.no_wait:
+        if baseline is not None:
             wait_for_reboot(
                 target,
+                baseline=baseline,
                 auth=authorization,
                 timeout=args.timeout,
                 reboot_timeout=args.reboot_timeout,

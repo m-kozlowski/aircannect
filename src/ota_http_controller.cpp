@@ -18,6 +18,7 @@
 #include "http_request_utils.h"
 #include "json_util.h"
 #include "ota_status.h"
+#include "ota_upload_response.h"
 #include "resmed_firmware_preparer.h"
 #include "resmed_ota_manager.h"
 #include "update_checker.h"
@@ -239,10 +240,27 @@ void build_resmed_ota_json(JsonOut &json,
 
 void send_esp_status(AsyncWebServerRequest *request,
                      const OtaStatusSnapshot &status,
-                     int response_status) {
+                     int response_status,
+                     FirmwareInstaller *finished_installer = nullptr) {
     String json;
     json.reserve(AC_WEB_OTA_JSON_RESERVE);
     build_ota_json(json, status);
+
+    if (finished_installer) {
+        auto *response = new (std::nothrow) OtaUploadResponse(json);
+        if (!response) {
+            request->send(503, "application/json",
+                          "{\"error\":\"ota_response_alloc_failed\"}");
+            return;
+        }
+
+        request->onDisconnect([finished_installer]() {
+            finished_installer->http_response_closed();
+        });
+        request->send(response);
+        return;
+    }
+
     request->send(response_status, "application/json", json);
 }
 
@@ -435,7 +453,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                 request,
                 collect_ota_status(*installer_, *url_source_,
                                    *arduino_source_, *update_checker_),
-                ok ? 200 : 400);
+                ok ? 200 : 400, ok ? installer_ : nullptr);
         },
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t length, bool final) {

@@ -96,6 +96,7 @@ public:
     void fail_external_install(const char *reason);
 
     // Lifecycle and query
+    void http_response_closed();
     void schedule_reboot(uint32_t delay_ms = 750);
     bool active() const;
     bool as11_quiesce_required() const;

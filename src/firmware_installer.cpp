@@ -983,9 +983,21 @@ void FirmwareInstaller::fail_external_install(const char *reason) {
     abort(reason ? reason : "arduino_ota_failed", false);
 }
 
+void FirmwareInstaller::http_response_closed() {
+    if (!lock()) return;
+
+    if (status_.source == FirmwareInstallSource::HttpUpload &&
+        status_.ready && status_.reboot_pending) {
+        schedule_reboot(0);
+    }
+
+    unlock();
+}
+
 void FirmwareInstaller::schedule_reboot(uint32_t delay_ms) {
     if (!lock()) return;
     reboot_at_ms_ = millis() + delay_ms;
+    if (!reboot_at_ms_) reboot_at_ms_ = 1;
     reboot_wait_logged_ = false;
     status_.reboot_pending = true;
     unlock();
