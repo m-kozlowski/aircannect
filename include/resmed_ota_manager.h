@@ -217,6 +217,8 @@ private:
     void poll_prepared_transfer();
     bool open_prepared_stream();
     bool fill_prepared_block();
+    bool can_submit_block(size_t offset);
+    bool queue_pending_block(size_t offset, size_t raw_length);
     void finish_pending_block();
     void close_prepared_stream(bool complete);
 

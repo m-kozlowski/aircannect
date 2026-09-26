@@ -43,18 +43,6 @@ static constexpr uint32_t FirmwareDumpRecoveryBootTimeoutMs = 30000;
 static constexpr int32_t RpcMethodNotFound = -32601;
 static constexpr size_t ResmedOtaKeyBytes = 32;
 
-bool normalize_hex(String &hex, size_t max_raw_bytes) {
-    hex.trim();
-    if (!hex.length() || (hex.length() & 1)) return false;
-    if (hex.length() > max_raw_bytes * 2) return false;
-    for (size_t i = 0; i < hex.length(); ++i) {
-        if (hex_nibble(hex[i]) < 0) return false;
-    }
-
-    hex.toUpperCase();
-    return true;
-}
-
 bool valid_sha256(String value) {
     value.trim();
     if (!value.length()) return true;
@@ -73,38 +61,6 @@ String sha_to_hex(const uint8_t hash[32]) {
     char out[65] = {};
     if (!hex_encode(hash, 32, out, sizeof(out), HexCase::Upper)) return {};
     return String(out);
-}
-
-bool update_sha_from_hex(mbedtls_sha256_context &context,
-                         const char *hex,
-                         size_t raw_length) {
-    if (!hex || strlen(hex) != raw_length * 2) return false;
-
-    uint8_t bytes[64];
-    size_t buffered = 0;
-    for (size_t i = 0; i < raw_length * 2; i += 2) {
-        const int high = hex_nibble(hex[i]);
-        const int low = hex_nibble(hex[i + 1]);
-        if (high < 0 || low < 0) return false;
-
-        bytes[buffered++] = static_cast<uint8_t>((high << 4) | low);
-        if (buffered == sizeof(bytes)) {
-            mbedtls_sha256_update(&context, bytes, buffered);
-            buffered = 0;
-        }
-    }
-    if (buffered) mbedtls_sha256_update(&context, bytes, buffered);
-    return true;
-}
-
-String bytes_to_hex(const uint8_t *bytes, size_t length) {
-    String hex;
-    hex.reserve(length * 2);
-    for (size_t i = 0; i < length; ++i) {
-        hex += hex_digit(bytes[i] >> 4, HexCase::Upper);
-        hex += hex_digit(bytes[i], HexCase::Upper);
-    }
-    return hex;
 }
 
 bool build_apply_authentication(const String &key_hex,
@@ -187,7 +143,7 @@ const char *resmed_ota_phase_name(ResmedOtaPhase phase) {
 
 struct ResmedOtaManager::ColdState {
     ResmedOtaStatus status;
-    char pending_block_hex[AC_RESMED_OTA_MAX_BLOCK_BYTES * 2 + 1] = {};
+    uint8_t pending_block[AC_RESMED_OTA_MAX_BLOCK_BYTES] = {};
 
     ResmedPreparedFirmware prepared;
     std::shared_ptr<StorageByteStream> prepared_stream;
@@ -497,6 +453,23 @@ bool ResmedOtaManager::submit_block(size_t offset,
                                     const String &hex_data) {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_ || !rpc_) return false;
+    if (!can_submit_block(offset)) return false;
+
+    String hex = hex_data;
+    hex.trim();
+    size_t raw_length = 0;
+    if (hex.isEmpty() || hex.length() > cold_->status.xfer_block_size * 2 ||
+        !hex_decode(hex.c_str(), hex.length(),
+                    cold_->pending_block, sizeof(cold_->pending_block),
+                    raw_length)) {
+        set_error("bad_hex_block");
+        return false;
+    }
+
+    return queue_pending_block(offset, raw_length);
+}
+
+bool ResmedOtaManager::can_submit_block(size_t offset) {
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
@@ -511,34 +484,33 @@ bool ResmedOtaManager::submit_block(size_t offset,
         return false;
     }
 
-    String hex = hex_data;
-    if (!normalize_hex(hex, cold_->status.xfer_block_size)) {
-        set_error("bad_hex_block");
-        return false;
-    }
-    const size_t raw_length = hex.length() / 2;
-    if (raw_length == 0 || offset + raw_length > cold_->status.total_size) {
+    return true;
+}
+
+bool ResmedOtaManager::queue_pending_block(size_t offset, size_t raw_length) {
+    if (raw_length == 0 || raw_length > cold_->status.total_size - offset) {
         set_error("bad_block_size");
         return false;
     }
 
     std::string params;
-    params.reserve(hex.length() + 80);
+    params.reserve(raw_length * 2 + 80);
     params += "{\"fileOffset\":";
     params += std::to_string(offset);
     params += ",\"encoding\":\"AsciiHex\",\"data\":\"";
-    params += hex.c_str();
-    params += "\"}";
+    const size_t data_offset = params.size();
+    params.resize(data_offset + raw_length * 2 + 2);
+    (void)hex_encode(cold_->pending_block, raw_length,
+                     &params[data_offset], raw_length * 2 + 1, HexCase::Upper);
+    params[params.size() - 2] = '"';
+    params.back() = '}';
 
-    copy_cstr(cold_->pending_block_hex, sizeof(cold_->pending_block_hex),
-              hex.c_str());
     pending_block_offset_ = offset;
     pending_block_bytes_ = raw_length;
     cold_->status.phase = ResmedOtaPhase::Uploading;
     last_activity_ms_ = millis();
     if (!queue_request("UpgradeDataBlock", params,
                        AC_RESMED_OTA_BLOCK_TIMEOUT_MS)) {
-        cold_->pending_block_hex[0] = '\0';
         pending_block_offset_ = 0;
         pending_block_bytes_ = 0;
         set_error("block_queue_failed");
@@ -2241,20 +2213,19 @@ bool ResmedOtaManager::fill_prepared_block() {
     prepared_block_bytes_ += read.bytes;
     if (prepared_block_bytes_ != prepared_block_wanted_) return true;
 
-    const String hex = bytes_to_hex(cold_->prepared_block, prepared_block_bytes_);
-    return submit_block(cold_->status.uploaded_bytes, hex);
+    memcpy(cold_->pending_block, cold_->prepared_block, prepared_block_bytes_);
+    return queue_pending_block(cold_->status.uploaded_bytes, prepared_block_bytes_);
 }
 
 void ResmedOtaManager::finish_pending_block() {
     if (!sha_started_ || sha_finished_ || pending_block_bytes_ == 0 ||
-        !update_sha_from_hex(sha_ctx_, cold_->pending_block_hex,
-                             pending_block_bytes_)) {
+        mbedtls_sha256_update(&sha_ctx_, cold_->pending_block,
+                              pending_block_bytes_) != 0) {
         set_error("sha_update_failed");
         return;
     }
 
     cold_->status.uploaded_bytes = pending_block_offset_ + pending_block_bytes_;
-    cold_->pending_block_hex[0] = '\0';
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     prepared_block_bytes_ = 0;
@@ -2369,7 +2340,6 @@ void ResmedOtaManager::clear_session() {
     close_prepared_stream(false);
     schedule_prepared_cleanup();
 
-    cold_->pending_block_hex[0] = '\0';
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     waiting_for_ = WaitingFor::None;
@@ -2460,7 +2430,6 @@ void ResmedOtaManager::finish_error(const char *error) {
     cold_->status.waiting = false;
     cold_->status.last_error = error ? error : "error";
     waiting_for_ = WaitingFor::None;
-    cold_->pending_block_hex[0] = '\0';
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     last_activity_ms_ = millis();
