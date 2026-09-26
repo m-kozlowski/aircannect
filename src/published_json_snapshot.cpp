@@ -60,7 +60,6 @@ bool PublishedJsonSnapshot::copy(LargeTextBuffer &out,
 }
 
 JsonSnapshotResponse PublishedJsonSnapshot::prepare_response(
-    AsyncWebServerRequest *request,
     AsyncWebServerResponse *&response,
     uint32_t timeout_ms) const {
     response = nullptr;
@@ -69,7 +68,7 @@ JsonSnapshotResponse PublishedJsonSnapshot::prepare_response(
         return JsonSnapshotResponse::Busy;
     }
 
-    const bool prepared = http_prepare_json_response(request, json_, response);
+    const bool prepared = http_prepare_json_response(json_, response);
     xSemaphoreGive(mutex_);
     return prepared ? JsonSnapshotResponse::Ready
                     : JsonSnapshotResponse::AllocationFailed;

@@ -114,7 +114,6 @@ static constexpr size_t AC_WEB_CONSOLE_LOG_MAX = 64 * 1024;
 static constexpr size_t AC_WEB_CONSOLE_COMMAND_OUTPUT_MAX = 60 * 1024;
 
 static constexpr size_t AC_WEB_STATUS_JSON_RESERVE = 4096;
-static constexpr size_t AC_WEB_STREAM_JSON_RESERVE = 1536;
 static constexpr size_t AC_WEB_WIFI_JSON_RESERVE = 1024;
 static constexpr size_t AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE = 2048;
 static constexpr size_t AC_WEB_AS11_BLE_STATUS_JSON_RESERVE = 1024;

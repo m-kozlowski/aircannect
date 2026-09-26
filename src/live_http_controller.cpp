@@ -1,13 +1,10 @@
 #include "live_http_controller.h"
 
 #include <Arduino.h>
-#include <new>
 #include "http_route_registry.h"
-#include "http_response_utils.h"
 
 #include "json_util.h"
 #include "live_chart_service.h"
-#include "stream_broker.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -23,15 +20,6 @@ uint32_t fnv1a32_string(const String &text) {
         hash *= 16777619u;
     }
     return hash ? hash : 1u;
-}
-
-const char *stream_command_name(StreamCommandType type) {
-    switch (type) {
-        case StreamCommandType::Start: return "start";
-        case StreamCommandType::Stop: return "stop";
-        case StreamCommandType::None:
-        default: return "none";
-    }
 }
 
 template <typename JsonOut>
@@ -62,80 +50,15 @@ void append_live_series(JsonOut &json,
     json += ']';
 }
 
-bool build_stream_json(LargeTextBuffer &json,
-                       const StreamBroker &stream,
-                       const LiveChartService &live_service) {
-    const LiveChartRuntimeStatus &live = live_service.status();
-
-    json = "{";
-    json_add_bool(json, "desired", stream.desired_active(), false);
-    json_add_bool(json, "subscribed", stream.actual_active());
-    json_add_bool(json, "pending_start", stream.pending_start());
-    json_add_bool(json, "pending_stop", stream.pending_stop());
-    json_add_bool(json, "error", stream.error());
-    json_add_string(json, "error_command",
-                    stream_command_name(stream.error_command()));
-    json_add_int(json, "consumers", stream.consumer_count());
-    json_add_int(json, "published_payloads", stream.published_payloads());
-    json_add_int(json, "fanout_drops", stream.total_queue_drops());
-    json_add_int(json, "frame_pool_used", stream.frame_pool_in_use());
-    json_add_int(json, "frame_pool_capacity", stream.frame_pool_capacity());
-    json_add_int(json, "parse_errors", stream.parse_errors());
-    json_add_int(json, "pool_exhaustions", stream.pool_exhaustions());
-    json_add_int(json, "truncated_frames", stream.truncated_frames());
-    json_add_bool(json, "web_live_attached", live.attached);
-    json_add_int(json, "web_live_handle", live.handle);
-    json_add_int(json, "web_live_frames", static_cast<long>(live.frames));
-    json_add_int(json, "web_live_drops", static_cast<long>(live.drops));
-    json_add_int(json, "web_live_attach_failures",
-                 static_cast<long>(live.attach_failures));
-    json_add_string(json, "web_live_error", live.last_error);
-    json_add_int(json, "stream_id", stream.last_stream_id());
-    json_add_int(json, "command_errors", stream.command_errors());
-    if (stream.last_notification_ms()) {
-        json_add_int(json, "last_age_ms",
-                     millis() - stream.last_notification_ms());
-    } else {
-        json += ",\"last_age_ms\":null";
-    }
-    json_add_string(json, "start_time", stream.last_start_time().c_str());
-    json_add_string(json, "params", stream.params_json().c_str());
-
-    json += ",\"consumer_slots\":[";
-    bool first_consumer = true;
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        const StreamConsumerHandle handle =
-            static_cast<StreamConsumerHandle>(i);
-        if (!stream.consumer_active(handle)) continue;
-        if (!first_consumer) json += ',';
-        first_consumer = false;
-
-        json += '{';
-        json_add_bool(json, "active", true, false);
-        json_add_int(json, "source",
-                     static_cast<unsigned>(stream.consumer_source(handle)));
-        json_add_int(json, "queued", stream.consumer_queue_count(handle));
-        json_add_int(json, "drops", stream.consumer_queue_drops(handle));
-        json += '}';
-    }
-    json += "]}";
-    return !json.overflowed();
-}
-
 }  // namespace
 
-bool LiveHttpController::begin(StreamBroker &stream,
-                               LiveChartService &live) {
-    stream_ = &stream;
+bool LiveHttpController::begin(LiveChartService &live) {
     live_ = &live;
 
-    if (!cache_mutex_) {
-        cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
-    }
     if (!lease_mutex_) {
         lease_mutex_ = xSemaphoreCreateMutexStatic(&lease_mutex_storage_);
     }
-    if (!cache_mutex_ || !lease_mutex_) return false;
+    if (!lease_mutex_) return false;
 
     live_json_.reserve(4096);
     return true;
@@ -160,11 +83,6 @@ void LiveHttpController::stop() {
 }
 
 void LiveHttpController::register_routes(HttpRouteRegistry &server) {
-    server.on(AsyncURIMatcher::exact("/api/stream"), HTTP_GET,
-              [this](AsyncWebServerRequest *request) {
-        send_stream_snapshot(request);
-    });
-
     server.on(AsyncURIMatcher::exact("/api/live/view"), HTTP_POST,
               [this](AsyncWebServerRequest *request) {
         send_live_view_state(request);
@@ -174,7 +92,7 @@ void LiveHttpController::register_routes(HttpRouteRegistry &server) {
 void LiveHttpController::poll(size_t connected_sse_clients,
                               size_t healthy_sse_clients,
                               uint32_t now_ms) {
-    if (!stream_ || !live_) return;
+    if (!live_) return;
 
     const bool live_requested =
         connected_sse_clients > 0 && live_view_requested(now_ms);
@@ -199,8 +117,6 @@ void LiveHttpController::poll(size_t connected_sse_clients,
     } else {
         publish_live_payload(now_ms);
     }
-
-    serve_stream_requests();
 }
 
 bool LiveHttpController::live_payload(const char *&data,
@@ -215,8 +131,6 @@ bool LiveHttpController::live_payload(const char *&data,
 
 LiveHttpMemoryStatus LiveHttpController::memory_status() const {
     LiveHttpMemoryStatus out;
-    out.stream_length = stream_json_.length();
-    out.stream_capacity = stream_json_.capacity();
     out.live_length = live_json_.length();
     out.live_capacity = live_json_.capacity();
     return out;
@@ -239,33 +153,6 @@ bool LiveHttpController::live_view_requested(uint32_t now_ms) {
     }
     xSemaphoreGive(lease_mutex_);
     return requested;
-}
-
-void LiveHttpController::serve_stream_requests() {
-    if (!stream_requests_pending_.load(std::memory_order_acquire)) return;
-
-    decltype(stream_requests_) requests;
-    if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
-    for (size_t i = 0; i < AC_WEB_SSE_CLIENTS_MAX + 1; ++i) {
-        requests[i].swap(stream_requests_[i]);
-    }
-    stream_requests_pending_.store(false, std::memory_order_release);
-    xSemaphoreGive(cache_mutex_);
-
-    bool built = false;
-    for (const auto &request : requests) {
-        if (!request || request->cancelled()) continue;
-
-        if (!built) built = build_stream_json(stream_json_, *stream_, *live_);
-        AsyncWebServerResponse *response = nullptr;
-        if (!built || !http_prepare_json_response(stream_json_, response)) {
-            response = new (std::nothrow) AsyncBasicResponse(
-                503, "application/json",
-                "{\"ok\":false,\"error\":\"response_alloc\"}");
-        }
-        if (response) response->addHeader("Cache-Control", "no-store");
-        request->publish(std::unique_ptr<AsyncWebServerResponse>(response));
-    }
 }
 
 void LiveHttpController::publish_live_payload(uint32_t now_ms) {
@@ -321,40 +208,6 @@ void LiveHttpController::publish_live_payload(uint32_t now_ms) {
     live_generation_ = next_generation;
     last_live_send_ms_ = now_ms;
     live_->mark_sent();
-}
-
-void LiveHttpController::send_stream_snapshot(
-    AsyncWebServerRequest *request) {
-    std::shared_ptr<AsyncDeferredResponse::State> state;
-    std::unique_ptr<AsyncDeferredResponse> response;
-    try {
-        state = std::make_shared<AsyncDeferredResponse::State>();
-        response.reset(new (std::nothrow) AsyncDeferredResponse(state));
-    } catch (const std::bad_alloc &) {
-    }
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response_alloc\"}");
-        return;
-    }
-
-    bool queued = false;
-    if (xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
-        for (auto &slot : stream_requests_) {
-            if (slot && !slot->cancelled()) continue;
-            slot = state;
-            stream_requests_pending_.store(true, std::memory_order_release);
-            queued = true;
-            break;
-        }
-        xSemaphoreGive(cache_mutex_);
-    }
-    if (!queued) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"stream_busy\"}");
-        return;
-    }
-    request->send(response.release());
 }
 
 void LiveHttpController::send_live_view_state(

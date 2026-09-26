@@ -62,7 +62,6 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus storage_operation;
     WebUiBufferMemoryStatus report;
     WebUiBufferMemoryStatus report_preferences;
-    WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus live;
     size_t console_log_length = 0;

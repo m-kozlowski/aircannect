@@ -1476,7 +1476,7 @@ void setup() {
     }
     refresh_status_presentations(millis());
 
-    if (!live_http_controller.begin(stream_broker, live_chart_service)) {
+    if (!live_http_controller.begin(live_chart_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] live HTTP controller failed to start\n");
     }

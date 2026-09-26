@@ -116,7 +116,7 @@ bool send_status_json(AsyncWebServerRequest *request, LargeTextBuffer &json) {
     }
 
     AsyncWebServerResponse *response = nullptr;
-    if (!http_prepare_json_response(request, json, response)) {
+    if (!http_prepare_json_response(json, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return false;

@@ -240,7 +240,7 @@ void OximetryHttpController::send_snapshot(
     AsyncWebServerRequest *request) const {
     AsyncWebServerResponse *response = nullptr;
     const JsonSnapshotResponse result =
-        snapshot_.prepare_response(request, response);
+        snapshot_.prepare_response(response);
     if (result == JsonSnapshotResponse::Busy) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"cache_busy\"}");

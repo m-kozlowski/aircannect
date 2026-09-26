@@ -548,7 +548,7 @@ void SettingsHttpController::send_catalog(
 
     AsyncWebServerResponse *response = nullptr;
     const bool prepared =
-        http_prepare_json_response(request, catalog_json_, response);
+        http_prepare_json_response(catalog_json_, response);
     xSemaphoreGive(cache_mutex_);
 
     if (!prepared) {
@@ -589,7 +589,7 @@ void SettingsHttpController::send_settings(
         settings_snapshot_.revision() != 0) {
         AsyncWebServerResponse *response = nullptr;
         const JsonSnapshotResponse result =
-            settings_snapshot_.prepare_response(request, response);
+            settings_snapshot_.prepare_response(response);
         if (result != JsonSnapshotResponse::Ready) {
             xSemaphoreGive(cache_mutex_);
             request->send(

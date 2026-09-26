@@ -1000,7 +1000,7 @@ void ReportHttpController::send_preferences(
 
     AsyncWebServerResponse *response = nullptr;
     const JsonSnapshotResponse result =
-        preferences_->snapshot().prepare_response(request, response);
+        preferences_->snapshot().prepare_response(response);
     if (result == JsonSnapshotResponse::Busy) {
         send_json_error(request, 503, "preferences_busy");
         return;

@@ -259,7 +259,7 @@ void DeviceHttpController::send_ble_status(
 
     AsyncWebServerResponse *response = nullptr;
     const JsonSnapshotResponse result =
-        ble_pairing_snapshot_.prepare_response(request, response);
+        ble_pairing_snapshot_.prepare_response(response);
     if (result == JsonSnapshotResponse::Busy) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"cache_busy\"}");

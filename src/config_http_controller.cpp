@@ -684,7 +684,7 @@ void ConfigHttpController::send_snapshot(
     }
 
     AsyncWebServerResponse *response = nullptr;
-    const bool prepared = http_prepare_json_response(request, json, response);
+    const bool prepared = http_prepare_json_response(json, response);
     xSemaphoreGive(cache_mutex_);
     if (!prepared) {
         request->send(503, "application/json",
@@ -697,7 +697,7 @@ void ConfigHttpController::send_snapshot(
 void ConfigHttpController::send_schema(
     AsyncWebServerRequest *request) const {
     AsyncWebServerResponse *response = nullptr;
-    if (!http_prepare_json_response(request, schema_json_, response)) {
+    if (!http_prepare_json_response(schema_json_, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;

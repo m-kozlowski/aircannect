@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 #include "board.h"
-#include "async_deferred_response.h"
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 
@@ -15,18 +14,15 @@ class AsyncWebServerRequest;
 namespace aircannect {
 
 class LiveChartService;
-class StreamBroker;
 
 struct LiveHttpMemoryStatus {
-    size_t stream_length = 0;
-    size_t stream_capacity = 0;
     size_t live_length = 0;
     size_t live_capacity = 0;
 };
 
 class LiveHttpController final : public HttpRouteModule {
 public:
-    bool begin(StreamBroker &stream, LiveChartService &live);
+    bool begin(LiveChartService &live);
     void stop();
     void register_routes(HttpRouteRegistry &server) override;
     void poll(size_t connected_sse_clients,
@@ -45,25 +41,16 @@ private:
     };
 
     bool live_view_requested(uint32_t now_ms);
-    void serve_stream_requests();
     void publish_live_payload(uint32_t now_ms);
 
-    void send_stream_snapshot(AsyncWebServerRequest *request);
     void send_live_view_state(AsyncWebServerRequest *request);
 
-    StreamBroker *stream_ = nullptr;
     LiveChartService *live_ = nullptr;
 
-    StaticSemaphore_t cache_mutex_storage_ = {};
     StaticSemaphore_t lease_mutex_storage_ = {};
-    SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t lease_mutex_ = nullptr;
 
     LiveViewLease leases_[AC_WEB_SSE_CLIENTS_MAX + 1];
-    std::shared_ptr<AsyncDeferredResponse::State>
-        stream_requests_[AC_WEB_SSE_CLIENTS_MAX + 1];
-    std::atomic<bool> stream_requests_pending_{false};
-    LargeTextBuffer stream_json_;
     LargeTextBuffer live_json_;
 
     uint32_t live_generation_ = 0;

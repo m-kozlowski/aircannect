@@ -231,8 +231,6 @@ WebUiMemoryStatus WebUI::memory_status() {
     }
     if (live_) {
         const LiveHttpMemoryStatus live = live_->memory_status();
-        out.stream.length = live.stream_length;
-        out.stream.capacity = live.stream_capacity;
         out.live.length = live.live_length;
         out.live.capacity = live.live_capacity;
     }
@@ -864,7 +862,7 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
     }
 
     AsyncWebServerResponse *response = nullptr;
-    if (!http_prepare_json_response(request, json, response)) {
+    if (!http_prepare_json_response(json, response)) {
         xSemaphoreGive(cache_mutex_);
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response alloc\"}");

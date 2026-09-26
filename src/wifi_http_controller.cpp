@@ -145,7 +145,7 @@ void WifiHttpController::send_snapshot(
 
     AsyncWebServerResponse *response = nullptr;
     const bool prepared =
-        http_prepare_json_response(request, snapshot_json_, response);
+        http_prepare_json_response(snapshot_json_, response);
     xSemaphoreGive(cache_mutex_);
     if (!prepared) {
         request->send(503, "application/json",
