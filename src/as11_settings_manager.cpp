@@ -28,20 +28,6 @@ bool As11SettingsManager::request_refresh(RpcRequestPort &rpc,
 
 OperationSubmission As11SettingsManager::write(
     RpcRequestPort &rpc,
-    const std::string &params_json,
-    RpcSource source,
-    uint32_t now_ms) {
-    const OperationSubmission submitted =
-        submit_write(rpc, params_json, source);
-    if (!submitted.accepted()) return submitted;
-
-    (void)state_.note_set_request(params_json, now_ms);
-    note_change();
-    return submitted;
-}
-
-OperationSubmission As11SettingsManager::write(
-    RpcRequestPort &rpc,
     const As11PreparedSettingsWrite &write,
     RpcSource source,
     uint32_t now_ms) {

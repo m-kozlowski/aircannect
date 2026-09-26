@@ -545,6 +545,40 @@ bool json_literal_for_set(const As11SettingDef &def,
     return false;
 }
 
+int rpc_write_mode(JsonObjectConst params, int mode,
+                   const As11SettingsCatalog &catalog) {
+    const As11SettingDef *def = catalog.find("MOP");
+    const int requested = def ? enum_index_from_json(
+        *def, value_for_setting(params, *def, catalog.device_model()), true) : -1;
+    return requested >= 0 ? requested : mode;
+}
+
+void append_rpc_pending_settings(As11PreparedSettingsWrite &prepared,
+                                  JsonObjectConst params, int mode,
+                                  const As11SettingsCatalog &catalog) {
+    for (size_t i = 0; i < catalog.count(); ++i) {
+        const As11SettingDef &def = catalog.setting(i);
+        if (!catalog.supports(def) ||
+            !as11_setting_visible_for_mode(def, mode)) continue;
+
+        const auto value = value_for_setting(params, def, catalog.device_model());
+        if (value.isNull()) continue;
+
+        // Friendly settings overwrite raw selectors in the outgoing object.
+        const auto found = std::find_if(
+            prepared.settings.begin(), prepared.settings.end(),
+            [i](const As11PreparedSettingWrite &setting) {
+                return setting.catalog_index == i;
+            });
+        if (found != prepared.settings.end()) continue;
+
+        std::string pending = normalize_value_for_def(def, value);
+        if (!pending.empty()) {
+            prepared.settings.push_back({i, std::move(pending)});
+        }
+    }
+}
+
 }  // namespace
 
 bool As11SettingsWriteRequest::parse(JsonObjectConst object) {
@@ -957,52 +991,6 @@ bool As11SettingsState::apply_settings_get_response(
     return any && storage_ok;
 }
 
-bool As11SettingsState::note_set_request(const std::string &params_json,
-                                         uint32_t now_ms) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, params_json);
-    if (err || !doc.is<JsonObjectConst>()) return false;
-    if (!ensure_storage()) return false;
-
-    JsonObjectConst root = doc.as<JsonObjectConst>();
-    int mode = mode_index();
-    const As11SettingDef *mode_def = catalog_.find("MOP");
-    const int target_mode = mode_def
-        ? enum_index_from_json(*mode_def,
-                               value_for_setting(root, *mode_def, device_model()),
-                               true)
-        : -1;
-
-    if (target_mode >= 0) mode = target_mode;
-
-    bool any = false;
-    for (size_t i = 0; i < setting_capacity_; ++i) {
-        const As11SettingDef &def = catalog_.setting(i);
-        if (!catalog_.supports(def)) continue;
-        if (!as11_setting_visible_for_mode(def, mode)) continue;
-        JsonVariantConst value = value_for_setting(root, def, device_model());
-        if (value.isNull()) continue;
-        std::string pending_value = normalize_value_for_def(def, value);
-        if (pending_value.empty()) continue;
-
-        const bool was_pending = pending_[i];
-        if (!pending_values_[i].set(pending_value)) {
-            continue;
-        }
-
-        if (!was_pending) pending_count_++;
-        pending_[i] = true;
-        pending_since_ms_[i] = now_ms;
-        any = true;
-    }
-
-    if (any) {
-        last_write_status_ = "sent";
-        last_write_ms_ = now_ms;
-    }
-    return any;
-}
-
 bool As11SettingsState::note_set_request(
     const As11PreparedSettingsWrite &write, uint32_t now_ms) {
     if (!ensure_storage()) return false;
@@ -1352,10 +1340,12 @@ std::string as11_settings_get_params_json(
 As11PreparedSettingsWrite as11_prepare_settings_write(
     const As11SettingsWriteRequest &request,
     int current_mode,
-    const As11SettingsCatalog &catalog) {
+    const As11SettingsCatalog &catalog,
+    JsonObjectConst raw_params) {
     As11PreparedSettingsWrite prepared;
 
-    int mode = current_mode;
+    int mode = raw_params.isNull() ? current_mode
+        : rpc_write_mode(raw_params, current_mode, catalog);
     const As11SettingDef *mode_def = catalog.find("MOP");
     const As11SettingsInputField *requested_mode =
         mode_def ? request.find(mode_def->key) : nullptr;
@@ -1368,6 +1358,11 @@ As11PreparedSettingsWrite as11_prepare_settings_write(
         }
     }
     prepared.params_json = "{";
+    if (!raw_params.isNull() && raw_params.size()) {
+        prepared.params_json.clear();
+        serializeJson(raw_params, prepared.params_json);
+        prepared.params_json.pop_back();
+    }
     for (size_t i = 0; i < catalog.count(); ++i) {
         const As11SettingDef &def = catalog.setting(i);
         if (!catalog.supports(def) || !def.writable ||
@@ -1390,7 +1385,7 @@ As11PreparedSettingsWrite as11_prepare_settings_write(
             continue;
         }
 
-        if (!prepared.settings.empty()) prepared.params_json += ',';
+        if (prepared.params_json.size() > 1) prepared.params_json += ',';
         prepared.params_json += '"';
         prepared.params_json += rpc_key;
         prepared.params_json += "\":";
@@ -1402,6 +1397,10 @@ As11PreparedSettingsWrite as11_prepare_settings_write(
         prepared.settings.push_back(std::move(setting));
     }
     prepared.params_json += '}';
+    prepared.mapped_count = prepared.settings.size();
+    if (!raw_params.isNull()) {
+        append_rpc_pending_settings(prepared, raw_params, mode, catalog);
+    }
     return prepared;
 }
 

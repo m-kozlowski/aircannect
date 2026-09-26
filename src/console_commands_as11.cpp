@@ -46,47 +46,19 @@ bool json_number_literal(const String &value) {
     return end && end != value.c_str() && *end == '\0';
 }
 
-std::string cli_set_value_literal(String value) {
+bool assign_cli_set_value(JsonVariant destination, String value) {
     value.trim();
     String lower = value;
     lower.toLowerCase();
     if (lower == "true" || lower == "false" || lower == "null" ||
         json_number_literal(value) || value.startsWith("{") ||
         value.startsWith("[")) {
-        return to_std(value);
+        JsonDocument parsed;
+        if (deserializeJson(parsed, value.c_str())) return false;
+        return destination.set(parsed.as<JsonVariantConst>());
     }
 
-    std::string out = "\"";
-    out += json_escape(to_std(value));
-    out += "\"";
-    return out;
-}
-
-void append_cli_set_pair(std::string &out,
-                         bool &first,
-                         const String &key,
-                         const String &value) {
-    if (!first) out += ',';
-    out += '"';
-    out += json_escape(to_std(key));
-    out += "\":";
-    out += cli_set_value_literal(value);
-    first = false;
-}
-
-void append_json_object_members(std::string &out,
-                                bool &first,
-                                const std::string &object) {
-    if (object.size() < 2 || object.front() != '{' ||
-        object.back() != '}') {
-        return;
-    }
-
-    const size_t length = object.size() - 2;
-    if (!length) return;
-    if (!first) out += ',';
-    out.append(object, 1, length);
-    first = false;
+    return destination.set(value.c_str());
 }
 
 void print_stream_memory_detail(Print &out, const StreamBroker &stream) {
@@ -435,6 +407,7 @@ bool As11DeviceConsoleCommands::execute_rpc(const String &command,
         }
 
         std::string params;
+        As11PreparedSettingsWrite prepared;
         bool managed_settings = false;
         if (rest.startsWith("{")) {
             params = to_std(rest);
@@ -442,10 +415,10 @@ bool As11DeviceConsoleCommands::execute_rpc(const String &command,
             int pos = 0;
             String key;
             String value;
-            std::string raw_params = "{";
-            std::string setting_body = "{";
-            bool raw_first = true;
-            bool setting_first = true;
+            JsonDocument raw_params;
+            JsonDocument setting_body;
+            raw_params.to<JsonObject>();
+            setting_body.to<JsonObject>();
             size_t raw_count = 0;
             size_t setting_count = 0;
 
@@ -458,16 +431,16 @@ bool As11DeviceConsoleCommands::execute_rpc(const String &command,
                 }
 
                 if (key.startsWith("_")) {
-                    append_cli_set_pair(raw_params, raw_first, key, value);
                     raw_count++;
                 } else {
-                    append_cli_set_pair(setting_body, setting_first, key,
-                                        value);
                     setting_count++;
                 }
+                JsonDocument &body = key.startsWith("_") ? raw_params : setting_body;
+                if (!assign_cli_set_value(body[key.c_str()].to<JsonVariant>(), value)) {
+                    out.println("[RPC] invalid settings");
+                    return true;
+                }
             }
-            raw_params += '}';
-            setting_body += '}';
 
             const As11SettingsState &settings = settings_.state();
             const As11DeviceState &as11 = device_.state();
@@ -477,27 +450,26 @@ bool As11DeviceConsoleCommands::execute_rpc(const String &command,
                     as11.active_therapy_profile());
             }
 
-            size_t accepted = 0;
-            std::string mapped_params = "{}";
             if (setting_count) {
-                mapped_params = as11_build_set_params_from_json(
-                    setting_body, mode, accepted, settings.catalog());
+                As11SettingsWriteRequest write_request;
+                if (!write_request.parse(setting_body.as<JsonObjectConst>())) {
+                    out.println("[RPC] invalid settings");
+                    return true;
+                }
+                prepared = as11_prepare_settings_write(
+                    write_request, mode, settings.catalog(),
+                    raw_params.as<JsonObjectConst>());
             }
-            if (!raw_count && !accepted) {
+            if (!raw_count && !prepared.mapped_count) {
                 out.println("[RPC] no accepted settings");
                 return true;
             }
-            managed_settings = accepted != 0;
-
-            bool first = true;
-            params = '{';
-            append_json_object_members(params, first, raw_params);
-            append_json_object_members(params, first, mapped_params);
-            params += '}';
+            managed_settings = prepared.mapped_count != 0;
+            if (!managed_settings) serializeJson(raw_params, params);
         }
 
         const bool queued = managed_settings
-            ? settings_.write(rpc_, params, RpcSource::Console,
+            ? settings_.write(rpc_, prepared, RpcSource::Console,
                               millis()).accepted()
             : passthrough_.send_request("Set", params, RpcSource::Console);
         out.println(queued ? "[RPC] Set queued" : "[RPC] Set queue failed");

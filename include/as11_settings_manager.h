@@ -19,10 +19,6 @@ public:
                          RpcSource source,
                          uint32_t now_ms);
     OperationSubmission write(RpcRequestPort &rpc,
-                              const std::string &params_json,
-                              RpcSource source,
-                              uint32_t now_ms);
-    OperationSubmission write(RpcRequestPort &rpc,
                               const As11PreparedSettingsWrite &write,
                               RpcSource source,
                               uint32_t now_ms);

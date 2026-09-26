@@ -154,6 +154,7 @@ struct As11PreparedSettingWrite {
 struct As11PreparedSettingsWrite {
     std::string params_json = "{}";
     std::vector<As11PreparedSettingWrite> settings;
+    size_t mapped_count = 0;
 
     bool empty() const { return settings.empty(); }
 };
@@ -197,8 +198,6 @@ public:
     bool apply_settings_get_response(RpcPayloadView payload,
                                      uint32_t now_ms,
                                      bool *complete_snapshot = nullptr);
-    // params_json is the outgoing RPC Set body, not UI/CLI setting input.
-    bool note_set_request(const std::string &params_json, uint32_t now_ms);
     bool note_set_request(const As11PreparedSettingsWrite &write,
                           uint32_t now_ms);
     void note_set_response(bool is_error, uint32_t now_ms);
@@ -286,7 +285,8 @@ const As11SettingCompositeDef &as11_setting_composite(size_t index);
 As11PreparedSettingsWrite as11_prepare_settings_write(
     const As11SettingsWriteRequest &request,
     int current_mode,
-    const As11SettingsCatalog &catalog);
+    const As11SettingsCatalog &catalog,
+    JsonObjectConst raw_params = {});
 
 bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode);
 bool as11_setting_readable_via_rpc(const As11SettingDef &def);
