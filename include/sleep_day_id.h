@@ -14,6 +14,13 @@ public:
     static bool from_yyyymmdd(const char *text, SleepDayId &out);
     static bool from_epoch_days(int64_t epoch_days, SleepDayId &out);
 
+    bool local_noon_epoch_ms(int64_t &out) const;
+    bool local_minute_from_noon_epoch_ms(uint16_t minute_from_noon,
+                                         int64_t &out) const;
+    bool utc_day_window(int32_t timezone_offset_minutes,
+                        int64_t &start_ms,
+                        int64_t &end_ms) const;
+
     constexpr bool valid() const {
         return epoch_day_ != InvalidEpochDay;
     }

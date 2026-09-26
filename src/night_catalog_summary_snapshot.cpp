@@ -18,8 +18,6 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t MS_PER_MINUTE = 60LL * 1000LL;
-constexpr int64_t MS_PER_DAY = 24LL * 60LL * MS_PER_MINUTE;
-constexpr int64_t LOCAL_NOON_MS = 12LL * 60LL * MS_PER_MINUTE;
 constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
 constexpr uint64_t FNV_PRIME = 1099511628211ULL;
 
@@ -76,11 +74,11 @@ bool summary_sleep_day(const ReportSummaryRecord &record, SleepDayId &out) {
 bool summary_axis_timezone_offset(SleepDayId sleep_day,
                                   int64_t day_start_ms,
                                   int32_t &out) {
-    if (!sleep_day.valid() || day_start_ms <= 0) return false;
+    if (day_start_ms <= 0) return false;
 
-    const int64_t local_noon_ms =
-        static_cast<int64_t>(sleep_day.epoch_days()) * MS_PER_DAY +
-        LOCAL_NOON_MS;
+    int64_t local_noon_ms = 0;
+    if (!sleep_day.local_noon_epoch_ms(local_noon_ms)) return false;
+
     const int64_t offset_ms = local_noon_ms - day_start_ms;
     if (offset_ms % MS_PER_MINUTE != 0) return false;
 

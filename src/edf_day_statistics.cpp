@@ -22,7 +22,6 @@
 namespace aircannect {
 namespace {
 
-constexpr int64_t MS_PER_DAY = INT64_C(86400000);
 constexpr int64_t MS_PER_HOUR = INT64_C(3600000);
 constexpr size_t HEADER_MAX_BYTES = 8192;
 constexpr size_t RECORD_MAX_BYTES = 64 * 1024;
@@ -73,25 +72,12 @@ bool day_window(SleepDayId day,
                 int32_t timezone_offset_minutes,
                 int64_t &start_ms,
                 int64_t &end_ms) {
-    if (!day.valid() || timezone_offset_minutes < -24 * 60 ||
+    if (timezone_offset_minutes < -24 * 60 ||
         timezone_offset_minutes > 24 * 60) {
         return false;
     }
 
-    const int64_t local_start =
-        static_cast<int64_t>(day.epoch_days()) * MS_PER_DAY +
-        12 * MS_PER_HOUR;
-    const int64_t offset =
-        static_cast<int64_t>(timezone_offset_minutes) * 60 * 1000;
-    if ((offset > 0 && local_start < INT64_MIN + offset) ||
-        (offset < 0 && local_start > INT64_MAX + offset)) {
-        return false;
-    }
-
-    start_ms = local_start - offset;
-    if (start_ms > INT64_MAX - MS_PER_DAY) return false;
-    end_ms = start_ms + MS_PER_DAY;
-    return true;
+    return day.utc_day_window(timezone_offset_minutes, start_ms, end_ms);
 }
 
 int32_t saturate_milli(float value) {

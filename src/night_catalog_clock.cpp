@@ -9,26 +9,11 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t MS_PER_MINUTE = 60LL * 1000LL;
-constexpr int64_t MS_PER_DAY = 24LL * 60LL * MS_PER_MINUTE;
-constexpr int64_t LOCAL_NOON_MS = 12LL * 60LL * MS_PER_MINUTE;
 constexpr int32_t MAX_OFFSET_MINUTES = 24 * 60;
 
 bool valid_offset(int64_t offset_minutes) {
     return offset_minutes >= -MAX_OFFSET_MINUTES &&
            offset_minutes <= MAX_OFFSET_MINUTES;
-}
-
-bool local_noon_ms(SleepDayId sleep_day, int64_t &out) {
-    if (!sleep_day.valid()) return false;
-
-    const int64_t days = sleep_day.epoch_days();
-    if (days > (INT64_MAX - LOCAL_NOON_MS) / MS_PER_DAY ||
-        days < (INT64_MIN + LOCAL_NOON_MS) / MS_PER_DAY) {
-        return false;
-    }
-
-    out = days * MS_PER_DAY + LOCAL_NOON_MS;
-    return true;
 }
 
 bool summary_offset_minutes(const NightCatalogSummaryInput &summary,
@@ -88,7 +73,7 @@ bool resolved_offset_minutes(const NightCatalogClockContext &context,
                              int64_t local_ms,
                              int32_t &out) {
     int64_t noon_ms = 0;
-    if (!local_noon_ms(sleep_day, noon_ms)) return false;
+    if (!sleep_day.local_noon_epoch_ms(noon_ms)) return false;
 
     const NightCatalogSummaryInput *summary =
         night_catalog_find_summary(context, sleep_day);
@@ -165,13 +150,14 @@ bool night_catalog_resolve_local_minute(void *context,
                                         int64_t &utc_ms) {
     const NightCatalogClockContext *clock =
         static_cast<const NightCatalogClockContext *>(context);
-    if (!clock || minute_from_noon > 1440) return false;
+    if (!clock) return false;
 
-    int64_t noon_ms = 0;
-    if (!local_noon_ms(sleep_day, noon_ms)) return false;
+    int64_t local_ms = 0;
+    if (!sleep_day.local_minute_from_noon_epoch_ms(minute_from_noon,
+                                                   local_ms)) {
+        return false;
+    }
 
-    const int64_t local_ms =
-        noon_ms + static_cast<int64_t>(minute_from_noon) * MS_PER_MINUTE;
     return night_catalog_resolve_local_time(*clock,
                                             sleep_day,
                                             local_ms,

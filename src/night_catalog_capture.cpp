@@ -17,9 +17,6 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t CAPTURE_QUARTER_MS = 15LL * 60LL * 1000LL;
-constexpr int64_t CAPTURE_DAY_MS = 24LL * 60LL * 60LL * 1000LL;
-constexpr int64_t CAPTURE_NOON_MS = 12LL * 60LL * 60LL * 1000LL;
-constexpr int64_t CAPTURE_MINUTE_MS = 60LL * 1000LL;
 
 struct CaptureFiles {
     NightCatalogSourceFileInput files[AC_EDF_REPORT_SESSION_FILE_MAX] = {};
@@ -64,46 +61,14 @@ struct CaptureWorkspace {
     LargeScratchArray<NightCatalogTimeRange> fallback_sessions;
 };
 
-bool subtract_offset(int64_t local_ms,
-                     int32_t timezone_offset_minutes,
-                     int64_t &utc_ms) {
-    const int64_t offset_ms = static_cast<int64_t>(
-        timezone_offset_minutes) * CAPTURE_MINUTE_MS;
-    if ((offset_ms > 0 && local_ms < INT64_MIN + offset_ms) ||
-        (offset_ms < 0 && local_ms > INT64_MAX + offset_ms)) {
-        return false;
-    }
-
-    utc_ms = local_ms - offset_ms;
-    return utc_ms > 0;
-}
-
-bool day_noon(SleepDayId sleep_day,
-              int32_t timezone_offset_minutes,
-              int64_t &utc_ms) {
-    if (!sleep_day.valid()) return false;
-
-    const int64_t days = sleep_day.epoch_days();
-    if (days > (INT64_MAX - CAPTURE_NOON_MS) / CAPTURE_DAY_MS ||
-        days < (INT64_MIN + CAPTURE_NOON_MS) / CAPTURE_DAY_MS) {
-        return false;
-    }
-
-    const int64_t local_ms = days * CAPTURE_DAY_MS + CAPTURE_NOON_MS;
-    return subtract_offset(local_ms, timezone_offset_minutes, utc_ms);
-}
-
 bool day_boundaries(SleepDayId sleep_day,
                     int32_t timezone_offset_minutes,
                     int64_t &start_ms,
                     int64_t &end_ms) {
-    if (!day_noon(sleep_day, timezone_offset_minutes, start_ms) ||
-        start_ms > INT64_MAX - CAPTURE_DAY_MS) {
-        return false;
-    }
-
-    end_ms = start_ms + CAPTURE_DAY_MS;
-    return true;
+    return sleep_day.utc_day_window(timezone_offset_minutes,
+                                    start_ms,
+                                    end_ms) &&
+           start_ms > 0;
 }
 
 bool session_prefix(const EdfSessionMetadata &metadata,
