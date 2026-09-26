@@ -2200,7 +2200,7 @@ bool ResmedOtaManager::fill_prepared_block() {
 
     const size_t offset = cold_->status.uploaded_bytes + prepared_block_bytes_;
     const StorageStreamRead read = stream_port_->read(
-        *cold_->prepared_stream, cold_->prepared_block + prepared_block_bytes_,
+        *cold_->prepared_stream, cold_->pending_block + prepared_block_bytes_,
         prepared_block_wanted_ - prepared_block_bytes_, offset);
     if (read.state == StorageStreamReadState::Retry) return false;
     if (read.state != StorageStreamReadState::Data || read.bytes == 0) {
@@ -2213,7 +2213,6 @@ bool ResmedOtaManager::fill_prepared_block() {
     prepared_block_bytes_ += read.bytes;
     if (prepared_block_bytes_ != prepared_block_wanted_) return true;
 
-    memcpy(cold_->pending_block, cold_->prepared_block, prepared_block_bytes_);
     return queue_pending_block(cold_->status.uploaded_bytes, prepared_block_bytes_);
 }
 
