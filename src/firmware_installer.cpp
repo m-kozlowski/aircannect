@@ -475,6 +475,13 @@ bool FirmwareInstaller::begin_write(const String &filename,
     memset(probe_bytes_, 0, sizeof(probe_bytes_));
     image_magic_checked_ = false;
 
+    write_buffer_ = static_cast<uint8_t *>(Memory::alloc_dma(kWriteChunkBytes));
+    if (!write_buffer_) {
+        abort("ota_write_buffer_alloc_failed");
+        unlock();
+        return false;
+    }
+
     // Preparation erased this same partition; resume at byte zero without
     // another erase in the HTTP callback or on subsequent small writes.
     esp_err_t err = esp_ota_resume(partition_, 0, 0, &ota_handle_);
@@ -657,8 +664,7 @@ bool FirmwareInstaller::write_plain(size_t index,
     size_t offset = 0;
     while (offset < len) {
         const size_t chunk = std::min(kWriteChunkBytes, len - offset);
-        const esp_err_t err =
-            esp_ota_write(ota_handle_, data + offset, chunk);
+        const esp_err_t err = write_flash_chunk(data + offset, chunk);
         if (err != ESP_OK) {
             write_error = esp_err_to_name(err);
             break;
@@ -867,6 +873,8 @@ bool FirmwareInstaller::finish() {
     prepare_started_ms_ = 0;
     write_last_activity_ms_ = 0;
     reset_zlib_decoder();
+    Memory::free(write_buffer_);
+    write_buffer_ = nullptr;
 
     Log::logf(CAT_OTA, LOG_INFO,
               "ESP OTA complete source=%s bytes=%u wire_bytes=%u "
@@ -1075,8 +1083,7 @@ bool FirmwareInstaller::write_decompressed_bytes(const uint8_t *data,
     size_t offset = 0;
     while (offset < len) {
         const size_t chunk = std::min(kWriteChunkBytes, len - offset);
-        const esp_err_t err =
-            esp_ota_write(ota_handle_, data + offset, chunk);
+        const esp_err_t err = write_flash_chunk(data + offset, chunk);
         if (err != ESP_OK) {
             abort(esp_err_to_name(err));
             return false;
@@ -1087,6 +1094,13 @@ bool FirmwareInstaller::write_decompressed_bytes(const uint8_t *data,
     }
 
     return true;
+}
+
+esp_err_t FirmwareInstaller::write_flash_chunk(const uint8_t *data, size_t len) {
+    // IDF writes PSRAM input through a 32-byte bounce buffer. Keep one
+    // internal buffer for this upload so flash writes retain their chunk size.
+    memcpy(write_buffer_, data, len);
+    return esp_ota_write(ota_handle_, write_buffer_, len);
 }
 
 bool FirmwareInstaller::apply_progress(size_t bytes) {
@@ -1166,6 +1180,8 @@ void FirmwareInstaller::clear_install_state_locked() {
     partition_update_ = nullptr;
 
     reset_zlib_decoder();
+    Memory::free(write_buffer_);
+    write_buffer_ = nullptr;
     partition_inspect_only_ = false;
     ota_handle_ = 0;
     partition_ = nullptr;

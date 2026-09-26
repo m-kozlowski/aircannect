@@ -115,6 +115,7 @@ private:
     bool write_zlib(size_t index, const uint8_t *data, size_t len);
     bool finish_zlib();
     bool write_decompressed_bytes(const uint8_t *data, size_t len);
+    esp_err_t write_flash_chunk(const uint8_t *data, size_t len);
     bool apply_progress(size_t bytes);
     bool apply_wire_progress(size_t bytes);
 
@@ -133,6 +134,7 @@ private:
     uint32_t last_progress_log_percent_ = 255;
 
     esp_ota_handle_t ota_handle_ = 0;
+    uint8_t *write_buffer_ = nullptr;
     const esp_partition_t *partition_ = nullptr;
     size_t prepared_image_size_ = 0;
     size_t prepared_wire_size_ = 0;
