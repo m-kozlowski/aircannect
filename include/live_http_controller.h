@@ -32,7 +32,6 @@ public:
               size_t healthy_sse_clients,
               uint32_t now_ms);
 
-    bool stream_payload(const char *&data, size_t &length) const;
     bool live_payload(const char *&data,
                       size_t &length,
                       uint32_t &generation) const;

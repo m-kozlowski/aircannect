@@ -207,14 +207,6 @@ void LiveHttpController::poll(size_t connected_sse_clients,
     if (stream_snapshot_due) (void)publish_stream_snapshot();
 }
 
-bool LiveHttpController::stream_payload(const char *&data,
-                                        size_t &length) const {
-    if (!stream_json_.length()) return false;
-    data = stream_json_.c_str();
-    length = stream_json_.length();
-    return true;
-}
-
 bool LiveHttpController::live_payload(const char *&data,
                                       size_t &length,
                                       uint32_t &generation) const {

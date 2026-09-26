@@ -409,15 +409,6 @@ void WebUI::poll(ServicePendingWork service_pending_work) {
                 sse_backpressure = true;
             }
         }
-
-        const char *stream_payload = nullptr;
-        size_t stream_length = 0;
-        if (live_ && live_->stream_payload(stream_payload, stream_length) &&
-            stream_length &&
-            send_sse_to_clients(stream_payload, "stream", event_id, false) ==
-                SseSendResult::Failed) {
-            sse_backpressure = true;
-        }
     }
 
     if (console_push_due) {
