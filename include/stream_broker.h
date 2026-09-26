@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ArduinoJson.h>
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
@@ -81,7 +83,7 @@ public:
                                const StreamSubscription &subscription);
     void release(StreamConsumerHandle handle);
 
-    void observe_external_request(RpcPayloadView payload,
+    void observe_external_request(JsonVariantConst request,
                                   uint32_t now_ms);
     void observe_external_response(RpcPayloadView payload,
                                    uint32_t now_ms);
@@ -210,7 +212,7 @@ private:
                                               uint32_t now_ms);
     void clear_external_requests();
 
-    static bool parse_external_subscription(const std::string &params_json,
+    static bool parse_external_subscription(JsonVariantConst params,
                                             StreamSubscription &subscription);
     static std::string build_subscription_params(
         const StreamSubscription &subscription);

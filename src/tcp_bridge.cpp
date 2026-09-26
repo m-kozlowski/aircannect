@@ -52,12 +52,6 @@ void TcpBridge::broadcast_rpc_payload(const RpcPayloadRef &payload) {
     }
 }
 
-void TcpBridge::set_raw_request_observer(TcpRawRequestObserver observer,
-                                         void *context) {
-    raw_request_observer_ = observer;
-    raw_request_observer_context_ = context;
-}
-
 bool TcpBridge::raw_client_connected() {
     if (!started()) return false;
 
@@ -266,7 +260,7 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc,
                 }
             }
 
-            if (!accept_rpc_byte(i, value, rpc, now_ms)) break;
+            if (!accept_rpc_byte(i, value, rpc)) break;
         }
     }
 }
@@ -416,8 +410,7 @@ bool TcpBridge::pump_service_input(size_t idx,
 }
 
 bool TcpBridge::accept_rpc_byte(size_t idx, uint8_t value,
-                                RpcPassthroughPort &rpc,
-                                uint32_t now_ms) {
+                                RpcPassthroughPort &rpc) {
     if (value != '\n') {
         if (value == '\r') return true;
         if (lines_[idx].length() < AC_TCP_LINE_MAX) {
@@ -448,9 +441,6 @@ bool TcpBridge::accept_rpc_byte(size_t idx, uint8_t value,
         Log::logf(CAT_TCP, LOG_WARN,
                   "[CLIENT %u] RPC transport rejected payload\n",
                   static_cast<unsigned>(idx));
-    } else if (raw_request_observer_) {
-        raw_request_observer_(raw_request_observer_context_, payload.data(),
-                              payload.size(), now_ms);
     }
     return true;
 }

@@ -15,11 +15,6 @@
 
 namespace aircannect {
 
-using TcpRawRequestObserver = void (*)(void *context,
-                                       const char *payload,
-                                       size_t payload_len,
-                                       uint32_t now_ms);
-
 enum class TcpBridgeClientProtocol : uint8_t {
     Unknown,
     Rpc,
@@ -38,8 +33,6 @@ public:
 
     // RPC transport
     void broadcast_rpc_payload(const RpcPayloadRef &payload);
-    void set_raw_request_observer(TcpRawRequestObserver observer,
-                                  void *context);
 
     // Status
     bool raw_client_connected();
@@ -57,7 +50,7 @@ private:
     bool begin_service_client(size_t idx, uint32_t now_ms);
     bool pump_service_input(size_t idx, bool service_entry_allowed);
     bool accept_rpc_byte(size_t idx, uint8_t value,
-                         RpcPassthroughPort &rpc, uint32_t now_ms);
+                         RpcPassthroughPort &rpc);
     void poll_service_idle(uint32_t now_ms);
     void reset_service_request();
     void disconnect_slot(size_t idx);
@@ -82,8 +75,6 @@ private:
     uint32_t service_last_activity_ms_ = 0;
     size_t service_owner_ = AC_MAX_TCP_CLIENTS;
 
-    TcpRawRequestObserver raw_request_observer_ = nullptr;
-    void *raw_request_observer_context_ = nullptr;
 };
 
 }  // namespace aircannect

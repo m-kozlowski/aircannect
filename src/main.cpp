@@ -439,14 +439,13 @@ static bool history_transfer_active(void *context) {
 }
 
 static void route_tcp_raw_request(void *context,
-                                  const char *payload,
-                                  size_t payload_len,
+                                  JsonVariantConst request,
+                                  RpcSource source,
                                   uint32_t now_ms) {
     StreamBroker *stream = static_cast<StreamBroker *>(context);
-    if (!stream) return;
+    if (!stream || source != RpcSource::Tcp) return;
 
-    stream->observe_external_request(RpcPayloadView(payload, payload_len),
-                                     now_ms);
+    stream->observe_external_request(request, now_ms);
 }
 
 static void route_as11_service_frame(void *context,
@@ -1300,8 +1299,8 @@ void setup() {
                                                     &edf_recorder_manager);
     can_rpc_link.set_service_frame_observer(
         route_as11_service_frame, &as11_service_manager);
-    tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
-                                        &stream_broker);
+    rpc_transport.set_raw_request_observer(route_tcp_raw_request,
+                                            &stream_broker);
     rpc_transport_generation_seen = rpc_transport.transport_generation();
 
     live_chart_service.begin(stream_broker, as11_device_service.state(),

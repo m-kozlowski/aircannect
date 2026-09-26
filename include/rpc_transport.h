@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <memory>
 #include <stdint.h>
 #include <string>
@@ -14,6 +15,11 @@
 
 namespace aircannect {
 
+// The transport owns the parsed document for the duration of the callback.
+using RpcRawRequestObserver = void (*)(void *context,
+                                      JsonVariantConst request,
+                                      RpcSource source,
+                                      uint32_t now_ms);
 using RpcNotificationObserver = void (*)(void *context,
                                          RpcPayloadView payload,
                                          uint32_t now_ms);
@@ -49,6 +55,7 @@ public:
     bool next_event(RpcEvent &event);
 
     void set_raw_rpc_forwarding_enabled(bool enabled);
+    void set_raw_request_observer(RpcRawRequestObserver observer, void *context);
     void set_event_notification_observer(RpcNotificationObserver observer,
                                          void *context);
     void set_stream_notification_observer(RpcNotificationObserver observer,
@@ -251,6 +258,8 @@ private:
     std::string last_boot_notification_;
 
     // Notification routing
+    RpcRawRequestObserver raw_request_observer_ = nullptr;
+    void *raw_request_context_ = nullptr;
     RpcNotificationObserver event_notification_observer_ = nullptr;
     void *event_notification_context_ = nullptr;
     RpcNotificationObserver stream_notification_observer_ = nullptr;

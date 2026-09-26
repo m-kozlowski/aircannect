@@ -146,12 +146,26 @@ bool RpcTransport::submit_raw_payload(const std::string &payload, RpcSource sour
         return false;
     }
 
-    uint32_t id = 0;
-    if ((source == RpcSource::Console || source == RpcSource::Tcp) &&
-        json_extract_id(payload, id)) {
-        remember_raw_passthrough(id, source, millis());
+    // Inspection never rewrites or rejects passthrough bytes.
+    JsonDocument document;
+    if (!deserializeJson(document, payload.data(), payload.size())) {
+        const uint32_t now_ms = millis();
+        const JsonVariantConst request = document.as<JsonVariantConst>();
+        if ((source == RpcSource::Console || source == RpcSource::Tcp) &&
+            request["id"].is<uint32_t>()) {
+            remember_raw_passthrough(request["id"].as<uint32_t>(), source, now_ms);
+        }
+        if (raw_request_observer_) {
+            raw_request_observer_(raw_request_context_, request, source, now_ms);
+        }
     }
     return true;
+}
+
+void RpcTransport::set_raw_request_observer(RpcRawRequestObserver observer,
+                                            void *context) {
+    raw_request_observer_ = observer;
+    raw_request_context_ = context;
 }
 
 RpcLinkSendResult RpcTransport::send_payload(const std::string &payload) {

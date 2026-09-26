@@ -18,39 +18,6 @@ static constexpr DataIdCsvLimits STREAM_DATA_ID_LIMITS = {
     AC_STREAM_FRAME_SIGNAL_MAX * AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
 };
 
-bool parse_external_stream_request(const char *payload,
-                                   size_t payload_len,
-                                   StreamCommandType &command,
-                                   std::string &params_json,
-                                   uint32_t &id,
-                                   bool &has_id) {
-    command = StreamCommandType::None;
-    params_json.clear();
-    id = 0;
-    has_id = false;
-    if (!payload || payload_len == 0) return false;
-
-    JsonDocument doc;
-    if (deserializeJson(doc, payload, payload_len)) return false;
-
-    const char *method = doc["method"] | "";
-    if (strcmp(method, "StartStream") != 0) return false;
-
-    JsonVariantConst params = doc["params"];
-    if (params.isNull()) return false;
-
-    std::string encoded;
-    serializeJson(params, encoded);
-    params_json = std::move(encoded);
-
-    JsonArrayConst data_ids = params["dataIds"].as<JsonArrayConst>();
-    command = !data_ids.isNull() && data_ids.size() == 0
-                  ? StreamCommandType::Stop
-                  : StreamCommandType::Start;
-    has_id = json_extract_id(payload, payload_len, id);
-    return true;
-}
-
 }  // namespace
 
 const char *stream_acquire_status_name(StreamAcquireStatus status) {
@@ -277,28 +244,30 @@ void StreamBroker::note_external_stop(uint32_t now_ms,
     }
 }
 
-void StreamBroker::observe_external_request(RpcPayloadView payload,
+void StreamBroker::observe_external_request(JsonVariantConst request,
                                              uint32_t now_ms) {
-    StreamCommandType command = StreamCommandType::None;
-    std::string params_json;
-    uint32_t id = 0;
-    bool has_id = false;
+    const char *method = request["method"] | "";
+    if (strcmp(method, "StartStream") != 0) return;
 
-    if (!parse_external_stream_request(payload.data(), payload.size(), command,
-                                       params_json, id, has_id)) {
-        return;
-    }
+    const JsonVariantConst params = request["params"];
+    if (params.isNull()) return;
+
+    const JsonArrayConst ids = params["dataIds"].as<JsonArrayConst>();
+    const StreamCommandType command = !ids.isNull() && ids.size() == 0
+        ? StreamCommandType::Stop : StreamCommandType::Start;
 
     external_transport_connected_ = true;
     if (command == StreamCommandType::Start) {
         StreamSubscription subscription;
-        if (!parse_external_subscription(params_json, subscription)) return;
+        if (!parse_external_subscription(params, subscription)) return;
         note_external_start(subscription, now_ms);
     } else {
         note_external_stop(now_ms);
     }
 
-    if (has_id) remember_external_request(id, command, now_ms);
+    if (request["id"].is<uint32_t>()) {
+        remember_external_request(request["id"].as<uint32_t>(), command, now_ms);
+    }
 }
 
 void StreamBroker::observe_external_response(RpcPayloadView payload,
@@ -706,62 +675,26 @@ void StreamBroker::clear_external_requests() {
 }
 
 bool StreamBroker::parse_external_subscription(
-    const std::string &params_json,
+    JsonVariantConst params,
     StreamSubscription &subscription) {
     clear_subscription(subscription);
-    JsonCursor json(params_json);
-    if (!json.consume('{')) return false;
-
-    bool saw_data_ids = false;
-    uint32_t sample_ms = 0;
-    uint32_t report_ms = 0;
-
-    json.skip_ws();
-    while (json.pos < json.end && *json.pos != '}') {
-        char key[64] = {};
-        if (!json.parse_string(key, sizeof(key))) return false;
-        if (!json.consume(':')) return false;
-
-        if (strcmp(key, "dataIds") == 0) {
-            if (!json.consume('[')) return false;
-            saw_data_ids = true;
-            json.skip_ws();
-            while (json.pos < json.end && *json.pos != ']') {
-                char data_id[AC_STREAM_FRAME_SIGNAL_NAME_MAX] = {};
-                if (!json.parse_string(data_id, sizeof(data_id))) {
-                    return false;
-                }
-                if (!add_data_id(subscription, data_id)) return false;
-
-                json.skip_ws();
-                if (json.pos < json.end && *json.pos == ',') {
-                    json.pos++;
-                    json.skip_ws();
-                    continue;
-                }
-                if (json.pos < json.end && *json.pos == ']') break;
-                return false;
-            }
-            if (!json.consume(']')) return false;
-        } else if (strcmp(key, "sampleIntervalMs") == 0) {
-            if (!json.parse_uint(sample_ms)) return false;
-        } else if (strcmp(key, "reportIntervalMs") == 0) {
-            if (!json.parse_uint(report_ms)) return false;
-        } else {
-            if (!json.skip_value()) return false;
+    const JsonArrayConst ids = params["dataIds"].as<JsonArrayConst>();
+    if (ids.isNull()) return false;
+    for (JsonVariantConst value : ids) {
+        if (!value.is<const char *>()) return false;
+        const JsonString id = value.as<JsonString>();
+        if (!add_data_id(subscription, std::string(id.c_str(), id.size()))) {
+            return false;
         }
-
-        json.skip_ws();
-        if (json.pos < json.end && *json.pos == ',') {
-            json.pos++;
-            json.skip_ws();
-            continue;
-        }
-        if (json.pos < json.end && *json.pos == '}') break;
-        return false;
     }
-    if (!json.consume('}')) return false;
-    if (!saw_data_ids) return false;
+
+    const JsonVariantConst sample = params["sampleIntervalMs"];
+    const JsonVariantConst report = params["reportIntervalMs"];
+    if ((!sample.isUnbound() && !sample.is<uint32_t>()) ||
+        (!report.isUnbound() && !report.is<uint32_t>())) return false;
+
+    uint32_t sample_ms = sample | uint32_t{0};
+    uint32_t report_ms = report | uint32_t{0};
 
     normalize_stream_intervals(sample_ms, report_ms);
     subscription.sample_ms = sample_ms;
