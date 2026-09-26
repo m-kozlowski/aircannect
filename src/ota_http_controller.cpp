@@ -454,7 +454,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                     return;
                 }
 
-                // Allow for the initial flash erase as well as slow uploads.
+                // Use the upload's idle limit instead of the short-request timeout.
                 request->client()->setRxTimeout(
                     FirmwareInstaller::WriteIdleTimeoutSeconds);
 

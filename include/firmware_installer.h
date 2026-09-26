@@ -104,6 +104,7 @@ public:
 
 private:
     // Partition writer
+    bool erase_partition_step();
     bool begin_zlib_decoder();
     void reset_zlib_decoder();
     void install_coredump_partition();
@@ -135,6 +136,8 @@ private:
     const esp_partition_t *partition_ = nullptr;
     size_t prepared_image_size_ = 0;
     size_t prepared_wire_size_ = 0;
+    size_t erase_size_ = 0;
+    size_t erase_offset_ = 0;
     uint32_t prepared_at_ms_ = 0;
     uint32_t prepare_started_ms_ = 0;
     uint32_t write_last_activity_ms_ = 0;

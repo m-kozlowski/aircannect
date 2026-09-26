@@ -456,7 +456,7 @@
         data = await waitForOtaSnapshot(
           (next) => next.http_prepared || !!next.last_error ||
             !next.http_prepare_pending,
-          eventSerial, 15000, "OTA prepare timed out");
+          eventSerial, 65000, "OTA prepare timed out");
       }
       if (data.last_error) throw new Error(data.last_error);
       if (!data.http_prepared) throw new Error("OTA prepare did not start");

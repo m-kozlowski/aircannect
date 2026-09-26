@@ -126,7 +126,7 @@ static constexpr size_t AC_WEB_SETTINGS_CATALOG_JSON_RESERVE = 8192;
 
 static constexpr size_t AC_OTA_URL_MAX_LENGTH = 2048;
 static constexpr uint32_t AC_OTA_URL_HTTP_TIMEOUT_MS = 15000;
-static constexpr uint32_t AC_OTA_URL_PREPARE_TIMEOUT_MS = 20000;
+static constexpr uint32_t AC_OTA_URL_PREPARE_TIMEOUT_MS = 65000;
 static constexpr size_t AC_OTA_URL_HTTP_BUFFER_BYTES = 4096;
 static constexpr size_t AC_OTA_URL_HTTP_TX_BUFFER_BYTES = 2048;
 static constexpr uint8_t AC_OTA_URL_REDIRECT_LIMIT = 5;

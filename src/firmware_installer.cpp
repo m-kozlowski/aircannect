@@ -16,6 +16,7 @@ namespace aircannect {
 namespace {
 
 static constexpr size_t kWriteChunkBytes = 4096;
+static constexpr size_t kEraseChunkBytes = 64 * 1024;
 static constexpr uint32_t kPreparedTtlMs = 60000;
 
 }  // namespace
@@ -345,6 +346,9 @@ bool FirmwareInstaller::request_prepare(size_t image_size,
         return false;
     }
 
+    const size_t sector = partition_->erase_size;
+    erase_size_ = image_size
+        ? ((image_size + sector - 1) / sector) * sector : partition_->size;
     status_.partition = partition_->label;
     Log::logf(CAT_OTA, LOG_INFO,
               "ESP OTA prepare source=%s partition=%s image_size=%u "
@@ -367,6 +371,12 @@ void FirmwareInstaller::poll_prepare(bool as11_quiesced,
     }
 
     if (as11_quiesced && oximetry_suspended) {
+        if (status_.source != FirmwareInstallSource::PartitionTable &&
+            !erase_partition_step()) {
+            unlock();
+            return;
+        }
+
         status_.prepare_pending = false;
         status_.prepared = true;
         prepared_at_ms_ = millis();
@@ -394,6 +404,41 @@ void FirmwareInstaller::poll_prepare(bool as11_quiesced,
                   firmware_install_source_name(source), error);
     }
     unlock();
+}
+
+bool FirmwareInstaller::erase_partition_step() {
+    if (static_cast<uint32_t>(millis() - prepare_started_ms_) >= kPreparedTtlMs) {
+        abort("ota_prepare_timeout");
+        return false;
+    }
+
+    if (erase_offset_ == 0) {
+        // Keep SDK admission and rollback handling, then release the temporary
+        // writer while preparation erases the area in bounded steps.
+        esp_err_t err = esp_ota_begin(partition_, OTA_WITH_SEQUENTIAL_WRITES,
+                                     &ota_handle_);
+        if (err != ESP_OK) {
+            abort(esp_err_to_name(err));
+            return false;
+        }
+
+        err = esp_ota_abort(ota_handle_);
+        ota_handle_ = 0;
+        if (err != ESP_OK) {
+            abort(esp_err_to_name(err));
+            return false;
+        }
+    }
+
+    const size_t chunk = std::min(kEraseChunkBytes, erase_size_ - erase_offset_);
+    const esp_err_t err = esp_partition_erase_range(partition_, erase_offset_, chunk);
+    if (err != ESP_OK) {
+        abort(esp_err_to_name(err));
+        return false;
+    }
+
+    erase_offset_ += chunk;
+    return erase_offset_ == erase_size_;
 }
 
 bool FirmwareInstaller::begin_write(const String &filename,
@@ -430,24 +475,9 @@ bool FirmwareInstaller::begin_write(const String &filename,
     memset(probe_bytes_, 0, sizeof(probe_bytes_));
     image_magic_checked_ = false;
 
-    partition_ = esp_ota_get_next_update_partition(nullptr);
-    if (!partition_) {
-        abort("no_ota_partition");
-        unlock();
-        return false;
-    }
-    if ((encoding == OtaUploadEncoding::Plain && image_size == 0) ||
-        image_size > partition_->size) {
-        abort("image_size_invalid");
-        unlock();
-        return false;
-    }
-
-    status_.partition = partition_->label;
-    // Erase up front so IDF can use large flash blocks instead of erasing
-    // individual sectors as our small writes cross their boundaries.
-    const size_t erase_size = image_size ? image_size : OTA_SIZE_UNKNOWN;
-    esp_err_t err = esp_ota_begin(partition_, erase_size, &ota_handle_);
+    // Preparation erased this same partition; resume at byte zero without
+    // another erase in the HTTP callback or on subsequent small writes.
+    esp_err_t err = esp_ota_resume(partition_, 0, 0, &ota_handle_);
     if (err != ESP_OK) {
         abort(esp_err_to_name(err));
         unlock();
@@ -830,6 +860,8 @@ bool FirmwareInstaller::finish() {
     status_.last_error = "";
     prepared_image_size_ = 0;
     prepared_wire_size_ = 0;
+    erase_size_ = 0;
+    erase_offset_ = 0;
     prepared_encoding_ = OtaUploadEncoding::Auto;
     prepared_at_ms_ = 0;
     prepare_started_ms_ = 0;
@@ -1139,6 +1171,8 @@ void FirmwareInstaller::clear_install_state_locked() {
     partition_ = nullptr;
     prepared_image_size_ = 0;
     prepared_wire_size_ = 0;
+    erase_size_ = 0;
+    erase_offset_ = 0;
     prepared_encoding_ = OtaUploadEncoding::Auto;
     prepared_at_ms_ = 0;
     prepare_started_ms_ = 0;

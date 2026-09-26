@@ -843,7 +843,7 @@ def main() -> int:
         help="do not wait for the device API after upload",
     )
     parser.add_argument("--timeout", type=float, default=10.0)
-    parser.add_argument("--prepare-timeout", type=float, default=20.0)
+    parser.add_argument("--prepare-timeout", type=float, default=65.0)
     parser.add_argument("--url-timeout", type=float, default=600.0)
     parser.add_argument("--reboot-timeout", type=float, default=90.0)
     parser.add_argument("--chunk-size", type=int, default=16 * 1024)
