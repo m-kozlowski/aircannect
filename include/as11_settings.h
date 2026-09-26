@@ -294,13 +294,5 @@ int as11_mode_index_from_value(const std::string &value);
 
 std::string as11_settings_get_params_json();
 std::string as11_settings_get_params_json(const As11SettingsCatalog &catalog);
-std::string as11_build_set_params_from_json(const std::string &body,
-                                            int mode,
-                                            size_t &accepted);
-std::string as11_build_set_params_from_json(
-    const std::string &body,
-    int mode,
-    size_t &accepted,
-    const As11SettingsCatalog &catalog);
 
 }  // namespace aircannect

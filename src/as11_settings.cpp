@@ -1404,35 +1404,4 @@ As11PreparedSettingsWrite as11_prepare_settings_write(
     return prepared;
 }
 
-std::string as11_build_set_params_from_json(const std::string &body,
-                                            int mode,
-                                            size_t &accepted) {
-    As11SettingsCatalog catalog;
-    return as11_build_set_params_from_json(body, mode, accepted, catalog);
-}
-
-std::string as11_build_set_params_from_json(
-    const std::string &body,
-    int mode,
-    size_t &accepted,
-    const As11SettingsCatalog &catalog) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, body);
-    if (err || !doc.is<JsonObjectConst>()) {
-        accepted = 0;
-        return "{}";
-    }
-
-    As11SettingsWriteRequest request;
-    if (!request.parse(doc.as<JsonObjectConst>())) {
-        accepted = 0;
-        return "{}";
-    }
-
-    As11PreparedSettingsWrite prepared =
-        as11_prepare_settings_write(request, mode, catalog);
-    accepted = prepared.settings.size();
-    return std::move(prepared.params_json);
-}
-
 }  // namespace aircannect
