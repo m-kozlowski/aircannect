@@ -454,15 +454,15 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                     return;
                 }
 
+                // Allow for the initial flash erase as well as slow uploads.
+                request->client()->setRxTimeout(
+                    FirmwareInstaller::WriteIdleTimeoutSeconds);
+
                 if (!installer_->begin_write(
                         filename, image_size, encoding, wire_size,
                         FirmwareInstallSource::HttpUpload)) {
                     return;
                 }
-
-                // The server's default 3-second RX timeout is for short requests.
-                request->client()->setRxTimeout(
-                    FirmwareInstaller::WriteIdleTimeoutSeconds);
             }
 
             if (!installer_->write(index, data, length)) {

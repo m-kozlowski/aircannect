@@ -444,8 +444,10 @@ bool FirmwareInstaller::begin_write(const String &filename,
     }
 
     status_.partition = partition_->label;
-    esp_err_t err = esp_ota_begin(partition_, OTA_WITH_SEQUENTIAL_WRITES,
-                                  &ota_handle_);
+    // Erase up front so IDF can use large flash blocks instead of erasing
+    // individual sectors as our small writes cross their boundaries.
+    const size_t erase_size = image_size ? image_size : OTA_SIZE_UNKNOWN;
+    esp_err_t err = esp_ota_begin(partition_, erase_size, &ota_handle_);
     if (err != ESP_OK) {
         abort(esp_err_to_name(err));
         unlock();
