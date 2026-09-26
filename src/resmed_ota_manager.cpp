@@ -470,6 +470,8 @@ bool ResmedOtaManager::submit_block(size_t offset,
 }
 
 bool ResmedOtaManager::can_submit_block(size_t offset) {
+    if (prepared_transfer_) return false;
+
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
