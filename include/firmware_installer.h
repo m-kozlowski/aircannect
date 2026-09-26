@@ -56,6 +56,8 @@ struct PartitionOperationResult {
 
 class FirmwareInstaller {
 public:
+    static constexpr uint32_t WriteIdleTimeoutSeconds = 60;
+
     void begin();
     void poll(bool reboot_allowed = true, bool therapy_active = false);
 

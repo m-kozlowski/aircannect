@@ -17,7 +17,6 @@ namespace {
 
 static constexpr size_t kWriteChunkBytes = 4096;
 static constexpr uint32_t kPreparedTtlMs = 60000;
-static constexpr uint32_t kWriteIdleTimeoutMs = 60000;
 
 }  // namespace
 
@@ -113,14 +112,14 @@ void FirmwareInstaller::poll(bool reboot_allowed, bool therapy_active) {
         status_.source != FirmwareInstallSource::Arduino &&
         status_.writing && write_last_activity_ms_ &&
         static_cast<int32_t>(now - write_last_activity_ms_) >=
-            static_cast<int32_t>(kWriteIdleTimeoutMs);
+            static_cast<int32_t>(WriteIdleTimeoutSeconds * 1000);
+    if (write_timed_out) abort("upload_timeout");
     unlock();
 
     if (log_reboot_wait) {
         Log::logf(CAT_OTA, LOG_INFO,
                   "reboot waiting for AS11 quiesce\n");
     }
-    if (write_timed_out) abort("upload_timeout");
 }
 
 bool FirmwareInstaller::request_coredump_partition(bool &already_exists,
@@ -855,6 +854,22 @@ void FirmwareInstaller::abort(const char *reason, bool log_error) {
     if (!lock()) return;
 
     const FirmwareInstallSource source = status_.source;
+    if (log_error) {
+        const uint32_t idle_ms = status_.writing
+            ? static_cast<uint32_t>(millis() - write_last_activity_ms_) : 0;
+
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "ESP OTA failed source=%s: %s bytes=%u/%u "
+                  "wire_bytes=%u/%u idle_ms=%lu\n",
+                  firmware_install_source_name(source),
+                  reason ? reason : "aborted",
+                  static_cast<unsigned>(status_.bytes),
+                  static_cast<unsigned>(status_.total_size),
+                  static_cast<unsigned>(status_.wire_bytes),
+                  static_cast<unsigned>(status_.wire_total_size),
+                  static_cast<unsigned long>(idle_ms));
+    }
+
     if (ota_handle_) esp_ota_abort(ota_handle_);
     if (source == FirmwareInstallSource::PartitionTable) {
         finish_partition_operation(reason ? reason : "aborted");
@@ -862,11 +877,6 @@ void FirmwareInstaller::abort(const char *reason, bool log_error) {
     clear_install_state_locked();
     set_error_locked(reason ? reason : "aborted");
 
-    if (log_error) {
-        Log::logf(CAT_OTA, LOG_ERROR, "ESP OTA failed source=%s: %s\n",
-                  firmware_install_source_name(source),
-                  status_.last_error.c_str());
-    }
     unlock();
 }
 

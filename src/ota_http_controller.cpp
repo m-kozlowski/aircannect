@@ -459,6 +459,10 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                         FirmwareInstallSource::HttpUpload)) {
                     return;
                 }
+
+                // The server's default 3-second RX timeout is for short requests.
+                request->client()->setRxTimeout(
+                    FirmwareInstaller::WriteIdleTimeoutSeconds);
             }
 
             if (!installer_->write(index, data, length)) {
