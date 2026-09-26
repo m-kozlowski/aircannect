@@ -212,11 +212,14 @@ const char *StorageRangeWriteService::write_locked() {
     const size_t count = std::min(size - job_->written,
                                   AC_STORAGE_RANGE_WRITE_STEP_BYTES);
     const size_t written = Storage::write_buffers(
-        job_->output, job_->command, job_->written, count);
+        job_->output, job_->command, job_->written, count, job_->staging);
 
     job_->written += written;
     if (written != count) return "write_failed";
-    if (job_->written == size) job_->phase = Phase::Flush;
+    if (job_->written == size) {
+        job_->staging.reset();
+        job_->phase = Phase::Flush;
+    }
 
     return nullptr;
 }

@@ -418,7 +418,7 @@ bool remove(const char *path) {
     fs::FS *fs = active_fs();
     if (!fs) return false;
 
-    release_write_handles();
+    release_write_handle(path);
     if (fs->remove(path)) {
         if (path_change_callback) path_change_callback(path);
         return true;

@@ -330,11 +330,6 @@ bool StorageAtomicWriteService::open_locked(const char *&error) {
         error = "parent_create_failed";
         return false;
     }
-    if (!remove_transaction_artifacts()) {
-        error = "transaction_cleanup_failed";
-        return false;
-    }
-
     if (job_->staged_source) {
         File staged = Storage::open(job_->staged_path, "r");
         if (!staged || staged.isDirectory() ||
@@ -372,18 +367,20 @@ bool StorageAtomicWriteService::write_locked(const char *&error) {
 
     const size_t remaining = job_->bytes->size() - job_->offset;
     const size_t wanted = std::min(remaining, WRITE_STEP_BYTES);
-    size_t written = 0;
-    {
-        written = Storage::write_buffer(
-            job_->output, job_->bytes->data() + job_->offset, wanted);
-    }
+    const size_t written = Storage::write_buffer(
+        job_->output, job_->bytes->data() + job_->offset, wanted,
+        job_->staging);
+
     if (written != wanted) {
         error = "write_failed";
         return false;
     }
 
     job_->offset += written;
-    if (job_->offset == job_->bytes->size()) job_->phase = Phase::Flush;
+    if (job_->offset == job_->bytes->size()) {
+        job_->staging.reset();
+        job_->phase = Phase::Flush;
+    }
     return true;
 }
 
@@ -455,7 +452,7 @@ bool StorageAtomicWriteService::publish_locked(const char *&error) {
 
     job_->published_modified = Storage::file_modified(job_->path);
 
-    if (!Storage::remove(PREVIOUS_FILE_PATH) ||
+    if ((had_previous && !Storage::remove(PREVIOUS_FILE_PATH)) ||
         !Storage::remove(RECORD_PATH)) {
         recovery_needed_ = true;
         recovery_attempt_requested_ = true;
@@ -542,7 +539,7 @@ bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
         return true;
     }
 
-    if (!job_->active || job_->lane != lane) {
+    if (recovery_needed_ || !job_->active || job_->lane != lane) {
         unlock();
         return abandoned;
     }

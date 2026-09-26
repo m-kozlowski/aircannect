@@ -6,6 +6,7 @@
 #include <freertos/semphr.h>
 
 #include "storage_atomic_write_port.h"
+#include "storage_internal.h"
 
 namespace aircannect {
 
@@ -43,6 +44,7 @@ private:
         Phase phase = Phase::Open;
         std::shared_ptr<const LargeByteBuffer> bytes;
         File output;
+        Storage::WriteStagingBuffer staging;
         size_t offset = 0;
         uint64_t source_size = 0;
         uint64_t free_reserve_bytes = 0;

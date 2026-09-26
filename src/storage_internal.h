@@ -35,8 +35,26 @@ void close_write_handle(const char *path, int descriptor, bool retain);
 bool release_write_handles();
 void release_write_handle(const char *path);
 bool finish_write_handles();
+
+// Owned by one write operation, including all of its bounded worker turns.
+class WriteStagingBuffer {
+public:
+    static constexpr size_t Capacity = 4096;
+    WriteStagingBuffer() = default;
+    ~WriteStagingBuffer();
+    WriteStagingBuffer(const WriteStagingBuffer &) = delete;
+    WriteStagingBuffer &operator=(const WriteStagingBuffer &) = delete;
+
+    uint8_t *get(size_t write_size);
+    void reset();
+
+private:
+    uint8_t *data_ = nullptr;
+    bool attempted_ = false;
+};
+
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
-                     size_t offset, size_t size);
+                     size_t offset, size_t size, WriteStagingBuffer &staging);
 
 // Storage-task file preparation and post-close metadata
 enum class ParentDirectoryStep : uint8_t { More, Done, Failed };
@@ -50,8 +68,8 @@ ParentDirectoryStep ensure_parent_directory_step(const char *path,
 bool ensure_parent_directories(const char *path);
 uint64_t file_modified(const char *path);
 
-// Bounded caller-owned write; temporary DMA staging is released on return.
-size_t write_buffer(File &file, const uint8_t *data, size_t size);
+size_t write_buffer(File &file, const uint8_t *data, size_t size,
+                    WriteStagingBuffer &staging);
 
 bool poll(bool allow_capacity_update);
 bool retry_mount();
