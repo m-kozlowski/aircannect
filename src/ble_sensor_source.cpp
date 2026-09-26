@@ -128,7 +128,7 @@ void BleSensorSource::configure(bool enabled, const char *runtime_name) {
         status_.scanning = false;
     }
     should_start = enabled_;
-    observer_allowed = enabled_ && auto_allowed_ && !suspend_requested_;
+    observer_allowed = passive_observation_allowed_locked();
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -158,7 +158,7 @@ void BleSensorSource::set_auto_allowed(bool allowed) {
                           scan_requested_ || manual_connect_requested_;
     should_start = enabled_ && !suspend_requested_ && !task_started_ &&
                    retry_due && has_work;
-    observer_allowed = enabled_ && auto_allowed_ && !suspend_requested_;
+    observer_allowed = passive_observation_allowed_locked();
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif
@@ -436,6 +436,10 @@ bool BleSensorSource::resolve_target(
     return false;
 }
 
+bool BleSensorSource::passive_observation_allowed_locked() const {
+    return enabled_ && auto_allowed_ && !suspend_requested_;
+}
+
 void BleSensorSource::set_suspended(bool suspended) {
     bool changed = false;
     bool observer_allowed = false;
@@ -452,7 +456,7 @@ void BleSensorSource::set_suspended(bool suspended) {
             observed_target_pending_ = false;
         }
     }
-    observer_allowed = enabled_ && auto_allowed_ && !suspend_requested_;
+    observer_allowed = passive_observation_allowed_locked();
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);
 #endif

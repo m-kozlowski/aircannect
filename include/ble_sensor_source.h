@@ -90,6 +90,7 @@ private:
     void set_error(const char *text);
 
     // Scan and connection policy
+    bool passive_observation_allowed_locked() const;
     void hold_autoconnect(const char *addr, uint32_t now_ms,
                           bool until_absent,
                           AutoconnectHoldoffKind kind);
