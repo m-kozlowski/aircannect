@@ -58,7 +58,8 @@ public:
                               void *context);
     void set_passive_observer_targets(const BleObserverTarget *targets,
                                       size_t count);
-    void request_passive_observation(bool enabled);
+    // False means the requested observer state remains pending for retry.
+    bool request_passive_observation(bool enabled);
     bool passive_observation_active() const;
 
 private:
@@ -81,12 +82,13 @@ private:
     void *observer_context_ = nullptr;
     bool observer_requested_ = false;
     bool observer_running_ = false;
+    bool observer_reconcile_pending_ = false;
     uint32_t observer_retry_ms_ = 0;
     BleObserverTarget observer_targets_[AC_BLE_OBSERVER_MAX_TARGETS] = {};
     size_t observer_target_count_ = 0;
     uint32_t observer_targets_revision_ = 0;
 
-    // Only accessed with the scan lease held.
+    // Protected by observer_mux_; updated while the scan lease is held.
     uint32_t observer_applied_revision_ = 0;
 #if AC_BLE_ENABLED
     BleRuntimeScanCallbacks *observer_callbacks_ = nullptr;

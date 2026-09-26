@@ -41,26 +41,6 @@ const char *oxyii_command_name(uint8_t command) {
     }
 }
 
-bool decode_oxyii_frame(const uint8_t *frame,
-                        size_t len,
-                        uint8_t &command,
-                        const uint8_t *&payload,
-                        size_t &payload_len) {
-    if (!frame || len < 8 || frame[0] != 0xa5) return false;
-
-    command = frame[1];
-    if (frame[2] != static_cast<uint8_t>(~command)) return false;
-
-    payload_len = static_cast<uint16_t>(frame[5]) |
-                  (static_cast<uint16_t>(frame[6]) << 8);
-    const size_t total = payload_len + 8;
-    if (len < total) return false;
-    if (crc8_ccitt(frame, total - 1) != frame[total - 1]) return false;
-
-    payload = frame + 7;
-    return true;
-}
-
 bool decode_oxyii_reading(const uint8_t *payload,
                           size_t len,
                           uint8_t &spo2,
@@ -213,11 +193,8 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
 
     if (data[0] == 0xa5) {
         oxyii_reset_rx();
-        if (len >= 7) {
-            const uint16_t payload_len =
-                static_cast<uint16_t>(data[5]) |
-                (static_cast<uint16_t>(data[6]) << 8);
-            const size_t wanted = static_cast<size_t>(payload_len) + 8;
+        size_t wanted = 0;
+        if (ble_sensor_frame_size(data, len, 0xa5, wanted)) {
             if (wanted <= sizeof(oxyii_.rx)) {
                 oxyii_.rx_want = wanted;
             } else {
@@ -240,16 +217,16 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
     if (oxyii_.rx_len < oxyii_.rx_want) return;
 
     uint8_t command = 0;
-    const uint8_t *payload = nullptr;
-    size_t payload_len = 0;
-    if (!decode_oxyii_frame(oxyii_.rx, oxyii_.rx_len, command,
-                            payload, payload_len)) {
+    BleSensorFrameView frame;
+    if (!decode_ble_sensor_frame(oxyii_.rx, oxyii_.rx_len,
+                                 oxyii_.rx_want, 0, frame)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor OxyII RX decode failed len=%u\n",
                   static_cast<unsigned>(oxyii_.rx_len));
         oxyii_reset_rx();
         return;
     }
+    command = frame.command;
     oxyii_reset_rx();
 
     const uint8_t pending_command = oxyii_.pending_cmd;
@@ -276,11 +253,11 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
     uint8_t spo2 = 0;
     uint8_t pulse = 0;
     bool invalid = true;
-    if (!decode_oxyii_reading(payload, payload_len, spo2, pulse,
+    if (!decode_oxyii_reading(frame.payload, frame.payload_len, spo2, pulse,
                               spo2_raw, pulse_raw, invalid)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor OxyII live decode failed len=%u\n",
-                  static_cast<unsigned>(payload_len));
+                  static_cast<unsigned>(frame.payload_len));
         return;
     }
 
@@ -307,20 +284,17 @@ bool BleSensorProtocolEngine::oxyii_write_frame(
     const uint8_t *payload,
     size_t payload_len,
     uint8_t sequence) {
-    if (!oxyii_.write || payload_len > 0xffff) return false;
-
-    const size_t frame_len = 7 + payload_len + 1;
-    if (frame_len > OXYII_TX_MAX) return false;
+    if (!oxyii_.write) return false;
 
     uint8_t frame[OXYII_TX_MAX] = {};
-    frame[0] = 0xa5;
-    frame[1] = command;
-    frame[2] = static_cast<uint8_t>(~command);
+    if (!write_ble_sensor_frame_header(frame, sizeof(frame), 0xa5,
+                                       command, payload_len)) {
+        return false;
+    }
+    const size_t frame_len = payload_len + 8;
     frame[4] = sequence;
-    frame[5] = static_cast<uint8_t>(payload_len & 0xff);
-    frame[6] = static_cast<uint8_t>((payload_len >> 8) & 0xff);
     if (payload && payload_len) memcpy(frame + 7, payload, payload_len);
-    frame[7 + payload_len] = crc8_ccitt(frame, 7 + payload_len);
+    write_ble_sensor_frame_crc(frame, frame_len);
     return oxyii_.write->writeValue(frame, frame_len, false);
 }
 

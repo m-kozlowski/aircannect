@@ -33,6 +33,7 @@ const char *viatom_command_name(uint8_t command) {
 
 bool decode_viatom_reading(const uint8_t *packet,
                            size_t len,
+                           size_t expected_size,
                            uint8_t &spo2,
                            uint16_t &pulse,
                            uint8_t &lead_state,
@@ -42,19 +43,12 @@ bool decode_viatom_reading(const uint8_t *packet,
                            uint16_t &spo2_raw,
                            uint16_t &pulse_raw,
                            bool &invalid) {
-    if (!packet || len < 9 || packet[0] != 0x55) return false;
-    if (packet[1] != static_cast<uint8_t>(packet[2] ^ 0xff)) return false;
-
-    const uint16_t payload_len =
-        static_cast<uint16_t>(packet[5]) |
-        (static_cast<uint16_t>(packet[6]) << 8);
-    const size_t packet_len = static_cast<size_t>(payload_len) + 8;
-    if (payload_len < 12 || len < packet_len) return false;
-    if (crc8_ccitt(packet, packet_len - 1) != packet[packet_len - 1]) {
+    BleSensorFrameView frame;
+    if (!decode_ble_sensor_frame(packet, len, expected_size, 12, frame)) {
         return false;
     }
 
-    const uint8_t *payload = packet + 7;
+    const uint8_t *payload = frame.payload;
     spo2 = payload[0];
     pulse = static_cast<uint16_t>(payload[1]) |
             (static_cast<uint16_t>(payload[2]) << 8);
@@ -192,13 +186,12 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
 
     const uint8_t *packet = data;
     size_t packet_len = len;
+    size_t expected_packet_len = 0;
     if (data[0] == 0x55) {
         viatom_reset_rx();
-        if (len >= 7) {
-            const uint16_t payload_len =
-                static_cast<uint16_t>(data[5]) |
-                (static_cast<uint16_t>(data[6]) << 8);
-            const size_t wanted = static_cast<size_t>(payload_len) + 8;
+        size_t wanted = 0;
+        if (ble_sensor_frame_size(data, len, 0x55, wanted)) {
+            expected_packet_len = wanted;
             if (wanted <= sizeof(viatom_.rx)) {
                 viatom_.rx_want = wanted;
             } else {
@@ -226,6 +219,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
 
         packet = viatom_.rx;
         packet_len = viatom_.rx_len;
+        expected_packet_len = viatom_.rx_want;
         buffered = true;
     }
 
@@ -250,7 +244,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     bool invalid = true;
 
     const bool decoded = decode_viatom_reading(
-        packet, packet_len, spo2, pulse, lead_state, battery,
+        packet, packet_len, expected_packet_len, spo2, pulse, lead_state, battery,
         battery_state, pi, spo2_raw, pulse_raw, invalid);
     if (buffered) viatom_reset_rx();
     if (!decoded) {
@@ -290,19 +284,16 @@ bool BleSensorProtocolEngine::viatom_write_packet(
     uint8_t command,
     const uint8_t *payload,
     size_t payload_len) {
-    if (!viatom_.write || payload_len > 0xffff) return false;
-
-    const size_t packet_len = 7 + payload_len + 1;
-    if (packet_len > 80) return false;
+    if (!viatom_.write) return false;
 
     uint8_t packet[80] = {};
-    packet[0] = 0xaa;
-    packet[1] = command;
-    packet[2] = static_cast<uint8_t>(command ^ 0xff);
-    packet[5] = static_cast<uint8_t>(payload_len & 0xff);
-    packet[6] = static_cast<uint8_t>((payload_len >> 8) & 0xff);
+    if (!write_ble_sensor_frame_header(packet, sizeof(packet), 0xaa,
+                                       command, payload_len)) {
+        return false;
+    }
+    const size_t packet_len = payload_len + 8;
     if (payload && payload_len) memcpy(packet + 7, payload, payload_len);
-    packet[7 + payload_len] = crc8_ccitt(packet, 7 + payload_len);
+    write_ble_sensor_frame_crc(packet, packet_len);
 
     for (size_t offset = 0; offset < packet_len;
          offset += VIATOM_WRITE_CHUNK_LEN) {

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "ble_sensor_frame.h"
 
 #if AC_OXIMETRY_BLE_ENABLED
 #include <NimBLEDevice.h>

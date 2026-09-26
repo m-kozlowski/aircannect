@@ -147,7 +147,26 @@ bool BleRuntime::scan_in_progress() const {
 
 void BleRuntime::release_scan() {
     if (!scan_mutex_) return;
-    (void)start_passive_observer_locked();
+
+    portENTER_CRITICAL(&observer_mux_);
+    const bool requested = observer_requested_;
+    portEXIT_CRITICAL(&observer_mux_);
+
+    if (requested) {
+        (void)start_passive_observer_locked();
+    } else {
+        (void)stop_passive_observer_locked();
+    }
+
+    portENTER_CRITICAL(&observer_mux_);
+    const bool settled = observer_requested_ == requested &&
+        (requested
+             ? observer_running_ &&
+                   observer_applied_revision_ == observer_targets_revision_
+             : !observer_running_);
+    observer_reconcile_pending_ = !settled;
+    portEXIT_CRITICAL(&observer_mux_);
+
     xSemaphoreGive(scan_mutex_);
 }
 
@@ -174,21 +193,43 @@ void BleRuntime::set_passive_observer_targets(
     portEXIT_CRITICAL(&observer_mux_);
 }
 
-void BleRuntime::request_passive_observation(bool enabled) {
+bool BleRuntime::request_passive_observation(bool enabled) {
     portENTER_CRITICAL(&observer_mux_);
     observer_requested_ = enabled;
+    const bool settled = !observer_reconcile_pending_ &&
+        (enabled
+             ? observer_running_ &&
+                   observer_applied_revision_ == observer_targets_revision_
+             : !observer_running_);
     portEXIT_CRITICAL(&observer_mux_);
+    if (settled) return true;
 
     if (!scan_mutex_ ||
         xSemaphoreTake(scan_mutex_, 0) != pdTRUE) {
-        return;
+        portENTER_CRITICAL(&observer_mux_);
+        observer_reconcile_pending_ = true;
+        portEXIT_CRITICAL(&observer_mux_);
+        return false;
     }
+    bool applied = false;
     if (enabled) {
-        (void)start_passive_observer_locked();
+        applied = start_passive_observer_locked();
     } else {
-        (void)stop_passive_observer_locked();
+        applied = stop_passive_observer_locked();
     }
+
+    portENTER_CRITICAL(&observer_mux_);
+    const bool still_requested = observer_requested_ == enabled;
+    const bool state_matches = enabled
+        ? observer_running_ &&
+              observer_applied_revision_ == observer_targets_revision_
+        : !observer_running_;
+    observer_reconcile_pending_ = !applied || !still_requested || !state_matches;
+    const bool reconciled = !observer_reconcile_pending_;
+    portEXIT_CRITICAL(&observer_mux_);
+
     xSemaphoreGive(scan_mutex_);
+    return reconciled;
 }
 
 bool BleRuntime::passive_observation_active() const {
@@ -205,6 +246,7 @@ bool BleRuntime::start_passive_observer_locked() {
     BleObserverTarget targets[AC_BLE_OBSERVER_MAX_TARGETS] = {};
     size_t target_count = 0;
     uint32_t targets_revision = 0;
+    uint32_t applied_revision = 0;
 
     portENTER_CRITICAL(&observer_mux_);
     handler = observer_handler_;
@@ -213,11 +255,12 @@ bool BleRuntime::start_passive_observer_locked() {
     const bool running = observer_running_;
     target_count = observer_target_count_;
     targets_revision = observer_targets_revision_;
+    applied_revision = observer_applied_revision_;
     memcpy(targets, observer_targets_, target_count * sizeof(*targets));
     portEXIT_CRITICAL(&observer_mux_);
 
     const uint32_t now_ms = millis();
-    if ((running && targets_revision == observer_applied_revision_) ||
+    if ((running && targets_revision == applied_revision) ||
         !requested || !handler ||
         (retry_ms && static_cast<int32_t>(now_ms - retry_ms) < 0) ||
         !NimBLEDevice::isInitialized()) {
@@ -246,9 +289,8 @@ bool BleRuntime::start_passive_observer_locked() {
         scan->setFilterPolicy(BLE_HCI_SCAN_FILT_NO_WL);
         if (filtered) started = scan->start(0, false, true);
     }
-    observer_applied_revision_ = targets_revision;
-
     portENTER_CRITICAL(&observer_mux_);
+    observer_applied_revision_ = targets_revision;
     observer_running_ = started;
     observer_retry_ms_ = started ? 0 : now_ms + AC_BLE_OBSERVER_RETRY_MS;
     portEXIT_CRITICAL(&observer_mux_);
@@ -351,8 +393,9 @@ void BleRuntime::set_passive_observer_targets(
     (void)count;
 }
 
-void BleRuntime::request_passive_observation(bool enabled) {
+bool BleRuntime::request_passive_observation(bool enabled) {
     (void)enabled;
+    return !enabled;
 }
 
 bool BleRuntime::passive_observation_active() const { return false; }

@@ -77,6 +77,7 @@ private:
     // Persistence and commands
     bool load_known();
     bool save_known() const;
+    void refresh_autoconnect_available_locked();
     bool find_addr(const char *addr, size_t &index) const;
     bool resolve_target(const char *addr_or_index,
                         OximetrySensorDevice &target) const;
@@ -138,6 +139,7 @@ private:
     uint8_t scan_count_ = 0;
     uint32_t scan_generation_ = 0;
     bool known_loaded_ = false;
+    bool autoconnect_available_ = false;
 
 #if AC_OXIMETRY_BLE_ENABLED
     TaskHandle_t task_ = nullptr;
@@ -165,6 +167,8 @@ private:
     bool observed_target_pending_ = false;
     bool auto_allowed_ = false;
     bool enabled_ = false;
+    bool task_create_retry_pending_ = false;
+    uint32_t task_create_retry_at_ms_ = 0;
     char runtime_name_[AC_BLE_DEVICE_NAME_MAX + 1] = {};
 
     FixedQueue<OximetrySample, AC_OXIMETRY_SENSOR_SAMPLE_QUEUE_DEPTH>
