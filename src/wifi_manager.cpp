@@ -1037,7 +1037,12 @@ bool WifiManager::begin_profile_association(
     WifiProfile &profile = profiles_[profile_index];
     if (!profile.ssid.length()) return false;
 
-    prepare_sta_radio(keep_softap, candidate != nullptr);
+    // The scan already prepared STA. Roaming replaces an old association;
+    // a previous profile timeout may instead have disabled STA entirely.
+    const wifi_mode_t mode = WiFi.getMode();
+    if (roaming || (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA)) {
+        prepare_sta_radio(keep_softap, roaming);
+    }
 
     mode_state_ = WifiModeState::StaConnecting;
     management_reachable_ = softap_running_;
