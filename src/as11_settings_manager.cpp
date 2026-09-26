@@ -31,6 +31,33 @@ OperationSubmission As11SettingsManager::write(
     const std::string &params_json,
     RpcSource source,
     uint32_t now_ms) {
+    const OperationSubmission submitted =
+        submit_write(rpc, params_json, source);
+    if (!submitted.accepted()) return submitted;
+
+    (void)state_.note_set_request(params_json, now_ms);
+    note_change();
+    return submitted;
+}
+
+OperationSubmission As11SettingsManager::write(
+    RpcRequestPort &rpc,
+    const As11PreparedSettingsWrite &write,
+    RpcSource source,
+    uint32_t now_ms) {
+    const OperationSubmission submitted =
+        submit_write(rpc, write.params_json, source);
+    if (!submitted.accepted()) return submitted;
+
+    (void)state_.note_set_request(write, now_ms);
+    note_change();
+    return submitted;
+}
+
+OperationSubmission As11SettingsManager::submit_write(
+    RpcRequestPort &rpc,
+    const std::string &params_json,
+    RpcSource source) {
     if (device_model() == ResmedDeviceModel::Unknown) {
         return OperationSubmission::rejected();
     }
@@ -48,8 +75,6 @@ OperationSubmission As11SettingsManager::write(
 
     write_ticket_ = submitted.ticket;
     write_source_ = source;
-    (void)state_.note_set_request(params_json, now_ms);
-    note_change();
     return submitted;
 }
 

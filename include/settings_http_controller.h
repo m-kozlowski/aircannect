@@ -7,6 +7,7 @@
 #include <string>
 
 #include "as11_device_state.h"
+#include "as11_settings.h"
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
@@ -42,7 +43,7 @@ private:
 
     struct Command {
         CommandKind kind = CommandKind::Refresh;
-        std::string body;
+        As11SettingsWriteRequest settings_write;
     };
 
     static constexpr size_t CommandQueueDepth = 8;

@@ -1,6 +1,7 @@
 #include "as11_settings.h"
 
 #include <ArduinoJson.h>
+#include <algorithm>
 #include <ctype.h>
 #include <math.h>
 #include <new>
@@ -467,48 +468,132 @@ bool setting_value_matches(const As11SettingDef &def,
     return confirmed == pending;
 }
 
+std::string settings_input_text(const As11SettingsInputField &field) {
+    if (field.kind == As11SettingsInputKind::Bool) {
+        return field.text == "true" ? "1" : "0";
+    }
+    if (field.kind == As11SettingsInputKind::Number ||
+        field.kind == As11SettingsInputKind::Text) {
+        return field.text;
+    }
+    return "";
+}
+
 bool json_literal_for_set(const As11SettingDef &def,
-                          JsonVariantConst value,
-                          std::string &out) {
+                          const As11SettingsInputField &field,
+                          std::string &out,
+                          std::string &pending_value) {
     if (def.kind == As11SettingKind::Number) {
-        if (!json_is_number(value)) return false;
-        const double numeric = value.as<double>();
+        if (field.kind != As11SettingsInputKind::Number) return false;
+
         if (setting_uses_iso_seconds(def)) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "\"PT%gS\"", numeric);
-            out = buf;
+            char iso_value[32];
+            snprintf(iso_value, sizeof(iso_value), "PT%gS", field.number);
+            out = "\"";
+            out += iso_value;
+            out += "\"";
+
+            double seconds = 0;
+            if (parse_iso_seconds(iso_value, seconds)) {
+                pending_value = std::to_string(
+                    lround(seconds * def.scale_div));
+            }
         } else {
-            out = value_to_string(value);
+            out = field.text;
+            if (def.scale_div > 1) {
+                double numeric = 0;
+                if (parse_number(field.text, numeric)) {
+                    pending_value = std::to_string(
+                        lround(numeric * def.scale_div));
+                }
+            } else {
+                pending_value = field.text;
+            }
         }
         return !out.empty();
     }
 
     if (def.kind == As11SettingKind::Enum) {
-        const int index = enum_index_from_json(def, value);
+        const std::string text = settings_input_text(field);
+        const int index = enum_index_from_text(def, text.c_str());
         const char *wire_value = option_wire_value_at(def, index);
         if (!wire_value) return false;
+
         out = "\"";
         out += json_escape(wire_value);
         out += "\"";
+        pending_value = std::to_string(index);
         return true;
     }
 
-    if (value.is<bool>()) {
-        if (def.kind != As11SettingKind::Bool) return false;
-        out = value.as<bool>() ? "true" : "false";
+    if (field.kind == As11SettingsInputKind::Bool &&
+        def.kind == As11SettingKind::Bool) {
+        out = field.text;
+        pending_value = field.text;
         return true;
     }
 
-    if (def.kind == As11SettingKind::Text && value.is<const char *>()) {
+    if (field.kind == As11SettingsInputKind::Text &&
+        def.kind == As11SettingKind::Text) {
         out = "\"";
-        out += json_escape(value.as<const char *>());
+        out += json_escape(field.text);
         out += "\"";
+        pending_value = field.text;
         return true;
     }
+
     return false;
 }
 
 }  // namespace
+
+bool As11SettingsWriteRequest::parse(JsonObjectConst object) {
+    fields_.clear();
+    if (object.isNull()) return false;
+
+    fields_.reserve(object.size());
+    for (JsonPairConst pair : object) {
+        As11SettingsInputField field;
+        field.key = pair.key().c_str();
+
+        const JsonVariantConst value = pair.value();
+        if (value.is<const char *>()) {
+            field.kind = As11SettingsInputKind::Text;
+            field.text = value.as<const char *>();
+        } else if (json_is_number(value)) {
+            field.kind = As11SettingsInputKind::Number;
+            field.text = value_to_string(value);
+            field.number = value.as<double>();
+        } else if (value.is<bool>()) {
+            field.kind = As11SettingsInputKind::Bool;
+            field.text = value.as<bool>() ? "true" : "false";
+        }
+
+        fields_.push_back(std::move(field));
+    }
+
+    std::stable_sort(fields_.begin(), fields_.end(),
+                     [](const As11SettingsInputField &left,
+                        const As11SettingsInputField &right) {
+        return left.key < right.key;
+    });
+    return true;
+}
+
+const As11SettingsInputField *As11SettingsWriteRequest::find(
+    const char *key) const {
+    if (!key) return nullptr;
+
+    const auto found = std::upper_bound(
+        fields_.begin(), fields_.end(), key,
+        [](const char *wanted, const As11SettingsInputField &field) {
+            return strcmp(wanted, field.key.c_str()) < 0;
+        });
+    if (found == fields_.begin()) return nullptr;
+
+    const auto match = found - 1;
+    return match->key == key ? &*match : nullptr;
+}
 
 As11StoredValue::As11StoredValue(const As11StoredValue &other) {
     set(other.str());
@@ -918,6 +1003,31 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
     return any;
 }
 
+bool As11SettingsState::note_set_request(
+    const As11PreparedSettingsWrite &write, uint32_t now_ms) {
+    if (!ensure_storage()) return false;
+
+    bool any = false;
+    for (const As11PreparedSettingWrite &setting : write.settings) {
+        if (setting.pending_value.empty()) continue;
+
+        const size_t index = setting.catalog_index;
+        const bool was_pending = pending_[index];
+        if (!pending_values_[index].set(setting.pending_value)) continue;
+
+        if (!was_pending) pending_count_++;
+        pending_[index] = true;
+        pending_since_ms_[index] = now_ms;
+        any = true;
+    }
+
+    if (any) {
+        last_write_status_ = "sent";
+        last_write_ms_ = now_ms;
+    }
+    return any;
+}
+
 void As11SettingsState::note_set_response(bool is_error, uint32_t now_ms) {
     if (!pending_count_) return;
     if (is_error) {
@@ -1239,6 +1349,62 @@ std::string as11_settings_get_params_json(
     return out;
 }
 
+As11PreparedSettingsWrite as11_prepare_settings_write(
+    const As11SettingsWriteRequest &request,
+    int current_mode,
+    const As11SettingsCatalog &catalog) {
+    As11PreparedSettingsWrite prepared;
+
+    int mode = current_mode;
+    const As11SettingDef *mode_def = catalog.find("MOP");
+    const As11SettingsInputField *requested_mode =
+        mode_def ? request.find(mode_def->key) : nullptr;
+    if (mode_def && requested_mode) {
+        const std::string mode_text = settings_input_text(*requested_mode);
+        const int target_mode = enum_index_from_text(
+            *mode_def, mode_text.c_str());
+        if (target_mode >= 0 && target_mode < mode_def->option_count) {
+            mode = target_mode;
+        }
+    }
+    prepared.params_json = "{";
+    for (size_t i = 0; i < catalog.count(); ++i) {
+        const As11SettingDef &def = catalog.setting(i);
+        if (!catalog.supports(def) || !def.writable ||
+            !as11_setting_visible_for_mode(def, mode)) {
+            continue;
+        }
+
+        const As11SettingsInputField *field = request.find(def.key);
+        if (!field) continue;
+
+        char key[80];
+        const char *rpc_key = setting_rpc_key(
+            def, key, sizeof(key), catalog.device_model());
+        if (!rpc_key) continue;
+
+        std::string rpc_value_json;
+        std::string pending_value;
+        if (!json_literal_for_set(def, *field, rpc_value_json,
+                                  pending_value)) {
+            continue;
+        }
+
+        if (!prepared.settings.empty()) prepared.params_json += ',';
+        prepared.params_json += '"';
+        prepared.params_json += rpc_key;
+        prepared.params_json += "\":";
+        prepared.params_json += rpc_value_json;
+
+        As11PreparedSettingWrite setting;
+        setting.catalog_index = i;
+        setting.pending_value = std::move(pending_value);
+        prepared.settings.push_back(std::move(setting));
+    }
+    prepared.params_json += '}';
+    return prepared;
+}
+
 std::string as11_build_set_params_from_json(const std::string &body,
                                             int mode,
                                             size_t &accepted) {
@@ -1258,39 +1424,16 @@ std::string as11_build_set_params_from_json(
         return "{}";
     }
 
-    JsonObjectConst root = doc.as<JsonObjectConst>();
-    const As11SettingDef *mode_def = catalog.find("MOP");
-    const int target_mode = mode_def
-        ? enum_index_from_json(*mode_def, root[mode_def->key]) : -1;
-    if (target_mode >= 0) mode = target_mode;
-
-    std::string out = "{";
-    accepted = 0;
-    for (size_t i = 0; i < catalog.count(); ++i) {
-        const As11SettingDef &def = catalog.setting(i);
-        if (!catalog.supports(def) || !def.writable ||
-            !as11_setting_visible_for_mode(def, mode)) {
-            continue;
-        }
-        JsonVariantConst value = root[def.key];
-        if (value.isNull()) continue;
-        char key[80];
-        const char *rpc_key = setting_rpc_key(
-            def, key, sizeof(key), catalog.device_model());
-        if (!rpc_key) continue;
-        std::string literal;
-        if (!json_literal_for_set(def, value, literal)) {
-            continue;
-        }
-        if (accepted) out += ",";
-        out += "\"";
-        out += rpc_key;
-        out += "\":";
-        out += literal;
-        accepted++;
+    As11SettingsWriteRequest request;
+    if (!request.parse(doc.as<JsonObjectConst>())) {
+        accepted = 0;
+        return "{}";
     }
-    out += "}";
-    return out;
+
+    As11PreparedSettingsWrite prepared =
+        as11_prepare_settings_write(request, mode, catalog);
+    accepted = prepared.settings.size();
+    return std::move(prepared.params_json);
 }
 
 }  // namespace aircannect

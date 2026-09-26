@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 #include <ArduinoJson.h>
 
@@ -122,6 +123,41 @@ private:
     ResmedDeviceModel device_model_ = ResmedDeviceModel::AirSense11;
 };
 
+enum class As11SettingsInputKind : uint8_t {
+    Unsupported,
+    Number,
+    Bool,
+    Text,
+};
+
+struct As11SettingsInputField {
+    std::string key;
+    std::string text;
+    double number = 0;
+    As11SettingsInputKind kind = As11SettingsInputKind::Unsupported;
+};
+
+class As11SettingsWriteRequest {
+public:
+    bool parse(JsonObjectConst object);
+    const As11SettingsInputField *find(const char *key) const;
+
+private:
+    std::vector<As11SettingsInputField> fields_;
+};
+
+struct As11PreparedSettingWrite {
+    size_t catalog_index = 0;
+    std::string pending_value;
+};
+
+struct As11PreparedSettingsWrite {
+    std::string params_json = "{}";
+    std::vector<As11PreparedSettingWrite> settings;
+
+    bool empty() const { return settings.empty(); }
+};
+
 struct As11SettingCompositeOption {
     const char *label;
     int16_t enum_value;
@@ -163,6 +199,8 @@ public:
                                      bool *complete_snapshot = nullptr);
     // params_json is the outgoing RPC Set body, not UI/CLI setting input.
     bool note_set_request(const std::string &params_json, uint32_t now_ms);
+    bool note_set_request(const As11PreparedSettingsWrite &write,
+                          uint32_t now_ms);
     void note_set_response(bool is_error, uint32_t now_ms);
     void note_set_cancelled(const char *reason, uint32_t now_ms);
     bool expire_pending(uint32_t now_ms, uint32_t timeout_ms);
@@ -244,6 +282,11 @@ std::string as11_setting_rpc_long_name(const As11SettingDef &def,
 
 size_t as11_setting_composite_count();
 const As11SettingCompositeDef &as11_setting_composite(size_t index);
+
+As11PreparedSettingsWrite as11_prepare_settings_write(
+    const As11SettingsWriteRequest &request,
+    int current_mode,
+    const As11SettingsCatalog &catalog);
 
 bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode);
 bool as11_setting_readable_via_rpc(const As11SettingDef &def);

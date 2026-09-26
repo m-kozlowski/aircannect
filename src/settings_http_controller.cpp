@@ -283,7 +283,12 @@ void SettingsHttpController::register_routes(HttpRouteRegistry &server) {
 
             Command command;
             command.kind = CommandKind::Update;
-            command.body = std::move(body);
+            if (!command.settings_write.parse(
+                    doc.as<JsonObjectConst>())) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad json\"}");
+                return;
+            }
             const bool queued = enqueue(std::move(command));
             request->send(
                 queued ? 202 : 503, "application/json",
@@ -334,13 +339,12 @@ void SettingsHttpController::execute(Command &command) {
         const As11DeviceState &device = device_->state();
         const int mode = active_settings_mode(device, state);
 
-        size_t accepted = 0;
-        const std::string params =
-            as11_build_set_params_from_json(
-                command.body, mode, accepted, state.catalog());
-        if (accepted) {
+        const As11PreparedSettingsWrite write =
+            as11_prepare_settings_write(
+                command.settings_write, mode, state.catalog());
+        if (!write.empty()) {
             (void)settings_->write(
-                *rpc_, params, RpcSource::HttpApi, millis());
+                *rpc_, write, RpcSource::HttpApi, millis());
         }
     }
 

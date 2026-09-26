@@ -22,6 +22,10 @@ public:
                               const std::string &params_json,
                               RpcSource source,
                               uint32_t now_ms);
+    OperationSubmission write(RpcRequestPort &rpc,
+                              const As11PreparedSettingsWrite &write,
+                              RpcSource source,
+                              uint32_t now_ms);
 
     void invalidate(RpcRequestPort &rpc,
                     RpcSource source,
@@ -41,6 +45,9 @@ private:
     void note_change();
 
     bool submit_refresh(RpcRequestPort &rpc, RpcSource source);
+    OperationSubmission submit_write(RpcRequestPort &rpc,
+                                     const std::string &params_json,
+                                     RpcSource source);
     void schedule_refresh(RpcSource source,
                           uint32_t now_ms,
                           uint32_t delay_ms = RefreshRetryMs);
