@@ -78,6 +78,7 @@ struct TrackWork {
     int append_slot = 0;
     bool file_exists = false;
     std::shared_ptr<LargeByteBuffer> lod[2];
+    size_t lod_block_bytes[2] = {};
     uint16_t lod_slots[REPORT_SIGNAL_STORE_MAX_BLOCKS] = {};
     size_t lod_count = 0;
     size_t lod_cursor[2] = {};
@@ -1001,12 +1002,20 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
             if (!planes[level]) continue;
             const size_t block_bytes =
                 planes[level]->size() / runtime_->writing_count;
+            work.lod_block_bytes[level] = block_bytes;
+            const size_t capacity = work.lod[level]
+                ? work.lod[level]->size() / block_bytes : 0;
+            const size_t next_capacity = std::min<size_t>(
+                REPORT_SIGNAL_STORE_MAX_BLOCKS,
+                std::max(next_count, capacity * 2));
+
             if (!work.lod[level]) {
                 work.lod[level] = LargeByteBuffer::allocate_shared(
-                    block_bytes * next_count);
+                    block_bytes * next_capacity);
             }
             if (!work.lod[level] ||
-                !work.lod[level]->grow(block_bytes * next_count)) {
+                (next_count > capacity &&
+                 !work.lod[level]->grow(block_bytes * next_capacity))) {
                 failure_reason_ = "report_signal_store_lod_allocation_failed";
                 return false;
             }
@@ -1163,7 +1172,7 @@ bool ReportSignalStoreBuilder::flush_lod(bool *progressed) {
             }
 
             const size_t slot = work.lod_slots[ordinal];
-            const size_t block_bytes = bytes->size() / work.lod_count;
+            const size_t block_bytes = work.lod_block_bytes[level];
             const size_t limit = (AC_STORAGE_RANGE_WRITE_MAX_BYTES -
                 ReportSignalStoreFileCodec::HeaderBytes) / block_bytes;
             size_t count = 1;
