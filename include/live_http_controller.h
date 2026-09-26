@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "async_deferred_response.h"
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 
@@ -44,10 +45,10 @@ private:
     };
 
     bool live_view_requested(uint32_t now_ms);
-    bool publish_stream_snapshot();
+    void serve_stream_requests();
     void publish_live_payload(uint32_t now_ms);
 
-    void send_stream_snapshot(AsyncWebServerRequest *request) const;
+    void send_stream_snapshot(AsyncWebServerRequest *request);
     void send_live_view_state(AsyncWebServerRequest *request);
 
     StreamBroker *stream_ = nullptr;
@@ -59,12 +60,13 @@ private:
     SemaphoreHandle_t lease_mutex_ = nullptr;
 
     LiveViewLease leases_[AC_WEB_SSE_CLIENTS_MAX + 1];
+    std::shared_ptr<AsyncDeferredResponse::State>
+        stream_requests_[AC_WEB_SSE_CLIENTS_MAX + 1];
+    std::atomic<bool> stream_requests_pending_{false};
     LargeTextBuffer stream_json_;
-    LargeTextBuffer stream_build_json_;
     LargeTextBuffer live_json_;
 
     uint32_t live_generation_ = 0;
-    uint32_t last_stream_snapshot_ms_ = 0;
     uint32_t last_live_send_ms_ = 0;
     uint32_t live_backpressure_since_ms_ = 0;
     bool live_backpressure_active_ = false;

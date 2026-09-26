@@ -13,11 +13,17 @@ namespace aircannect {
 bool http_prepare_json_response(AsyncWebServerRequest *request,
                                 const LargeTextBuffer &json,
                                 AsyncWebServerResponse *&response) {
+    (void)request;
+    return http_prepare_json_response(json, response);
+}
+
+bool http_prepare_json_response(const LargeTextBuffer &json,
+                                AsyncWebServerResponse *&response) {
     response = nullptr;
 
     try {
         if (json.length() == 0) {
-            response = request->beginResponse(200, "application/json", "");
+            response = new (std::nothrow) AsyncBasicResponse(200, "application/json", "");
             return response != nullptr;
         }
 
@@ -27,7 +33,7 @@ bool http_prepare_json_response(AsyncWebServerRequest *request,
             json.c_str(), json.length());
         if (!payload) return false;
 
-        response = request->beginResponse(
+        response = new (std::nothrow) AsyncCallbackResponse(
             "application/json", json.length(),
             [payload](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
                 if (offset >= payload->size()) return 0;
