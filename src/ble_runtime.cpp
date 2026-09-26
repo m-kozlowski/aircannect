@@ -149,7 +149,7 @@ void BleRuntime::release_scan() {
     if (!scan_mutex_) return;
 
     portENTER_CRITICAL(&observer_mux_);
-    const bool requested = observer_requested_;
+    const bool requested = observer_requested_ && observer_allowed_;
     portEXIT_CRITICAL(&observer_mux_);
 
     if (requested) {
@@ -159,7 +159,7 @@ void BleRuntime::release_scan() {
     }
 
     portENTER_CRITICAL(&observer_mux_);
-    const bool settled = observer_requested_ == requested &&
+    const bool settled = (observer_requested_ && observer_allowed_) == requested &&
         (requested
              ? observer_running_ &&
                    observer_applied_revision_ == observer_targets_revision_
@@ -196,6 +196,20 @@ void BleRuntime::set_passive_observer_targets(
 bool BleRuntime::request_passive_observation(bool enabled) {
     portENTER_CRITICAL(&observer_mux_);
     observer_requested_ = enabled;
+    portEXIT_CRITICAL(&observer_mux_);
+    return reconcile_passive_observation();
+}
+
+void BleRuntime::set_passive_observation_allowed(bool allowed) {
+    portENTER_CRITICAL(&observer_mux_);
+    observer_allowed_ = allowed;
+    portEXIT_CRITICAL(&observer_mux_);
+    (void)reconcile_passive_observation();
+}
+
+bool BleRuntime::reconcile_passive_observation() {
+    portENTER_CRITICAL(&observer_mux_);
+    const bool enabled = observer_requested_ && observer_allowed_;
     const bool settled = !observer_reconcile_pending_ &&
         (enabled
              ? observer_running_ &&
@@ -219,7 +233,8 @@ bool BleRuntime::request_passive_observation(bool enabled) {
     }
 
     portENTER_CRITICAL(&observer_mux_);
-    const bool still_requested = observer_requested_ == enabled;
+    const bool still_requested =
+        (observer_requested_ && observer_allowed_) == enabled;
     const bool state_matches = enabled
         ? observer_running_ &&
               observer_applied_revision_ == observer_targets_revision_
@@ -250,7 +265,7 @@ bool BleRuntime::start_passive_observer_locked() {
 
     portENTER_CRITICAL(&observer_mux_);
     handler = observer_handler_;
-    requested = observer_requested_;
+    requested = observer_requested_ && observer_allowed_;
     retry_ms = observer_retry_ms_;
     const bool running = observer_running_;
     target_count = observer_target_count_;
@@ -397,6 +412,12 @@ bool BleRuntime::request_passive_observation(bool enabled) {
     (void)enabled;
     return !enabled;
 }
+
+void BleRuntime::set_passive_observation_allowed(bool allowed) {
+    (void)allowed;
+}
+
+bool BleRuntime::reconcile_passive_observation() { return true; }
 
 bool BleRuntime::passive_observation_active() const { return false; }
 

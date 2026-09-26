@@ -58,6 +58,8 @@ public:
                               void *context);
     void set_passive_observer_targets(const BleObserverTarget *targets,
                                       size_t count);
+    // Owner permission is independent of worker requests based on older state.
+    void set_passive_observation_allowed(bool allowed);
     // False means the requested observer state remains pending for retry.
     bool request_passive_observation(bool enabled);
     bool passive_observation_active() const;
@@ -69,6 +71,7 @@ private:
 
     bool start_passive_observer_locked();
     bool stop_passive_observer_locked();
+    bool reconcile_passive_observation();
     void note_advertisement(const void *device);
     void note_observer_stopped();
 
@@ -81,6 +84,7 @@ private:
     BleAdvertisementHandler observer_handler_ = nullptr;
     void *observer_context_ = nullptr;
     bool observer_requested_ = false;
+    bool observer_allowed_ = false;
     bool observer_running_ = false;
     bool observer_reconcile_pending_ = false;
     uint32_t observer_retry_ms_ = 0;
