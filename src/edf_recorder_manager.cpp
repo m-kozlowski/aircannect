@@ -358,9 +358,9 @@ OperationAdmission EdfRecorderManager::request_airmini_history(
     }
 
     int32_t timezone = 0;
-    const int64_t noon = (static_cast<int64_t>(start_day.epoch_days()) * 24 +
-                          12) * 60 * 60 * 1000;
-    if (!edf_configured_timezone_offset_minutes(noon, timezone)) {
+    int64_t noon = 0;
+    if (!start_day.local_noon_epoch_ms(noon) ||
+        !edf_configured_timezone_offset_minutes(noon, timezone)) {
         return OperationAdmission::Rejected;
     }
     return cold_->history.request(start_day, end_day, generation, millis(),

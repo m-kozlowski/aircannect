@@ -4,6 +4,7 @@
 
 #include "edf_bytes.h"
 #include "edf_str_file_layout.h"
+#include "sleep_day_id.h"
 
 namespace aircannect {
 
@@ -31,9 +32,12 @@ bool EdfStrSessionAccumulator::restore_record(const uint8_t *record,
         return false;
     }
 
+    SleepDayId sleep_day;
+    int64_t noon_ms = 0;
     EdfLocalDateTime start;
-    if (!edf_epoch_ms_to_local_datetime(
-            (static_cast<int64_t>(day) * 24 + 12) * 3600000, 0, start)) {
+    if (!SleepDayId::from_epoch_days(day, sleep_day) ||
+        !sleep_day.local_noon_epoch_ms(noon_ms) ||
+        !edf_epoch_ms_to_local_datetime(noon_ms, 0, start)) {
         return false;
     }
     for (int i = 0; i < count; ++i) {

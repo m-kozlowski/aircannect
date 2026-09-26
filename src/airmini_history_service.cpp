@@ -67,6 +67,7 @@ struct AirMiniHistoryService::Runtime {
     bool seed_valid = false;
     As11ClockTransform clock;
     int32_t timezone_minutes = 0;
+    int64_t transfer_from_ms = 0;
     uint32_t start_at_ms = 0;
     uint32_t deadline_ms = 0;
     uint32_t rpc_generation = 0;
@@ -147,11 +148,13 @@ OperationAdmission AirMiniHistoryService::request(
     work.start_at_ms = now_ms + delay_ms;
     const int64_t correction = clock.externally_referenced
         ? clock.device_minus_utc_ms : 0;
-    const int64_t begin = (static_cast<int64_t>(start.epoch_days()) * 24 + 12) *
-        3600000 - static_cast<int64_t>(timezone_offset_minutes) * 60000;
-    const int64_t finish = (static_cast<int64_t>(end.epoch_days()) * 24 + 36) *
-        3600000 - static_cast<int64_t>(timezone_offset_minutes) * 60000;
-    work.fetched.set_window(begin - DAY_MS + correction, finish + correction);
+    int64_t begin = 0;
+    int64_t finish = 0;
+    int64_t unused = 0;
+    (void)start.utc_day_window(timezone_offset_minutes, begin, unused);
+    (void)end.utc_day_window(timezone_offset_minutes, unused, finish);
+    work.transfer_from_ms = begin - DAY_MS + correction;
+    work.fetched.set_window(work.transfer_from_ms, finish + correction);
 
     status_ = {};
     status_.generation = generation;
@@ -224,13 +227,7 @@ void AirMiniHistoryService::start_transfer(uint32_t now_ms) {
         command.params_json =
             "{\"Settings\":{\"fromDateTime\":\"2008-01-01T00:00:00.000Z\"}}";
     } else {
-        const int64_t correction = work.clock.externally_referenced
-            ? work.clock.device_minus_utc_ms : 0;
-        const int64_t start =
-            (static_cast<int64_t>(status_.start_day.epoch_days()) * 24 + 12) *
-            3600000 - static_cast<int64_t>(work.timezone_minutes) * 60000 -
-            DAY_MS + correction;
-        const std::string from = utc_text(start);
+        const std::string from = utc_text(work.transfer_from_ms);
         command.params_json = "[";
         for (AirMiniHistorySelector selector : SELECTORS) {
             if (command.params_json.size() > 1) command.params_json += ',';
@@ -374,10 +371,8 @@ void AirMiniHistoryService::start_day() {
     work.publication.reset();
     work.read_offset = 0;
     work.read_kind = Runtime::ReadKind::History;
-    work.day_start_ms =
-        (static_cast<int64_t>(status_.current_day.epoch_days()) * 24 + 12) *
-        3600000 - static_cast<int64_t>(work.timezone_minutes) * 60000;
-    work.day_end_ms = work.day_start_ms + DAY_MS;
+    (void)status_.current_day.utc_day_window(
+        work.timezone_minutes, work.day_start_ms, work.day_end_ms);
     work.edf.reset();
     status_.phase = AirMiniHistoryPhase::ReadingSaved;
 }
