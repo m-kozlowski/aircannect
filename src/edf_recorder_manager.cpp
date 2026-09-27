@@ -292,13 +292,15 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     sync_annotation_open_status();
     attach_stream(now_ms);
     update_stream_queue_drops();
-    if (!numeric_files_open_ || !numeric_open_synced_) {
+    const bool numeric_ready =
+        (numeric_files_open_ || open_numeric_files_from_stream(now_ms)) &&
+        sync_numeric_open_status(now_ms);
+
+    if (!numeric_ready) {
         buffer_numeric_open_stream();
-    }
-    if (!numeric_files_open_ && !open_numeric_files_from_stream(now_ms)) {
         return;
     }
-    if (!sync_numeric_open_status(now_ms)) return;
+
     drain_stream(now_ms);
     drain_local_sa2();
 }
@@ -666,7 +668,9 @@ bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
     }
     if (!ensure_segment_metadata_published(status_.recording_start_time,
                                            now_ms)) {
-        next_annotation_open_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
+        if (!cold_->segment_metadata_active) {
+            next_annotation_open_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
+        }
         return false;
     }
 
@@ -2588,6 +2592,20 @@ void EdfRecorderManager::buffer_numeric_open_stream() {
         }
         if (!frame) continue;
         if (!numeric_open_frame_buffer_.push(std::move(frame))) {
+            if (status_.numeric_open_buffer_drops == 0) {
+                const char *waiting = !numeric_stream_ready()
+                    ? "stream_acceptance"
+                    : (annotation_open_pending_ ? "annotation"
+                       : (numeric_files_open_ ? "numeric_open" : "numeric_setup"));
+
+                Log::logf(CAT_EDF, LOG_WARN,
+                          "startup buffer full id=%lu waiting=%s "
+                          "frame_start=%s buffered=%u\n",
+                          static_cast<unsigned long>(status_.session_id),
+                          waiting, frame->start_time,
+                          static_cast<unsigned>(numeric_open_frame_buffer_.count()));
+            }
+
             status_.numeric_open_buffer_drops++;
             status_.frame_drops++;
             break;
