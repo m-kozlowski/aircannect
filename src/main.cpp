@@ -20,6 +20,7 @@
 #include "board.h"
 #include "can_driver.h"
 #include "can_rpc_link.h"
+#include "psu_can_identity.h"
 #include "config_http_controller.h"
 #include "config_service.h"
 #include "console_command_router.h"
@@ -116,6 +117,7 @@ public:
 
 static CanDriver can_driver;
 static CanRpcLink can_rpc_link(can_driver);
+static PsuCanIdentity psu_can_identity(can_rpc_link);
 static BleRuntime ble_runtime;
 static As11BleRpcLink as11_ble_rpc_link(ble_runtime);
 static RpcLinkSelector rpc_link_selector(can_rpc_link, as11_ble_rpc_link);
@@ -870,6 +872,9 @@ static void apply_config_runtime_effects(void *,
                       as11_transport_name(config.as11_transport));
         }
     }
+    if (dirty & AC_CONFIG_DIRTY_PSU_90W) {
+        psu_can_identity.set_enabled(config.psu_90w_enabled);
+    }
     if (dirty & (AC_CONFIG_DIRTY_HOSTNAME |
                  AC_CONFIG_DIRTY_OXIMETRY |
                  AC_CONFIG_DIRTY_AS11_TRANSPORT)) {
@@ -994,6 +999,7 @@ static void drain_can_side_events() {
                 rpc_transport.accept_debug_framing_error(event.detail.c_str());
                 break;
             case CanSideEventKind::BootNotification:
+                psu_can_identity.note_device_boot();
                 rpc_transport.accept_boot_notification(event.detail.c_str());
                 break;
             case CanSideEventKind::ApplicationReset:
@@ -1453,6 +1459,10 @@ void setup() {
     }
     log_memory_profile_checkpoint("as11_transport");
 
+    psu_can_identity.set_enabled(config_service.data().psu_90w_enabled);
+    psu_can_identity.poll(false);
+    can_rpc_link.poll_physical(millis());
+
     wifi_manager.begin();
     log_memory_profile_checkpoint("wifi");
     if (!wifi_http_controller.begin(wifi_manager)) {
@@ -1533,6 +1543,9 @@ void loop() {
     const bool as11_link_ready = rpc_link_selector.status().ready;
     poll_as11_ble_recovery(now_ms);
     drain_can_side_events();
+    psu_can_identity.poll(as11_application_quiesce_requested ||
+                          resmed_ota_transport_active);
+
     as11_service_manager.poll_preparation(
         rpc_transport,
         rpc_quiesce_coordinator.requested() && rpc_quiesce_coordinator.complete(),

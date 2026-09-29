@@ -22,6 +22,7 @@ Boolean values accept `on`/`off`, `yes`/`no`, `true`/`false`, `1`/`0`, and
 | `as11_ble_id` | ASCII string, max 64 chars, or empty | empty | Client ID issued during BLE pairing. Normally managed by the pairing flow. |
 | `as11_ble_key` | 64 hexadecimal characters, or empty | empty | Secret master key issued during BLE pairing. Normally managed by the pairing flow. |
 | `as11_ota_key` | 64 hexadecimal characters, or empty | empty | Device-specific OTA authentication key. |
+| `psu_90w` | boolean, CAN builds only | `off` | Emulate 90 W AC power-supply identification over CAN. |
 
 ## Wi-Fi Profiles
 
@@ -67,9 +68,7 @@ Empty `http_user` and `http_pass` mean open access for HTTP and telnet.
 
 AirCANnect checks about one minute after IPv4 becomes available and then every
 six hours. Checks wait until the device is idle: no therapy, foreground report
-work, storage export, or firmware update may be active. They only report a
-newer compatible release; firmware installation remains an explicit user
-action from the OTA tab or the `ota install` CLI command.
+work, storage export, or firmware update may be active.
 
 ## Time
 

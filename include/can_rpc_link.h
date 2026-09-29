@@ -51,6 +51,7 @@ public:
     void set_application_enabled(bool enabled);
 
     // CAN side channels and maintenance
+    RpcLinkSendResult send_datagram(RpcPayloadView payload, uint32_t can_id);
     bool take_side_event(CanSideEvent &event);
     void set_service_frame_observer(As11ServiceFrameObserver observer,
                                     void *context);
@@ -67,8 +68,6 @@ private:
 
     static bool enqueue_datagram_frame(void *context,
                                        const DatagramFrame &frame);
-    RpcLinkSendResult send_datagram(RpcPayloadView payload, uint32_t can_id);
-
     void handle_frame(const RawCanFrame &frame, uint32_t now_ms);
     void handle_application_frame(const RawCanFrame &frame, uint32_t now_ms,
                                    DatagramRx &receiver, RpcLinkEventKind kind);

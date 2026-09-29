@@ -186,6 +186,14 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      "ResMed OTA key",
      "Device-specific key used for authenticated firmware installation.",
      nullptr, 0, -1, AC_CFG_OFFSET(as11_ota_key)},
+#if AC_CAN_ENABLED
+    {"psu_90w", AppConfigFieldId::Psu90wEnabled, AppConfigGroup::As11,
+     60, AppConfigFieldType::Bool, PROVISIONABLE, AC_CONFIG_DIRTY_PSU_90W,
+     "Emulate 90 W PSU",
+     "For a 90 W AC supply without CAN identification. Do not enable with "
+     "a lower-power supply or an existing PSU CAN transmitter.",
+     nullptr, 0, -1, AC_CFG_OFFSET(psu_90w_enabled)},
+#endif
 
     {"softap_mode", AppConfigFieldId::SoftApMode, AppConfigGroup::Network, 10,
      AppConfigFieldType::Enum, PROVISIONABLE, AC_CONFIG_DIRTY_SOFTAP,
@@ -510,6 +518,9 @@ bool AppConfigFieldWriter::set_value(
                 cfg.as11_ble_address, cfg.as11_ble_client_id, value);
         case AppConfigFieldId::As11OtaKey:
             return config.set_as11_ota_key(value);
+        case AppConfigFieldId::Psu90wEnabled:
+            if (!parse_bool_yesno(value, parsed_bool)) return false;
+            return config.set_psu_90w_enabled(parsed_bool);
         case AppConfigFieldId::TcpEnabled:
             if (!parse_bool_yesno(value, parsed_bool)) return false;
             return config.set_tcp_bridge(parsed_bool, cfg.tcp_bridge_port);

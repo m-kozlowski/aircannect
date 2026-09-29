@@ -814,6 +814,13 @@ bool AppConfig::set_as11_ota_key(const String &key) {
     return mark_dirty(AC_CONFIG_DIRTY_AS11_OTA_KEY);
 }
 
+bool AppConfig::set_psu_90w_enabled(bool enabled) {
+    if (data_.psu_90w_enabled == enabled) return true;
+
+    data_.psu_90w_enabled = enabled;
+    return mark_dirty(AC_CONFIG_DIRTY_PSU_90W);
+}
+
 bool AppConfig::set_tcp_bridge(bool enabled, uint16_t port) {
     if (port == 0) return false;
     if (data_.tcp_bridge_enabled == enabled && data_.tcp_bridge_port == port) {

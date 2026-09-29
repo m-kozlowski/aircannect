@@ -340,7 +340,7 @@ void CanRpcLink::push_side_error(const char *detail) {
 }
 
 void CanRpcLink::push_boot_notification(const RawCanFrame &frame) {
-    char id[8];
+    char id[9];
     snprintf(id, sizeof(id), "%03lX", static_cast<unsigned long>(frame.id));
 
     CanSideEvent event;

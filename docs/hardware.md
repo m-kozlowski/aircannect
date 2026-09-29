@@ -63,6 +63,10 @@ Signal summary:
 | Transceiver `CANH` | AirSense `CAN-H` |
 | Transceiver `CANL` | AirSense `CAN-L` |
 
+For a suitably rated 90 W AC supply without CAN identification, the optional
+[`psu_90w` setting](configuration.md#as11-connection) can supply that
+identification. Leave it off when the original PSU already sends CAN messages.
+
 The microSD wiring is shown in the diagram and repeated in the pin assignment
 section below. Keep SDMMC wires short, ideally under 5 cm.
 
