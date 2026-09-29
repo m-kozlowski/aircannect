@@ -153,6 +153,21 @@ void log_str_refresh_result(const EdfStrSummaryRefreshStatus &status) {
     }
 }
 
+struct EdfStartupTiming {
+    bool active = false;
+    uint32_t started_ms = 0;
+    int32_t metadata_ms = -1;
+    int32_t annotation_ms = -1;
+    int32_t stream_ms = -1;
+    int32_t numeric_ms = -1;
+    int32_t first_frame_ms = -1;
+    uint32_t unavailable_reads = 0;
+    uint32_t pending_reads = 0;
+    uint32_t received_requests[AC_EDF_STORAGE_FILE_COUNT] = {};
+    uint32_t receive_max_ms = 0;
+    const char *receive_max_file = "--";
+};
+
 }  // namespace
 
 struct EdfRecorderManager::ColdState {
@@ -171,6 +186,7 @@ struct EdfRecorderManager::ColdState {
     bool str_session_checkpoint_valid = false;
 
     NumericSchemaState numeric_schemas[AC_EDF_NUMERIC_SERIES_COUNT];
+    EdfStartupTiming startup_timing;
 };
 
 void EdfRecorderManager::begin(EventBroker &events,
@@ -301,6 +317,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         return;
     }
 
+    log_startup_timing("ready");
     drain_stream(now_ms);
     drain_local_sa2();
 }
@@ -674,6 +691,11 @@ bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
         return false;
     }
 
+    EdfStartupTiming &timing = cold_->startup_timing;
+    if (timing.active && timing.metadata_ms < 0) {
+        timing.metadata_ms = millis() - timing.started_ms;
+    }
+
     bool ok = true;
     if (!open_session_annotation_files(status_.recording_start_time)) {
         ok = false;
@@ -684,6 +706,9 @@ bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
     }
 
     annotation_open_pending_ = false;
+    if (timing.active && timing.annotation_ms < 0) {
+        timing.annotation_ms = millis() - timing.started_ms;
+    }
     return true;
 }
 
@@ -694,6 +719,10 @@ void EdfRecorderManager::begin_recording_gate(const char *start_time,
         status_.recording_gate_bad_events++;
         return;
     }
+
+    cold_->startup_timing = {};
+    cold_->startup_timing.active = true;
+    cold_->startup_timing.started_ms = millis();
 
     if (cold_->segment_metadata_active && recording_gate_closed_ &&
         status_.recording_end_time[0]) {
@@ -761,6 +790,7 @@ void EdfRecorderManager::close_recording_gate(const char *end_time,
 }
 
 bool EdfRecorderManager::close_recording_segment() {
+    log_startup_timing("closed_before_ready");
     release_stream();
     drain_local_sa2();
 
@@ -1399,6 +1429,11 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         return false;
     }
 
+    EdfStartupTiming &timing = cold_->startup_timing;
+    if (timing.active && timing.stream_ms < 0) {
+        timing.stream_ms = millis() - timing.started_ms;
+    }
+
     if (!recording_gate_open_ || !status_.recording_start_time[0]) {
         if (!recording_gate_recovery_pending_) {
             StreamFrameRef discarded;
@@ -1539,6 +1574,11 @@ bool EdfRecorderManager::ensure_numeric_files_open(
 
     numeric_segment_day_ = numeric_day;
     if (numeric_files_open_) {
+        EdfStartupTiming &timing = cold_->startup_timing;
+        if (timing.active && timing.numeric_ms < 0) {
+            timing.numeric_ms = millis() - timing.started_ms;
+        }
+
         const NumericSchemaState *numeric = cold_->numeric_schemas;
         Log::logf(CAT_EDF, LOG_DEBUG,
                   "numeric files open start=%s accepted=%s brp=%u "
@@ -1618,6 +1658,9 @@ void EdfRecorderManager::sync_annotation_open_status() {
     const EdfStorageOpenRead csl_read =
         StorageService::edf_open_result(csl_open_handle_, csl);
 
+    observe_startup_open(eve_open_handle_, eve_read, eve, "EVE");
+    observe_startup_open(csl_open_handle_, csl_read, csl, "CSL");
+
     const bool eve_known = eve_read == EdfStorageOpenRead::Known;
     const bool csl_known = csl_read == EdfStorageOpenRead::Known;
     if (eve_read == EdfStorageOpenRead::Unavailable ||
@@ -1673,6 +1716,9 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         const EdfStorageOpenRead read = StorageService::edf_open_result(
             state.open_handle, results[i]);
 
+        observe_startup_open(state.open_handle, read, results[i],
+                             edf_file_tag(state.layout.schema.kind));
+
         known[i] = read == EdfStorageOpenRead::Known;
         if (read == EdfStorageOpenRead::Unavailable ||
             (known[i] && !results[i].complete)) {
@@ -1714,6 +1760,63 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     assembler_.set_current_records(records);
     numeric_open_synced_ = true;
     return true;
+}
+
+void EdfRecorderManager::observe_startup_open(
+    const EdfStorageOpenHandle &handle,
+    EdfStorageOpenRead read,
+    const EdfStorageOpenResult &result,
+    const char *tag) {
+    EdfStartupTiming &timing = cold_->startup_timing;
+    if (!timing.active) return;
+
+    if (read == EdfStorageOpenRead::Unavailable) {
+        timing.unavailable_reads++;
+        return;
+    }
+    if (read != EdfStorageOpenRead::Known) return;
+    if (!result.complete) {
+        timing.pending_reads++;
+        return;
+    }
+    if (result.superseded) return;
+
+    uint32_t &received = timing.received_requests[
+        edf_storage_file_index(handle.file)];
+    if (received == handle.request_id) return;
+
+    received = handle.request_id;
+    const uint32_t receive_ms = millis() - result.published_ms;
+    if (receive_ms >= timing.receive_max_ms) {
+        timing.receive_max_ms = receive_ms;
+        timing.receive_max_file = tag;
+    }
+}
+
+void EdfRecorderManager::log_startup_timing(const char *outcome) {
+    EdfStartupTiming &timing = cold_->startup_timing;
+    if (!timing.active) return;
+    timing.active = false;
+
+    Log::logf(CAT_EDF, LOG_INFO,
+              "startup id=%lu result=%s total_ms=%lu buffer=%u drops=%lu "
+              "unavailable=%lu pending=%lu\n",
+              static_cast<unsigned long>(status_.session_id), outcome,
+              static_cast<unsigned long>(millis() - timing.started_ms),
+              static_cast<unsigned>(numeric_open_frame_buffer_.count()),
+              static_cast<unsigned long>(status_.numeric_open_buffer_drops),
+              static_cast<unsigned long>(timing.unavailable_reads),
+              static_cast<unsigned long>(timing.pending_reads));
+    Log::logf(CAT_EDF, LOG_INFO,
+              "startup gates ms metadata=%ld annotation=%ld stream=%ld "
+              "numeric=%ld frame=%ld receive_max=%lu file=%s\n",
+              static_cast<long>(timing.metadata_ms),
+              static_cast<long>(timing.annotation_ms),
+              static_cast<long>(timing.stream_ms),
+              static_cast<long>(timing.numeric_ms),
+              static_cast<long>(timing.first_frame_ms),
+              static_cast<unsigned long>(timing.receive_max_ms),
+              timing.receive_max_file);
 }
 
 void EdfRecorderManager::freeze_session_clock(uint32_t now_ms) {
@@ -2591,6 +2694,10 @@ void EdfRecorderManager::buffer_numeric_open_stream() {
             break;
         }
         if (!frame) continue;
+        EdfStartupTiming &timing = cold_->startup_timing;
+        if (timing.active && timing.first_frame_ms < 0) {
+            timing.first_frame_ms = millis() - timing.started_ms;
+        }
         if (!numeric_open_frame_buffer_.push(std::move(frame))) {
             if (status_.numeric_open_buffer_drops == 0) {
                 const char *waiting = !numeric_stream_ready()
@@ -2623,8 +2730,13 @@ bool EdfRecorderManager::take_numeric_open_stream_frame(
         return false;
     }
 
-    return stream_->next_frame(status_.stream_handle, frame) &&
-           static_cast<bool>(frame);
+    const bool received = stream_->next_frame(status_.stream_handle, frame) &&
+                          static_cast<bool>(frame);
+    EdfStartupTiming &timing = cold_->startup_timing;
+    if (received && timing.active && timing.first_frame_ms < 0) {
+        timing.first_frame_ms = millis() - timing.started_ms;
+    }
+    return received;
 }
 
 void EdfRecorderManager::drain_stream(uint32_t now_ms) {

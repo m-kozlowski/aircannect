@@ -18,6 +18,7 @@
 #include "edf_file_reader.h"
 #include "edf_file_resume.h"
 #include "edf_identification.h"
+#include "edf_storage_catalog.h"
 #include "edf_storage_open_plan.h"
 #include "edf_str_storage_writer.h"
 #include "large_allocator.h"
@@ -83,6 +84,7 @@ struct JobSlot {
     JobType type = JobType::Record;
     StoredFileKind kind = StoredFileKind::Brp;
     uint32_t request_id = 0;
+    uint32_t admitted_ms = 0;
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     char patient_id[AC_EDF_STORAGE_PATIENT_ID_MAX] = {};
     char recording_id[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
@@ -128,6 +130,7 @@ struct OpenRequestResult {
     bool resumed = false;
     uint32_t request_id = 0;
     uint32_t record_count = 0;
+    uint32_t published_ms = 0;
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
@@ -988,6 +991,7 @@ void store_open_result(const OpenRequestResult &result,
     const size_t index = file_index(kind);
     xSemaphoreTake(queue_lock, portMAX_DELAY);
     open_results[index] = result;
+    open_results[index].published_ms = millis();
     unlock_queue();
 }
 
@@ -1521,12 +1525,66 @@ bool render_numeric_open_header(JobSlot &job) {
 }
 
 bool process_open(JobSlot &job) {
+    struct {
+        uint32_t prepare_us = 0;
+        uint32_t directories_us = 0;
+        uint32_t close_us = 0;
+        uint32_t resume_us = 0;
+        uint32_t create_us = 0;
+        uint32_t header_us = 0;
+        uint32_t flush_us = 0;
+        uint32_t progress_us = 0;
+    } timing;
+
+    const uint32_t queue_ms = millis() - job.admitted_ms;
+    const uint32_t started_us = micros();
+    uint32_t phase_started_us = started_us;
+    uint32_t *phase = &timing.prepare_us;
+    auto next_phase = [&](uint32_t *next) {
+        const uint32_t now_us = micros();
+        if (phase) *phase += now_us - phase_started_us;
+        phase = next;
+        phase_started_us = now_us;
+    };
+    auto finish = [&](bool success, const OpenFile *state, const char *error) {
+        next_phase(nullptr);
+        const uint32_t work_us = micros() - started_us;
+        mark_open_result(job, success, state, error);
+        const char *tag = is_annotation_kind(job.kind)
+            ? edf_annotation_file_tag(job.kind == StoredFileKind::Eve
+                                         ? EdfAnnotationKind::Eve
+                                         : EdfAnnotationKind::Csl)
+            : edf_file_tag(numeric_kind(job.kind));
+        Log::logf(CAT_EDF, LOG_INFO,
+                  "startup file=%s req=%lu ok=%u resumed=%u ms queue=%lu "
+                  "work=%lu publish=%lu\n",
+                  tag, static_cast<unsigned long>(job.request_id),
+                  static_cast<unsigned>(success),
+                  static_cast<unsigned>(state && state->resumed),
+                  static_cast<unsigned long>(queue_ms),
+                  static_cast<unsigned long>(work_us / 1000),
+                  static_cast<unsigned long>((micros() - started_us -
+                                               work_us) / 1000));
+        Log::logf(CAT_EDF, LOG_INFO,
+                  "startup io file=%s ms prep=%lu dir=%lu close=%lu "
+                  "resume=%lu create=%lu header=%lu flush=%lu progress=%lu\n",
+                  tag,
+                  static_cast<unsigned long>(timing.prepare_us / 1000),
+                  static_cast<unsigned long>(timing.directories_us / 1000),
+                  static_cast<unsigned long>(timing.close_us / 1000),
+                  static_cast<unsigned long>(timing.resume_us / 1000),
+                  static_cast<unsigned long>(timing.create_us / 1000),
+                  static_cast<unsigned long>(timing.header_us / 1000),
+                  static_cast<unsigned long>(timing.flush_us / 1000),
+                  static_cast<unsigned long>(timing.progress_us / 1000));
+        return success;
+    };
     auto fail = [&](const char *error) {
         set_error(error);
-        mark_open_result(job, false, nullptr, error);
-        return false;
+        return finish(false, nullptr, error);
     };
 
+    Storage::release_write_handles();
     if (!valid_path(job.path)) {
         return fail("bad_path");
     }
@@ -1538,20 +1596,23 @@ bool process_open(JobSlot &job) {
         return fail("header_render_failed");
     }
 
+    next_phase(&timing.directories_us);
     if (!ensure_parent_dirs(job.path)) {
         return fail("mkdir_failed");
     }
 
+    next_phase(&timing.close_us);
     OpenFile &state = open_files[file_index(job.kind)];
     close_file(state);
     mark_progress_closed(job.kind);
     refresh_open_file_count();
+    next_phase(&timing.resume_us);
     if (try_resume_open_file(state, job)) {
+        next_phase(&timing.progress_us);
         refresh_open_file_count();
         mark_progress_open(state);
-        mark_open_result(job, true, &state, nullptr);
         service_state.last_error[0] = 0;
-        return true;
+        return finish(true, &state, nullptr);
     }
 
     // A failed resume must never replace an existing EDF. Creation below is
@@ -1562,6 +1623,7 @@ bool process_open(JobSlot &job) {
 
     // Create without truncation, then reopen in r+ so later header patches
     // seek normally instead of inheriting append-mode write semantics.
+    next_phase(&timing.create_us);
     File created = Storage::open(job.path, "a");
     if (!created) {
         log_worker_failure(LOG_WARN, "open_failed", job.path);
@@ -1590,6 +1652,7 @@ bool process_open(JobSlot &job) {
     state.record_size = job.record_size;
     state.resumed = false;
     copy_cstr(state.path, sizeof(state.path), job.path);
+    next_phase(&timing.header_us);
     if (!write_open_header(state, job)) {
         state.file.close();
         log_worker_failure(LOG_WARN, "header_write_failed", job.path);
@@ -1609,12 +1672,13 @@ bool process_open(JobSlot &job) {
         log_worker_failure(LOG_WARN, "recording_start_write_failed", job.path);
         return fail("recording_start_write_failed");
     }
+    next_phase(&timing.flush_us);
     state.file.flush();
+    next_phase(&timing.progress_us);
     refresh_open_file_count();
     mark_progress_open(state);
-    mark_open_result(job, true, &state, nullptr);
     service_state.last_error[0] = 0;
-    return true;
+    return finish(true, &state, nullptr);
 }
 
 bool process_record(const JobSlot &job) {
@@ -2405,7 +2469,9 @@ void task_entry(void *) {
             }
 
             if (have_job) {
-                Storage::release_write_handles();
+                if (slots[slot_index].type != JobType::Open) {
+                    Storage::release_write_handles();
+                }
                 const bool completed = process_job(slots[slot_index]);
                 if (completed && slots[slot_index].type == JobType::StrRecord) {
                     queue_report_source_change(slots[slot_index]);
@@ -2521,6 +2587,7 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
         return EdfStorageEnqueueResult::Rejected;
     }
 
+    if (job.type == JobType::Open) job.admitted_ms = millis();
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
     unlock_queue();
@@ -3001,6 +3068,7 @@ EdfStorageOpenRead edf_open_result(const EdfStorageOpenHandle &handle,
         result.open = stored.open;
         result.resumed = stored.resumed;
         result.record_count = stored.record_count;
+        result.published_ms = stored.published_ms;
         copy_cstr(result.path, sizeof(result.path), stored.path);
         copy_cstr(result.error, sizeof(result.error), stored.error);
         return EdfStorageOpenRead::Known;

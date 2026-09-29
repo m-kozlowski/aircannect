@@ -334,6 +334,11 @@ private:
     bool close_session_files();
     void sync_annotation_open_status();
     bool sync_numeric_open_status(uint32_t now_ms);
+    void observe_startup_open(const EdfStorageOpenHandle &handle,
+                              EdfStorageOpenRead read,
+                              const EdfStorageOpenResult &result,
+                              const char *tag);
+    void log_startup_timing(const char *outcome);
     void buffer_numeric_open_stream();
     bool take_numeric_open_stream_frame(StreamFrameRef &frame);
     uint32_t event_coverage_session_gaps() const;

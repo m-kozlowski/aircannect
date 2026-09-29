@@ -86,6 +86,7 @@ struct EdfStorageOpenResult {
     bool open = false;
     bool resumed = false;
     uint32_t record_count = 0;
+    uint32_t published_ms = 0;
     char path[80] = {};
     char error[96] = {};
 };
