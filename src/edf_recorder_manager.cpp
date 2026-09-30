@@ -1798,7 +1798,7 @@ void EdfRecorderManager::log_startup_timing(const char *outcome) {
     if (!timing.active) return;
     timing.active = false;
 
-    Log::logf(CAT_EDF, LOG_INFO,
+    Log::logf(CAT_EDF, LOG_DEBUG,
               "startup id=%lu result=%s total_ms=%lu buffer=%u drops=%lu "
               "unavailable=%lu pending=%lu\n",
               static_cast<unsigned long>(status_.session_id), outcome,
@@ -1807,7 +1807,7 @@ void EdfRecorderManager::log_startup_timing(const char *outcome) {
               static_cast<unsigned long>(status_.numeric_open_buffer_drops),
               static_cast<unsigned long>(timing.unavailable_reads),
               static_cast<unsigned long>(timing.pending_reads));
-    Log::logf(CAT_EDF, LOG_INFO,
+    Log::logf(CAT_EDF, LOG_DEBUG,
               "startup gates ms metadata=%ld annotation=%ld stream=%ld "
               "numeric=%ld frame=%ld receive_max=%lu file=%s\n",
               static_cast<long>(timing.metadata_ms),

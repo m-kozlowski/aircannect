@@ -1555,7 +1555,7 @@ bool process_open(JobSlot &job) {
                                          ? EdfAnnotationKind::Eve
                                          : EdfAnnotationKind::Csl)
             : edf_file_tag(numeric_kind(job.kind));
-        Log::logf(CAT_EDF, LOG_INFO,
+        Log::logf(CAT_EDF, LOG_DEBUG,
                   "startup file=%s req=%lu ok=%u resumed=%u ms queue=%lu "
                   "work=%lu publish=%lu\n",
                   tag, static_cast<unsigned long>(job.request_id),
@@ -1565,7 +1565,7 @@ bool process_open(JobSlot &job) {
                   static_cast<unsigned long>(work_us / 1000),
                   static_cast<unsigned long>((micros() - started_us -
                                                work_us) / 1000));
-        Log::logf(CAT_EDF, LOG_INFO,
+        Log::logf(CAT_EDF, LOG_DEBUG,
                   "startup io file=%s ms prep=%lu dir=%lu close=%lu "
                   "resume=%lu create=%lu header=%lu flush=%lu progress=%lu\n",
                   tag,
