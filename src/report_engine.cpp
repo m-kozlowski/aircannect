@@ -507,9 +507,12 @@ bool ReportEngine::start_known_request(
     }
 
     const auto *source = catalog_->find(active_request_.artifact.sleep_day);
+    // A fallback-only report can also have an append checkpoint. Keep its
+    // partial historical coverage when EDF adds a later session to the night.
     const bool edf_append = source && stored &&
         (source->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
-        (stored->view.night.source_flags & NIGHT_CATALOG_SOURCE_EDF);
+        ((stored->view.night.source_flags & NIGHT_CATALOG_SOURCE_EDF) ||
+         stored->view.night.checkpoint_slot != 0);
     previous_metadata_ = !active_request_.force_rebuild && edf_append
         ? retained_metadata_ : ReportSignalStoreMetadata{};
     if (previous_metadata_.metadata) active_store_generation_ = stored->generation;
