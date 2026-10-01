@@ -371,7 +371,7 @@ struct ReportTask::Runtime {
 
         (void)engine.cancel_background();
         capture_build = {};
-        capture_published_end_ms = 0;
+        capture_evaluated_end_ms = 0;
         capture_attempt_end_ms = 0;
         capture_retry_at_ms = 0;
         capture_checked_revision = 0;
@@ -412,12 +412,12 @@ struct ReportTask::Runtime {
         }
         const int64_t end_ms = capture_input.closed_end();
         if (end_ms <= capture_session.canonical_segment_start_ms ||
-            (end_ms <= capture_published_end_ms && !progress_changed)) return false;
+            (end_ms <= capture_evaluated_end_ms && !progress_changed)) return false;
 
         if (!capture_sources_ready(now_ms)) return false;
 
         bool rewritten = false;
-        if (!capture_input.publication_due(catalog, capture_published_end_ms,
+        if (!capture_input.publication_due(catalog, capture_evaluated_end_ms,
                                            capture_progress.get(), rewritten)) {
             return false;
         }
@@ -434,6 +434,16 @@ struct ReportTask::Runtime {
 
         const ReportArtifactKey key = ReportArtifactKey::result(
             night->sleep_day, night->source_revision);
+        const auto *current = catalog ? catalog->find(night->sleep_day) : nullptr;
+        ReportNightFailureStatus failure;
+        if (!rewritten && current &&
+            current->source_revision == night->source_revision &&
+            find_failure(night->sleep_day, failure, 0) && !failure.retryable) {
+            capture_evaluated_end_ms = end_ms;
+            capture_progress = progress;
+            return false;
+        }
+
         const uint32_t generation = next_catalog_generation();
         accept_catalog(next, generation, false);
         pending_catalog_save = next;
@@ -1716,13 +1726,17 @@ struct ReportTask::Runtime {
             completion.outcome.disposition ==
             OperationDisposition::Succeeded;
         const bool post_therapy = completion.request.artifact == post_therapy_build;
-        if (completion.request.artifact == capture_build) {
-            if (succeeded) {
-                capture_published_end_ms = capture_attempt_end_ms;
+        const bool capture = completion.request.artifact == capture_build;
+        if (capture) {
+            if (succeeded || retained) {
+                // A refusal consumes this input revision, not the saved report.
+                // New closed data or a rewrite can trigger the next attempt.
+                capture_evaluated_end_ms = capture_attempt_end_ms;
                 capture_progress = std::move(capture_attempt_progress);
             }
-            capture_retry_at_ms = succeeded ? 0 : now_ms + CATALOG_RETRY_MAX_MS;
-            if (!succeeded) capture_checked_revision = 0;
+            capture_retry_at_ms = succeeded || retained
+                ? 0 : now_ms + CATALOG_RETRY_MAX_MS;
+            if (!succeeded && !retained) capture_checked_revision = 0;
             capture_build = {};
         }
 
@@ -1748,6 +1762,7 @@ struct ReportTask::Runtime {
             find_failure(completed_day, failure, 0);
             const char *operation = rebuilding ? "rebuild" :
                 post_therapy ? "post_therapy" :
+                capture ? "capture" :
                 completion.request.priority == ReportRequestPriority::Foreground
                     ? "build" : "build_background";
             if (retained) {
@@ -2094,7 +2109,7 @@ struct ReportTask::Runtime {
     SourceRevision capture_sources_revision;
     uint8_t capture_sources_flags = 0;
     ReportArtifactKey capture_build;
-    int64_t capture_published_end_ms = 0;
+    int64_t capture_evaluated_end_ms = 0;
     int64_t capture_attempt_end_ms = 0;
     uint32_t capture_retry_at_ms = 0;
     uint64_t capture_checked_revision = 0;
