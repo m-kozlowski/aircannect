@@ -98,6 +98,14 @@ void remove_key_if_present(Preferences &prefs, const char *key) {
 bool WifiManager::begin() {
     load_config();
     stop_wifi();
+
+#if AC_WIFI_DISABLE_POWER_SAVE >= 0
+    // STA_START reapplies Arduino's saved policy, not just the IDF setting.
+    if (!WiFi.setSleep(false)) {
+        Log::logf(CAT_WIFI, LOG_WARN, "Disabling Power Save failed\n");
+    }
+#endif
+
     WiFi.onEvent(wifi_event_cb);
     WiFi.setAutoReconnect(false);
 
@@ -865,17 +873,6 @@ void WifiManager::apply_sta_phy_config() {
             Log::logf(CAT_WIFI, LOG_WARN,
                       "STA max TX power config failed qdbm=%d err=%d\n",
                       static_cast<int>(AC_WIFI_MAX_TX_POWER_QDBM),
-                      static_cast<int>(err));
-        }
-    }
-#endif
-
-#if AC_WIFI_DISABLE_POWER_SAVE >= 0
-    {
-        const esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
-        if (err != ESP_OK) {
-            Log::logf(CAT_WIFI, LOG_WARN,
-                      "Disabling Power Save failed err=%d\n",
                       static_cast<int>(err));
         }
     }
