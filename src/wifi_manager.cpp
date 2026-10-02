@@ -25,7 +25,18 @@ static constexpr const char *WIFI_PREF_LAST_GOOD = "last_good";
 static constexpr uint16_t WIFI_COEX_SCAN_ACTIVE_MAX_MS = 120;
 static constexpr uint8_t WIFI_COEX_SCAN_HOME_DWELL_MS = 30;
 
-static std::atomic<uint8_t> last_disconnect_reason{0};
+struct StaLinkEvent {
+    uint8_t event = ARDUINO_EVENT_WIFI_STA_STOP;
+    uint8_t reason = 0;
+
+    bool associated() const {
+        return event == ARDUINO_EVENT_WIFI_STA_CONNECTED ||
+               event == ARDUINO_EVENT_WIFI_STA_GOT_IP ||
+               event == ARDUINO_EVENT_WIFI_STA_LOST_IP;
+    }
+};
+
+static std::atomic<StaLinkEvent> sta_link_event{StaLinkEvent{}};
 static std::atomic<bool> automatic_scan_pending{false};
 static std::atomic<bool> automatic_scan_done{false};
 static std::atomic<uint32_t> automatic_scan_status{1};
@@ -79,8 +90,23 @@ void format_ap_ssid(const String &hostname, char *out, size_t size) {
 
 void wifi_event_cb(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-        last_disconnect_reason.store(info.wifi_sta_disconnected.reason,
-                                     std::memory_order_relaxed);
+        sta_link_event.store({static_cast<uint8_t>(event),
+                              info.wifi_sta_disconnected.reason},
+                             std::memory_order_relaxed);
+    } else if (event == ARDUINO_EVENT_WIFI_STA_START ||
+               event == ARDUINO_EVENT_WIFI_STA_STOP ||
+               event == ARDUINO_EVENT_WIFI_STA_CONNECTED ||
+               event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+        sta_link_event.store({static_cast<uint8_t>(event), 0},
+                             std::memory_order_relaxed);
+    } else if (event == ARDUINO_EVENT_WIFI_STA_LOST_IP) {
+        // A delayed IP loss must not revive an already disconnected link.
+        StaLinkEvent previous = sta_link_event.load(std::memory_order_relaxed);
+        if (previous.associated()) {
+            sta_link_event.compare_exchange_strong(
+                previous, {static_cast<uint8_t>(event), 0},
+                std::memory_order_relaxed);
+        }
     } else if (event == ARDUINO_EVENT_WIFI_SCAN_DONE &&
                automatic_scan_pending.load(std::memory_order_acquire)) {
         automatic_scan_status.store(info.wifi_scan_done.status,
@@ -156,8 +182,9 @@ void WifiManager::poll() {
         return;
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        if (!sta_has_ipv4()) {
+    const StaLinkEvent link = sta_link_event.load(std::memory_order_relaxed);
+    if (link.associated()) {
+        if (link.event != ARDUINO_EVENT_WIFI_STA_GOT_IP || !sta_has_ipv4()) {
             handle_associated_without_ip();
             return;
         }
@@ -176,11 +203,13 @@ void WifiManager::poll() {
 
     if (mode_state_ == WifiModeState::StaConnected ||
         mode_state_ == WifiModeState::StaAssociated) {
+        // Arduino changes status before delivering our callback and its reason.
+        if (link.event != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
+
         management_reachable_ = softap_running_;
         sta_ipv4_online_ = false;
         stats_.disconnects++;
-        last_disconnect_reason_ =
-            last_disconnect_reason.load(std::memory_order_relaxed);
+        last_disconnect_reason_ = link.reason;
         stats_.last_disconnect_reason = last_disconnect_reason_;
         Log::logf(CAT_WIFI, LOG_WARN,
                   "STA disconnected reason=%u; reconnecting\n",
@@ -358,7 +387,7 @@ bool WifiManager::start_profile(size_t index, bool keep_softap,
     ap_select_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
     pmf_retry_attempted_ = false;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason.store(0, std::memory_order_relaxed);
+    sta_link_event.store({}, std::memory_order_relaxed);
 
     reset_scan_candidates();
     if (start_automatic_scan()) {
@@ -477,7 +506,7 @@ void WifiManager::stop_wifi() {
     ipv4_deadline_ms_ = 0;
     ap_select_deadline_ms_ = 0;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason.store(0, std::memory_order_relaxed);
+    sta_link_event.store({}, std::memory_order_relaxed);
     mode_state_ = WifiModeState::Off;
 }
 
@@ -541,7 +570,7 @@ void WifiManager::softap_ssid(char *out, size_t size) const {
 void WifiManager::apply_softap_mode() {
     if (softap_mode_ == SoftApMode::Forced) {
         const bool with_sta =
-            sta_configured_ || WiFi.status() == WL_CONNECTED ||
+            sta_configured_ || sta_associated() ||
             mode_state_ == WifiModeState::StaConnecting ||
             mode_state_ == WifiModeState::StaApSelecting ||
             mode_state_ == WifiModeState::StaPmfRetry ||
@@ -588,11 +617,8 @@ void WifiManager::set_roaming_suspended(bool suspended) {
     low_rssi_count_ = 0;
     if (mode_state_ == WifiModeState::StaRoamScanning) {
         cancel_automatic_scan();
-        mode_state_ = WiFi.status() == WL_CONNECTED
-                          ? (sta_has_ipv4()
-                                 ? WifiModeState::StaConnected
-                                 : WifiModeState::StaAssociated)
-                          : WifiModeState::StaConnecting;
+        // poll() resumes link/IP handling after the scan has been cancelled.
+        mode_state_ = WifiModeState::StaConnected;
     }
 }
 
@@ -884,6 +910,10 @@ bool WifiManager::sta_has_ipv4() const {
     return ip != IPAddress(0, 0, 0, 0);
 }
 
+bool WifiManager::sta_associated() const {
+    return sta_link_event.load(std::memory_order_relaxed).associated();
+}
+
 bool WifiManager::candidate_ip_failed(uint8_t profile_index,
                                       const uint8_t *bssid,
                                       uint32_t now_ms) const {
@@ -1002,7 +1032,6 @@ void WifiManager::handle_connected() {
     softap_retry_deadline_ms_ = 0;
     consecutive_profile_failures_ = 0;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason.store(0, std::memory_order_relaxed);
     low_rssi_count_ = 0;
     last_roam_check_ms_ = millis();
     profile_scan_snapshot_valid_ = false;
@@ -1054,7 +1083,7 @@ bool WifiManager::begin_profile_association(
     ipv4_deadline_ms_ = 0;
     pmf_retry_attempted_ = false;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason.store(0, std::memory_order_relaxed);
+    sta_link_event.store({}, std::memory_order_relaxed);
     stats_.connect_attempts++;
 
     if (!candidate) {
@@ -1353,19 +1382,7 @@ void WifiManager::handle_roam_scan() {
     if (!scan_succeeded) {
         low_rssi_count_ = 0;
 
-        if (WiFi.status() == WL_CONNECTED) {
-            mode_state_ = sta_has_ipv4()
-                              ? WifiModeState::StaConnected
-                              : WifiModeState::StaAssociated;
-
-        } else if (active_profile_index_ >= 0) {
-            start_profile(static_cast<size_t>(active_profile_index_),
-                          softap_running_);
-
-        } else {
-            start_next_profile(preferred_profile_index_, softap_running_);
-        }
-
+        mode_state_ = WifiModeState::StaConnected;
         return;
     }
 
@@ -1375,7 +1392,7 @@ void WifiManager::handle_roam_scan() {
     int32_t live_current_rssi = 0;
     const int8_t active_profile = active_profile_index_;
 
-    if (WiFi.status() == WL_CONNECTED) {
+    if (sta_associated()) {
         uint8_t *bssid = WiFi.BSSID();
 
         if (bssid) {
@@ -1392,7 +1409,7 @@ void WifiManager::handle_roam_scan() {
     bool should_switch = false;
 
     if (scan_candidate_count_ > 0 && have_current_bssid &&
-        WiFi.status() == WL_CONNECTED) {
+        sta_associated()) {
         const ScanCandidate &best = scan_candidates_[0];
         bool current_seen = false;
         int32_t current_scan_rssi = live_current_rssi;
@@ -1452,18 +1469,8 @@ void WifiManager::handle_roam_scan() {
 
     if (should_switch && start_scan_candidate(0)) return;
 
-    if (WiFi.status() == WL_CONNECTED) {
-        mode_state_ = sta_has_ipv4()
-                          ? WifiModeState::StaConnected
-                          : WifiModeState::StaAssociated;
-
-    } else if (active_profile_index_ >= 0) {
-        start_profile(static_cast<size_t>(active_profile_index_),
-                      softap_running_);
-
-    } else {
-        start_next_profile(preferred_profile_index_, softap_running_);
-    }
+    // Let poll() handle link loss with its event reason, or wait for IPv4.
+    mode_state_ = WifiModeState::StaConnected;
 }
 
 void WifiManager::cleanup_manual_scan() {
@@ -1497,8 +1504,8 @@ void WifiManager::cleanup_manual_scan() {
 }
 
 void WifiManager::handle_connect_timeout() {
-    last_disconnect_reason_ =
-        last_disconnect_reason.load(std::memory_order_relaxed);
+    const StaLinkEvent link = sta_link_event.load(std::memory_order_relaxed);
+    last_disconnect_reason_ = link.reason;
     stats_.last_disconnect_reason = last_disconnect_reason_;
     if (!pmf_retry_attempted_ && last_disconnect_reason_ == 208) {
         retry_with_pmf_disabled();
@@ -1536,7 +1543,7 @@ void WifiManager::retry_with_pmf_disabled() {
     mode_state_ = WifiModeState::StaPmfRetry;
     connect_deadline_ms_ = millis() + AC_WIFI_PMF_RETRY_TIMEOUT_MS;
     last_disconnect_reason_ = 0;
-    last_disconnect_reason.store(0, std::memory_order_relaxed);
+    sta_link_event.store({}, std::memory_order_relaxed);
     Log::logf(CAT_WIFI, LOG_INFO,
               "reason 208; retrying with PMF disabled\n");
     esp_wifi_disconnect();

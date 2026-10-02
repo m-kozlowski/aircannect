@@ -180,6 +180,7 @@ private:
                                    bool keep_softap, bool roaming,
                                    const char *reason);
     bool sta_has_ipv4() const;
+    bool sta_associated() const;
     void mark_ip_failed_for_current();
     bool candidate_ip_failed(uint8_t profile_index, const uint8_t *bssid,
                              uint32_t now_ms) const;
