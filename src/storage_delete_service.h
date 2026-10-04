@@ -12,6 +12,8 @@
 
 namespace aircannect {
 
+class StorageStreamService;
+
 class StorageDeleteService final : public StorageDeletePort {
 public:
     using WakeCallback = void (*)();
@@ -25,10 +27,12 @@ public:
                ClaimMaintenanceCallback claim_maintenance,
                ReleaseMaintenanceCallback release_maintenance);
     void set_task_available(bool available);
+    void set_stream_service(StorageStreamService *service) { streams_ = service; }
     void set_paused(bool paused);
     bool step();
 
     // delete requests
+    bool cancel(uint32_t id) override;
     bool start_selected(const char *base_path,
                         const char *const *names,
                         size_t count,
@@ -78,12 +82,14 @@ private:
     std::atomic<bool> pause_transition_pending_{false};
     std::atomic<bool> task_available_{false};
     bool maintenance_claimed_ = false;
+    StorageStreamService *streams_ = nullptr;
 
     // request status
     StorageDeleteStatus status_;
     mutable bool status_dirty_ = false;
     uint32_t next_id_ = 1;
     bool base_checked_ = false;
+    bool cancel_requested_ = false;
 
     // requested roots
     uint32_t root_offsets_[AC_STORAGE_MAX_SELECTIONS] = {};

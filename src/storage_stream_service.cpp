@@ -43,6 +43,14 @@ uint64_t file_modified(File &file) {
     return modified > 0 ? static_cast<uint64_t>(modified) : 0;
 }
 
+bool path_matches(const char *root, const char *path, bool subtree) {
+    if (!subtree) return strcmp(root, path) == 0;
+    const size_t length = strlen(root);
+    return strncmp(root, path, length) == 0 &&
+           (path[length] == '\0' || path[length] == '/' ||
+            (length == 1 && root[0] == '/'));
+}
+
 }  // namespace
 
 struct StorageByteStream {
@@ -258,7 +266,8 @@ void StorageStreamService::finish(StorageByteStream &stream, bool complete) {
 bool StorageStreamService::try_begin_write(const void *owner,
                                            const char *path,
                                            uint64_t offset,
-                                           uint64_t length) {
+                                           uint64_t length,
+                                           bool subtree) {
     if (!owner || !lock(0)) return false;
 
     if (write_owner_ == owner) {
@@ -268,7 +277,7 @@ bool StorageStreamService::try_begin_write(const void *owner,
 
     if (!path || !path[0] || length == 0 ||
         strlen(path) >= sizeof(write_path_) || write_owner_ ||
-        read_conflicts_locked(path, offset, length)) {
+        read_conflicts_locked(path, offset, length, subtree)) {
         unlock();
         return false;
     }
@@ -277,6 +286,7 @@ bool StorageStreamService::try_begin_write(const void *owner,
     copy_cstr(write_path_, sizeof(write_path_), path);
     write_offset_ = offset;
     write_length_ = length;
+    write_subtree_ = subtree;
     unlock();
     return true;
 }
@@ -292,6 +302,7 @@ void StorageStreamService::end_write(const void *owner) {
         write_path_[0] = '\0';
         write_offset_ = 0;
         write_length_ = 0;
+        write_subtree_ = false;
     }
 
     unlock();
@@ -300,12 +311,13 @@ void StorageStreamService::end_write(const void *owner) {
 
 bool StorageStreamService::read_conflicts_locked(const char *path,
                                                   uint64_t offset,
-                                                  uint64_t length) const {
+                                                  uint64_t length,
+                                                  bool subtree) const {
     if (!path || !path[0] || length == 0) return false;
 
     for (const std::shared_ptr<StorageByteStream> &stream : streams_) {
         if (!stream || stream->transfer.producer_done() ||
-            strcmp(stream->path, path) != 0) {
+            !path_matches(path, stream->path, subtree)) {
             continue;
         }
 
@@ -328,7 +340,7 @@ bool StorageStreamService::read_conflicts_locked(const char *path,
 bool StorageStreamService::writer_conflicts_locked(const char *path,
                                                     uint64_t offset,
                                                     uint64_t length) const {
-    return write_owner_ && strcmp(write_path_, path) == 0 &&
+    return write_owner_ && path_matches(write_path_, path, write_subtree_) &&
            ranges_overlap(offset,
                           length ? length : UINT64_MAX - offset,
                           write_offset_, write_length_);

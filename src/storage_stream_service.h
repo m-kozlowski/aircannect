@@ -36,10 +36,12 @@ public:
 
     // Internal writer admission. The owner token remains reserved until the
     // writer calls end_write(). UINT64_MAX length covers the whole path.
+    // Recursive deletion uses subtree=true and reserves all descendants too.
     bool try_begin_write(const void *owner,
                          const char *path,
                          uint64_t offset,
-                         uint64_t length);
+                         uint64_t length,
+                         bool subtree = false);
     void end_write(const void *owner);
 
 private:
@@ -49,7 +51,8 @@ private:
     void wake() const;
     bool read_conflicts_locked(const char *path,
                                uint64_t offset,
-                               uint64_t length) const;
+                               uint64_t length,
+                               bool subtree) const;
     bool writer_conflicts_locked(const char *path,
                                  uint64_t offset,
                                  uint64_t length) const;
@@ -70,6 +73,7 @@ private:
     char write_path_[AC_STORAGE_PATH_MAX] = {};
     uint64_t write_offset_ = 0;
     uint64_t write_length_ = 0;
+    bool write_subtree_ = false;
 
     std::shared_ptr<StorageByteStream> streams_[STREAM_CAPACITY];
     size_t next_stream_ = 0;

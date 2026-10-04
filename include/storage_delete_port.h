@@ -12,6 +12,7 @@ enum class StorageDeleteState : uint8_t {
     Deleting,
     Done,
     Error,
+    Cancelled,
 };
 
 const char *storage_delete_state_name(StorageDeleteState state);
@@ -32,6 +33,9 @@ struct StorageDeleteStatus {
 class StorageDeletePort {
 public:
     virtual ~StorageDeletePort() = default;
+
+    // Request cancellation; wait for a terminal status before reusing paths.
+    virtual bool cancel(uint32_t id) = 0;
 
     // delete requests
     virtual bool start_selected(const char *base_path,

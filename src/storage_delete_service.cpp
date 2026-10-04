@@ -9,6 +9,7 @@
 #include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_internal.h"
+#include "storage_stream_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -41,11 +42,13 @@ const char *storage_delete_state_name(StorageDeleteState state) {
         case StorageDeleteState::Deleting: return "deleting";
         case StorageDeleteState::Done: return "done";
         case StorageDeleteState::Error: return "error";
+        case StorageDeleteState::Cancelled: return "cancelled";
     }
     return "unknown";
 }
 
 StorageDeleteService::~StorageDeleteService() {
+    close_walk_locked();
     if (walk_stack_) {
         for (size_t i = 0; i < walk_capacity_; ++i) {
             walk_stack_[i].~WalkFrame();
@@ -167,6 +170,7 @@ void StorageDeleteService::set_error_locked(const char *error) {
 }
 
 void StorageDeleteService::close_walk_locked() {
+    if (streams_) streams_->end_write(this);
     if (!walk_stack_) return;
     for (size_t i = 0; i < walk_depth_; ++i) {
         if (walk_stack_[i].opened) {
@@ -299,6 +303,7 @@ bool StorageDeleteService::start_selected(const char *base_path,
     close_walk_locked();
     active_.store(false);
     base_checked_ = false;
+    cancel_requested_ = false;
     path_bytes_len_ = 0;
     current_root_ = 0;
     memset(root_offsets_, 0, sizeof(root_offsets_));
@@ -334,6 +339,15 @@ bool StorageDeleteService::start_selected(const char *base_path,
     return true;
 }
 
+bool StorageDeleteService::cancel(uint32_t id) {
+    if (!lock(0)) return false;
+
+    if (status_.id == id && active_.load()) cancel_requested_ = true;
+    unlock();
+    wake();
+    return true;
+}
+
 bool StorageDeleteService::status(StorageDeleteStatus &out,
                                   uint32_t timeout_ms) const {
     return published_status_.read(out, timeout_ms);
@@ -354,6 +368,19 @@ bool StorageDeleteService::validate_base_locked() {
 
 bool StorageDeleteService::step() {
     if (!active_.load()) return false;
+    if (!lock(0)) return false;
+
+    if (cancel_requested_) {
+        close_walk_locked();
+        release_maintenance_locked();
+        active_.store(false);
+        status_.state = StorageDeleteState::Cancelled;
+        touch_status_locked();
+        unlock();
+        return true;
+    }
+    unlock();
+
     if (paused_.load()) {
         if (!pause_transition_pending_.exchange(false)) return false;
         if (!lock(50)) return false;
@@ -386,11 +413,20 @@ bool StorageDeleteService::step() {
     const uint32_t slice_started_us = micros();
 
     while (status_.state == StorageDeleteState::Deleting) {
+        if (streams_ && current_root_ < status_.roots &&
+            !streams_->try_begin_write(this,
+                path_bytes_ + root_offsets_[current_root_], 0, UINT64_MAX, true)) {
+            release_maintenance_locked();
+            unlock();
+            return false;
+        }
+        const size_t previous_root = current_root_;
         if (!delete_next_locked()) {
             release_maintenance_locked();
             unlock();
             return true;
         }
+        if (streams_ && current_root_ != previous_root) streams_->end_write(this);
         if (static_cast<uint32_t>(micros() - slice_started_us) >=
             DELETE_STEP_SLICE_US) {
             break;

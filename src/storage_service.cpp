@@ -1206,6 +1206,7 @@ bool initialize_storage_resources() {
     if (!path_service.begin(wake_service_task)) ready = false;
     atomic_write_service.set_stream_service(&stream_service);
     range_write_service.set_stream_service(&stream_service);
+    delete_service.set_stream_service(&stream_service);
     if (!atomic_write_service.begin(wake_service_task)) ready = false;
     if (!range_write_service.begin(wake_service_task)) ready = false;
     if (!upload_service.begin(wake_service_task,
