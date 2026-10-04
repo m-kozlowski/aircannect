@@ -20,6 +20,7 @@
 namespace aircannect {
 
 class StorageStatusPort;
+class StorageDeletePort;
 
 enum class ReportTaskState : uint8_t {
     Stopped,
@@ -158,6 +159,7 @@ enum class ReportStoreQueryState : uint8_t {
 };
 
 struct ReportNightQuery {
+    std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
     ReportStoreQueryState state = ReportStoreQueryState::Unavailable;
     bool outdated = false;
     SleepDayId sleep_day;
@@ -168,6 +170,7 @@ struct ReportNightQuery {
 };
 
 struct ReportSignalRangeQuery {
+    std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
     ReportStoreQueryState state = ReportStoreQueryState::Unavailable;
     ReportSignalStoreTrack track;
     ReportSignalStoreLevel level = ReportSignalStoreLevel::Raw;
@@ -179,6 +182,7 @@ struct ReportSignalRangeQuery {
 };
 
 struct ReportEventFileQuery {
+    std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
     ReportStoreQueryState state = ReportStoreQueryState::Unavailable;
     SleepDayId sleep_day;
     SourceRevision source_revision;
@@ -223,7 +227,8 @@ public:
                StorageScanPort &scan_port,
                ReportSpoolPort &spool_port,
                StorageRangeWritePort &range_write_port,
-               StorageStatusPort &status_port);
+               StorageStatusPort &status_port,
+               StorageDeletePort *delete_port = nullptr);
 
     OperationAdmission request_night(
         SleepDayId sleep_day,

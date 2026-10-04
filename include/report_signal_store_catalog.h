@@ -32,6 +32,9 @@ public:
 
     size_t size() const { return record_count_; }
     size_t storage_bytes() const { return storage_bytes_; }
+    const ReportSignalStoreCatalogRecord *record(size_t index) const {
+        return index < record_count_ ? records_ + index : nullptr;
+    }
 
     const ReportSignalStoreCatalogRecord *find(
         SleepDayId sleep_day) const;

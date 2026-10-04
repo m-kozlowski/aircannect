@@ -557,6 +557,7 @@ bool format_present_blocks(const ReportSignalRangeQuery &query,
 }
 
 struct HttpStreamRef {
+    std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
     StorageStreamPort *port = nullptr;
     std::shared_ptr<StorageByteStream> stream;
     size_t size = 0;
@@ -576,6 +577,7 @@ struct HttpStreamRef {
 
 struct ReportHttpController::PendingResponses {
     struct Entry {
+        std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
         PendingKind kind = PendingKind::Events;
         std::shared_ptr<AsyncDeferredResponse::State> response;
         StorageStreamCommand command;
@@ -890,6 +892,7 @@ void ReportHttpController::poll() {
             return;
         }
         ref->port = stream_port_;
+        ref->generation_owner = std::move(ready.generation_owner);
         ref->stream = use_deflate
             ? std::move(ready.sidecar_stream)
             : std::move(ready.stream);
@@ -1185,6 +1188,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         pending.raw_response_size = query.file_size;
         pending.source_revision = query.source_revision;
         pending.generation = query.generation;
+        pending.generation_owner = query.generation_owner;
         (void)format_events_etag(query, pending.etag, sizeof(pending.etag));
 
         if (!plot_version_matches(request, pending.source_revision,
@@ -1247,6 +1251,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         pending.raw_response_size = query.range.length;
         pending.source_revision = query.track.source_revision;
         pending.generation = query.track.generation;
+        pending.generation_owner = query.generation_owner;
         pending.track_index = query.track.track_index;
         pending.interval_ms = query.range.interval_ms;
         pending.value_scale = query.track.value_scale;

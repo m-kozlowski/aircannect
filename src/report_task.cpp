@@ -11,6 +11,7 @@
 #include "night_catalog_builder.h"
 #include "night_catalog_capture.h"
 #include "report_fallback_artifact.h"
+#include "report_generation_cleanup.h"
 #include "report_signal_tile_backfill.h"
 #include "report_spool_availability.h"
 #include "storage_service.h"
@@ -599,6 +600,7 @@ struct ReportTask::Runtime {
         if (!next) return;
 
         store_catalog = std::move(next);
+        generation_cleanup.publish(store_catalog);
         engine.publish_store_catalog(store_catalog);
         if (!publish_state()) {
             record_failure("publish_status", "report_snapshot_alloc_failed");
@@ -635,6 +637,7 @@ struct ReportTask::Runtime {
             store_catalog = ReportSignalStoreCatalogBuilder::build(
                 nullptr, 0);
         }
+        generation_cleanup.publish(store_catalog);
         engine.publish_store_catalog(store_catalog);
 
         store_catalog_loader.cancel();
@@ -2079,6 +2082,7 @@ struct ReportTask::Runtime {
     NightCatalogStoreService catalog_store;
     NightCatalogStoreService capture_sources;
     ReportSignalStoreCatalogLoadService store_catalog_loader;
+    ReportGenerationCleanup generation_cleanup;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
     ReportRebuildStatus rebuild;
@@ -2230,7 +2234,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
                        StorageScanPort &scan_port,
                        ReportSpoolPort &spool_port,
                        StorageRangeWritePort &range_write_port,
-                       StorageStatusPort &status_port) {
+                       StorageStatusPort &status_port,
+                       StorageDeletePort *delete_port) {
     if (runtime_) return runtime_->initialized;
 
 #ifdef ARDUINO
@@ -2259,11 +2264,15 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
+    if (delete_port) {
+        runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port);
+    }
     runtime_->signal_tile_backfill.begin(read_port, range_write_port);
     runtime_->engine.begin(read_port, write_port, spool_port, range_write_port);
     runtime_->store_catalog = ReportSignalStoreCatalogBuilder::build(
         nullptr, 0);
     runtime_->engine.publish_store_catalog(runtime_->store_catalog);
+    runtime_->generation_cleanup.publish(runtime_->store_catalog);
     runtime_->initialized = runtime_->store_catalog != nullptr;
     runtime_->publish_state();
     runtime_->publish_status();
@@ -2490,6 +2499,7 @@ ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
     out.source_revision = stored->source_revision;
     out.generation = stored->generation;
     out.metadata = stored->metadata;
+    out.generation_owner = state->store_catalog;
     out.view = stored->view;
     return out;
 }
@@ -2506,6 +2516,7 @@ ReportSignalRangeQuery ReportTask::query_signal(
     out.block_count = block_count;
 
     const ReportNightQuery night = query_night(sleep_day);
+    out.generation_owner = night.generation_owner;
     out.state = night.state;
     if (night.state != ReportStoreQueryState::Ready || !night.metadata) {
         return out;
@@ -2540,6 +2551,7 @@ ReportEventFileQuery ReportTask::query_events(SleepDayId sleep_day) const {
     ReportEventFileQuery out;
     out.sleep_day = sleep_day;
     const ReportNightQuery night = query_night(sleep_day);
+    out.generation_owner = night.generation_owner;
     out.state = night.state;
     if (night.state != ReportStoreQueryState::Ready || !night.metadata) {
         return out;
@@ -3061,7 +3073,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = runtime.observe_signal_tile_backfill(now_ms) || worked;
     }
 
-    if (!runtime.activity.therapy_active || runtime.capture_storage_ready()) {
+    const auto engine_status = runtime.engine.status();
+    const bool cleanup_allowed = catalog_current && startup_allowed &&
+        !local_blocked && engine_status.state == ReportEngineState::Idle &&
+        engine_status.queued == 0 && !runtime.rebuild_catalog &&
+        !runtime.post_therapy_build.valid() && !runtime.capture_build.valid() &&
+        !runtime.signal_tile_backfill_started && !runtime.store_catalog_load_pending &&
+        !runtime.store_catalog_loader.status().active();
+    worked = runtime.generation_cleanup.poll(cleanup_allowed, now_ms) || worked;
+
+    if (!runtime.generation_cleanup.deleting() &&
+        (!runtime.activity.therapy_active || runtime.capture_storage_ready())) {
         worked = runtime.engine.poll(
             now_ms, runtime.activity.therapy_active
                 ? 1 : std::max<size_t>(record_budget, 1)) || worked;

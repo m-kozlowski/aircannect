@@ -1373,7 +1373,8 @@ void setup() {
                            StorageService::scan_port(),
                            report_spool_service,
                            StorageService::range_write_port(),
-                           StorageService::status_port())) {
+                           StorageService::status_port(),
+                           &StorageService::delete_port())) {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
