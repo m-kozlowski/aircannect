@@ -65,6 +65,7 @@ constexpr DescriptorPreset AirSense11DescriptorPresets[] = {
     {"15.8.4.0", 0xD785ABA6u, 0xBEB37EE2u},
     {"16.8.5.0", 0x7862CBA7u, 0xBEB37EE2u},
     {"17.8.6.0", 0xBECBC5BCu, 0xBEB37EE2u},
+    {"18.8.7.0", 0x1B460250u, 0xBEB37EE2u},
 };
 
 // This pair is established only for the reference SW03900 release. Do not
