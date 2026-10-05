@@ -529,12 +529,13 @@ bool StorageDeleteService::finish_done_locked() {
     status_.state = StorageDeleteState::Done;
     touch_status_locked();
 
-    const log_level_t level =
-        status_.files_deleted > 0 || status_.dirs_deleted > 0
-            ? LOG_INFO
-            : LOG_DEBUG;
-    Log::logf(CAT_STORAGE, level,
-              "[DELETE] done roots=%u files=%u dirs=%u\n",
+    const char *path = status_.roots == 1
+        ? path_bytes_ + root_offsets_[0]
+        : status_.base_path;
+
+    Log::logf(CAT_STORAGE, LOG_DEBUG,
+              "[DELETE] done path=%s roots=%u files=%u dirs=%u\n",
+              path,
               static_cast<unsigned>(status_.roots),
               static_cast<unsigned>(status_.files_deleted),
               static_cast<unsigned>(status_.dirs_deleted));
