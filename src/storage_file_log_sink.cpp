@@ -391,7 +391,11 @@ FileLogSinkStatus StorageFileLogSink::status() const {
 
 bool StorageFileLogSink::release_media() {
 #if AC_FILE_LOG_ENABLED
-    if (!prepare_tail_read(capture_tail_fence())) return false;
+    if (!lock(0)) return false;
+    const uint32_t fence = accepted_sequence_;
+    unlock();
+
+    if (!prepare_tail_read(fence)) return false;
     directory_ready_ = false;
 #endif
     return true;
