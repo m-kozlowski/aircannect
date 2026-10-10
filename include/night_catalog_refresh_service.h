@@ -43,6 +43,8 @@ struct NightCatalogRefreshStatus {
 struct NightCatalogRefreshTarget {
     SleepDayId sleep_day;
     char datalog_sleep_day[9] = {};
+    // Scan a wider inventory, but read only raw days in this night's sources.
+    bool all_datalog_days = false;
 
     bool valid() const {
         return sleep_day.valid() && datalog_sleep_day[0] != '\0';

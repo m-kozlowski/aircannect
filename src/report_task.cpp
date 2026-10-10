@@ -5,9 +5,11 @@
 #include <new>
 #include <string.h>
 #include <utility>
+#include <string_view>
 
 #include "board_report.h"
 #include "edf_file_inventory.h"
+#include "large_scratch_array.h"
 #include "night_catalog_builder.h"
 #include "night_catalog_capture.h"
 #include "report_fallback_artifact.h"
@@ -102,6 +104,7 @@ enum class CatalogStorePurpose : uint8_t {
     Load,
     Save,
     SourceUpdate,
+    RebuildLoad,
 };
 
 uint32_t increment_generation(uint32_t generation) {
@@ -130,6 +133,7 @@ bool same_refresh_target(const NightCatalogRefreshTarget &left,
                          const NightCatalogRefreshTarget &right) {
     return left.valid() && right.valid() &&
            left.sleep_day == right.sleep_day &&
+           left.all_datalog_days == right.all_datalog_days &&
            strcmp(left.datalog_sleep_day, right.datalog_sleep_day) == 0;
 }
 
@@ -276,6 +280,16 @@ struct ReportTask::Runtime {
             (!published || !published->catalog)) {
             unlock();
             return OperationAdmission::Rejected;
+        }
+
+        // An open Reports page can ask for the newly refreshed revision while
+        // rebuild is saving it. The accepted rebuild already owns that work.
+        if (command.kind == ReportTaskCommandKind::MaterializeNight &&
+            !command.force_rebuild && rebuild.active &&
+            !(command.sleep_day < rebuild.first_day) &&
+            !(rebuild.last_day < command.sleep_day)) {
+            unlock();
+            return OperationAdmission::Accepted;
         }
 
         for (size_t i = 0; i < command_count; ++i) {
@@ -940,7 +954,9 @@ struct ReportTask::Runtime {
         summary_acquisition.cancel();
         spool_availability_probe.cancel();
         if (catalog_refresh.active()) {
-            if (!pending_refresh.valid()) {
+            if (refresh_rebuild) {
+                refresh_rebuild = false;
+            } else if (!pending_refresh.valid()) {
                 pending_refresh.generation = refresh_generation;
                 pending_refresh.due_ms = 0;
                 pending_refresh.current_offset_valid = refresh_offset_valid;
@@ -1065,7 +1081,8 @@ struct ReportTask::Runtime {
     bool schedule_source_change_refresh(uint32_t now_ms,
                                         bool local_blocked,
                                         bool startup_allowed) {
-        if (source_change_count == 0 || local_blocked || !startup_allowed ||
+        if (rebuild_catalog || source_change_count == 0 ||
+            local_blocked || !startup_allowed ||
             !catalog || pending_refresh.valid() || refresh_generation != 0 ||
             summary_acquisition.active() || catalog_refresh.active() ||
             catalog_load_pending || !catalog_storage_ready() ||
@@ -1195,7 +1212,7 @@ struct ReportTask::Runtime {
     }
 
     bool materialize_due_reconcile(uint32_t now_ms) {
-        if (!reconcile_pending ||
+        if (rebuild_catalog || !reconcile_pending ||
             !deadline_due(now_ms, reconcile_due_ms) ||
             pending_refresh.valid() || refresh_generation != 0 ||
             (!reconcile_post_therapy &&
@@ -1624,6 +1641,65 @@ struct ReportTask::Runtime {
             // Keep the requested days fixed, but use the latest source revision.
             const NightCatalogRecord *current = catalog
                 ? catalog->find(night->sleep_day) : nullptr;
+
+            if (!rebuild_sources_ready) {
+                if (local_background_work_blocked() || !catalog_storage_ready() ||
+                    catalog_load_pending || pending_catalog_save ||
+                    store_purpose != CatalogStorePurpose::None ||
+                    catalog_refresh.active() || refresh_generation != 0 ||
+                    engine.status().state != ReportEngineState::Idle) {
+                    unlock();
+                    return false;
+                }
+
+                if (current && current->sources_external) {
+                    const auto admission = catalog_store.request_load_night(
+                        night->sleep_day, rebuild.generation);
+                    if (admission == OperationAdmission::Accepted) {
+                        store_purpose = CatalogStorePurpose::RebuildLoad;
+                    }
+                    unlock();
+                    if (admission == OperationAdmission::Rejected) {
+                        return fail_rebuild("report_sources_read_rejected");
+                    }
+                    return admission == OperationAdmission::Accepted;
+                }
+
+                if (current) {
+                    auto target = source_change_target(catalog.get(), night->sleep_day);
+                    if (!target.valid()) {
+                        target.sleep_day.format_yyyymmdd(
+                            target.datalog_sleep_day, sizeof(target.datalog_sleep_day));
+                        target.all_datalog_days = true;
+                    }
+
+                    const uint32_t generation = next_catalog_generation();
+                    const auto admission = catalog_refresh.request_refresh(
+                        {}, current->timezone_offset_valid || timezone_offset_valid,
+                        current->timezone_offset_valid ? current->timezone_offset_minutes
+                                                       : timezone_offset_minutes,
+                        generation, catalog, target);
+                    if (admission == OperationAdmission::Accepted) {
+                        refresh_generation = generation;
+                        refresh_target = target;
+                        refresh_rebuild = true;
+                    }
+                    unlock();
+                    if (admission == OperationAdmission::Rejected) {
+                        return fail_rebuild("report_sources_refresh_rejected");
+                    }
+                    return admission == OperationAdmission::Accepted;
+                }
+                unlock();
+                return fail_rebuild("report_night_missing");
+            }
+
+            if (local_background_work_blocked() || pending_catalog_save ||
+                store_purpose != CatalogStorePurpose::None) {
+                unlock();
+                return false;
+            }
+
             const ReportArtifactKey key = ReportArtifactKey::result(
                 night->sleep_day,
                 current ? current->source_revision : night->source_revision);
@@ -1636,6 +1712,7 @@ struct ReportTask::Runtime {
             }
 
             ++rebuild_cursor;
+            rebuild_sources_ready = false;
             if (queued.status == ReportRequestEnqueueStatus::Invalid) {
                 ++rebuild.completed;
                 ++rebuild.failed;
@@ -1665,6 +1742,60 @@ struct ReportTask::Runtime {
         rebuild_catalog.reset();
         unlock();
         return true;
+    }
+
+    bool fail_rebuild(const char *error) {
+        if (!lock()) return false;
+        if (!rebuild_catalog || rebuild_cursor >= rebuild_catalog->size()) {
+            unlock();
+            return false;
+        }
+
+        const auto *night = rebuild_catalog->record(rebuild_cursor++);
+        rebuild_sources_ready = false;
+        ++rebuild.completed;
+        ++rebuild.failed;
+        rebuild.last_completion = {};
+        rebuild.last_completion.request.artifact = ReportArtifactKey::result(
+            night->sleep_day, night->source_revision);
+        rebuild.last_completion.request.force_rebuild = true;
+        rebuild.last_completion.outcome.disposition = OperationDisposition::Failed;
+        copy_cstr(rebuild.last_completion.error,
+                  sizeof(rebuild.last_completion.error), error);
+        const auto day = night->sleep_day;
+        unlock();
+        record_failure("rebuild", error, day);
+        return true;
+    }
+
+    const char *rebuild_source_error(const NightCatalog &updated) const {
+        const auto *previous = catalog->find(refresh_target.sleep_day);
+        const auto *next = updated.find(refresh_target.sleep_day);
+        if (!previous || !next) return "report_rebuild_sources_incomplete";
+
+        // Missing historical inputs must not replace the only saved description.
+        constexpr uint8_t physical_sources = NIGHT_CATALOG_SOURCE_EDF |
+            NIGHT_CATALOG_SOURCE_STR | NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
+            NIGHT_CATALOG_SOURCE_LOCAL_HISTORY;
+        const uint8_t required = previous->source_flags & physical_sources;
+        if ((next->source_flags & required) != required) return "report_rebuild_sources_incomplete";
+
+        size_t count = 0;
+        const auto *files = updated.files(*next, count);
+        LargeScratchArray<std::string_view> paths;
+        if (!paths.allocate(count)) return "report_rebuild_alloc_failed";
+        for (size_t i = 0; i < count; ++i) *paths.append() = updated.path(files[i]);
+        if (count > 1) std::sort(paths.data(), paths.data() + count);
+
+        files = catalog->files(*previous, count);
+        for (size_t i = 0; i < count; ++i) {
+            if (paths.size() == 0 || !std::binary_search(
+                    paths.data(), paths.data() + paths.size(),
+                    std::string_view(catalog->path(files[i])))) {
+                return "report_rebuild_sources_incomplete";
+            }
+        }
+        return nullptr;
     }
 
     bool observe_engine(uint32_t now_ms) {
@@ -1829,7 +1960,8 @@ struct ReportTask::Runtime {
 
         out.condition = ReportTaskCondition::Working;
         if (catalog_store.active()) {
-            out.operation = store_purpose != CatalogStorePurpose::Load
+            out.operation = store_purpose == CatalogStorePurpose::Save ||
+                            store_purpose == CatalogStorePurpose::SourceUpdate
                 ? ReportTaskOperation::SavingCatalog
                 : ReportTaskOperation::LoadingCatalog;
             return out;
@@ -2025,6 +2157,7 @@ struct ReportTask::Runtime {
             next.state = ReportTaskState::Stopped;
         } else if (catalog_load_pending ||
                    store_purpose == CatalogStorePurpose::Load ||
+                   store_purpose == CatalogStorePurpose::RebuildLoad ||
                    store_catalog_loader.status().active()) {
             next.state = ReportTaskState::LoadingCatalog;
         } else if (catalog_refresh.active() || pending_refresh.valid() ||
@@ -2126,6 +2259,8 @@ struct ReportTask::Runtime {
             if (!generation_cleanup.forget_media()) return worked;
             rebuild_catalog.reset();
             rebuild_ticket = {};
+            rebuild_sources_ready = false;
+            refresh_rebuild = false;
             pending_catalog_save.reset();
             pending_source_update.reset();
             pending_catalog_save_source_change = false;
@@ -2182,6 +2317,8 @@ struct ReportTask::Runtime {
     std::shared_ptr<const NightCatalog> rebuild_catalog;
     size_t rebuild_cursor = 0;
     OperationTicket rebuild_ticket;
+    bool rebuild_sources_ready = false;
+    bool refresh_rebuild = false;
     size_t command_count = 0;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
@@ -2739,6 +2876,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         if (command.kind == ReportTaskCommandKind::Rebuild) {
             runtime.rebuild_catalog = runtime.catalog;
             runtime.rebuild_cursor = 0;
+            runtime.rebuild_sources_ready = false;
+            (void)runtime.engine.cancel_background();
+            runtime.cancel_signal_tile_backfill();
         } else if (!runtime.catalog) {
             (void)runtime.enqueue(command);
         } else {
@@ -2796,6 +2936,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         runtime.record_failure("load_catalog", status.error);
                     }
                     if (!runtime.catalog) runtime.schedule_reconcile(now_ms, false);
+                }
+            } else if (completed == CatalogStorePurpose::RebuildLoad) {
+                const auto loaded = runtime.catalog_store.snapshot();
+                const auto *night = loaded ? loaded->record(0) : nullptr;
+                const auto *prior = night && runtime.catalog
+                    ? runtime.catalog->find(night->sleep_day) : nullptr;
+                if (status.state != NightCatalogStoreState::Ready) {
+                    runtime.fail_rebuild(status.error);
+                } else if (!prior || !runtime.merge_loaded_sources(
+                               loaded, prior->source_revision, prior->source_flags)) {
+                    runtime.fail_rebuild("report_sources_load_failed");
                 }
             } else if (completed == CatalogStorePurpose::SourceUpdate) {
                 const auto replacement = std::move(runtime.pending_source_update);
@@ -2876,6 +3027,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_store_retry_at_ms = 0;
                 runtime.catalog_store_retry_attempt = 0;
             } else {
+                if (runtime.rebuild_sources_ready) runtime.fail_rebuild(status.error);
                 runtime.catalog_store_retry_at_ms =
                     now_ms + retry_delay(runtime.catalog_store_retry_attempt);
                 advance_retry(runtime.catalog_store_retry_attempt);
@@ -2936,6 +3088,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
     if (runtime.pending_refresh.valid() &&
+        !runtime.rebuild_catalog &&
         !runtime.pending_refresh.summary_attempted &&
         !runtime.summary_acquisition.active() &&
         !local_blocked && startup_allowed &&
@@ -2968,7 +3121,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.catalog_refresh.status();
         if (status.state == NightCatalogRefreshState::Ready ||
             status.state == NightCatalogRefreshState::Error) {
-            if (status.state == NightCatalogRefreshState::Ready) {
+            const char *rebuild_error = nullptr;
+            if (runtime.refresh_rebuild) {
+                rebuild_error = status.error[0] ? status.error : status.warning[0]
+                    ? status.warning : runtime.rebuild_source_error(*runtime.catalog_refresh.snapshot());
+            }
+
+            if (rebuild_error) {
+                runtime.fail_rebuild(rebuild_error);
+            } else if (status.state == NightCatalogRefreshState::Ready) {
                 publish_catalog(runtime.catalog_refresh.snapshot(),
                                 runtime.refresh_generation);
                 runtime.pending_catalog_save = runtime.catalog;
@@ -2999,6 +3160,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
                 runtime.catalog_refresh_logged_error[0] = '\0';
+                if (runtime.refresh_rebuild) runtime.rebuild_sources_ready = true;
             } else if (status.retryable) {
                 if (!runtime.pending_refresh.valid()) {
                     runtime.pending_refresh.generation =
@@ -3051,7 +3213,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
             }
 
-            if (status.state == NightCatalogRefreshState::Error) {
+            if (!runtime.refresh_rebuild && status.state == NightCatalogRefreshState::Error) {
                 runtime.record_failure("refresh_catalog", status.error,
                                        runtime.refresh_target.sleep_day,
                                        deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms),
@@ -3061,6 +3223,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             }
 
             runtime.refresh_generation = 0;
+            runtime.refresh_rebuild = false;
             runtime.refresh_target = {};
             runtime.refresh_post_therapy = false;
             runtime.refresh_source_change = false;
@@ -3069,6 +3232,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     if (runtime.pending_refresh.valid() &&
+        !runtime.rebuild_catalog &&
         runtime.pending_refresh.summary_attempted &&
         runtime.store_purpose != CatalogStorePurpose::SourceUpdate &&
         !runtime.summary_acquisition.active() &&
@@ -3164,7 +3328,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.catalog_refresh.active() &&
         !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required();
-    if (catalog_current && !local_blocked && startup_allowed) {
+    if (catalog_current && !runtime.rebuild_catalog && !local_blocked && startup_allowed) {
         worked = runtime.schedule_post_therapy_build() || worked;
         if (runtime.store_purpose == CatalogStorePurpose::None &&
             !runtime.pending_catalog_save && !runtime.store_catalog_load_pending &&

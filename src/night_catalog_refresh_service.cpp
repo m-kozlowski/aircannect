@@ -1,6 +1,7 @@
 #include "night_catalog_refresh_service.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <new>
 #include <stdio.h>
@@ -703,6 +704,20 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     runtime_->current_offset_valid = current_offset_valid;
     runtime_->current_offset_minutes = current_offset_minutes;
 
+    if (target.valid()) {
+        const auto *night = runtime_->previous_catalog->find(target.sleep_day);
+        if (night && (night->source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK)) {
+            const auto selected = NightCatalogBuilder::select_night(
+                *runtime_->previous_catalog, target.sleep_day);
+            runtime_->summary = selected
+                ? NightCatalogSummarySnapshot::from_catalog(*selected) : nullptr;
+            if (!runtime_->summary) {
+                reset_transient();
+                return OperationAdmission::Rejected;
+            }
+        }
+    }
+
     StorageScanRoot roots[4] = {};
     size_t root_count = 0;
     if (target.valid()) {
@@ -727,8 +742,10 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
             return OperationAdmission::Rejected;
         }
 
-        roots[root_count++] = {runtime_->datalog_root, true};
-        roots[root_count++] = {runtime_->metadata_root, true};
+        roots[root_count++] = {
+            target.all_datalog_days ? "/DATALOG" : runtime_->datalog_root, true};
+        roots[root_count++] = {
+            target.all_datalog_days ? EDF_SESSION_METADATA_ROOT : runtime_->metadata_root, true};
         roots[root_count++] = {"/STR.edf", false};
 
         // A source-change hint may refer to the first historical import.
@@ -777,11 +794,46 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
         return false;
     }
 
+    using DayText = std::array<char, 9>;
+    LargeScratchArray<DayText> datalog_days;
+    size_t datalog_day_count = 0;
+    if (runtime.target.all_datalog_days) {
+        const auto *night = runtime.previous_catalog->find(runtime.target.sleep_day);
+        size_t count = 0;
+        const auto *files = night ? runtime.previous_catalog->files(*night, count) : nullptr;
+        if (!datalog_days.allocate(count)) return false;
+
+        for (size_t i = 0; i < count; ++i) {
+            EdfInventoryEntry source;
+            if (!edf_inventory_describe_path(
+                    runtime.previous_catalog->path(files[i]), source)) continue;
+            memcpy(datalog_days.append()->data(), source.sleep_day, 8);
+        }
+
+        if (datalog_days.size() > 0) {
+            auto *end = datalog_days.data() + datalog_days.size();
+            std::sort(datalog_days.data(), end);
+            datalog_day_count = std::unique(datalog_days.data(), end) - datalog_days.data();
+        }
+    }
+
     StorageScanEntryView entry;
     for (size_t i = 0; i < runtime.scan->size(); ++i) {
         scan_entry_kinds.data()[i] =
             static_cast<uint8_t>(ScanSourceKind::None);
         if (!runtime.scan->entry(i, entry) || entry.directory) continue;
+
+        if (runtime.target.all_datalog_days &&
+            (entry.root_index == DATALOG_SCAN_ROOT ||
+             entry.root_index == SESSION_METADATA_SCAN_ROOT)) {
+            const size_t prefix = entry.root_index == DATALOG_SCAN_ROOT
+                ? strlen("/DATALOG/") : strlen(EDF_SESSION_METADATA_ROOT) + 1;
+            if (strlen(entry.path) < prefix + 9) continue;
+            DayText day{};
+            memcpy(day.data(), entry.path + prefix, 8);
+            if (datalog_day_count == 0 || !std::binary_search(
+                    datalog_days.data(), datalog_days.data() + datalog_day_count, day)) continue;
+        }
 
         if (entry.root_index == DATALOG_SCAN_ROOT &&
             path_is_report_edf(entry.path)) {
@@ -2111,8 +2163,7 @@ bool NightCatalogRefreshService::poll() {
             // Preserve inaccessible external fallback history, not a partial rebuild.
             const auto *previous =
                 runtime_->previous_catalog->record(runtime_->build_cursor++);
-            if (!previous->sources_external ||
-                (runtime_->target.valid() &&
+            if ((runtime_->target.valid() &&
                  previous->sleep_day != runtime_->target.sleep_day) ||
                 (previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
                 return true;
