@@ -3415,19 +3415,33 @@ void ReportTask::run() {
 
     runtime_->task_started = true;
     runtime_->publish_status();
+
+    uint32_t batch_started_us = micros();
+    size_t batch_steps = 0;
+
     for (;;) {
         const bool worked = step(
             millis(), AC_REPORT_FOREGROUND_RECORD_BUDGET);
-        const ReportTaskControlSnapshot status = control_snapshot();
+
         if (worked) {
+            // Every step still observes activity and cancellation; bound the
+            // batch between steps, without spinning when progress needs I/O.
+            if (report_work_batch_can_continue(
+                    ++batch_steps, micros() - batch_started_us)) {
+                continue;
+            }
+
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
-        } else if (status.background_active) {
-            ulTaskNotifyTake(pdTRUE,
-                             pdMS_TO_TICKS(AC_REPORT_TASK_WAIT_TICK_MS));
         } else {
+            const ReportTaskControlSnapshot status = control_snapshot();
             ulTaskNotifyTake(pdTRUE,
-                             pdMS_TO_TICKS(AC_REPORT_TASK_IDLE_TICK_MS));
+                             pdMS_TO_TICKS(status.background_active
+                                 ? AC_REPORT_TASK_WAIT_TICK_MS
+                                 : AC_REPORT_TASK_IDLE_TICK_MS));
         }
+
+        batch_started_us = micros();
+        batch_steps = 0;
     }
 #endif
 }

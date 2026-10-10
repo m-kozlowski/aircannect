@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "board_report.h"
 #include "display_report_summary.h"
 #include "edf_session_metadata.h"
 #include "night_catalog_refresh_service.h"
@@ -21,6 +22,11 @@ namespace aircannect {
 
 class StorageStatusPort;
 class StorageDeletePort;
+
+constexpr bool report_work_batch_can_continue(size_t steps, uint32_t elapsed_us) {
+    return steps < AC_REPORT_TASK_BATCH_STEPS &&
+           elapsed_us < AC_REPORT_TASK_BATCH_US;
+}
 
 enum class ReportTaskState : uint8_t {
     Stopped,

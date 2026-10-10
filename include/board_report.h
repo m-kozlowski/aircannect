@@ -6,12 +6,14 @@
 #include <stdint.h>
 
 // New report pipeline owner. It shares core 0 with storage at the same low
-// priority and yields after every bounded decode step, so storage's EDF lane
+// priority and yields after a bounded work batch, so storage's EDF lane
 // and the main loop remain responsive.
 static constexpr uint32_t AC_REPORT_TASK_STACK = 12288;
 static constexpr uint8_t AC_REPORT_TASK_PRIO = 1;
 static constexpr uint8_t AC_REPORT_TASK_CORE = 0;
 static constexpr uint32_t AC_REPORT_TASK_WORK_TICK_MS = 1;
+static constexpr size_t AC_REPORT_TASK_BATCH_STEPS = 4;
+static constexpr uint32_t AC_REPORT_TASK_BATCH_US = 4000;
 static constexpr uint32_t AC_REPORT_TASK_WAIT_TICK_MS = 5;
 static constexpr uint32_t AC_REPORT_TASK_IDLE_TICK_MS = 1000;
 static constexpr size_t AC_REPORT_TASK_COMMAND_CAPACITY = 8;
