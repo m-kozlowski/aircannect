@@ -240,7 +240,8 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         !session_ || !time_sync_) {
         return;
     }
-    if (recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
+    if (!storage_suspended_ &&
+        recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
         cold_->history.cancel("history_device_unknown");
         post_therapy_history_pending_ = false;
         release_stream();
@@ -266,6 +267,13 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
 
     poll_rpc_completions();
     poll_str_summary_fetch(now_ms);
+    if (storage_suspended_) {
+        cold_->history.cancel("storage_usb");
+        if (segment_close_pending_ && close_recording_segment()) {
+            segment_close_pending_ = false;
+        }
+        return;
+    }
     poll_airmini_history(now_ms);
     dispatch_session_edges(now_ms);
 
@@ -326,7 +334,8 @@ OperationAdmission EdfRecorderManager::request_str_summary_refresh(
     SleepDayId start_day,
     SleepDayId end_day,
     uint32_t generation) {
-    if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11) {
+    if (storage_suspended_ ||
+        recorder_model(device_state_) != ResmedDeviceModel::AirSense11) {
         return OperationAdmission::Rejected;
     }
     if (!initialized_ || !cold_ || status_.active ||
@@ -367,7 +376,8 @@ EdfRecorderManager::str_summary_refresh_status() const {
 
 OperationAdmission EdfRecorderManager::request_airmini_history(
     SleepDayId start_day, SleepDayId end_day, uint32_t generation) {
-    if (!cold_ || recorder_model(device_state_) != ResmedDeviceModel::AirMini) {
+    if (storage_suspended_ || !cold_ ||
+        recorder_model(device_state_) != ResmedDeviceModel::AirMini) {
         return OperationAdmission::Rejected;
     }
     if (status_.active || history_suspended_ ||
@@ -441,6 +451,41 @@ void EdfRecorderManager::poll_airmini_history(uint32_t now_ms) {
     }
 }
 
+void EdfRecorderManager::set_storage_suspended(bool suspended) {
+    if (storage_suspended_ == suspended) return;
+
+    storage_suspended_ = suspended;
+    if (!cold_) return;
+    if (suspended) {
+        if (status_.active && session_) {
+            end_session(session_->status(), millis(), "storage_usb");
+        }
+        release_stream();
+        cold_->history.cancel("storage_usb");
+        post_therapy_history_pending_ = false;
+        cold_->str_summary_refresh.abort("storage_usb");
+    } else {
+        str_ = {};
+        if (session_) {
+            seen_session_starts_ = session_->status().start_count;
+            seen_session_ends_ = session_->status().end_count;
+        }
+        if (status_.enabled && session_ &&
+            session_->status().state == SessionState::Active) {
+            start_session(session_->status(), millis(), "storage_returned");
+        }
+    }
+}
+
+bool EdfRecorderManager::storage_quiesced() const {
+    return storage_suspended_ && (!cold_ ||
+        (!status_.active && !segment_close_pending_ &&
+         !cold_->pending_final_metadata_valid && cold_->metadata_publisher.idle() &&
+         !str_record_pending_write_ && !str_summary_.active() &&
+         !str_settings_rpc_.active() && !identification_rpc_.active() &&
+         !cold_->str_summary_refresh.status().active() && !history_active()));
+}
+
 void EdfRecorderManager::set_enabled(bool enabled) {
     if (enabled && !cold_) {
         status_.enabled = false;
@@ -460,7 +505,8 @@ void EdfRecorderManager::set_enabled(bool enabled) {
         release_stream();
         return;
     }
-    if (session_ && session_->status().state == SessionState::Active) {
+    if (!storage_suspended_ && session_ &&
+        session_->status().state == SessionState::Active) {
         start_session(session_->status(), millis(), "enabled_active");
     }
 }
@@ -940,7 +986,7 @@ bool EdfRecorderManager::queue_pending_final_metadata() {
 
 void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
                                             uint32_t now_ms) {
-    if (!status_.enabled ||
+    if (storage_suspended_ || !status_.enabled ||
         recorder_model(device_state_) == ResmedDeviceModel::Unknown) {
         return;
     }

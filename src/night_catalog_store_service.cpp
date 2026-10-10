@@ -546,4 +546,11 @@ void NightCatalogStoreService::cancel() {
     status_.error[0] = '\0';
 }
 
+void NightCatalogStoreService::forget_media() {
+    cancel();
+    stored_.reset();
+    published_.reset();
+    status_ = {};
+}
+
 }  // namespace aircannect

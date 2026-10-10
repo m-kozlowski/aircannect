@@ -1,4 +1,5 @@
 #include "resmed_ota_manager.h"
+#include "storage_usb.h"
 
 #include <algorithm>
 #include <ctype.h>
@@ -2454,6 +2455,10 @@ bool ResmedOtaManager::guard_device_idle_for_upgrade() {
 }
 
 bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
+    if (StorageUsb::suspended()) {
+        if (reason) *reason = "storage_usb";
+        return false;
+    }
     if (reason) *reason = "therapy_state_unknown";
     if (!rpc_ || !device_) return false;
 

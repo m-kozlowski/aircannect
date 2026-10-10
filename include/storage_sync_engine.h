@@ -120,6 +120,7 @@ public:
 
     // export task
     ExportStep step();
+    bool release_media();
 
     // configuration/gates
     void configure(const SmbExportConfig &config);

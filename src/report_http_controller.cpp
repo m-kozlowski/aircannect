@@ -1,4 +1,5 @@
 #include "report_http_controller.h"
+#include "storage_usb.h"
 
 #include "http_route_registry.h"
 #include <WebResponseImpl.h>
@@ -458,6 +459,10 @@ bool format_signal_etag(const ReportSignalRangeQuery &query,
 
 bool report_task_available(AsyncWebServerRequest *request,
                            const ReportTask &report_task) {
+    if (StorageUsb::suspended()) {
+        send_json_error(request, 503, "storage_usb");
+        return false;
+    }
     const ReportTaskControlSnapshot status = report_task.control_snapshot();
     if (!status.initialized) {
         send_json_error(request, 503, "report_unavailable");
@@ -667,7 +672,27 @@ void ReportHttpController::begin(ReportTask &report_task,
     (void)preference_commands_.begin();
 }
 
+bool ReportHttpController::release_media() {
+    poll_preference_commands();
+    if (!pending_ || !pending_->mutex) return true;
+    if (xSemaphoreTake(pending_->mutex, 0) != pdTRUE) return false;
+
+    for (auto &entry : pending_->entries) {
+        if (!entry.used()) continue;
+        if (entry.stream) stream_port_->finish(*entry.stream, false);
+        if (entry.sidecar_stream) stream_port_->finish(*entry.sidecar_stream, false);
+        entry.response->publish(json_error_response(503, "storage_usb"));
+        entry = {};
+    }
+    xSemaphoreGive(pending_->mutex);
+    return true;
+}
+
 void ReportHttpController::poll() {
+    if (StorageUsb::suspended()) {
+        (void)release_media();
+        return;
+    }
     publish_completion();
     poll_preference_commands();
 
@@ -983,6 +1008,13 @@ void ReportHttpController::poll_preference_commands() {
         !preference_commands_.pop(pending_preference_command_)) {
         return;
     }
+    if (StorageUsb::suspended() ||
+        pending_preference_command_.media_revision != StorageUsb::status().revision) {
+        if (!preferences_->reject_update(pending_preference_command_.request_id,
+                                          "storage_usb")) return;
+        pending_preference_command_ = {};
+        return;
+    }
     if (!preferences_->ready_for_update()) return;
 
     const OperationAdmission admission = preferences_->update(
@@ -996,6 +1028,10 @@ void ReportHttpController::poll_preference_commands() {
 
 void ReportHttpController::send_preferences(
     AsyncWebServerRequest *request) const {
+    if (StorageUsb::suspended()) {
+        send_json_error(request, 503, "storage_usb");
+        return;
+    }
     if (!request || !preferences_) {
         send_json_error(request, 503, "preferences_unavailable");
         return;
@@ -1019,6 +1055,11 @@ void ReportHttpController::send_preferences(
 
 void ReportHttpController::send_preferences_update(
     AsyncWebServerRequest *request) {
+    if (StorageUsb::suspended()) {
+        send_json_error(request, 503, "storage_usb");
+        return;
+    }
+    const uint32_t media_revision = StorageUsb::status().revision;
     JsonDocument document;
     std::string body;
     if (!http_parse_json_body(request, document, body) ||
@@ -1030,6 +1071,7 @@ void ReportHttpController::send_preferences_update(
 
     PreferenceCommand command;
     command.request_id = next_preference_request_id();
+    command.media_revision = media_revision;
     command.body = std::move(body);
     const uint32_t request_id = command.request_id;
     if (!preference_commands_.push(std::move(command))) {
@@ -1146,6 +1188,7 @@ void ReportHttpController::send_result(AsyncWebServerRequest *request) {
 }
 
 void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
+    const uint32_t media_revision = StorageUsb::status().revision;
     if (!report_task_ || !stream_port_) {
         send_json_error(request, 503, "report_unavailable");
         return;
@@ -1367,6 +1410,13 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     }
 
     PendingResponses::Entry *slot = nullptr;
+    if (StorageUsb::suspended() ||
+        StorageUsb::status().revision != media_revision) {
+        xSemaphoreGive(pending_->mutex);
+        delete response;
+        send_json_error(request, 503, "storage_usb");
+        return;
+    }
     for (PendingResponses::Entry &entry : pending_->entries) {
         if (!entry.used()) {
             slot = &entry;

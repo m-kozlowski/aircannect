@@ -75,6 +75,8 @@ public:
     bool publish_config(const ExportEndpointConfig &config);
     void publish_activity(const ActivitySnapshot &activity);
     void publish_network(const NetworkSnapshot &network);
+    void set_storage_suspended(bool suspended);
+    bool storage_quiesced() const { return !task_ || storage_paused_.load(); }
     void defer_smb_until(uint32_t until_ms);
 
     // endpoint commands
@@ -194,6 +196,8 @@ private:
     bool next_idle_endpoint_smb_ = true;
     uint32_t next_command_sequence_ = 1;
     std::atomic<uint8_t> work_reservation_{0};
+    std::atomic<bool> storage_suspend_requested_{false};
+    std::atomic<bool> storage_paused_{false};
 };
 
 }  // namespace aircannect

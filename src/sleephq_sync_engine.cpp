@@ -825,6 +825,19 @@ ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
     return ExportStep::Working;
 }
 
+bool SleepHqSyncEngine::release_media() {
+    if (!lock(0)) return false;
+
+    reset_run_locked(false);
+    retry_due_ms_ = 0;
+    status_.pending = false;
+    status_.state = status_.configured ? SleepHqSyncState::Idle
+                                   : SleepHqSyncState::Disabled;
+    publish_runtime_locked();
+    unlock();
+    return true;
+}
+
 void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
     client_.disconnect();
     inventory_session_.reset();

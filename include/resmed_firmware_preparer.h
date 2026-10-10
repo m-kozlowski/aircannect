@@ -78,6 +78,7 @@ public:
                  ResmedFirmwareInstallTransport transport =
                      AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT);
     void cancel();
+    bool set_storage_suspended(bool suspended);
 
     void publish_activity(const ActivitySnapshot &activity);
     void publish_device_identifier(const char *identifier);
@@ -145,6 +146,7 @@ private:
     ColdState *cold_ = nullptr;
 
     std::atomic<bool> cancel_requested_{false};
+    std::atomic<bool> storage_suspended_{false};
     std::atomic<bool> therapy_active_{false};
     std::atomic<bool> ota_install_active_{false};
     uint32_t generation_ = 0;

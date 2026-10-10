@@ -20,10 +20,13 @@ public:
     bool begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port);
     void poll();
+    void set_storage_suspended(bool suspended);
+    bool storage_quiesced() const;
 
     OperationAdmission update(const char *json,
                               size_t length,
                               uint32_t request_id);
+    bool reject_update(uint32_t request_id, const char *error);
 
     const PublishedJsonSnapshot &snapshot() const { return snapshot_; }
     bool ready_for_update() const;
@@ -55,6 +58,7 @@ private:
     LargeTextBuffer writing_json_;
     PublishedJsonSnapshot snapshot_;
     Phase phase_ = Phase::LoadStart;
+    bool storage_suspended_ = false;
     uint32_t preferences_revision_ = 1;
     uint32_t pending_revision_ = 0;
     uint32_t storage_generation_ = 0;

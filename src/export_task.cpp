@@ -171,6 +171,7 @@ void ExportTask::defer_smb_until(uint32_t until_ms) {
 }
 
 bool ExportTask::queue_command(CommandKind kind, const char *day) {
+    if (storage_suspend_requested_.load()) return false;
     if (!runtime_ || kind == CommandKind::None) return false;
     if (kind == CommandKind::SleepHqSyncDay &&
         (!day || !storage_export_is_datalog_day_name(day))) {
@@ -178,6 +179,10 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
     }
     if (!lock_inputs()) return false;
 
+    if (storage_suspend_requested_.load()) {
+        unlock_inputs();
+        return false;
+    }
     if (runtime_->inputs.command.kind != CommandKind::None) {
         const bool same_day = kind != CommandKind::SleepHqSyncDay ||
                               strcmp(runtime_->inputs.command.day, day) == 0;
@@ -630,6 +635,15 @@ void ExportTask::task_entry(void *context) {
     static_cast<ExportTask *>(context)->run();
 }
 
+void ExportTask::set_storage_suspended(bool suspended) {
+    if (storage_suspend_requested_.exchange(suspended) == suspended) return;
+    if (suspended && runtime_) {
+        runtime_->smb.set_runtime_blocked(true);
+        runtime_->sleephq.set_runtime_blocked(true);
+    }
+    wake();
+}
+
 void ExportTask::run() {
     for (;;) {
         PublishedInputs &inputs = runtime_->input_snapshot;
@@ -641,6 +655,23 @@ void ExportTask::run() {
 
         const uint32_t now_ms = millis();
         apply_inputs(inputs, now_ms);
+        if (storage_suspend_requested_.load()) {
+            if (!storage_paused_.load()) {
+                const bool smb = runtime_->smb.release_media();
+                const bool shq = runtime_->sleephq.release_media();
+                if (smb && shq) {
+                    finish_command(inputs.command, false);
+                    if (publish_work_claim()) {
+                        work_reservation_.fetch_and(static_cast<uint8_t>(~EndpointStep));
+                        publish_status();
+                        storage_paused_.store(true);
+                    }
+                }
+            }
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            continue;
+        }
+        storage_paused_.store(false);
         (void)apply_command(inputs.command);
 
         // Block run startup, but still let engines publish due retries and

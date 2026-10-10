@@ -69,6 +69,25 @@ void ReportGenerationCleanup::publish(
     restart_ = true;
 }
 
+bool ReportGenerationCleanup::forget_media() {
+    // The caller has already waited for poll(false) to acknowledge deletion.
+    metadata_.cancel();
+    if (!discard_scan()) return false;
+    catalog_.reset();
+    retired_.clear();
+    pending_.clear();
+    deferred_.clear();
+    entries_.reset();
+    night_cursor_ = 0;
+    entry_cursor_ = 0;
+    day_ = {};
+    restart_ = false;
+    waiting_for_readers_ = false;
+    tracking_failed_ = false;
+    retry_at_ms_ = 0;
+    return true;
+}
+
 void ReportGenerationCleanup::release_readers() {
     const size_t count = retired_.size();
     retired_.erase(std::remove_if(retired_.begin(), retired_.end(),

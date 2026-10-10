@@ -60,6 +60,7 @@ public:
 
     bool poll();
     void cancel();
+    void forget_media();
 
     bool active() const;
     const NightCatalogStoreStatus &status() const { return status_; }

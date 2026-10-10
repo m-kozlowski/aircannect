@@ -69,6 +69,7 @@
 #include "storage_upload_http_controller.h"
 #include "storage_manager.h"
 #include "storage_service.h"
+#include "storage_usb.h"
 #include "status_http_controller.h"
 #include "string_util.h"
 #include "stream_broker.h"
@@ -306,6 +307,7 @@ static bool toggle_therapy(void *, uint32_t now_ms) {
 
 static bool power_off_aircannect(void *, uint32_t) {
     if (!board_power_off_supported() || local_poweroff_requested ||
+        StorageUsb::suspended() ||
         firmware_installer.active() || resmed_ota_manager.active()) {
         return false;
     }
@@ -318,7 +320,8 @@ static bool power_off_aircannect(void *, uint32_t) {
 }
 
 static bool restart_aircannect(void *, uint32_t) {
-    if (firmware_installer.active() || resmed_ota_manager.active()) {
+    if (StorageUsb::suspended() || firmware_installer.active() ||
+        resmed_ota_manager.active()) {
         return false;
     }
 
@@ -575,6 +578,9 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      bool ota_storage_upload_active,
                                      bool therapy_active,
                                      bool as11_rpc_available) {
+    StorageUsb::set_entry_allowed(!therapy_active && !ota_install_active &&
+                                  !local_poweroff_requested &&
+                                  !ota_storage_upload_active && Storage::mounted());
     const bool supports_as11_spools =
         as11_device_service.state().model() == ResmedDeviceModel::AirSense11;
     const bool changed =
@@ -640,6 +646,10 @@ static void publish_runtime_network() {
 
 static void poll_storage_upload_publication() {
     static char pending_path[AC_STORAGE_PATH_MAX] = {};
+    if (StorageUsb::suspended()) {
+        pending_path[0] = '\0';
+        return;
+    }
     if (!pending_path[0]) {
         (void)StorageService::take_uploaded_path(pending_path,
                                                  sizeof(pending_path));
@@ -1506,8 +1516,45 @@ void setup() {
     log_memory_profile_checkpoint("web");
 }
 
+static void poll_usb_storage() {
+    static bool suspended = false;
+    if (!suspended && !StorageUsb::suspended()) return;
+    const StorageUsbState state = StorageUsb::status().state;
+    if (state == StorageUsbState::Preparing && !suspended &&
+        (session_manager.status().state == SessionState::Active ||
+         as11_device_service.state().therapy_state() == As11TherapyState::Running ||
+         local_poweroff_requested ||
+         edf_recorder_manager.status().active || firmware_installer.active() ||
+         resmed_ota_manager.active())) {
+        StorageUsb::reject_entry("therapy or update active");
+        return;
+    }
+
+    if (state == StorageUsbState::Restoring) StorageUsb::resume_local();
+    const bool requested = StorageUsb::suspended();
+    if (!requested && !suspended) return;
+
+    edf_recorder_manager.set_storage_suspended(requested);
+    report_task.set_storage_suspended(requested);
+    export_task.set_storage_suspended(requested);
+    report_preferences_service.set_storage_suspended(requested);
+    const bool repository = resmed_firmware_repository.set_storage_suspended(requested);
+    const bool preparer = resmed_firmware_preparer.set_storage_suspended(requested);
+    const bool http = !requested || report_http_controller.release_media();
+
+    if (requested && !StorageUsb::producers_stopped()) {
+        StorageUsb::set_producers_stopped(
+            edf_recorder_manager.storage_quiesced() &&
+            report_task.storage_quiesced() && export_task.storage_quiesced() &&
+            report_preferences_service.storage_quiesced() &&
+            repository && preparer && http);
+    }
+    suspended = requested || !repository || !preparer;
+}
+
 void loop() {
     const uint32_t now_ms = millis();
+    poll_usb_storage();
     crash_diagnostics.poll();
 
     // RPC and OTA ingress

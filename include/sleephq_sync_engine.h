@@ -102,6 +102,7 @@ public:
 
     // export task
     ExportStep step();
+    bool release_media();
 
     // configuration/gates
     void configure(const SleepHqExportConfig &config);

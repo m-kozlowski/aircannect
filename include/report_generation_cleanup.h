@@ -25,6 +25,7 @@ public:
     // The writer must not reuse an orphan path until storage has stopped
     // deleting it, even after requesting cancellation.
     bool deleting() const { return delete_id_ != 0; }
+    bool forget_media();
 
 private:
     using Retired = std::weak_ptr<const ReportSignalStoreCatalog>;

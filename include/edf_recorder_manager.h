@@ -148,6 +148,8 @@ public:
                StoragePathPort &storage_path,
                ReportSpoolPort &report_spool);
     void poll(uint32_t now_ms);
+    void set_storage_suspended(bool suspended);
+    bool storage_quiesced() const;
 
     // control/status
     void set_enabled(bool enabled);
@@ -449,6 +451,7 @@ private:
 
     // open/recording state
     bool initialized_ = false;
+    bool storage_suspended_ = false;
     bool files_open_ = false;
     bool numeric_files_open_ = false;
     bool recording_gate_open_ = false;

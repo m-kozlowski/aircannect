@@ -1,4 +1,5 @@
 #include "firmware_installer.h"
+#include "storage_usb.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -995,6 +996,10 @@ void FirmwareInstaller::http_response_closed() {
 }
 
 void FirmwareInstaller::schedule_reboot(uint32_t delay_ms) {
+    if (StorageUsb::suspended()) {
+        Log::logf(CAT_OTA, LOG_WARN, "reboot rejected: SD is assigned to USB");
+        return;
+    }
     if (!lock()) return;
     reboot_at_ms_ = millis() + delay_ms;
     if (!reboot_at_ms_) reboot_at_ms_ = 1;
@@ -1177,6 +1182,7 @@ bool FirmwareInstaller::apply_wire_progress(size_t bytes) {
 }
 
 bool FirmwareInstaller::source_available_locked() const {
+    if (StorageUsb::suspended()) return false;
     const bool busy = status_.source_reserved || status_.prepare_pending ||
                       status_.prepared || status_.writing || status_.ready ||
                       status_.reboot_pending;

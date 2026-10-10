@@ -229,6 +229,8 @@ public:
                StorageRangeWritePort &range_write_port,
                StorageStatusPort &status_port,
                StorageDeletePort *delete_port = nullptr);
+    void set_storage_suspended(bool suspended);
+    bool storage_quiesced() const;
 
     OperationAdmission request_night(
         SleepDayId sleep_day,

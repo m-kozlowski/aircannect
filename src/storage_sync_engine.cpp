@@ -150,6 +150,23 @@ bool StorageSyncEngine::config_matches_locked(
            strcmp(active.password, config.password) == 0;
 }
 
+bool StorageSyncEngine::release_media() {
+    if (!lock(0)) return false;
+
+    reset_run_locked(false);
+    metadata_loaded_ = false;
+    metadata_save_pending_ = false;
+    pending_metadata_bytes_.reset();
+    retry_due_ms_ = 0;
+    post_therapy_requested_.store(false);
+    status_.pending = false;
+    status_.state = config_.enabled ? StorageSyncState::Idle
+                                   : StorageSyncState::Disabled;
+    publish_runtime_locked();
+    unlock();
+    return true;
+}
+
 void StorageSyncEngine::reset_run_locked(bool keep_status) {
     close_local_locked();
     inventory_session_.reset();

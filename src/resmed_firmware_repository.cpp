@@ -107,7 +107,7 @@ bool ResmedFirmwareRepository::direct_repository_file(
 bool ResmedFirmwareRepository::consume_file_published(const char *path) {
     if (!direct_repository_file(path)) return true;
     if (!lock()) return false;
-    if (publication_phase_ != PublicationPhase::None) {
+    if (storage_suspended_ || publication_phase_ != PublicationPhase::None) {
         unlock();
         return false;
     }
@@ -124,7 +124,7 @@ bool ResmedFirmwareRepository::consume_file_published(const char *path) {
 
 bool ResmedFirmwareRepository::request_remove(const char *path) {
     if (!direct_repository_file(path) || !lock()) return false;
-    if (remove_requested_ || !snapshot_ ||
+    if (storage_suspended_ || remove_requested_ || !snapshot_ ||
         !snapshot_->contains_file(path)) {
         unlock();
         return false;
@@ -571,9 +571,45 @@ void ResmedFirmwareRepository::start_pending_operation() {
 
 void ResmedFirmwareRepository::poll() {
     if (!scan_port_ || !read_port_ || !path_port_ || !mutex_) return;
+    if (storage_suspended_) return;
 
     poll_completion();
     if (action_ == Action::None) start_pending_operation();
+}
+
+bool ResmedFirmwareRepository::set_storage_suspended(bool suspended) {
+    if (!lock(0)) return false;
+    if (storage_suspended_ == suspended) {
+        unlock();
+        return true;
+    }
+
+    storage_suspended_ = suspended;
+    if (suspended) {
+        if (ticket_.valid()) {
+            if (action_ == Action::Scan) scan_port_->abandon(ticket_);
+            else if (action_ == Action::ReadPublishedBootId) read_port_->abandon(ticket_);
+            else path_port_->abandon(ticket_);
+        }
+        ticket_ = {};
+        if (publication_prepared_.valid()) {
+            read_port_->release_prepared(publication_prepared_);
+            publication_prepared_ = {};
+        }
+        action_ = Action::None;
+        publication_phase_ = PublicationPhase::None;
+        remove_requested_ = false;
+        snapshot_.reset();
+        status_.entries = 0;
+        directory_ready_ = false;
+    }
+    refresh_requested_ = !suspended;
+    status_.refresh_pending = !suspended;
+    status_.state = ResmedFirmwareRepositoryState::Idle;
+    retry_at_ms_ = 0;
+    advance_status_generation_locked();
+    unlock();
+    return true;
 }
 
 }  // namespace aircannect

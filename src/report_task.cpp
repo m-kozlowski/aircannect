@@ -263,6 +263,10 @@ struct ReportTask::Runtime {
 
     OperationAdmission enqueue(ReportTaskCommand command) {
         if (!lock()) return OperationAdmission::Busy;
+        if (storage_suspend_requested.load()) {
+            unlock();
+            return OperationAdmission::Rejected;
+        }
 
         if (command.kind == ReportTaskCommandKind::Rebuild && rebuild.active) {
             unlock();
@@ -2073,6 +2077,95 @@ struct ReportTask::Runtime {
         unlock();
     }
 
+    bool poll_storage_pause(uint32_t now_ms) {
+        if (!storage_pause_started) {
+            if (!lock(0)) return true;
+
+            command_count = 0;
+            for (auto &command : commands) command = {};
+            rebuild = {};
+            for (auto &failure : failures) failure = {};
+            unlock();
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+            std::atomic_store_explicit(&published,
+                std::shared_ptr<const ReportPublishedState>{},
+                std::memory_order_release);
+#pragma GCC diagnostic pop
+
+            engine.clear();
+            catalog_refresh.cancel();
+            catalog_store.forget_media();
+            capture_sources.forget_media();
+            summary_acquisition.cancel();
+            spool_availability_probe.cancel();
+            signal_tile_backfill.reset();
+            store_catalog_loader.cancel();
+            store_catalog_loader.reset();
+            storage_pause_started = true;
+        }
+
+        bool worked = engine.poll(now_ms, 1);
+        worked = catalog_refresh.poll() || worked;
+        worked = summary_acquisition.poll() || worked;
+        worked = spool_availability_probe.poll() || worked;
+        worked = generation_cleanup.poll(false, now_ms) || worked;
+
+        if (engine.status().state != ReportEngineState::Idle ||
+            catalog_refresh.active() || summary_acquisition.active() ||
+            spool_availability_probe.status().active() ||
+            generation_cleanup.deleting()) return worked;
+
+        if (!storage_paused.load()) {
+            catalog.reset();
+            store_catalog.reset();
+            engine.publish_catalog({});
+            engine.publish_store_catalog({});
+            summary_acquisition.seed({});
+            if (!generation_cleanup.forget_media()) return worked;
+            rebuild_catalog.reset();
+            rebuild_ticket = {};
+            pending_catalog_save.reset();
+            pending_source_update.reset();
+            pending_catalog_save_source_change = false;
+            pending_catalog_save_post_therapy = false;
+            pending_refresh = {};
+            refresh_generation = 0;
+            refresh_post_therapy = false;
+            refresh_source_change = false;
+            store_purpose = CatalogStorePurpose::None;
+            post_therapy_build = {};
+            capture_input.reset();
+            capture_progress.reset();
+            capture_attempt_progress.reset();
+            capture_build = {};
+            capture_session = {};
+            capture_checked_revision = 0;
+            capture_sources_pending = false;
+            signal_tile_backfill_started = false;
+            source_change_count = 0;
+            store_catalog_load_pending = false;
+            catalog_generation = 0;
+            durable_catalog_generation = 0;
+            catalog_store_retry_at_ms = 0;
+            catalog_refresh_retry_at_ms = 0;
+            store_catalog_load_retry_at_ms = 0;
+            reset_background_pass();
+            invalidate_spool_availability();
+            observed_engine_completion = {};
+            display_summary = {};
+            (void)publish_state();
+            storage_paused.store(true);
+            publish_status();
+        }
+        return worked;
+    }
+
+    std::atomic<bool> storage_suspend_requested{false};
+    std::atomic<bool> storage_paused{false};
+    bool storage_pause_started = false;
+
     ReportArtifactRequest build_slots[AC_REPORT_TASK_BUILD_CAPACITY] = {};
     ReportEngine engine;
     ReportSummaryAcquisition summary_acquisition;
@@ -2317,6 +2410,17 @@ bool ReportTask::begin(StorageReadPort &read_port,
     }
 #endif
     return runtime_->initialized;
+}
+
+void ReportTask::set_storage_suspended(bool suspended) {
+    if (!runtime_) return;
+    if (runtime_->storage_suspend_requested.exchange(suspended) != suspended) {
+        runtime_->wake();
+    }
+}
+
+bool ReportTask::storage_quiesced() const {
+    return !runtime_ || runtime_->storage_paused.load();
 }
 
 OperationAdmission ReportTask::request_rebuild(
@@ -2597,6 +2701,25 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (!runtime_ || !runtime_->initialized) return false;
     Runtime &runtime = *runtime_;
     runtime.last_step_ms = now_ms;
+
+    if (runtime.storage_suspend_requested.load()) {
+        return runtime.poll_storage_pause(now_ms);
+    }
+    if (runtime.storage_pause_started) {
+        // Drop notifications captured before the host's edits. Discovery and
+        // loading now establish the new card contents, not saved RAM cursors.
+        if (!runtime.lock(0)) return false;
+        runtime.pending_capture = {};
+        runtime.capture_pending = false;
+        runtime.pending_session_ended = {};
+        runtime.pending_source_change_count = 0;
+        runtime.unlock();
+        runtime.storage_pause_started = false;
+        runtime.storage_paused.store(false);
+        runtime.catalog_load_pending = true;
+        runtime.reconcile_deadline_initialized = true;
+        runtime.schedule_reconcile(now_ms, false);
+    }
 
     bool worked = runtime.apply_pending_refresh_inputs(now_ms);
     worked = runtime.apply_pending_source_changes() || worked;

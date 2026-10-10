@@ -102,7 +102,7 @@ bool ResmedFirmwarePreparer::request(const char *path,
         !storage_user_path_valid(path) || !lock(100)) {
         return false;
     }
-    if (task_ || cold_->result_pending || therapy_active_.load() ||
+    if (storage_suspended_.load() || task_ || cold_->result_pending || therapy_active_.load() ||
         ota_install_active_.load()) {
         unlock();
         return false;
@@ -161,6 +161,22 @@ void ResmedFirmwarePreparer::cancel() {
         cancel_requested_.store(false, std::memory_order_release);
     }
     unlock();
+}
+
+bool ResmedFirmwarePreparer::set_storage_suspended(bool suspended) {
+    storage_suspended_.store(suspended);
+    if (!suspended || !cold_) return true;
+    if (!lock(0)) return false;
+
+    const bool idle = task_ == nullptr;
+    if (idle) {
+        cold_->result_pending = false;
+        cold_->request = {};
+        cold_->result = {};
+        cold_->status = {};
+    }
+    unlock();
+    return idle;
 }
 
 void ResmedFirmwarePreparer::publish_activity(
@@ -623,7 +639,8 @@ void ResmedFirmwarePreparer::cleanup_path(const char *path) {
 }
 
 bool ResmedFirmwarePreparer::should_abort() const {
-    return cancel_requested_.load(std::memory_order_acquire) ||
+    return storage_suspended_.load() ||
+           cancel_requested_.load(std::memory_order_acquire) ||
            therapy_active_.load(std::memory_order_acquire) ||
            ota_install_active_.load(std::memory_order_acquire);
 }

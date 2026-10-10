@@ -23,6 +23,7 @@ public:
     void poll(uint32_t now_ms);
 
     bool completed(EdfSessionMetadataPublication publication) const;
+    bool idle() const { return pending_.empty() && active_.generation == 0; }
     const char *last_error() const { return last_error_; }
 
 private:

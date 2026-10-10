@@ -31,6 +31,7 @@ public:
                ReportPreferencesService &preferences,
                StorageStreamPort &stream_port);
     void poll();
+    bool release_media();
     void register_routes(HttpRouteRegistry &server) override;
 
     const PublishedJsonSnapshot &completion_snapshot() const {
@@ -51,6 +52,7 @@ private:
     struct PendingResponses;
     struct PreferenceCommand {
         uint32_t request_id = 0;
+        uint32_t media_revision = 0;
         std::string body;
     };
 

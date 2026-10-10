@@ -176,7 +176,25 @@ bool ReportPreferencesService::begin(StorageReadPort &read_port,
 }
 
 bool ReportPreferencesService::ready_for_update() const {
-    return phase_ == Phase::Ready;
+    return !storage_suspended_ && phase_ == Phase::Ready;
+}
+
+void ReportPreferencesService::set_storage_suspended(bool suspended) {
+    if (storage_suspended_ == suspended) return;
+
+    storage_suspended_ = suspended;
+    if (!suspended) {
+        loader_.reset();
+        phase_ = Phase::LoadStart;
+        snapshot_dirty_ = true;
+    } else if (phase_ == Phase::LoadStart || phase_ == Phase::Loading) {
+        loader_.cancel();
+        phase_ = Phase::Ready;
+    }
+}
+
+bool ReportPreferencesService::storage_quiesced() const {
+    return storage_suspended_ && phase_ == Phase::Ready;
 }
 
 uint32_t ReportPreferencesService::next_storage_generation() {
@@ -254,7 +272,7 @@ bool ReportPreferencesService::prepare_update(const char *json,
 OperationAdmission ReportPreferencesService::update(const char *json,
                                                     size_t length,
                                                     uint32_t request_id) {
-    if (phase_ != Phase::Ready) return OperationAdmission::Busy;
+    if (!ready_for_update()) return OperationAdmission::Busy;
     if (!json || length == 0 || length > REPORT_PREFERENCES_MAX_BYTES ||
         request_id == 0) {
         return OperationAdmission::Rejected;
@@ -271,6 +289,15 @@ OperationAdmission ReportPreferencesService::update(const char *json,
     update_error_[0] = '\0';
     phase_ = Phase::WriteStart;
     return OperationAdmission::Accepted;
+}
+
+bool ReportPreferencesService::reject_update(uint32_t request_id,
+                                             const char *error) {
+    if (phase_ != Phase::Ready) return false;
+
+    update_request_id_ = request_id;
+    complete_update(false, error);
+    return true;
 }
 
 void ReportPreferencesService::complete_update(bool success,

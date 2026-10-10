@@ -1,4 +1,6 @@
 #include "storage_service.h"
+#include "storage_access.h"
+#include "storage_usb.h"
 
 #include <algorithm>
 #include <atomic>
@@ -29,6 +31,7 @@
 #include "storage_delete_service.h"
 #include "storage_file_log_sink.h"
 #include "storage_internal.h"
+#include "storage_io_diagnostics.h"
 #include "storage_path.h"
 #include "storage_path_service.h"
 #include "storage_range_write_service.h"
@@ -802,6 +805,10 @@ OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
 
     if (!service_state.initialized) begin();
     if (!service_state.available || !lock_queue()) return OperationSubmission::busy();
+    if (!storage_local_requests_enabled.load()) {
+        unlock_queue();
+        return OperationSubmission::rejected();
+    }
 
     const size_t completion_count = read_completion_count_locked();
     if (read_job_count + completion_count >=
@@ -1260,6 +1267,7 @@ bool process_storage_resource_recovery(uint32_t now_ms) {
 }
 
 bool process_mount_recovery(uint32_t now_ms) {
+    if (StorageUsb::suspended()) return false;
     const bool manual_retry = mount_retry_requested.exchange(false);
     const StorageStatus storage = Storage::status();
     if (storage.mounted) {
@@ -2437,6 +2445,131 @@ bool process_job(JobSlot &job) {
     }
 }
 
+bool process_usb_mode() {
+    static uint16_t released = 0;
+    static bool local_released = false;
+    static bool sealing = false;
+    static uint32_t initial_io_errors = 0;
+    if (!StorageUsb::suspended()) {
+        released = 0;
+        local_released = false;
+        sealing = false;
+        return false;
+    }
+    const StorageUsbState state = StorageUsb::status().state;
+    if (state == StorageUsbState::Shared || state == StorageUsbState::Error ||
+        state == StorageUsbState::Restoring) return true;
+    if (!StorageUsb::producers_stopped()) return false;
+    // Cancelling preparation never needs to unmount a still-local filesystem.
+    if (state == StorageUsbState::Returning && !local_released) {
+        released = 0;
+        sealing = false;
+        StorageUsb::restored(Storage::mounted());
+        return true;
+    }
+
+    if (!storage_resources_ready) {
+        StorageUsb::fail("storage resources unavailable");
+        return true;
+    }
+
+    if (!sealing) {
+        initial_io_errors = Storage::io_error_count();
+        sealing = true;
+    }
+    if (state == StorageUsbState::Preparing &&
+        Storage::io_error_count() != initial_io_errors) {
+        StorageUsb::fail("I/O error while closing local files");
+        return true;
+    }
+    StorageUsb::seal_local_requests();
+    if (!local_released) {
+        if (!lock_queue(0)) return true;
+        const bool edf_drained = queued == 0 && !processing_job;
+        unlock_queue();
+        if (!edf_drained) return false;
+
+        if (!released) {
+            (void)process_close_all();
+            const bool overview_released = edf_overview.release_media();
+            publish_edf_overview();
+            if (!overview_released) return true;
+        }
+        for (size_t i = 0; i < AC_STORAGE_PREPARED_READ_CAPACITY; ++i) {
+            finish_read_job(i, OperationOutcome::cancelled(), "storage_usb");
+        }
+
+        if (!lock_queue(0)) return true;
+        const bool reads_drained = read_job_count == 0;
+        unlock_queue();
+        if (!reads_drained) return true;
+
+        const auto release = [&](unsigned bit, auto &service) {
+            if (!(released & (1u << bit)) && service.release_media()) {
+                released |= 1u << bit;
+            }
+        };
+        release(0, scan_service);
+        release(1, browser_service);
+        release(2, archive_service);
+        release(3, delete_service);
+        release(4, upload_service);
+        release(5, stream_service);
+        release(6, atomic_write_service);
+        release(7, range_write_service);
+        release(8, path_service);
+        release(9, file_log_sink);
+
+        if (released != 0x3ff) {
+            if (!(released & (1u << 6))) {
+                (void)atomic_write_service.step(StorageAtomicWriteLane::Foreground);
+                (void)atomic_write_service.step(StorageAtomicWriteLane::Maintenance);
+            }
+            if (!(released & (1u << 7))) {
+                (void)range_write_service.step(StorageAtomicWriteLane::Foreground);
+                (void)range_write_service.step(StorageAtomicWriteLane::Maintenance);
+            }
+            if (!(released & (1u << 8))) (void)path_service.step();
+            if (!(released & (1u << 9))) (void)file_log_sink.step();
+            return true;
+        }
+        const bool flushed = Storage::finish_write_handles();
+        if (state == StorageUsbState::Preparing &&
+            (!flushed || Storage::io_error_count() != initial_io_errors)) {
+            StorageUsb::fail("I/O error while closing local files");
+            return true;
+        }
+
+        // Never replay pre-USB file positions into report capture after remount.
+        if (!lock_queue(0)) return true;
+        published_edf_progress.reset();
+        for (auto &change : pending_report_source_changes) change = {};
+        pending_report_source_change_count = 0;
+        unlock_queue();
+        if (edf_progress_state) {
+            for (auto &file : edf_progress_state->files) file = {};
+            edf_progress_dirty = true;
+        }
+        local_released = true;
+    }
+
+    if (state == StorageUsbState::Preparing) {
+        (void)StorageUsb::share();
+    } else if (StorageUsb::poll()) {
+        const bool mounted = Storage::mounted() || Storage::retry_mount();
+        if (mounted) recover_str_storage_artifacts();
+        if (mounted) {
+            // Reset before publishing return: a new request may arrive before
+            // this task gets another turn in Local state.
+            released = 0;
+            local_released = false;
+            sealing = false;
+        }
+        StorageUsb::restored(mounted);
+    }
+    return true;
+}
+
 void task_entry(void *) {
     initialize_edf_progress();
     publish_edf_progress();
@@ -2448,6 +2581,15 @@ void task_entry(void *) {
     for (;;) {
         bool did_work = false;
         const uint32_t now_ms = millis();
+        if (process_usb_mode()) {
+            const auto state = StorageUsb::status().state;
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(
+                state == StorageUsbState::Preparing ||
+                state == StorageUsbState::Returning ? 10 : 1000));
+            batch_started_us = micros();
+            batch_steps = 0;
+            continue;
+        }
         if (process_mount_recovery(now_ms) ||
             process_storage_resource_recovery(now_ms)) {
             did_work = true;
@@ -2569,6 +2711,11 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
         return EdfStorageEnqueueResult::Busy;
     }
 
+    if (!storage_local_requests_enabled.load()) {
+        unlock_queue();
+        return EdfStorageEnqueueResult::Rejected;
+    }
+
     if (free_slots() == 0) {
         unlock_queue();
         if (report_busy) {
@@ -2629,6 +2776,7 @@ void begin() {
         service_state.available = false;
         return;
     }
+    StorageUsb::begin(wake_service_task);
 
     storage_resources_ready = initialize_storage_resources();
     storage_resource_retry_attempt = 0;
@@ -2690,6 +2838,7 @@ bool set_report_source_change_callback(ReportSourceChangeCallback callback,
 }
 
 bool request_mount() {
+    if (StorageUsb::suspended()) return false;
     if (!service_state.initialized || !service_state.available) return false;
 
     bool expected = false;
@@ -2989,6 +3138,7 @@ StorageWorkloadSnapshot workload_snapshot() {
 
 StorageAdmissionResult storage_request_admission(
     StorageAdmissionKind kind) {
+    if (StorageUsb::suspended()) return StorageAdmissionResult::Busy;
     const StorageAdmissionResult availability =
         storage_request_availability(
             Storage::mounted(),

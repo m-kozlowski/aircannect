@@ -46,6 +46,7 @@ public:
                StorageReadPort &read_port,
                StoragePathPort &path_port);
     void poll();
+    bool set_storage_suspended(bool suspended);
 
     bool request_refresh(bool foreground = true);
     bool request_remove(const char *path);
@@ -108,6 +109,7 @@ private:
     std::atomic<uint32_t> status_generation_{0};
     std::shared_ptr<const ResmedFirmwareCatalogSnapshot> snapshot_;
     ActivitySnapshot activity_;
+    bool storage_suspended_ = false;
     bool refresh_requested_ = true;
     bool foreground_refresh_ = false;
     uint32_t refresh_generation_ = 1;
