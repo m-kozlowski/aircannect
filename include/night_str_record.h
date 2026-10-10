@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "report_daily_metrics.h"
+#include "report_daily_statistics.h"
 #include "sleep_day_id.h"
 #include "report_therapy_settings.h"
 #include "resmed_device_model.h"
@@ -21,6 +22,7 @@ struct NightStrRecord {
     SleepDayId sleep_day;
     ReportDailyMetrics metrics;
     ReportTherapySettings settings;
+    ReportDailyStatistics statistics;
     uint64_t source_identity = 0;
     uint8_t mask_window_count = 0;
     NightStrMaskWindow mask_windows[AC_NIGHT_STR_MASK_WINDOW_MAX] = {};

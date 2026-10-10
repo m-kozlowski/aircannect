@@ -73,7 +73,8 @@ struct ReportMetricStatistics {
 };
 
 struct ReportCalculatedMetrics {
-    static constexpr size_t Count = 8;
+    static constexpr size_t Count = 15;
+    static constexpr int32_t LeakThresholdMilli = 24000;
     ReportMetricStatistics pressure;
     ReportMetricStatistics ipap;
     ReportMetricStatistics leak;
@@ -82,6 +83,15 @@ struct ReportCalculatedMetrics {
     ReportMetricStatistics tidal_volume;
     ReportMetricStatistics spo2;
     ReportMetricStatistics epap;
+    ReportMetricStatistics flow_limitation;
+    ReportMetricStatistics snore;
+    ReportMetricStatistics inspiration_time;
+    ReportMetricStatistics expiration_time;
+    ReportMetricStatistics ie_ratio;
+    ReportMetricStatistics target_ventilation;
+    ReportMetricStatistics pulse;
+    uint64_t leak_recorded_ms = 0;
+    uint64_t leak_above_threshold_ms = 0;
 
     ReportMetricStatistics &at(size_t index);
     const ReportMetricStatistics &at(size_t index) const;
@@ -98,7 +108,9 @@ public:
 
     bool begin(uint32_t signal_mask);
     bool begin(const ReportReadPlan &plan);
-    void accept(ReportSignalId signal, int32_t value_milli);
+    void accept(ReportSignalId signal, int32_t value_milli,
+                uint32_t duration_ms = 0);
+    void accept_expiration_time(int32_t value_milli);
     ReportCalculatedMetrics finish() const;
 
     std::shared_ptr<const LargeByteBuffer> snapshot() const;

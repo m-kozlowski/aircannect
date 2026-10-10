@@ -72,7 +72,7 @@ public:
                                const ReportSeriesDescriptor &series,
                                const ReportSeriesSample &sample) = 0;
 
-    // EDF-only fast path. The span is borrowed until this call returns;
+    // EDF-only fast path. The span's bytes remain borrowed until end_record();
     // the default preserves existing sinks by adapting valid words to the
     // sample contract. Fallback decoding continues through accept_series().
     virtual bool accept_series_span(
@@ -92,6 +92,11 @@ public:
         }
         return true;
     }
+
+    // Called after all mappings of one numeric EDF record, before releasing
+    // its bytes. Allows the owner to combine contemporaneous signal samples.
+    virtual bool end_record() { return true; }
+
     virtual bool accept_event(uint16_t session_index,
                               const ReportEventRecord &event) = 0;
 

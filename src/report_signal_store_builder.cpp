@@ -167,6 +167,12 @@ struct ReportSignalStoreBuilder::Runtime {
     uint32_t store_generation = 0;
     ReportMetricAccumulator metrics;
     ReportMetricAccumulator closed_metrics;
+    struct BreathSpan {
+        EdfReportSeriesSpan samples;
+        size_t track = SIZE_MAX;
+    };
+    std::vector<BreathSpan, LargeAllocator<BreathSpan>> inspiration_spans;
+    std::vector<BreathSpan, LargeAllocator<BreathSpan>> ie_spans;
     int64_t closed_before_ms = 0;
     uint8_t checkpoint_slot = 1;
     ReportBuildCheckpointInput previous_checkpoint;
@@ -214,6 +220,8 @@ struct ReportSignalStoreBuilder::Runtime {
 
         metrics.clear();
         closed_metrics.clear();
+        decltype(inspiration_spans)().swap(inspiration_spans);
+        decltype(ie_spans)().swap(ie_spans);
         closed_before_ms = 0;
         checkpoint_slot = 1;
         previous_checkpoint = {};
@@ -360,10 +368,16 @@ struct ReportSignalStoreBuilder::Runtime {
                           edf_report_physical_value_milli(
                               *scale, edf_read_i16_le_sample(raw_bytes, i)))
                     : single_canonical_value;
+                const int64_t timestamp = first_timestamp_ms +
+                    static_cast<int64_t>(i) * series.sample_interval_ms;
+                const uint32_t duration = static_cast<uint32_t>(std::min<int64_t>(
+                    series.sample_interval_ms,
+                    plan->session(session_index)->output_window.end_ms - timestamp));
+
                 if (i < closed_count) {
-                    closed_metrics.accept(series.signal, canonical_value);
+                    closed_metrics.accept(series.signal, canonical_value, duration);
                 } else {
-                    work.tail_metrics->accept(series.signal, canonical_value);
+                    work.tail_metrics->accept(series.signal, canonical_value, duration);
                 }
             }
         }
@@ -921,6 +935,18 @@ bool ReportSignalStoreBuilder::accept_series_span(
         return false;
     }
 
+    if (series.signal == ReportSignalId::InspiratoryDuration ||
+        series.signal == ReportSignalId::IeRatio) {
+        auto &spans = series.signal == ReportSignalId::InspiratoryDuration
+            ? runtime_->inspiration_spans : runtime_->ie_spans;
+        try {
+            spans.push_back({span, runtime_->last_track});
+        } catch (const std::bad_alloc &) {
+            failure_reason_ = "report_signal_store_breath_allocation_failed";
+            return false;
+        }
+    }
+
     const bool regular = static_cast<uint64_t>(span.samples_per_record) *
             series.sample_interval_ms == span.record_duration_ms;
     if (!regular) {
@@ -1213,6 +1239,62 @@ bool ReportSignalStoreBuilder::flush_lod(bool *progressed) {
     return true;
 }
 
+bool ReportSignalStoreBuilder::end_record() {
+    const auto &inspiration = runtime_->inspiration_spans;
+    const auto &ratios = runtime_->ie_spans;
+    size_t ti_span = 0;
+    size_t ie_span = 0;
+    size_t t = 0;
+    size_t e = 0;
+    while (ti_span < inspiration.size() && ie_span < ratios.size()) {
+        const auto &ti = inspiration[ti_span].samples;
+        const auto &ie = ratios[ie_span].samples;
+        if (t == ti.sample_count) {
+            ++ti_span;
+            t = 0;
+            continue;
+        }
+        if (e == ie.sample_count) {
+            ++ie_span;
+            e = 0;
+            continue;
+        }
+
+        const int64_t timestamp = ti.timestamp_at(t);
+        const int64_t other_timestamp = ie.timestamp_at(e);
+        if (timestamp < other_timestamp) { ++t; continue; }
+        if (timestamp > other_timestamp) { ++e; continue; }
+
+        if (!ti.missing_at(t) && !ie.missing_at(e)) {
+            const int32_t inspiration_ms = ti.value_milli_at(t);
+            const int32_t ratio = ie.value_milli_at(e);
+            if (inspiration_ms > 0 && ratio > 0) {
+                // I:E is percent: 100 means Ti == Te. Both inputs are milli-units.
+                const int64_t expiration =
+                    (static_cast<int64_t>(inspiration_ms) * 100000 + ratio / 2) / ratio;
+                if (expiration <= INT32_MAX) {
+                    if (timestamp < runtime_->closed_before_ms) {
+                        runtime_->closed_metrics.accept_expiration_time(expiration);
+                    } else {
+                        TrackWork &work = runtime_->tracks[inspiration[ti_span].track];
+                        if (!runtime_->prepare_tail(work)) {
+                            failure_reason_ = "report_signal_store_tail_allocation_failed";
+                            return false;
+                        }
+                        work.tail_metrics->accept_expiration_time(expiration);
+                    }
+                }
+            }
+        }
+        ++t;
+        ++e;
+    }
+
+    runtime_->inspiration_spans.clear();
+    runtime_->ie_spans.clear();
+    return true;
+}
+
 bool ReportSignalStoreBuilder::accept_event(
     uint16_t session_index,
     const ReportEventRecord &event) {
@@ -1415,6 +1497,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     }
     night.statistics = runtime_->metrics.finish();
     night.settings = runtime_->plan->night().settings;
+    night.daily_statistics = runtime_->plan->night().statistics;
     report_night_complete_metrics(
         night.metrics,
         night.events,

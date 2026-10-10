@@ -184,6 +184,7 @@ struct ReportSignalStoreNight {
     ReportNightMetrics metrics;
     ReportCalculatedMetrics statistics;
     ReportTherapySettings settings;
+    ReportDailyStatistics daily_statistics;
     ReportEventCounts events;
     const NightCatalogTimeRange *sessions = nullptr;
     size_t session_count = 0;
@@ -250,9 +251,12 @@ private:
 class ReportSignalStoreNightCodec {
 public:
     static constexpr size_t MaxBytes = 64 * 1024;
-    static constexpr uint16_t Version = 4;
-    static constexpr size_t HeaderBytes = 232 + ReportCalculatedMetrics::Count * 24 +
-        ReportTherapySettings::WireBytes;
+    static constexpr uint16_t Version = 5;
+    static constexpr size_t ExtraStatisticsOffset = 520;
+    static constexpr size_t LeakDurationOffset = ExtraStatisticsOffset +
+        (ReportCalculatedMetrics::Count - 8) * 24;
+    static constexpr size_t DailyStatisticsOffset = LeakDurationOffset + 24;
+    static constexpr size_t HeaderBytes = DailyStatisticsOffset + ReportDailyStatistics::WireBytes;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t TrackBytes = 88;
 

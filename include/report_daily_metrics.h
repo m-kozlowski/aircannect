@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "report_proto.h"
+#include "report_daily_statistics.h"
 
 namespace aircannect {
 
@@ -65,6 +66,7 @@ bool report_daily_metrics_from_summary(const ReportSummaryRecord &record,
                                        ReportDailyMetrics &out);
 bool report_daily_metrics_from_str_record(const uint8_t *record,
                                           size_t len,
-                                          ReportDailyMetrics &out);
+                                          ReportDailyMetrics &out,
+                                          ReportDailyStatistics &statistics);
 
 }  // namespace aircannect

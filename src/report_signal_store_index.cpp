@@ -46,7 +46,8 @@ int64_t get_i64(const uint8_t *in) {
 void encode_night_details(uint8_t *bytes, const ReportSignalStoreNight &night) {
     for (size_t i = 0; i < ReportCalculatedMetrics::Count; ++i) {
         const auto &stat = night.statistics.at(i);
-        uint8_t *out = bytes + 232 + i * 24;
+        uint8_t *out = bytes + (i < 8 ? 232 + i * 24
+            : ReportSignalStoreNightCodec::ExtraStatisticsOffset + (i - 8) * 24);
         put_le32(out, (stat.valid ? 1u : 0u) | (stat.extrema_valid ? 2u : 0u));
         put_i32(out + 4, stat.min_milli);
         put_i32(out + 8, stat.mean_milli);
@@ -54,7 +55,12 @@ void encode_night_details(uint8_t *bytes, const ReportSignalStoreNight &night) {
         put_i32(out + 16, stat.p95_milli);
         put_i32(out + 20, stat.max_milli);
     }
-    night.settings.encode(bytes + 232 + ReportCalculatedMetrics::Count * 24);
+    night.settings.encode(bytes + 424);
+    uint8_t *leak = bytes + ReportSignalStoreNightCodec::LeakDurationOffset;
+    put_le64(leak, night.statistics.leak_recorded_ms);
+    put_le64(leak + 8, night.statistics.leak_above_threshold_ms);
+    put_i32(leak + 16, ReportCalculatedMetrics::LeakThresholdMilli);
+    night.daily_statistics.encode(bytes + ReportSignalStoreNightCodec::DailyStatisticsOffset);
 }
 
 void set_bit(uint8_t *bitmap, size_t index) {
@@ -383,6 +389,7 @@ bool ReportSignalStoreNightCodec::decode(
     const size_t header_bytes = get_le16(bytes + 10);
     if (!((version == 2 && header_bytes == 224) ||
           (version == 3 && header_bytes == 232) ||
+          (version == 4 && header_bytes == 520) ||
           (version == Version && header_bytes == HeaderBytes)) ||
         length < header_bytes) {
         return false;
@@ -399,8 +406,10 @@ bool ReportSignalStoreNightCodec::decode(
         night.rejected_source_revision = SourceRevision(get_le64(bytes + 224));
     }
     if (version >= 4) {
-        for (size_t i = 0; i < ReportCalculatedMetrics::Count; ++i) {
-            const uint8_t *in = bytes + 232 + i * 24;
+        const size_t count = version == 4 ? 8 : ReportCalculatedMetrics::Count;
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t *in = bytes + (i < 8 ? 232 + i * 24
+                : ExtraStatisticsOffset + (i - 8) * 24);
             const uint32_t flags = get_le32(in);
             if (flags > 3 || flags == 2) return false;
 
@@ -414,9 +423,16 @@ bool ReportSignalStoreNightCodec::decode(
             stat.max_milli = get_i32(in + 20);
             if (stat.extrema_valid && stat.min_milli > stat.max_milli) return false;
         }
-        if (!night.settings.decode(bytes + 232 + ReportCalculatedMetrics::Count * 24)) {
+        if (!night.settings.decode(bytes + 424)) {
             return false;
         }
+    }
+    if (version >= 5) {
+        night.statistics.leak_recorded_ms = get_le64(bytes + LeakDurationOffset);
+        night.statistics.leak_above_threshold_ms = get_le64(bytes + LeakDurationOffset + 8);
+        if (night.statistics.leak_above_threshold_ms > night.statistics.leak_recorded_ms ||
+            get_i32(bytes + LeakDurationOffset + 16) != ReportCalculatedMetrics::LeakThresholdMilli ||
+            !night.daily_statistics.decode(bytes + DailyStatisticsOffset)) return false;
     }
     night.day_start_ms = get_i64(bytes + 32);
     night.day_end_ms = get_i64(bytes + 40);

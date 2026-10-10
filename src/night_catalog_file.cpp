@@ -36,9 +36,12 @@ constexpr uint8_t FILE_MAGIC_V14[8] = {
 constexpr uint8_t FILE_MAGIC_V15[8] = {
     'A', 'C', 'N', 'C', 'A', 'T', '1', '5',
 };
+constexpr uint8_t FILE_MAGIC_V16[8] = {
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '6',
+};
 
 constexpr size_t RECORD_BYTES_V11 = 120;
-constexpr size_t RECORD_BYTES = 176 + ReportTherapySettings::WireBytes;
+constexpr size_t RECORD_BYTES = 272 + ReportDailyStatistics::WireBytes;
 constexpr size_t RANGE_BYTES = 16;
 constexpr size_t FILE_BYTES = 96;
 constexpr size_t COVERAGE_BYTES = 24;
@@ -529,6 +532,7 @@ void encode_record(uint8_t *out, const NightCatalogRecord &record) {
                  ? record.timezone_offset_minutes
                  : TIMEZONE_OFFSET_MISSING));
     record.settings.encode(out + 176);
+    record.statistics.encode(out + 272);
 }
 
 bool decode_record(const uint8_t *in,
@@ -583,6 +587,7 @@ bool decode_record(const uint8_t *in,
     if (legacy) decode_metrics_v11(in + 64, record.metrics);
     else decode_metrics(in + 64, record.metrics);
     if (version >= 15 && !record.settings.decode(in + 176)) return false;
+    if (version >= 16 && !record.statistics.decode(in + 272)) return false;
     return true;
 }
 
@@ -793,16 +798,17 @@ bool parse_header(const uint8_t *header,
     const uint16_t version = get_le16(header + 8);
     const bool legacy = version == NightCatalogFileCodec::LegacyVersion;
     const uint16_t record_bytes = legacy ? RECORD_BYTES_V11 :
-        version < 15 ? 176 : RECORD_BYTES;
+        version < 15 ? 176 : version == 15 ? 272 : RECORD_BYTES;
     const uint16_t revision_policy = legacy
         ? SOURCE_REVISION_POLICY_V11
         : NIGHT_CATALOG_SOURCE_REVISION_POLICY;
     const uint8_t *magic = legacy ? FILE_MAGIC_V11
         : version == 12 ? FILE_MAGIC_V12
         : version == 13 ? FILE_MAGIC_V13
-        : version == 14 ? FILE_MAGIC_V14 : FILE_MAGIC_V15;
+        : version == 14 ? FILE_MAGIC_V14
+        : version == 15 ? FILE_MAGIC_V15 : FILE_MAGIC_V16;
 
-    if ((!legacy && version != 12 && version != 13 && version != 14 &&
+    if ((!legacy && version != 12 && version != 13 && version != 14 && version != 15 &&
          version != NightCatalogFileCodec::Version) ||
         memcmp(header, magic, sizeof(FILE_MAGIC_V11)) != 0 ||
         get_le16(header + 12) != record_bytes ||
@@ -993,7 +999,7 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         return {};
     }
 
-    memcpy(header, FILE_MAGIC_V15, sizeof(FILE_MAGIC_V15));
+    memcpy(header, FILE_MAGIC_V16, sizeof(FILE_MAGIC_V16));
     put_le16(header + 8, Version);
     put_le16(header + 10, HeaderBytes);
     put_le16(header + 12, RECORD_BYTES);

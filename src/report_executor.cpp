@@ -420,6 +420,10 @@ bool ReportExecutor::decode_record() {
                 return false;
             }
         }
+        if (!sink_->end_record()) {
+            finish(ReportExecutorState::Failed, ReportExecutorError::SinkRejected);
+            return false;
+        }
     } else {
         if (!operation_context.event_source_valid) {
             finish(ReportExecutorState::Failed,

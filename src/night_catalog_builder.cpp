@@ -31,6 +31,7 @@ struct BuildNight {
     int64_t day_end_ms = 0;
     ReportDailyMetrics str_metrics;
     ReportTherapySettings settings;
+    ReportDailyStatistics statistics;
     ReportDailyMetrics summary_metrics;
     uint64_t summary_identity = 0;
     int32_t timezone_offset_minutes = 0;
@@ -854,6 +855,7 @@ bool ingest_str(const NightCatalogBuildInput &input,
 
     night->str_metrics = source.record.metrics;
     night->settings = source.record.settings;
+    night->statistics = source.record.statistics;
     night->has_str = true;
     return true;
 }
@@ -1058,6 +1060,13 @@ uint64_t calculate_revision(const NightCatalog &catalog,
     hash = hash_float(hash, record.metrics.spo2_median_percent);
     hash = hash_u32(hash, record.metrics.spo2_threshold_minutes);
     hash = hash_u32(hash, record.metrics.csr_minutes);
+    for (size_t i = 0; i < ReportDailyStatistics::Count; ++i) {
+        const auto &row = record.statistics.rows[i];
+        if (!row.valid_mask) continue;
+        hash = hash_u32(hash, i);
+        hash = hash_u32(hash, row.valid_mask);
+        for (int32_t value : row.values) hash = hash_u32(hash, value);
+    }
 
     if ((record.source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) != 0) {
         hash = hash_u64(hash, record.summary_identity);
@@ -1307,6 +1316,7 @@ struct NightCatalogBuilder::Runtime {
 
         if (source.has_str) {
             record.settings = source.settings;
+            record.statistics = source.statistics;
             (void)apply_metrics(record.metrics,
                                 source.str_metrics,
                                 NightCatalogMetricSource::Str,

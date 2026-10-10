@@ -2032,6 +2032,9 @@
           stats[key] = {mean: values[0], median: values[1], p95: values[2]};
         }
       });
+      Object.entries(result && result.daily_statistics || {}).forEach(([key, stat]) => {
+        if (!(result.statistics && result.statistics[key])) stats[key] = {...stats[key], ...stat};
+      });
       return stats;
     }
 
@@ -2229,11 +2232,15 @@
       body.replaceChildren();
       const stats = reportStatistics(result);
       const rows = [["pressure", "Pressure (IPAP)", "cmH2O", 1], ["epap", "EPAP", "cmH2O", 1],
-        ["leak", "Leak", "L/min", 1], ["respiratory_rate", "Resp. rate", "/min", 1],
+        ["leak", "Leak", "L/min", 1], ["flow_limitation", "Flow limitation", "", 1],
+        ["snore", "Snore", "", 1], ["respiratory_rate", "Resp. rate", "/min", 1],
         ["tidal_volume", "Tidal volume", "mL", 1000], ["minute_ventilation", "Minute vent.", "L/min", 1],
-        ["spo2", "SpO2", "%", 1]];
+        ["target_ventilation", "Target vent.", "L/min", 1],
+        ["inspiration_time", "Insp. time", "s", 1], ["expiration_time", "Exp. time", "s", 1],
+        ["ie_ratio", "I:E", "", 0.01],
+        ["spo2", "SpO2", "%", 1], ["pulse", "Pulse", "bpm", 1]];
       rows.forEach(([key, label, unit, scale]) => {
-        if (key === "spo2" && !stats[key]) return;
+        if ((key === "spo2" || key === "pulse") && !stats[key]) return;
         const row = body.insertRow();
         const cell = row.insertCell();
         cell.textContent = label;
@@ -2243,9 +2250,23 @@
 
         ["min", "mean", "median", "p95", "max"].forEach((field) => {
           const value = reportNumber(stats[key] && stats[key][field]);
-          row.insertCell().textContent = value === null ? "--" : (value * scale).toFixed(scale === 1000 ? 0 : 2);
+          row.insertCell().textContent = value === null ? "--"
+            : (value * scale).toFixed(scale === 1000 ? 0 : 2) + (key === "ie_ratio" ? ":1" : "");
         });
       });
+
+      const leak = result && result.leak_duration;
+      const footer = document.getElementById("reportLeakDuration");
+      if (footer) {
+        footer.hidden = !leak || !leak.recorded_ms;
+        if (!footer.hidden) {
+          const seconds = Math.floor(leak.above_ms / 1000);
+          footer.textContent = "Leak > " + leak.threshold + " L/min: " +
+            Math.floor(seconds / 3600) + "h " + Math.floor(seconds % 3600 / 60) + "m " +
+            seconds % 60 + "s (" + (100 * leak.above_ms / leak.recorded_ms).toFixed(2) + "%)";
+          footer.title = "Percentage of recorded leak data";
+        }
+      }
     }
 
     function renderReportSettings(result) {
@@ -2524,7 +2545,8 @@
       const headerBytes = view.getUint16(10, true);
       if (!((version === 2 && headerBytes === 224) ||
             (version === 3 && headerBytes === 232) ||
-            (version === 4 && headerBytes === 520)) ||
+            (version === 4 && headerBytes === 520) ||
+            (version === 5 && headerBytes === 888)) ||
           buffer.byteLength < headerBytes) {
         return invalid;
       }
@@ -2698,8 +2720,10 @@
       if (version >= 4) {
         const names = ["mask_pressure", "leak", "minute_ventilation",
           "respiratory_rate", "tidal_volume", "spo2", "pressure", "epap"];
+        if (version >= 5) names.push("flow_limitation", "snore", "inspiration_time",
+          "expiration_time", "ie_ratio", "target_ventilation", "pulse");
         for (let i = 0; i < names.length; i++) {
-          const offset = 232 + i * 24;
+          const offset = i < 8 ? 232 + i * 24 : 520 + (i - 8) * 24;
           const flags = view.getUint32(offset, true);
           if (flags > 3 || flags === 2) return invalid;
           if (!(flags & 1)) continue;
@@ -2722,6 +2746,27 @@
         for (let i = 0; i < 23; i++) {
           result.settings.push(normalizedEnums && settingsMask & (1 << i)
             ? view.getInt32(428 + i * 4, true) / 1000 : null);
+        }
+      }
+      if (version >= 5) {
+        const recorded = Number(view.getBigUint64(688, true));
+        const above = Number(view.getBigUint64(696, true));
+        const threshold = view.getInt32(704, true) / 1000;
+        if (above > recorded || threshold !== 24) return invalid;
+        result.leak_duration = {recorded_ms: recorded, above_ms: above, threshold};
+        result.daily_statistics = {};
+        const names = ["mask_pressure", "pressure", "epap", "leak", "minute_ventilation",
+          "respiratory_rate", "tidal_volume", "spo2", "target_ventilation", "inspiration_time", "ie_ratio"];
+        for (let i = 0; i < names.length; i++) {
+          const offset = 712 + i * 16;
+          const mask = view.getUint32(offset, true);
+          if (mask > 7) return invalid;
+          if (!mask) continue;
+          const stat = {};
+          ["median", "p95", "max"].forEach((field, j) => {
+            if (mask & (1 << j)) stat[field] = view.getInt32(offset + 4 + j * 4, true) / 1000;
+          });
+          result.daily_statistics[names[i]] = stat;
         }
       }
       if (result.ahi !== undefined && result.arousal_index !== undefined) {

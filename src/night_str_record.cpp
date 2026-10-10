@@ -145,7 +145,7 @@ bool night_str_record_parse(const uint8_t *record,
         }
     }
 
-    (void)report_daily_metrics_from_str_record(record, len, out.metrics);
+    (void)report_daily_metrics_from_str_record(record, len, out.metrics, out.statistics);
     read_settings(record, len, model, out.settings);
     out.source_identity = record_identity(record, len, model);
     return true;

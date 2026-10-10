@@ -32,6 +32,7 @@ public:
                           const EdfSignalScale &scale) override;
     bool ready(bool *progressed = nullptr) override;
     bool end_operation(bool *progressed = nullptr) override;
+    bool end_record() override;
     bool accept_series(uint16_t session_index,
                        const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;
