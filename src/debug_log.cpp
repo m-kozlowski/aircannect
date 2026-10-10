@@ -15,6 +15,7 @@
 #include "file_log_sink_port.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
+#include "storage_usb_device.h"
 #include "string_util.h"
 
 using aircannect::FixedQueue;
@@ -148,7 +149,7 @@ int compose_line(log_cat_t cat,
 }
 
 void serial_dispatch(const char *buf, int len) {
-    if (!buf || len <= 0) return;
+    if (!buf || len <= 0 || !aircannect::StorageUsbDevice::serial_available()) return;
     Serial.write(reinterpret_cast<const uint8_t *>(buf), len);
 }
 

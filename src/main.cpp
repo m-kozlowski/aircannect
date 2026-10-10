@@ -70,6 +70,7 @@
 #include "storage_manager.h"
 #include "storage_service.h"
 #include "storage_usb.h"
+#include "storage_usb_device.h"
 #include "status_http_controller.h"
 #include "string_util.h"
 #include "stream_broker.h"
@@ -955,7 +956,8 @@ static void drain_rpc_events() {
 
         // Framing failures already reach Serial and persistent sinks through
         // Log. Keep the event for Telnet and WebUI without printing it twice.
-        if (event.kind != RpcEventKind::FramingError) {
+        if (event.kind != RpcEventKind::FramingError &&
+            StorageUsbDevice::serial_available()) {
             serial_management_console.handle_event(Serial, event);
         }
         telnet_console.handle_event(event);
@@ -1088,6 +1090,7 @@ void setup() {
     board_power_begin();
 
     // Serial bootstrap
+    StorageUsbDevice::begin();
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);
     while (Serial.available()) Serial.read();
@@ -1825,7 +1828,9 @@ void loop() {
         !resmed_ota_manager.active();
     tcp_bridge.poll(rpc_transport, service_entry_allowed);
     telnet_console.poll(config_service.data(), console_router);
-    serial_management_console.poll(Serial, Serial, console_router);
+    if (StorageUsbDevice::serial_available()) {
+        serial_management_console.poll(Serial, Serial, console_router);
+    }
 
     drain_can_rx();
 

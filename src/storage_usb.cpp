@@ -10,13 +10,14 @@
 #include "debug_log.h"
 #include "storage_access.h"
 #include "storage_internal.h"
+#include "storage_usb_device.h"
 #include "string_util.h"
 
-#if AC_STORAGE_SDMMC_ENABLED && !ARDUINO_USB_MODE
+#if AC_STORAGE_SDMMC_ENABLED && AC_USB_SD_ENABLED
 #include <driver/sdmmc_host.h>
 #include <esp_heap_caps.h>
 #include <sdmmc_cmd.h>
-#include <esp32-hal-tinyusb.h>
+#include <tusb.h>
 #define AC_USB_SD_SUPPORTED 1
 #else
 #define AC_USB_SD_SUPPORTED 0
@@ -39,28 +40,10 @@ void (*wake)() = nullptr;
 sdmmc_card_t card{};
 bool raw_active = false;
 bool prevent_removal = false;
+bool eject_pending = false;
 uint8_t *sector_buffer = nullptr;
 static constexpr size_t SectorBytes = 512;
 static constexpr size_t TransferBytes = 4096;
-
-uint16_t descriptor(uint8_t *destination, uint8_t *interface) {
-    const uint8_t endpoint = tinyusb_get_free_duplex_endpoint();
-    if (!endpoint) return 0;
-
-    const uint8_t data[] = {
-        TUD_MSC_DESCRIPTOR(*interface,
-            tinyusb_add_string_descriptor("AirCANnect SD"),
-            endpoint, static_cast<uint8_t>(0x80 | endpoint),
-            CFG_TUD_ENDOINT_SIZE)
-    };
-    ++*interface;
-    memcpy(destination, data, sizeof(data));
-    return sizeof(data);
-}
-
-// Arduino starts USB before setup(). Register the fixed composite interface now.
-const bool registered = tinyusb_enable_interface(
-    USB_INTERFACE_MSC, TUD_MSC_DESC_LEN, descriptor) == ESP_OK;
 #endif
 
 void publish_locked(StorageUsbState next, const char *error = nullptr) {
@@ -79,7 +62,7 @@ void begin(void (*wake_storage)()) {
     media_mutex = xSemaphoreCreateMutexStatic(&media_mutex_storage);
     wake = wake_storage;
 #if AC_USB_SD_SUPPORTED
-    snapshot.supported = registered;
+    snapshot.supported = true;
 #endif
 }
 
@@ -163,8 +146,10 @@ bool share() {
                            card.csd.capacity == 0)) {
         error = ESP_ERR_NOT_SUPPORTED;
     }
+    if (error == ESP_OK) error = StorageUsbDevice::start();
 
     prevent_removal = false;
+    eject_pending = false;
     xSemaphoreTake(mutex, portMAX_DELAY);
     const bool shared = error == ESP_OK && snapshot.state == StorageUsbState::Preparing;
     publish_locked(shared ? StorageUsbState::Shared : StorageUsbState::Returning,
@@ -184,6 +169,13 @@ bool share() {
 
 bool poll() {
     if (state.load() != StorageUsbState::Returning || !stopped.load()) return false;
+
+    // Stop the USB task before taking the lock its in-flight callbacks need.
+    const esp_err_t usb_error = StorageUsbDevice::stop();
+    if (usb_error != ESP_OK) {
+        fail(esp_err_to_name(usb_error));
+        return false;
+    }
 
     xSemaphoreTake(media_mutex, portMAX_DELAY);
 #if AC_USB_SD_SUPPORTED
@@ -350,15 +342,26 @@ bool tud_msc_start_stop_cb(uint8_t, uint8_t, bool start, bool eject) {
 
     xSemaphoreTake(StorageUsb::media_mutex, portMAX_DELAY);
     const bool allowed = !StorageUsb::prevent_removal;
-    xSemaphoreTake(StorageUsb::mutex, portMAX_DELAY);
-    if (allowed && StorageUsb::snapshot.state == StorageUsbState::Shared) {
-        StorageUsb::publish_locked(StorageUsbState::Returning);
-    }
-    xSemaphoreGive(StorageUsb::mutex);
+    StorageUsb::eject_pending = allowed;
     xSemaphoreGive(StorageUsb::media_mutex);
-    if (allowed && StorageUsb::wake) StorageUsb::wake();
     if (!allowed) tud_msc_set_sense(0, SCSI_SENSE_ILLEGAL_REQUEST, 0x53, 2);
     return allowed;
+}
+
+void tud_msc_scsi_complete_cb(uint8_t, const uint8_t command[16]) {
+    if (command[0] != 0x1b || !StorageUsb::mutex) return;
+
+    // Keep USB alive until the host has received the eject command's status.
+    xSemaphoreTake(StorageUsb::media_mutex, portMAX_DELAY);
+    xSemaphoreTake(StorageUsb::mutex, portMAX_DELAY);
+    if (StorageUsb::eject_pending &&
+        StorageUsb::snapshot.state == StorageUsbState::Shared) {
+        StorageUsb::publish_locked(StorageUsbState::Returning);
+    }
+    StorageUsb::eject_pending = false;
+    xSemaphoreGive(StorageUsb::mutex);
+    xSemaphoreGive(StorageUsb::media_mutex);
+    if (StorageUsb::wake) StorageUsb::wake();
 }
 
 int32_t tud_msc_read10_cb(uint8_t, uint32_t lba, uint32_t offset,
