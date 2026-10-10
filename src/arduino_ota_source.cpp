@@ -118,9 +118,12 @@ void ArduinoOtaSource::start() {
         if (!installer_.begin_external_install(
                 FirmwareInstallSource::Arduino)) {
             Update.abort();
-            set_error("ota_busy");
+            const auto install = installer_.status();
+            const String error = install.last_error.length()
+                                     ? install.last_error : "ota_busy";
+            set_error(error.c_str());
             Log::logf(CAT_OTA, LOG_WARN,
-                      "ArduinoOTA rejected: another install is active\n");
+                      "ArduinoOTA rejected: %s\n", error.c_str());
             return;
         }
 

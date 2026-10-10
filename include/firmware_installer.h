@@ -121,7 +121,7 @@ private:
     bool apply_wire_progress(size_t bytes);
 
     // Shared state
-    bool source_available_locked() const;
+    const char *source_blocked_locked() const;
     void set_error_locked(const char *error);
     void clear_install_state_locked();
     bool lock(TickType_t timeout = portMAX_DELAY) const;

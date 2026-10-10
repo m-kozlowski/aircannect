@@ -377,7 +377,8 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         if (!ok && error.length()) status.last_error = error;
         const int response_status =
-            ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
+            ok ? 202 : (status.last_error == "ota_busy" ||
+                        status.last_error == "usb_storage_active" ? 409 : 400);
         send_esp_status(request, status, response_status);
     });
 
@@ -406,7 +407,8 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
         const OtaStatusSnapshot status = collect_ota_status(
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
-            ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
+            ok ? 202 : (status.last_error == "ota_busy" ||
+                        status.last_error == "usb_storage_active" ? 409 : 400);
         send_esp_status(request, status, response_status);
     });
 
@@ -434,7 +436,8 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
         const OtaStatusSnapshot status = collect_ota_status(
             *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
-            ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
+            ok ? 202 : (status.last_error == "ota_busy" ||
+                        status.last_error == "usb_storage_active" ? 409 : 400);
         send_esp_status(request, status, response_status);
     });
 

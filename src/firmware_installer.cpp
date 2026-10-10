@@ -129,8 +129,8 @@ bool FirmwareInstaller::request_coredump_partition(bool &already_exists,
     already_exists = false;
     if (!lock()) return false;
 
-    if (!source_available_locked()) {
-        set_error_locked("ota_busy");
+    if (const char *blocked = source_blocked_locked()) {
+        set_error_locked(blocked);
         unlock();
         return false;
     }
@@ -254,8 +254,8 @@ bool FirmwareInstaller::reserve_source(FirmwareInstallSource source,
         unlock();
         return true;
     }
-    if (!source_available_locked()) {
-        set_error_locked("ota_busy");
+    if (const char *blocked = source_blocked_locked()) {
+        set_error_locked(blocked);
         unlock();
         return false;
     }
@@ -303,8 +303,9 @@ bool FirmwareInstaller::request_prepare(size_t image_size,
 
     const bool reserved_by_source =
         status_.source_reserved && status_.source == source;
-    if (!reserved_by_source && !source_available_locked()) {
-        set_error_locked("ota_busy");
+    const char *blocked = reserved_by_source ? nullptr : source_blocked_locked();
+    if (blocked) {
+        set_error_locked(blocked);
         unlock();
         return false;
     }
@@ -927,8 +928,8 @@ bool FirmwareInstaller::begin_external_install(FirmwareInstallSource source) {
     if (source != FirmwareInstallSource::Arduino) return false;
 
     if (!lock()) return false;
-    if (!source_available_locked()) {
-        set_error_locked("ota_busy");
+    if (const char *blocked = source_blocked_locked()) {
+        set_error_locked(blocked);
         unlock();
         return false;
     }
@@ -1181,12 +1182,12 @@ bool FirmwareInstaller::apply_wire_progress(size_t bytes) {
     return true;
 }
 
-bool FirmwareInstaller::source_available_locked() const {
-    if (StorageUsb::suspended()) return false;
+const char *FirmwareInstaller::source_blocked_locked() const {
+    if (StorageUsb::suspended()) return "usb_storage_active";
     const bool busy = status_.source_reserved || status_.prepare_pending ||
                       status_.prepared || status_.writing || status_.ready ||
                       status_.reboot_pending;
-    return !busy;
+    return busy ? "ota_busy" : nullptr;
 }
 
 void FirmwareInstaller::set_error_locked(const char *error) {
