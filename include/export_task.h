@@ -4,6 +4,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <atomic>
+#include <array>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -31,8 +32,15 @@ struct ExportTaskControlSnapshot {
     bool busy = false;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
-    StorageSyncRuntimeStatus smb;
-    SleepHqSyncRuntimeStatus sleephq;
+    std::array<ExportEndpointStatus, AC_EXPORT_ENDPOINT_COUNT> endpoints;
+
+    const ExportEndpointStatus &endpoint(ExportEndpoint id) const {
+        return endpoints[static_cast<size_t>(id)];
+    }
+
+    ExportEndpointStatus &endpoint(ExportEndpoint id) {
+        return endpoints[static_cast<size_t>(id)];
+    }
 #if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_words = 0;
 #endif

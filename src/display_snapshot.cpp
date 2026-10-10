@@ -12,32 +12,17 @@
 namespace aircannect {
 namespace {
 
-DisplayExportState display_state(StorageSyncRuntimeStatus status) {
-    if (!status.enabled || !status.configured) {
+DisplayExportState display_state(const ExportEndpointStatus &status) {
+    if (!status.configured) {
         return DisplayExportState::Disabled;
     }
-    if (status.state == StorageSyncState::Error) {
+    if (status.state == ExportState::Error) {
         return DisplayExportState::Error;
     }
-    if (status.state == StorageSyncState::Working ||
-        status.durable_state_pending) {
+    if (status.executing()) {
         return DisplayExportState::Working;
     }
-    if (status.state == StorageSyncState::Pending || status.pending) {
-        return DisplayExportState::Pending;
-    }
-    return DisplayExportState::Ready;
-}
-
-DisplayExportState display_state(SleepHqSyncRuntimeStatus status) {
-    if (!status.configured) return DisplayExportState::Disabled;
-    if (status.state == SleepHqSyncState::Error) {
-        return DisplayExportState::Error;
-    }
-    if (status.state == SleepHqSyncState::Working) {
-        return DisplayExportState::Working;
-    }
-    if (status.state == SleepHqSyncState::Pending || status.pending) {
+    if (status.awaiting()) {
         return DisplayExportState::Pending;
     }
     return DisplayExportState::Ready;
@@ -143,8 +128,8 @@ DisplaySnapshot compose_display_snapshot(
         copy_text(out.wifi_value, sizeof(out.wifi_value), "CONNECTING");
     }
 
-    out.smb = display_state(exports.smb);
-    out.sleephq = display_state(exports.sleephq);
+    out.smb = display_state(exports.endpoint(ExportEndpoint::Smb));
+    out.sleephq = display_state(exports.endpoint(ExportEndpoint::SleepHq));
 
     apply_display_therapy_telemetry(out, telemetry, therapy_mode);
     out.reports = reports;

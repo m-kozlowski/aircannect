@@ -50,27 +50,16 @@ private:
         bool cancel_pending = false;
         uint32_t report_settle_due_ms = 0;
         uint32_t report_settle_deadline_ms = 0;
-        bool storage_pending = false;
-        bool storage_grace_armed = false;
-        uint32_t storage_due_ms = 0;
-        bool sleephq_pending = false;
-        bool sleephq_grace_armed = false;
-        uint32_t sleephq_due_ms = 0;
     };
 
-    struct StartupCheckState {
-        uint32_t smb_requested_generation = 0;
-        uint32_t smb_completed_generation = 0;
-        uint32_t smb_request_completed_sequence = 0;
-        uint32_t sleephq_requested_generation = 0;
-        uint32_t sleephq_completed_generation = 0;
-        bool idle_grace_complete = false;
-    };
-
-    struct StartupBackfillState {
-        uint32_t smb_queued_generation = 0;
-        uint32_t sleephq_queued_generation = 0;
-        uint32_t due_ms = 0;
+    struct EndpointSchedule {
+        uint32_t check_requested_generation = 0;
+        uint32_t check_completed_generation = 0;
+        uint32_t request_completed_sequence = 0;
+        uint32_t backfill_queued_generation = 0;
+        bool post_therapy_pending = false;
+        uint32_t post_therapy_due_ms = 0;
+        bool manual_pending = false;
     };
 
     struct FullReconcileState {
@@ -79,46 +68,38 @@ private:
         bool queued = false;
     };
 
-    struct ManualSyncState {
-        bool sleephq_pending = false;
-    };
-
+    // task snapshots and requests
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
     static bool external_request_allowed(
         const ExportTaskControlSnapshot &status);
     ExportTaskControlSnapshot control_snapshot() const;
+    EndpointSchedule &schedule(ExportEndpoint id);
+    const EndpointSchedule &schedule(ExportEndpoint id) const;
+    bool request_external(const ExportRequest &request);
+    void record_request(const ExportRequest &request,
+                        const ExportEndpointStatus &status);
 
     // post-therapy sequence
     void poll_post_therapy(const ExportReportActivity &report,
                            bool stream_activity_active,
                            bool therapy_active,
-                           bool storage_sync_active,
+                           const ExportTaskControlSnapshot &status,
                            uint32_t now_ms);
     void reset_post_therapy_after_running();
     void arm_post_therapy_after_stop(uint32_t now_ms);
     void maybe_finish_report_settle(const ExportReportActivity &report,
                                     bool stream_activity_active,
                                     uint32_t now_ms);
-    void maybe_queue_storage_sync(bool stream_activity_active,
-                                  uint32_t now_ms);
-    void maybe_queue_post_therapy_sleephq(
-        bool stream_activity_active,
-        bool storage_sync_active,
-        uint32_t now_ms);
-    void queue_post_therapy_storage_sync(uint32_t now_ms);
-    void clear_post_therapy_sleephq();
+    void queue_post_therapy(bool stream_activity_active,
+                            const ExportTaskControlSnapshot &status,
+                            uint32_t now_ms);
+    bool post_therapy_pending() const;
 
     // startup and idle backfill
     bool startup_idle_work_allowed(uint32_t now_ms);
-    void observe_smb_startup_check(StorageSyncRuntimeStatus status);
-    void maybe_queue_smb_startup_check(
-        bool network_connected,
-        StorageSyncRuntimeStatus status,
-        SleepHqSyncRuntimeStatus sleephq);
-    void maybe_queue_sleephq_startup_check(bool network_connected,
-                                           bool smb_startup_complete,
-                                           bool storage_sync_active,
-                                           SleepHqSyncRuntimeStatus status);
+    void observe_startup_check(ExportEndpoint endpoint,
+                               const ExportEndpointStatus &status);
+    void queue_startup_checks(const ExportTaskControlSnapshot &status);
     void poll_startup_backfill(
         const ExportReportActivity &report,
         const ActivitySnapshot &activity,
@@ -148,9 +129,9 @@ private:
 
     // coordinator state
     PostTherapyState post_therapy_;
-    StartupCheckState startup_check_;
-    StartupBackfillState startup_backfill_;
-    ManualSyncState manual_sync_;
+    std::array<EndpointSchedule, AC_EXPORT_ENDPOINT_COUNT> endpoints_;
+    bool startup_idle_grace_complete_ = false;
+    uint32_t startup_backfill_due_ms_ = 0;
     FullReconcileState full_reconcile_;
     ExportTaskControlSnapshot status_snapshot_;
 };

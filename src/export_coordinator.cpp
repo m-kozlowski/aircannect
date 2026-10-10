@@ -19,7 +19,8 @@ bool ExportCoordinator::external_request_allowed(
     if (status.command_pending) return false;
     if (!status.busy) return true;
 
-    return status.smb.scheduled_reconcile && !status.sleephq.active();
+    return status.endpoint(ExportEndpoint::Smb).scheduled_reconcile &&
+           !status.endpoint(ExportEndpoint::SleepHq).active();
 }
 
 void ExportCoordinator::begin(ExportTask &task) {
@@ -51,96 +52,106 @@ ExportSleepHqStatusSnapshot ExportCoordinator::sleephq_snapshot() const {
                  : ExportSleepHqStatusSnapshot();
 }
 
+ExportCoordinator::EndpointSchedule &ExportCoordinator::schedule(ExportEndpoint id) {
+    return endpoints_[static_cast<size_t>(id)];
+}
+
+const ExportCoordinator::EndpointSchedule &ExportCoordinator::schedule(
+    ExportEndpoint id) const {
+    return endpoints_[static_cast<size_t>(id)];
+}
+
 bool ExportCoordinator::endpoint_work_claimed() const {
     if (!task_) return false;
     if (task_->endpoint_work_claimed()) return true;
 
-    return startup_check_.smb_requested_generation != 0 &&
-           startup_check_.smb_completed_generation !=
-               startup_check_.smb_requested_generation;
+    const auto &smb = schedule(ExportEndpoint::Smb);
+    return smb.check_requested_generation != 0 &&
+           smb.check_completed_generation != smb.check_requested_generation;
+}
+
+void ExportCoordinator::record_request(
+    const ExportRequest &request, const ExportEndpointStatus &status) {
+    auto &state = schedule(request.endpoint);
+    const bool full_sync = request.operation != ExportOperation::Check &&
+                           request.reason != ExportReason::Maintenance &&
+                           !request.day[0];
+    if (request.operation == ExportOperation::Check ||
+        (request.endpoint == ExportEndpoint::Smb && full_sync)) {
+        if (state.check_completed_generation != status.config_generation) {
+            state.check_requested_generation = status.config_generation;
+            state.request_completed_sequence = status.completed_sequence;
+        }
+    }
+    if (full_sync) state.backfill_queued_generation = status.config_generation;
+}
+
+bool ExportCoordinator::request_external(const ExportRequest &request) {
+    if (!task_) return false;
+
+    const auto current = control_snapshot();
+    if (!external_request_allowed(current) || !task_->request(request)) {
+        return false;
+    }
+
+    // A manual SleepHQ check did not participate in startup bookkeeping.
+    if (request.operation != ExportOperation::Check) {
+        record_request(request, current.endpoint(request.endpoint));
+    }
+    return true;
 }
 
 bool ExportCoordinator::request_sync() {
-    if (!task_ || manual_sync_.sleephq_pending) return false;
-
-    const ExportTaskControlSnapshot current = control_snapshot();
-    const bool smb_configured =
-        current.smb.enabled && current.smb.configured;
-    const bool sleephq_configured = current.sleephq.configured;
-    if (!smb_configured && !sleephq_configured) return false;
-
-    if (smb_configured) {
-        if (!request_smb_sync()) return false;
-        manual_sync_.sleephq_pending = sleephq_configured;
-        return true;
+    if (!task_) return false;
+    for (const auto &state : endpoints_) {
+        if (state.manual_pending) return false;
     }
 
-    return request_sleephq_sync();
+    const auto current = control_snapshot();
+    bool queued = false;
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        if (!current.endpoint(endpoint).configured) continue;
+
+        if (!queued) {
+            if (!request_external({endpoint, ExportOperation::Sync,
+                                   ExportReason::Manual})) {
+                return false;
+            }
+            queued = true;
+        } else {
+            schedule(endpoint).manual_pending = true;
+        }
+    }
+    return queued;
 }
 
 bool ExportCoordinator::request_smb_sync() {
-    if (!task_) return false;
-    const ExportTaskControlSnapshot current = control_snapshot();
-    if (!external_request_allowed(current) || !task_->request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::Manual})) {
-        return false;
-    }
-
-    if (startup_check_.smb_completed_generation !=
-        current.smb.config_generation) {
-        startup_check_.smb_requested_generation =
-            current.smb.config_generation;
-        startup_check_.smb_request_completed_sequence =
-            current.smb.completed_sequence;
-    }
-    startup_backfill_.smb_queued_generation =
-        current.smb.config_generation;
-    return true;
+    return request_external({ExportEndpoint::Smb, ExportOperation::Sync,
+                             ExportReason::Manual});
 }
 
 bool ExportCoordinator::request_smb_verify() {
-    if (!task_) return false;
-    const ExportTaskControlSnapshot current = control_snapshot();
-    if (!external_request_allowed(current) || !task_->request({ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Manual})) {
-        return false;
-    }
-
-    if (startup_check_.smb_completed_generation !=
-        current.smb.config_generation) {
-        startup_check_.smb_requested_generation =
-            current.smb.config_generation;
-        startup_check_.smb_request_completed_sequence =
-            current.smb.completed_sequence;
-    }
-    startup_backfill_.smb_queued_generation =
-        current.smb.config_generation;
-    return true;
+    return request_external({ExportEndpoint::Smb, ExportOperation::Reconcile,
+                             ExportReason::Manual});
 }
 
 bool ExportCoordinator::request_sleephq_sync() {
-    if (!task_) return false;
-    const ExportTaskControlSnapshot current = control_snapshot();
-    if (!external_request_allowed(current) ||
-        !task_->request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual})) {
-        return false;
-    }
-
-    startup_backfill_.sleephq_queued_generation =
-        current.sleephq.config_generation;
-    return true;
+    return request_external({ExportEndpoint::SleepHq, ExportOperation::Sync,
+                             ExportReason::Manual});
 }
 
 bool ExportCoordinator::request_sleephq_sync_day(const char *day) {
-    if (!task_ || !external_request_allowed(control_snapshot())) return false;
     if (!day || !storage_export_is_datalog_day_name(day)) return false;
 
-    ExportRequest request{ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual};
+    ExportRequest request{ExportEndpoint::SleepHq, ExportOperation::Sync,
+                          ExportReason::Manual};
     memcpy(request.day, day, sizeof(request.day));
-    return task_->request(request);
+    return request_external(request);
 }
 
 bool ExportCoordinator::request_sleephq_check() {
-    if (!task_ || !external_request_allowed(control_snapshot())) return false;
-    return task_->request({ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Manual});
+    return request_external({ExportEndpoint::SleepHq, ExportOperation::Check,
+                             ExportReason::Manual});
 }
 
 void ExportCoordinator::poll(const ExportReportActivity &report,
@@ -148,76 +159,51 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
                              uint32_t now_ms) {
     if (!task_) return;
 
-    const ExportTaskControlSnapshot task_status = task_->control_snapshot();
-    status_snapshot_ = task_status;
-    const StorageSyncRuntimeStatus storage = task_status.smb;
-    const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
-    const bool storage_active = storage.active();
+    const auto status = task_->control_snapshot();
+    status_snapshot_ = status;
+    observe_startup_check(ExportEndpoint::Smb, status.endpoint(ExportEndpoint::Smb));
 
-    observe_smb_startup_check(storage);
+    poll_post_therapy(report, activity.realtime_stream_active,
+                      activity.therapy_active, status, now_ms);
+    poll_manual_sync(status);
+    maybe_preempt_full_reconcile(report, activity, status);
 
-    poll_post_therapy(report,
-                      activity.realtime_stream_active,
-                      activity.therapy_active,
-                      storage_active,
-                      now_ms);
-
-    poll_manual_sync(task_status);
-
-    maybe_preempt_full_reconcile(report, activity, task_status);
-
-    if (sleephq.state == SleepHqSyncState::Working) {
-        task_->defer_smb_until(
-            due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS));
+    if (status.endpoint(ExportEndpoint::SleepHq).state == ExportState::Working) {
+        task_->defer_smb_until(due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS));
     }
 
     const bool startup_idle =
-        startup_idle_work_allowed(now_ms) &&
-        !report.foreground_active &&
+        startup_idle_work_allowed(now_ms) && !report.foreground_active &&
         !activity.therapy_active && !activity.realtime_stream_active &&
         !activity.ota_install_active;
-    if (startup_idle) {
-        maybe_queue_smb_startup_check(task_status.network_ready,
-                                      storage,
-                                      sleephq);
-        const bool smb_startup_complete =
-            !storage.enabled || !storage.configured ||
-            startup_check_.smb_completed_generation ==
-                storage.config_generation;
 
-        maybe_queue_sleephq_startup_check(task_status.network_ready,
-                                          smb_startup_complete,
-                                          storage_active,
-                                          sleephq);
-    }
-    poll_startup_backfill(report, activity, task_status, now_ms);
-
-    poll_full_reconcile(report, activity, task_status, now_ms);
+    if (startup_idle) queue_startup_checks(status);
+    poll_startup_backfill(report, activity, status, now_ms);
+    poll_full_reconcile(report, activity, status, now_ms);
 }
 
 void ExportCoordinator::poll_manual_sync(
-    const ExportTaskControlSnapshot &task_status) {
-    if (!manual_sync_.sleephq_pending || task_status.command_pending ||
-        task_status.busy) {
-        return;
-    }
+    const ExportTaskControlSnapshot &status) {
+    if (status.command_pending || status.busy) return;
 
-    if (request_sleephq_sync()) {
-        manual_sync_.sleephq_pending = false;
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        auto &state = schedule(endpoint);
+        if (!state.manual_pending) continue;
+
+        if (request_external({endpoint, ExportOperation::Sync, ExportReason::Manual})) {
+            state.manual_pending = false;
+        }
+        return;
     }
 }
 
 void ExportCoordinator::poll_post_therapy(
-    const ExportReportActivity &report,
-    bool stream_activity_active,
-    bool therapy_active,
-    bool storage_sync_active,
-    uint32_t now_ms) {
+    const ExportReportActivity &report, bool stream_activity_active,
+    bool therapy_active, const ExportTaskControlSnapshot &status, uint32_t now_ms) {
     if (!post_therapy_.state_initialized) {
-        post_therapy_.state_initialized = true;
         post_therapy_.last_therapy_active = therapy_active;
+        post_therapy_.state_initialized = true;
     }
-
     if (therapy_active && !post_therapy_.last_therapy_active) {
         post_therapy_.cancel_pending = true;
     }
@@ -232,53 +218,38 @@ void ExportCoordinator::poll_post_therapy(
     }
     if (post_therapy_.cancel_pending) return;
 
-    if (post_therapy_.last_therapy_active) {
-        arm_post_therapy_after_stop(now_ms);
-    }
+    if (post_therapy_.last_therapy_active) arm_post_therapy_after_stop(now_ms);
 
     maybe_finish_report_settle(report, stream_activity_active, now_ms);
-    maybe_queue_storage_sync(stream_activity_active, now_ms);
-    maybe_queue_post_therapy_sleephq(stream_activity_active,
-                                     storage_sync_active,
-                                     now_ms);
+    queue_post_therapy(stream_activity_active, status, now_ms);
     post_therapy_.last_therapy_active = false;
 }
 
 void ExportCoordinator::reset_post_therapy_after_running() {
     post_therapy_.report_settle_due_ms = 0;
     post_therapy_.report_settle_deadline_ms = 0;
-    post_therapy_.storage_pending = false;
-    post_therapy_.storage_grace_armed = false;
-    post_therapy_.storage_due_ms = 0;
-    post_therapy_.sleephq_pending = false;
-    post_therapy_.sleephq_grace_armed = false;
-    post_therapy_.sleephq_due_ms = 0;
+    for (auto &state : endpoints_) {
+        state.post_therapy_pending = false;
+        state.post_therapy_due_ms = 0;
+    }
 }
 
 void ExportCoordinator::arm_post_therapy_after_stop(uint32_t now_ms) {
-    const ExportTaskControlSnapshot task_status = control_snapshot();
+    const auto status = control_snapshot();
+    bool pending = false;
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        auto &state = schedule(endpoint);
+        state.post_therapy_pending = status.endpoint(endpoint).configured;
+        state.post_therapy_due_ms = 0;
+        pending = pending || state.post_therapy_pending;
+    }
 
-    post_therapy_.storage_pending = task_ && task_status.smb.enabled &&
-                                    task_status.smb.configured;
-    post_therapy_.sleephq_pending =
-        task_ && task_status.sleephq.configured;
-    const bool export_pending = post_therapy_.storage_pending ||
-                                post_therapy_.sleephq_pending;
     post_therapy_.report_settle_due_ms =
-        export_pending
-            ? due_after(now_ms, AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS)
-            : 0;
+        pending ? due_after(now_ms, AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS) : 0;
     post_therapy_.report_settle_deadline_ms =
-        export_pending
-            ? due_after(now_ms,
-                        AC_EXPORT_POST_THERAPY_SETTLE_MAX_WAIT_MS)
-            : 0;
-    post_therapy_.storage_grace_armed = false;
-    post_therapy_.sleephq_grace_armed = false;
-    post_therapy_.storage_due_ms = 0;
-    post_therapy_.sleephq_due_ms = 0;
+        pending ? due_after(now_ms, AC_EXPORT_POST_THERAPY_SETTLE_MAX_WAIT_MS) : 0;
 
-    if (task_ && post_therapy_.report_settle_due_ms != 0) {
+    if (post_therapy_.report_settle_due_ms != 0) {
         task_->defer_smb_until(post_therapy_.report_settle_due_ms);
     }
 }
@@ -313,351 +284,227 @@ void ExportCoordinator::maybe_finish_report_settle(
 
     post_therapy_.report_settle_due_ms = 0;
     post_therapy_.report_settle_deadline_ms = 0;
-    post_therapy_.storage_grace_armed = false;
-    post_therapy_.storage_due_ms = 0;
+    schedule(ExportEndpoint::Smb).post_therapy_due_ms = 0;
 }
 
-void ExportCoordinator::maybe_queue_storage_sync(
-    bool stream_activity_active,
+void ExportCoordinator::queue_post_therapy(
+    bool stream_activity_active, const ExportTaskControlSnapshot &status,
     uint32_t now_ms) {
-    if (!post_therapy_.storage_pending) return;
-
-    if (!task_) {
-        post_therapy_.storage_pending = false;
-        post_therapy_.storage_due_ms = 0;
-        return;
-    }
-    if (post_therapy_.storage_due_ms != 0 &&
-        static_cast<int32_t>(now_ms - post_therapy_.storage_due_ms) < 0) {
-        return;
-    }
     if (post_therapy_.report_settle_due_ms != 0) return;
-    if (stream_activity_active) {
-        post_therapy_.storage_due_ms = 0;
-        task_->defer_smb_until(
-            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS));
-        return;
-    }
-    if (!post_therapy_.storage_grace_armed) {
-        post_therapy_.storage_grace_armed = true;
-        post_therapy_.storage_due_ms =
-            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
-        task_->defer_smb_until(post_therapy_.storage_due_ms);
-        return;
-    }
-    if (post_therapy_.storage_due_ms == 0) {
-        post_therapy_.storage_due_ms =
-            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
-        task_->defer_smb_until(post_therapy_.storage_due_ms);
-        return;
-    }
-    if (static_cast<int32_t>(now_ms - post_therapy_.storage_due_ms) >= 0) {
-        queue_post_therapy_storage_sync(now_ms);
-    }
-}
 
-void ExportCoordinator::maybe_queue_post_therapy_sleephq(
-    bool stream_activity_active,
-    bool storage_sync_active,
-    uint32_t now_ms) {
-    if (!post_therapy_.sleephq_pending) return;
+    bool previous_active = false;
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        auto &state = schedule(endpoint);
+        if (state.post_therapy_pending) {
+            const bool smb = endpoint == ExportEndpoint::Smb;
+            const bool due_in_future = state.post_therapy_due_ms != 0 &&
+                static_cast<int32_t>(now_ms - state.post_therapy_due_ms) < 0;
 
-    if (post_therapy_.report_settle_due_ms != 0) return;
-    if (!task_) {
-        clear_post_therapy_sleephq();
-        return;
-    }
+            // SMB's idle deferral is already armed until its due time.
+            if (smb && due_in_future) {
+                previous_active = true;
+                continue;
+            }
 
-    const bool storage_blocking = post_therapy_.storage_pending ||
-                                  storage_sync_active;
-    if (stream_activity_active || storage_blocking) {
-        post_therapy_.sleephq_due_ms = 0;
-        return;
-    }
-    if (!post_therapy_.sleephq_grace_armed) {
-        post_therapy_.sleephq_grace_armed = true;
-        post_therapy_.sleephq_due_ms =
-            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
-        return;
-    }
-    if (post_therapy_.sleephq_due_ms == 0) {
-        post_therapy_.sleephq_due_ms =
-            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
-        return;
-    }
-    if (static_cast<int32_t>(now_ms - post_therapy_.sleephq_due_ms) < 0) {
-        return;
-    }
-
-    const ExportTaskControlSnapshot current = control_snapshot();
-    if (task_->request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::PostTherapy})) {
-        startup_backfill_.sleephq_queued_generation =
-            current.sleephq.config_generation;
-        clear_post_therapy_sleephq();
-    } else {
-        post_therapy_.sleephq_due_ms =
-            due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS);
-    }
-}
-
-void ExportCoordinator::queue_post_therapy_storage_sync(uint32_t now_ms) {
-    if (!task_) {
-        post_therapy_.storage_pending = false;
-        post_therapy_.storage_due_ms = 0;
-        return;
-    }
-
-    const ExportTaskControlSnapshot current = control_snapshot();
-    if (task_->request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::PostTherapy})) {
-        startup_backfill_.smb_queued_generation =
-            current.smb.config_generation;
-        if (startup_check_.smb_completed_generation !=
-            current.smb.config_generation) {
-            startup_check_.smb_requested_generation =
-                current.smb.config_generation;
-            startup_check_.smb_request_completed_sequence =
-                current.smb.completed_sequence;
+            if (stream_activity_active || previous_active) {
+                state.post_therapy_due_ms = 0;
+                if (smb) {
+                    task_->defer_smb_until(due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS));
+                }
+            } else if (state.post_therapy_due_ms == 0) {
+                state.post_therapy_due_ms = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
+                if (smb) task_->defer_smb_until(state.post_therapy_due_ms);
+            } else if (!due_in_future) {
+                const auto current = control_snapshot();
+                const ExportRequest request{
+                    endpoint, ExportOperation::Sync, ExportReason::PostTherapy,
+                };
+                if (task_->request(request)) {
+                    record_request(request, current.endpoint(endpoint));
+                    state.post_therapy_pending = false;
+                    state.post_therapy_due_ms = 0;
+                } else {
+                    state.post_therapy_due_ms = due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS);
+                }
+            }
         }
-        post_therapy_.storage_pending = false;
-        post_therapy_.storage_due_ms = 0;
-    } else {
-        post_therapy_.storage_due_ms =
-            due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS);
+
+        previous_active = previous_active || state.post_therapy_pending ||
+                          status.endpoint(endpoint).active();
     }
 }
 
-void ExportCoordinator::clear_post_therapy_sleephq() {
-    post_therapy_.sleephq_pending = false;
-    post_therapy_.sleephq_grace_armed = false;
-    post_therapy_.sleephq_due_ms = 0;
+bool ExportCoordinator::post_therapy_pending() const {
+    if (post_therapy_.report_settle_due_ms != 0) return true;
+    for (const auto &state : endpoints_) {
+        if (state.post_therapy_pending) return true;
+    }
+    return false;
 }
 
 bool ExportCoordinator::startup_idle_work_allowed(uint32_t now_ms) {
-    if (startup_check_.idle_grace_complete) return true;
-    if (static_cast<int32_t>(
-            now_ms - AC_RUNTIME_STARTUP_IDLE_GRACE_MS) < 0) {
+    if (startup_idle_grace_complete_) return true;
+    if (static_cast<int32_t>(now_ms - AC_RUNTIME_STARTUP_IDLE_GRACE_MS) < 0) {
         return false;
     }
 
-    startup_check_.idle_grace_complete = true;
+    startup_idle_grace_complete_ = true;
     return true;
 }
 
-void ExportCoordinator::observe_smb_startup_check(
-    StorageSyncRuntimeStatus status) {
-    if (!status.enabled || !status.configured ||
-        status.config_generation == 0) {
-        startup_check_.smb_requested_generation = 0;
-        startup_check_.smb_completed_generation = 0;
-        startup_check_.smb_request_completed_sequence = 0;
-        return;
-    }
-    if (startup_check_.smb_requested_generation !=
-        status.config_generation) {
-        startup_check_.smb_completed_generation = 0;
-        return;
-    }
-    if (status.state == StorageSyncState::Error && !status.pending) {
-        startup_check_.smb_completed_generation = status.config_generation;
-        return;
-    }
-    if (status.state != StorageSyncState::Idle || status.pending ||
-        status.completed_sequence ==
-            startup_check_.smb_request_completed_sequence) {
-        return;
-    }
-
-    startup_check_.smb_completed_generation = status.config_generation;
-}
-
-void ExportCoordinator::maybe_queue_smb_startup_check(
-    bool network_connected,
-    StorageSyncRuntimeStatus status,
-    SleepHqSyncRuntimeStatus sleephq) {
-    if (!task_ || !network_connected) return;
-    if (!status.enabled || !status.configured ||
-        status.config_generation == 0) {
-        startup_check_.smb_requested_generation = 0;
-        startup_check_.smb_completed_generation = 0;
-        startup_check_.smb_request_completed_sequence = 0;
-        return;
-    }
-    if (startup_check_.smb_completed_generation ==
-        status.config_generation) {
-        return;
-    }
-    if (startup_check_.smb_requested_generation ==
-            status.config_generation ||
-        status.pending || status.state == StorageSyncState::Working ||
-        sleephq.pending || sleephq.state == SleepHqSyncState::Working) {
-        return;
-    }
-
-    if (task_->request({ExportEndpoint::Smb, ExportOperation::Check, ExportReason::Startup})) {
-        startup_check_.smb_requested_generation =
-            status.config_generation;
-        startup_check_.smb_request_completed_sequence =
-            status.completed_sequence;
-    }
-}
-
-void ExportCoordinator::maybe_queue_sleephq_startup_check(
-    bool network_connected,
-    bool smb_startup_complete,
-    bool storage_sync_active,
-    SleepHqSyncRuntimeStatus status) {
-    if (!task_ || !network_connected || !smb_startup_complete ||
-        storage_sync_active) {
-        return;
-    }
+void ExportCoordinator::observe_startup_check(
+    ExportEndpoint endpoint, const ExportEndpointStatus &status) {
+    auto &state = schedule(endpoint);
     if (!status.configured || status.config_generation == 0) {
-        startup_check_.sleephq_requested_generation = 0;
-        startup_check_.sleephq_completed_generation = 0;
-        return;
-    }
-    if (status.check_complete()) {
-        startup_check_.sleephq_completed_generation =
-            status.config_generation;
-    }
-    if (startup_check_.sleephq_completed_generation ==
-            status.config_generation ||
-        startup_check_.sleephq_requested_generation ==
-            status.config_generation ||
-        status.state == SleepHqSyncState::Pending ||
-        status.state == SleepHqSyncState::Working) {
+        state.check_requested_generation = 0;
+        state.check_completed_generation = 0;
+        state.request_completed_sequence = 0;
         return;
     }
 
-    if (task_->request({ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Startup})) {
-        startup_check_.sleephq_requested_generation =
-            status.config_generation;
+    // SleepHQ explicitly confirms account resolution. SMB confirms a run;
+    // a terminal check failure also lets the next endpoint attempt its check.
+    if (endpoint == ExportEndpoint::SleepHq) {
+        if (status.completed_check_generation == status.config_generation) {
+            state.check_completed_generation = status.config_generation;
+        }
+        return;
+    }
+
+    if (state.check_requested_generation != status.config_generation) {
+        state.check_completed_generation = 0;
+        return;
+    }
+    if ((status.state == ExportState::Error && !status.pending) ||
+        (status.ready() && status.completed_sequence != state.request_completed_sequence)) {
+        state.check_completed_generation = status.config_generation;
+    }
+}
+
+void ExportCoordinator::queue_startup_checks(
+    const ExportTaskControlSnapshot &status) {
+    if (!status.network_ready) return;
+
+    bool previous_settled = true;
+    bool previous_active = false;
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        const auto &current = status.endpoint(endpoint);
+        auto &state = schedule(endpoint);
+        if (!previous_settled || previous_active) return;
+
+        observe_startup_check(endpoint, current);
+        if (current.configured && current.config_generation != 0 &&
+            state.check_completed_generation != current.config_generation &&
+            state.check_requested_generation != current.config_generation) {
+            bool busy = current.awaiting() || current.state == ExportState::Working;
+            // A pending endpoint must finish before an earlier startup check.
+            for (const auto &other : status.endpoints) {
+                busy = busy || other.pending || other.state == ExportState::Working;
+            }
+
+            if (!busy) {
+                const ExportRequest request{
+                    endpoint, ExportOperation::Check, ExportReason::Startup,
+                };
+                if (task_->request(request)) record_request(request, current);
+            }
+        }
+
+        previous_settled = !current.configured ||
+            state.check_completed_generation == current.config_generation;
+        previous_active = current.active();
     }
 }
 
 void ExportCoordinator::poll_startup_backfill(
-    const ExportReportActivity &report,
-    const ActivitySnapshot &activity,
-    const ExportTaskControlSnapshot &task_status,
-    uint32_t now_ms) {
-    if (!task_) return;
+    const ExportReportActivity &report, const ActivitySnapshot &activity,
+    const ExportTaskControlSnapshot &status, uint32_t now_ms) {
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        const auto &current = status.endpoint(endpoint);
+        auto &state = schedule(endpoint);
+        if (!current.configured) {
+            state.backfill_queued_generation = 0;
+            continue;
+        }
 
-    const StorageSyncRuntimeStatus smb = task_status.smb;
-    const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
-    if (!smb.enabled || !smb.configured) {
-        startup_backfill_.smb_queued_generation = 0;
-    }
-    if (!sleephq.configured) {
-        startup_backfill_.sleephq_queued_generation = 0;
+        const bool check_complete =
+            state.check_completed_generation == current.config_generation;
+        const bool failed_account_check =
+            endpoint == ExportEndpoint::SleepHq &&
+            state.check_requested_generation == current.config_generation &&
+            !current.active() && !status.command_pending;
+
+        if (!check_complete && !failed_account_check) {
+            startup_backfill_due_ms_ = 0;
+            return;
+        }
     }
 
-    const bool smb_check_complete =
-        !smb.enabled || !smb.configured ||
-        startup_check_.smb_completed_generation == smb.config_generation;
-    const bool sleephq_check_succeeded =
-        !sleephq.configured ||
-        startup_check_.sleephq_completed_generation ==
-            sleephq.config_generation;
-    const bool sleephq_check_attempted =
-        startup_check_.sleephq_requested_generation ==
-            sleephq.config_generation &&
-        !sleephq.active() && !task_status.command_pending;
-    if (!smb_check_complete ||
-        (!sleephq_check_succeeded && !sleephq_check_attempted)) {
-        startup_backfill_.due_ms = 0;
+    bool busy = !status.network_ready || task_->endpoint_work_claimed() ||
+                status.command_pending || report.foreground_active ||
+                report.background_active || activity.therapy_active ||
+                activity.realtime_stream_active || activity.ota_install_active;
+    for (const auto &endpoint : status.endpoints) busy = busy || endpoint.active();
+
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        const auto &current = status.endpoint(endpoint);
+        auto &state = schedule(endpoint);
+        const bool ready = current.configured && current.ready() &&
+            state.check_completed_generation == current.config_generation &&
+            state.backfill_queued_generation != current.config_generation;
+        if (!ready || busy) continue;
+
+        if (startup_backfill_due_ms_ == 0) {
+            startup_backfill_due_ms_ = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
+            return;
+        }
+        if (static_cast<int32_t>(now_ms - startup_backfill_due_ms_) < 0) return;
+
+        const ExportRequest request{
+            endpoint, ExportOperation::Sync, ExportReason::IdleBackfill,
+        };
+        if (task_->request(request)) {
+            record_request(request, current);
+            startup_backfill_due_ms_ = 0;
+        }
         return;
     }
-
-    const bool smb_pending =
-        smb.enabled && smb.configured &&
-        startup_backfill_.smb_queued_generation != smb.config_generation;
-    const bool sleephq_pending =
-        sleephq.configured && sleephq_check_succeeded &&
-        startup_backfill_.sleephq_queued_generation !=
-            sleephq.config_generation;
-    if (!smb_pending && !sleephq_pending) {
-        startup_backfill_.due_ms = 0;
-        return;
-    }
-
-    const bool busy = !task_status.network_ready ||
-                      task_->endpoint_work_claimed() ||
-                      task_status.command_pending ||
-                      report.foreground_active || report.background_active ||
-                      activity.therapy_active ||
-                      activity.realtime_stream_active ||
-                      activity.ota_install_active || smb.active() ||
-                      sleephq.active();
-    if (busy) {
-        startup_backfill_.due_ms = 0;
-        return;
-    }
-
-    const bool smb_ready = smb_pending && smb.state == StorageSyncState::Idle &&
-                           !smb.pending;
-    const bool sleephq_ready =
-        sleephq_pending && sleephq.state == SleepHqSyncState::Idle &&
-        !sleephq.pending;
-    if (!smb_ready && !sleephq_ready) {
-        startup_backfill_.due_ms = 0;
-        return;
-    }
-
-    if (startup_backfill_.due_ms == 0) {
-        startup_backfill_.due_ms =
-            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
-        return;
-    }
-    if (static_cast<int32_t>(now_ms - startup_backfill_.due_ms) < 0) return;
-
-    if (smb_ready && task_->request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::IdleBackfill})) {
-        startup_backfill_.smb_queued_generation = smb.config_generation;
-        startup_backfill_.due_ms = 0;
-        return;
-    }
-    if (sleephq_ready && task_->request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::IdleBackfill})) {
-        startup_backfill_.sleephq_queued_generation =
-            sleephq.config_generation;
-        startup_backfill_.due_ms = 0;
-    }
+    startup_backfill_due_ms_ = 0;
 }
 
 bool ExportCoordinator::startup_backfill_pending(
-    const ExportTaskControlSnapshot &task_status) const {
-    const StorageSyncRuntimeStatus smb = task_status.smb;
-    const bool smb_pending =
-        smb.enabled && smb.configured &&
-        startup_check_.smb_completed_generation == smb.config_generation &&
-        startup_backfill_.smb_queued_generation != smb.config_generation;
-
-    const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
-    const bool sleephq_pending =
-        sleephq.configured &&
-        startup_check_.sleephq_completed_generation ==
-            sleephq.config_generation &&
-        startup_backfill_.sleephq_queued_generation !=
-            sleephq.config_generation;
-    return smb_pending || sleephq_pending;
+    const ExportTaskControlSnapshot &status) const {
+    for (const auto endpoint : AC_EXPORT_ENDPOINT_ORDER) {
+        const auto &current = status.endpoint(endpoint);
+        const auto &state = schedule(endpoint);
+        if (current.configured &&
+            state.check_completed_generation == current.config_generation &&
+            state.backfill_queued_generation != current.config_generation) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void ExportCoordinator::maybe_preempt_full_reconcile(
     const ExportReportActivity &report,
     const ActivitySnapshot &activity,
     const ExportTaskControlSnapshot &task_status) {
-    if (!task_ || !task_status.smb.scheduled_reconcile) return;
+    const auto &smb = task_status.endpoint(ExportEndpoint::Smb);
+    if (!task_ || !smb.scheduled_reconcile) return;
 
     const bool smb_startup_pending =
-        task_status.smb.enabled && task_status.smb.configured &&
-        startup_check_.smb_completed_generation !=
-            task_status.smb.config_generation;
-    const bool post_therapy_pending =
-        post_therapy_.report_settle_due_ms != 0 ||
-        post_therapy_.storage_pending || post_therapy_.sleephq_pending;
+        smb.configured &&
+        schedule(ExportEndpoint::Smb).check_completed_generation !=
+            smb.config_generation;
+    const bool post_pending = post_therapy_pending();
     const bool priority_work =
         !task_status.network_ready || report.foreground_active ||
         report.background_active || activity.therapy_active ||
         activity.realtime_stream_active || activity.ota_install_active ||
-        smb_startup_pending || post_therapy_pending ||
-        startup_backfill_pending(task_status) || task_status.sleephq.active();
+        smb_startup_pending || post_pending ||
+        startup_backfill_pending(task_status) ||
+        task_status.endpoint(ExportEndpoint::SleepHq).active();
     if (!priority_work) return;
 
     full_reconcile_.idle_due_ms = 0;
@@ -666,39 +513,35 @@ void ExportCoordinator::maybe_preempt_full_reconcile(
 
 bool ExportCoordinator::full_reconcile_prerequisites_complete(
     const ExportTaskControlSnapshot &task_status) const {
+    const auto &smb = task_status.endpoint(ExportEndpoint::Smb);
+    const auto &sleephq = task_status.endpoint(ExportEndpoint::SleepHq);
     if (!task_status.network_ready || task_status.command_pending ||
-        !task_status.smb.enabled || !task_status.smb.configured ||
-        task_status.smb.state != StorageSyncState::Idle ||
-        task_status.smb.pending || task_status.sleephq.active()) {
+        !smb.configured || !smb.ready() || sleephq.active()) {
         return false;
     }
-    if (startup_check_.smb_completed_generation !=
-        task_status.smb.config_generation) {
+    if (schedule(ExportEndpoint::Smb).check_completed_generation !=
+        smb.config_generation) {
         return false;
     }
-    if (post_therapy_.report_settle_due_ms != 0 ||
-        post_therapy_.storage_pending || post_therapy_.sleephq_pending ||
-        startup_backfill_pending(task_status)) {
+    if (post_therapy_pending() || startup_backfill_pending(task_status)) {
         return false;
     }
 
-    const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
     if (!sleephq.configured) return true;
     const bool check_succeeded =
-        startup_check_.sleephq_completed_generation ==
+        schedule(ExportEndpoint::SleepHq).check_completed_generation ==
         sleephq.config_generation;
     const bool check_attempted =
-        startup_check_.sleephq_requested_generation ==
+        schedule(ExportEndpoint::SleepHq).check_requested_generation ==
         sleephq.config_generation;
     if (!check_succeeded && !check_attempted) {
         return false;
     }
-    if (sleephq.state == SleepHqSyncState::Pending ||
-        sleephq.state == SleepHqSyncState::Working || sleephq.pending) {
+    if (sleephq.awaiting() || sleephq.state == ExportState::Working) {
         return false;
     }
     if (check_succeeded &&
-        startup_backfill_.sleephq_queued_generation !=
+        schedule(ExportEndpoint::SleepHq).backfill_queued_generation !=
             sleephq.config_generation) {
         return false;
     }
@@ -712,28 +555,29 @@ void ExportCoordinator::poll_full_reconcile(
     uint32_t now_ms) {
     if (!task_) return;
 
+    const auto &smb = task_status.endpoint(ExportEndpoint::Smb);
     if (full_reconcile_.config_generation !=
-        task_status.smb.config_generation) {
+        smb.config_generation) {
         reset_full_reconcile();
         full_reconcile_.config_generation =
-            task_status.smb.config_generation;
+            smb.config_generation;
     }
 
     if (full_reconcile_.queued) {
-        if (task_status.smb.scheduled_reconcile) {
+        if (smb.scheduled_reconcile) {
             return;
         }
-        if (task_status.command_pending || task_status.smb.active()) {
+        if (task_status.command_pending || smb.active()) {
             return;
         }
 
         reset_full_reconcile();
         full_reconcile_.config_generation =
-            task_status.smb.config_generation;
+            smb.config_generation;
     }
 
     const uint64_t now_epoch = storage_export_current_epoch_seconds_or_zero();
-    const uint64_t last_reconcile = task_status.smb.last_reconcile_epoch;
+    const uint64_t last_reconcile = smb.last_reconcile_epoch;
     const bool due =
         now_epoch != 0 &&
         (last_reconcile == 0 ||
@@ -758,7 +602,8 @@ void ExportCoordinator::poll_full_reconcile(
         return;
     }
 
-    if (task_->request({ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Maintenance})) {
+    if (task_->request({ExportEndpoint::Smb, ExportOperation::Reconcile,
+                        ExportReason::Maintenance})) {
         full_reconcile_.queued = true;
         full_reconcile_.idle_due_ms = 0;
     }

@@ -418,14 +418,16 @@ void ExportTask::publish_status() {
               sizeof(sleephq.sleephq_device_id),
               sleephq_device_id);
     smb.sync = runtime_->smb.status();
-    control.smb = runtime_->smb.runtime_status();
     sleephq.sync = runtime_->sleephq.status();
-    control.sleephq = runtime_->sleephq.runtime_status();
-    control.active = control.smb.durable_state_pending ||
-                     control.smb.state == StorageSyncState::Working ||
-                     control.sleephq.state == SleepHqSyncState::Working;
-    control.busy = control.active || control.smb.pending ||
-                   control.sleephq.pending || control.command_pending;
+
+    control.active = false;
+    control.busy = command_pending;
+    for (size_t i = 0; i < AC_EXPORT_ENDPOINT_COUNT; ++i) {
+        const auto status = runtime_->backends[i].status();
+        control.endpoints[i] = status;
+        control.active = control.active || status.executing();
+        control.busy = control.busy || status.busy();
+    }
 #if AC_STACK_PROFILE_ENABLED
     control.stack_high_water_words = uxTaskGetStackHighWaterMark(nullptr);
 #endif
