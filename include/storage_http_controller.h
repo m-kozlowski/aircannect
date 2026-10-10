@@ -71,7 +71,7 @@ private:
     std::unique_ptr<PendingStorageRename> pending_storage_rename_;
     uint32_t storage_rename_generation_ = 0;
 
-    // Archive and delete status publication
+    // Storage operation status publication
     static constexpr uint32_t OperationSnapshotActiveIntervalMs = 500;
     static constexpr uint32_t OperationSnapshotIdleIntervalMs = 3000;
     PublishedJsonSnapshot operation_snapshot_;
@@ -80,6 +80,7 @@ private:
     uint32_t next_operation_snapshot_ms_ = 0;
     bool operation_snapshot_active_ = false;
     bool operation_snapshot_initialized_ = false;
+    uint32_t usb_snapshot_revision_ = 0;
 
     // Request serialization for paused HTTP responses
     mutable StaticSemaphore_t job_mutex_storage_ = {};

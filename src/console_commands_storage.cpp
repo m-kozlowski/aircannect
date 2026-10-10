@@ -13,6 +13,7 @@
 #include "management_console_utils.h"
 #include "storage_manager.h"
 #include "storage_service.h"
+#include "storage_usb.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -369,6 +370,23 @@ void StorageConsoleCommands::execute_storage(
         ConsoleFormat::print_storage_status(out, Storage::status());
         return;
     }
+    if (command == "usb") {
+        if (has_second || (has_first && first != "status" &&
+                           first != "on" && first != "off")) {
+            out.println("[STORAGE] usage: storage usb [status|on|off]");
+            return;
+        }
+
+        if (first == "on" || first == "off") {
+            out.printf("[STORAGE][USB] %s\n",
+                       StorageUsb::request(first == "on") ? "queued" : "rejected");
+        }
+        const auto usb = StorageUsb::status();
+        out.printf("[STORAGE][USB] supported=%s state=%s error=%s\n",
+                   usb.supported ? "yes" : "no", StorageUsb::state_name(usb.state),
+                   usb.error[0] ? usb.error : "--");
+        return;
+    }
     if (command == "mount" && !has_first) {
         out.print("[STORAGE] mount ");
         out.println(StorageService::request_mount()
@@ -392,7 +410,7 @@ void StorageConsoleCommands::execute_storage(
         command != "rename") {
         print_unknown_command(
             out, "STORAGE",
-            "storage status, mount, pwd, ls [PATH], cd PATH, "
+            "storage status, mount, usb [status|on|off], pwd, ls [PATH], cd PATH, "
             "rm PATH, rename PATH NEW_NAME");
         return;
     }

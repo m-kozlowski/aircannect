@@ -5,6 +5,8 @@
     let storageNextOffset = null;
     let storageListRequestSeq = 0;
     let storageOperationData = null;
+    let storageUsbState = "local";
+    let storageUsbRequestPending = false;
     let storageArchiveJobId = 0;
     let storageArchiveDownloadStartedId = 0;
     let storageDeleteJobId = 0;
@@ -113,7 +115,7 @@
     function storageSelectionUi() {
       const selected = storageSelectedNames.size;
       const storageJobBusy = storageArchiveBusy || storageDeleteBusy ||
-        storageRenameBusy || storageUploadBusy;
+        storageRenameBusy || storageUploadBusy || storageUsbState !== "local";
       const exportBusy = smbSyncBusy || sleepHqSyncBusy;
       const archiveBusy = storageJobBusy || exportBusy;
       const destructiveBusy = storageJobBusy || exportBusy;
@@ -143,6 +145,15 @@
       }
       const uploadBtn = document.getElementById("storageUploadBtn");
       if (uploadBtn) uploadBtn.disabled = storageJobBusy || exportBusy;
+      for (const [id, unavailable] of [
+        ["storageUpBtn", storagePath === "/"],
+        ["storagePrevBtn", storageOffset <= 0],
+        ["storageNextBtn", storageNextOffset === null],
+        ["storageRefreshBtn", false],
+      ]) {
+        const button = document.getElementById(id);
+        if (button) button.disabled = storageUsbState !== "local" || unavailable;
+      }
       const syncBtn = document.getElementById("edfSyncBtn");
       if (syncBtn) syncBtn.disabled = endpointBusy || !smbSyncEnabled || !smbSyncConfigured;
       const verifyBtn = document.getElementById("edfVerifyBtn");
@@ -300,6 +311,7 @@
     }
 
     async function loadStorageList(reset) {
+      if (storageUsbState !== "local") return;
       const requestSeq = ++storageListRequestSeq;
       if (reset) {
         storageOffset = 0;
@@ -1011,8 +1023,70 @@
 
     function applyStorageOperationSnapshot(data) {
       storageOperationData = data;
+      applyStorageUsbStatus(data && data.usb);
       storageApplyArchiveStatus(data && data.archive);
       storageApplyDeleteStatus(data && data.delete);
+    }
+
+    function applyStorageUsbStatus(usb) {
+      if (!usb) return;
+      const previous = storageUsbState;
+      storageUsbState = usb.state || "local";
+      const row = document.getElementById("storageUsbRow");
+      if (row) row.hidden = !usb.supported;
+      const toggle = document.getElementById("storageUsbToggle");
+      if (toggle) {
+        toggle.checked = storageUsbState !== "local";
+        toggle.disabled = storageUsbRequestPending ||
+          !["local", "shared", "error"].includes(storageUsbState);
+      }
+      const labels = {local: "Local", preparing: "Preparing",
+        shared: "USB read/write", returning: "Returning SD",
+        restoring: "Reloading", error: "Unavailable"};
+      AirCANnect.ui.text("storageUsbStatus", labels[storageUsbState] || storageUsbState);
+      if (usb.error) AirCANnect.ui.message("storageUsbMsg", usb.error, false, true);
+      else AirCANnect.ui.clearMessage("storageUsbMsg");
+
+      if (previous !== storageUsbState && storageUsbState !== "local") {
+        ++storageListRequestSeq;
+        storageEntries = [];
+        storageSelectedNames.clear();
+        const list = document.getElementById("storageList");
+        if (list) list.replaceChildren();
+        storageSetBadge("USB", "warn");
+      }
+      storageSelectionUi();
+      if (previous !== "local" && storageUsbState === "local") {
+        storagePath = "/";
+        if (AirCANnect.pages.isActive("storage")) loadStorageList(true);
+      }
+    }
+
+    async function storageSetUsb(enabled) {
+      const question = enabled
+        ? "Pause recording, reports and exports, and give the computer read/write access to SD?"
+        : "Has the USB disk been unmounted on the computer? Returning it before unmounting can damage files.";
+      if (!confirm(question)) {
+        applyStorageUsbStatus(storageOperationData && storageOperationData.usb);
+        return;
+      }
+
+      storageUsbRequestPending = true;
+      applyStorageUsbStatus(storageOperationData && storageOperationData.usb);
+      let failure = "";
+      try {
+        const response = await AirCANnect.http.request("/api/storage/usb", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({enabled}),
+        });
+        if (!response.ok) throw new Error(storageErrorText(await response.text(), response.status));
+      } catch (error) {
+        failure = error.message;
+      } finally {
+        storageUsbRequestPending = false;
+        applyStorageUsbStatus(storageOperationData && storageOperationData.usb);
+        if (failure) AirCANnect.ui.message("storageUsbMsg", failure, false, true);
+      }
     }
 
     async function storageStartArchive(url, options) {
@@ -1109,6 +1183,8 @@
     }
 
     AirCANnect.actions.register("storage.up", () => storageUp());
+    AirCANnect.actions.register("storage.usb", (_event, element) =>
+      storageSetUsb(element.checked));
     AirCANnect.actions.register("storage.upload-choose", () =>
       storageChooseUpload());
     AirCANnect.actions.register("storage.refresh", () =>

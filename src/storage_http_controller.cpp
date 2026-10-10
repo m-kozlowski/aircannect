@@ -26,6 +26,7 @@
 #include "storage_path.h"
 #include "storage_path_port.h"
 #include "storage_read_port.h"
+#include "storage_usb.h"
 
 namespace aircannect {
 namespace {
@@ -80,12 +81,17 @@ void append_storage_delete_status(JsonOut &json,
 template <typename JsonOut>
 void build_storage_operation_json(JsonOut &json,
                                   const StorageArchiveStatus &archive,
-                                  const StorageDeleteStatus &remove) {
+                                  const StorageDeleteStatus &remove,
+                                  const StorageUsbStatus &usb) {
     json = "{\"archive\":";
     append_storage_archive_status(json, archive);
     json += ",\"delete\":";
     append_storage_delete_status(json, remove);
-    json += '}';
+    json += ",\"usb\":{";
+    json_add_bool(json, "supported", usb.supported, false);
+    json_add_string(json, "state", StorageUsb::state_name(usb.state));
+    json_add_string(json, "error", usb.error);
+    json += "}}";
 }
 
 struct StorageSelectionRequest {
@@ -328,13 +334,15 @@ bool StorageHttpController::publish_operation_snapshot_if_needed(bool force) {
     if (!storage_archive_ || !storage_delete_) return false;
 
     const uint32_t now = millis();
+    const auto usb = StorageUsb::status();
+    const bool usb_changed = usb.revision != usb_snapshot_revision_;
     const bool active = storage_archive_->active() || storage_delete_->active();
     const bool activity_changed =
         operation_snapshot_initialized_ &&
         active != operation_snapshot_active_;
     const bool requested = operation_snapshot_requested_.exchange(
         false, std::memory_order_acq_rel);
-    if (!force && !requested && !activity_changed &&
+    if (!force && !requested && !activity_changed && !usb_changed &&
         static_cast<int32_t>(now - next_operation_snapshot_ms_) < 0) {
         return true;
     }
@@ -349,7 +357,7 @@ bool StorageHttpController::publish_operation_snapshot_if_needed(bool force) {
 
     operation_snapshot_build_json_.clear();
     build_storage_operation_json(operation_snapshot_build_json_, archive,
-                                 remove);
+                                 remove, usb);
     if (operation_snapshot_build_json_.overflowed()) {
         Log::logf(CAT_STORAGE, LOG_WARN,
                   "operation status snapshot allocation failed\n");
@@ -363,6 +371,7 @@ bool StorageHttpController::publish_operation_snapshot_if_needed(bool force) {
     }
 
     operation_snapshot_active_ = active;
+    usb_snapshot_revision_ = usb.revision;
     operation_snapshot_initialized_ = true;
     next_operation_snapshot_ms_ = now +
         (active ? OperationSnapshotActiveIntervalMs
@@ -613,6 +622,26 @@ void StorageHttpController::poll_archive_download() {
 }
 
 void StorageHttpController::register_routes(HttpRouteRegistry &server) {
+    server.on(AsyncURIMatcher::exact("/api/storage/usb"), HTTP_POST,
+              [this](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        std::string body;
+        if (!http_parse_json_body(request, doc, body) ||
+            !doc["enabled"].is<bool>()) {
+            request->send(400, "application/json",
+                          "{\"ok\":false,\"error\":\"bad_request\"}");
+            return;
+        }
+
+        if (!StorageUsb::request(doc["enabled"].as<bool>())) {
+            request->send(409, "application/json",
+                          "{\"ok\":false,\"error\":\"usb_unavailable_or_busy\"}");
+            return;
+        }
+        request_operation_snapshot();
+        request->send(202, "application/json", "{\"ok\":true}");
+    }, nullptr, http_request_body_handler);
+
     // Storage browser and jobs
     server.on(AsyncURIMatcher::exact("/api/storage/list"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {

@@ -125,6 +125,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP storage]");
         out.println("  storage status            show mounted storage state");
         out.println("  storage mount             mount storage if unavailable");
+        out.println("  storage usb [status|on|off] share SD over USB; unmount on host before off");
         out.println("  storage pwd               show the current directory");
         out.println("  storage ls [PATH]         list a directory");
         out.println("  storage cd PATH           change the current directory");

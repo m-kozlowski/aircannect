@@ -242,6 +242,7 @@
       background: #10111466;
     }
 
+    #storageUsbRow[hidden],
     .storage-upload-progress[hidden] {
       display: none;
     }

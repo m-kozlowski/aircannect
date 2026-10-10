@@ -537,12 +537,18 @@
               <span class="label">Storage</span>
               <span class="badge" id="storageBadge">--</span>
             </div>
+            <div class="row" id="storageUsbRow" hidden>
+              <label class="check"><input type="checkbox" id="storageUsbToggle"
+                data-change-action="storage.usb"> USB disk</label>
+              <span class="value" id="storageUsbStatus">Local</span>
+            </div>
+            <div class="msg" id="storageUsbMsg"></div>
             <div class="storage-toolbar">
               <div class="storage-path" id="storagePath">/</div>
               <div class="btns" style="margin-top: 0">
                 <button class="btn" id="storageUpBtn" data-action="storage.up">Up</button>
                 <button class="btn primary" id="storageUploadBtn" data-action="storage.upload-choose">Upload</button>
-                <button class="btn" data-action="storage.refresh">Refresh</button>
+                <button class="btn" id="storageRefreshBtn" data-action="storage.refresh">Refresh</button>
                 <input id="storageUploadInput" type="file" multiple hidden
                   data-change-action="storage.upload-files">
               </div>
