@@ -2261,7 +2261,7 @@
       AirCANnect.ui.text("reportSettingsSource", needsRefresh
         ? "Saved settings require a fresh read from STR."
         : mode === null ? "Historical settings are unavailable in this saved report."
-        : "Daily STR snapshot; changes within the night are not recorded.");
+        : "");
 
       const labels = ["Mode", "Pressure", "Min pressure", "Max pressure", "IPAP", "EPAP",
         "Max IPAP", "Min EPAP", "Max EPAP", "PS", "Min PS", "Max PS", "Ti min", "Ti max",
