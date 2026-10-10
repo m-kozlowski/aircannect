@@ -166,6 +166,12 @@ private:
         bool required = true;
     };
 
+    struct PlainResponseResult {
+        const char *error = nullptr;
+        int rpc_code = 0;
+        explicit operator bool() const { return error == nullptr; }
+    };
+
     // Worker lifecycle
     static void task_entry(void *context);
     void task_loop();
@@ -213,9 +219,10 @@ private:
                             const char *key,
                             const char *value,
                             uint32_t id);
-    bool wait_plain_response(uint32_t id,
-                             const PlainResponseField *fields,
-                             size_t field_count);
+    PlainResponseResult wait_plain_response(uint32_t id,
+                                            const PlainResponseField *fields,
+                                            size_t field_count);
+    bool accept_session_response(const char *phase, PlainResponseResult result);
     bool write_fig(uint16_t vcid, const uint8_t *data, size_t length);
     void drain_notifications(bool publish_application);
     void publish_packet(const As11BleFigPacket &packet);

@@ -1224,21 +1224,30 @@ bool As11BleRpcLink::authenticate(const Configuration &config) {
         {"challenge", challenge, sizeof(challenge), true},
         {"nonce", nonce, sizeof(nonce), true},
     };
-    if (!send_plain_request("RequestSession", "clientId", config.client_id,
-                            1) ||
-        !wait_plain_response(
+    if (!send_plain_request("RequestSession", "clientId", config.client_id, 1)) {
+        set_status(As11BleLinkState::Backoff, "session_request_send_failed");
+        return false;
+    }
+    if (!accept_session_response("session_request", wait_plain_response(
             1, session_fields,
-            sizeof(session_fields) / sizeof(session_fields[0]))) {
-        set_status(As11BleLinkState::Backoff, "session_request_failed");
+            sizeof(session_fields) / sizeof(session_fields[0])))) {
         return false;
     }
 
     char response[AS11_BLE_KEY_HEX_BYTES + 1] = {};
-    if (!crypto_.integrity_response_hex(challenge, response) ||
-        !send_plain_request("CheckSessionIntegrity", "response", response,
-                            2) ||
-        !wait_plain_response(2, nullptr, 0) ||
-        !crypto_.derive_session_key(nonce)) {
+    if (!crypto_.integrity_response_hex(challenge, response)) {
+        set_status(As11BleLinkState::Backoff, "session_integrity_failed");
+        return false;
+    }
+    if (!send_plain_request("CheckSessionIntegrity", "response", response, 2)) {
+        set_status(As11BleLinkState::Backoff, "session_integrity_send_failed");
+        return false;
+    }
+    if (!accept_session_response("session_integrity",
+                                 wait_plain_response(2, nullptr, 0))) {
+        return false;
+    }
+    if (!crypto_.derive_session_key(nonce)) {
         set_status(As11BleLinkState::Backoff, "session_integrity_failed");
         return false;
     }
@@ -1262,14 +1271,14 @@ bool As11BleRpcLink::send_plain_request(const char *method,
                      reinterpret_cast<const uint8_t *>(json), length);
 }
 
-bool As11BleRpcLink::wait_plain_response(
+As11BleRpcLink::PlainResponseResult As11BleRpcLink::wait_plain_response(
     uint32_t id,
     const PlainResponseField *fields,
     size_t field_count) {
     const uint32_t deadline = millis() + AC_AS11_BLE_SESSION_TIMEOUT_MS;
     while (static_cast<int32_t>(millis() - deadline) < 0) {
 #if AC_BLE_ENABLED
-        if (!client_ || !client_->isConnected()) return false;
+        if (!client_ || !client_->isConnected()) return {"disconnected"};
 #endif
 
         RpcPayloadRef notification;
@@ -1278,14 +1287,14 @@ bool As11BleRpcLink::wait_plain_response(
             continue;
         }
         if (!fig_.feed(notification->data(), notification->size())) {
-            return false;
+            return {"fig_buffer_failed"};
         }
 
         while (true) {
             As11BleFigPacket packet;
             const As11BleFigDecodeState state = fig_.take(packet);
             if (state == As11BleFigDecodeState::NeedMore) break;
-            if (state != As11BleFigDecodeState::Packet) return false;
+            if (state != As11BleFigDecodeState::Packet) return {"fig_decode_failed"};
             if (packet.vcid != AS11_BLE_VCID_PLAINTEXT_RESPONSE ||
                 !packet.payload) {
                 continue;
@@ -1295,23 +1304,39 @@ bool As11BleRpcLink::wait_plain_response(
             const DeserializationError error = deserializeJson(
                 document, packet.payload->data(), packet.payload->size());
             if (error || document["id"].as<uint32_t>() != id) continue;
-            if (document["error"].is<JsonObject>()) return false;
+            if (document["error"].is<JsonObject>()) {
+                return {"rpc_error", document["error"]["code"].as<int>()};
+            }
 
             for (size_t i = 0; i < field_count; ++i) {
                 const PlainResponseField &field = fields[i];
                 if (!field.key || !field.value || field.value_size == 0) {
-                    return false;
+                    return {"invalid_field"};
                 }
 
                 const char *value = document["result"][field.key] | "";
                 if (!copy_text(field.value, field.value_size, value) ||
                     (field.required && !field.value[0])) {
-                    return false;
+                    return {"invalid_field"};
                 }
             }
-            return true;
+            return {};
         }
     }
+    return {"timeout"};
+}
+
+bool As11BleRpcLink::accept_session_response(const char *phase,
+                                             PlainResponseResult result) {
+    if (result) return true;
+
+    char error[sizeof(status_.error)];
+    if (strcmp(result.error, "rpc_error") == 0) {
+        snprintf(error, sizeof(error), "%s_rpc_error_%d", phase, result.rpc_code);
+    } else {
+        snprintf(error, sizeof(error), "%s_%s", phase, result.error);
+    }
+    set_status(As11BleLinkState::Backoff, error);
     return false;
 }
 
