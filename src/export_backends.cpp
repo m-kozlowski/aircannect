@@ -1,40 +1,30 @@
-#include "export_backend.h"
+#include "export_backends.h"
 
+#include "board_report.h"
 #include "sleephq_sync_engine.h"
 #include "storage_sync_engine.h"
 
 namespace aircannect {
 
-bool ExportRequest::supported() const {
-    if (endpoint != ExportEndpoint::Smb &&
-        endpoint != ExportEndpoint::SleepHq) {
-        return false;
-    }
-
-    if (day[0]) {
-        return endpoint == ExportEndpoint::SleepHq &&
-               operation == ExportOperation::Sync &&
-               reason == ExportReason::Manual;
-    }
-
-    switch (operation) {
-        case ExportOperation::Check:
-            return reason == ExportReason::Startup ||
-                   (endpoint == ExportEndpoint::SleepHq &&
-                    reason == ExportReason::Manual);
-        case ExportOperation::Sync:
-            return reason == ExportReason::Manual ||
-                   reason == ExportReason::IdleBackfill ||
-                   reason == ExportReason::PostTherapy;
-        case ExportOperation::Reconcile:
-            return endpoint == ExportEndpoint::Smb &&
-                   (reason == ExportReason::Manual ||
-                    reason == ExportReason::Maintenance);
-    }
-    return false;
-}
-
 namespace {
+
+constexpr ExportOperationRule SMB_RULES[] = {
+    {ExportOperation::Check, ExportReason::Startup},
+    {ExportOperation::Sync, ExportReason::Manual},
+    {ExportOperation::Sync, ExportReason::IdleBackfill},
+    {ExportOperation::Sync, ExportReason::PostTherapy},
+    {ExportOperation::Reconcile, ExportReason::Manual},
+    {ExportOperation::Reconcile, ExportReason::Maintenance, false,
+     {ExportPriority::Maintenance, true, true}},
+};
+
+constexpr ExportOperationRule SLEEPHQ_RULES[] = {
+    {ExportOperation::Check, ExportReason::Startup},
+    {ExportOperation::Check, ExportReason::Manual},
+    {ExportOperation::Sync, ExportReason::Manual, true},
+    {ExportOperation::Sync, ExportReason::IdleBackfill},
+    {ExportOperation::Sync, ExportReason::PostTherapy},
+};
 
 bool request_engine(StorageSyncEngine &engine, const ExportRequest &request) {
     switch (request.operation) {
@@ -95,24 +85,32 @@ ExportEndpointStatus engine_status(StorageSyncEngine &engine) {
     auto out = common_status(source);
     out.configured = source.enabled && source.configured;
     out.durable_state_pending = source.durable_state_pending;
-    out.completed_sequence = source.completed_sequence;
-    out.scheduled_reconcile = source.scheduled_reconcile;
-    out.last_reconcile_epoch = source.last_reconcile_epoch;
+    out.ready_generation = source.completed_sequence ? source.config_generation : 0;
+    out.maintenance_pending = source.scheduled_reconcile;
+    out.last_maintenance_epoch = source.last_reconcile_epoch;
+    if (source.scheduled_reconcile) {
+        out.work = SMB_EXPORT_DEFINITION.rule(
+            ExportOperation::Reconcile, ExportReason::Maintenance)->work;
+    }
     return out;
 }
 
 ExportEndpointStatus engine_status(SleepHqSyncEngine &engine) {
     const auto source = engine.runtime_status();
     auto out = common_status(source);
-    out.completed_check_generation = source.completed_check_generation;
+    out.ready_generation = source.completed_check_generation;
     return out;
 }
 
-}  // namespace
+void defer_engine(StorageSyncEngine &engine, uint32_t until_ms) {
+    engine.defer_idle_work_until(until_ms);
+}
+
+void defer_engine(SleepHqSyncEngine &, uint32_t) {}
 
 template <typename Engine>
-const ExportBackend::Operations &ExportBackend::operations() {
-    static const Operations ops = {
+const ExportBackend::Operations &operations() {
+    static const ExportBackend::Operations ops = {
         [](void *e, const ExportRequest &r) {
             return request_engine(*static_cast<Engine *>(e), r);
         },
@@ -128,14 +126,31 @@ const ExportBackend::Operations &ExportBackend::operations() {
         [](void *e, bool v) {
             static_cast<Engine *>(e)->set_runtime_blocked(v);
         },
+        [](void *e, uint32_t until_ms) {
+            defer_engine(*static_cast<Engine *>(e), until_ms);
+        },
     };
     return ops;
 }
 
-ExportBackend::ExportBackend(StorageSyncEngine &engine)
-    : engine_(&engine), ops_(&operations<StorageSyncEngine>()) {}
+}  // namespace
 
-ExportBackend::ExportBackend(SleepHqSyncEngine &engine)
-    : engine_(&engine), ops_(&operations<SleepHqSyncEngine>()) {}
+const ExportBackendDefinition SMB_EXPORT_DEFINITION = {
+    ExportEndpoint::Smb, SMB_RULES, sizeof(SMB_RULES) / sizeof(SMB_RULES[0]),
+    true, AC_EXPORT_FULL_RECONCILE_INTERVAL_SECONDS,
+};
+
+const ExportBackendDefinition SLEEPHQ_EXPORT_DEFINITION = {
+    ExportEndpoint::SleepHq, SLEEPHQ_RULES,
+    sizeof(SLEEPHQ_RULES) / sizeof(SLEEPHQ_RULES[0]),
+};
+
+ExportBackend make_export_backend(StorageSyncEngine &engine) {
+    return {&engine, SMB_EXPORT_DEFINITION, operations<StorageSyncEngine>()};
+}
+
+ExportBackend make_export_backend(SleepHqSyncEngine &engine) {
+    return {&engine, SLEEPHQ_EXPORT_DEFINITION, operations<SleepHqSyncEngine>()};
+}
 
 }  // namespace aircannect

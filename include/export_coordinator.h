@@ -36,6 +36,7 @@ public:
     ExportSleepHqStatusSnapshot sleephq_snapshot() const;
 
     // external requests
+    bool request(const ExportRequest &request);
     bool request_sync();
     bool request_smb_sync();
     bool request_smb_verify();
@@ -54,28 +55,20 @@ private:
 
     struct EndpointSchedule {
         uint32_t check_requested_generation = 0;
-        uint32_t check_completed_generation = 0;
-        uint32_t request_completed_sequence = 0;
         uint32_t backfill_queued_generation = 0;
         bool post_therapy_pending = false;
         uint32_t post_therapy_due_ms = 0;
         bool manual_pending = false;
-    };
-
-    struct FullReconcileState {
-        uint32_t config_generation = 0;
-        uint32_t idle_due_ms = 0;
-        bool queued = false;
+        uint32_t maintenance_generation = 0;
+        uint32_t maintenance_due_ms = 0;
+        bool maintenance_queued = false;
     };
 
     // task snapshots and requests
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
-    static bool external_request_allowed(
-        const ExportTaskControlSnapshot &status);
     ExportTaskControlSnapshot control_snapshot() const;
     EndpointSchedule &schedule(ExportEndpoint id);
     const EndpointSchedule &schedule(ExportEndpoint id) const;
-    bool request_external(const ExportRequest &request);
     void record_request(const ExportRequest &request,
                         const ExportEndpointStatus &status);
 
@@ -94,11 +87,13 @@ private:
                             const ExportTaskControlSnapshot &status,
                             uint32_t now_ms);
     bool post_therapy_pending() const;
+    void defer_idle_work(const ExportTaskControlSnapshot &status,
+                         uint32_t until_ms);
 
     // startup and idle backfill
     bool startup_idle_work_allowed(uint32_t now_ms);
-    void observe_startup_check(ExportEndpoint endpoint,
-                               const ExportEndpointStatus &status);
+    bool check_settled(ExportEndpoint endpoint,
+                       const ExportTaskControlSnapshot &status) const;
     void queue_startup_checks(const ExportTaskControlSnapshot &status);
     void poll_startup_backfill(
         const ExportReportActivity &report,
@@ -111,28 +106,20 @@ private:
     // manual all-endpoint sync
     void poll_manual_sync(const ExportTaskControlSnapshot &task_status);
 
-    // full SMB reconcile
-    void maybe_preempt_full_reconcile(
-        const ExportReportActivity &report,
-        const ActivitySnapshot &activity,
-        const ExportTaskControlSnapshot &task_status);
-    void poll_full_reconcile(const ExportReportActivity &report,
-                             const ActivitySnapshot &activity,
-                             const ExportTaskControlSnapshot &task_status,
-                             uint32_t now_ms);
-    bool full_reconcile_prerequisites_complete(
-        const ExportTaskControlSnapshot &task_status) const;
-    void reset_full_reconcile();
+    // preemptible endpoint maintenance
+    void poll_maintenance(const ExportReportActivity &report,
+                          const ActivitySnapshot &activity,
+                          const ExportTaskControlSnapshot &status,
+                          uint32_t now_ms);
 
     // export task command/status port
     ExportTask *task_ = nullptr;
 
     // coordinator state
     PostTherapyState post_therapy_;
-    std::array<EndpointSchedule, AC_EXPORT_ENDPOINT_COUNT> endpoints_;
+    std::array<EndpointSchedule, AC_EXPORT_ENDPOINT_CAPACITY> endpoints_;
     bool startup_idle_grace_complete_ = false;
     uint32_t startup_backfill_due_ms_ = 0;
-    FullReconcileState full_reconcile_;
     ExportTaskControlSnapshot status_snapshot_;
 };
 

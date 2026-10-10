@@ -1,5 +1,5 @@
 #include "export_task.h"
-#include "export_backend.h"
+#include "export_backends.h"
 
 #include <new>
 #include <stdio.h>
@@ -19,9 +19,10 @@ namespace aircannect {
 struct ExportTask::Runtime {
     StorageSyncEngine smb;
     SleepHqSyncEngine sleephq;
-    ExportBackend backends[AC_EXPORT_ENDPOINT_COUNT] = {
-        ExportBackend(smb), ExportBackend(sleephq),
+    ExportBackend installed_backends[2] = {
+        make_export_backend(smb), make_export_backend(sleephq),
     };
+    ExportBackendRegistry backends{installed_backends, std::size(installed_backends)};
     PublishedInputs inputs;
     PublishedInputs input_snapshot;
     ExportTaskControlSnapshot control_status;
@@ -161,14 +162,15 @@ void ExportTask::publish_network(const NetworkSnapshot &network) {
     if (changed) wake();
 }
 
-void ExportTask::defer_smb_until(uint32_t until_ms) {
+void ExportTask::defer_idle_until(ExportEndpoint endpoint, uint32_t until_ms) {
     if (!runtime_) return;
+    if (!runtime_->backends.find(endpoint)) return;
     if (!lock_inputs()) return;
 
-    runtime_->inputs.smb_defer_until_ms = until_ms;
-    runtime_->inputs.smb_defer_generation++;
-    if (runtime_->inputs.smb_defer_generation == 0) {
-        runtime_->inputs.smb_defer_generation++;
+    runtime_->inputs.defer_until_ms[static_cast<size_t>(endpoint)] = until_ms;
+    runtime_->inputs.defer_generation++;
+    if (runtime_->inputs.defer_generation == 0) {
+        runtime_->inputs.defer_generation++;
     }
 
     unlock_inputs();
@@ -177,7 +179,8 @@ void ExportTask::defer_smb_until(uint32_t until_ms) {
 
 bool ExportTask::request(const ExportRequest &request) {
     if (storage_suspend_requested_.load() || !runtime_) return false;
-    if (!request.supported()) return false;
+    const auto *backend = runtime_->backends.find(request.endpoint);
+    if (!backend || !request.supported(backend->definition())) return false;
     if (!lock_inputs()) return false;
 
     if (storage_suspend_requested_.load()) {
@@ -211,18 +214,23 @@ bool ExportTask::request(const ExportRequest &request) {
 
     work_reservation_.fetch_or(ExportDemand);
     unlock_inputs();
-    if (request.reason != ExportReason::Maintenance) {
-        cancel_smb_scheduled_reconcile();
+    const auto incoming = backend->definition().rule(
+        request.operation, request.reason)->work;
+    for (const auto &other : runtime_->backends) {
+        const auto status = other.status();
+        if (status.maintenance_pending && status.can_preempt(incoming)) {
+            other.cancel(ExportReason::Maintenance);
+        }
     }
     wake();
     return true;
 }
 
-void ExportTask::cancel_smb_scheduled_reconcile() {
+void ExportTask::cancel_maintenance(ExportEndpoint endpoint) {
     if (!runtime_) return;
 
-    runtime_->backends[static_cast<size_t>(ExportEndpoint::Smb)].cancel(
-        ExportReason::Maintenance);
+    const auto *backend = runtime_->backends.find(endpoint);
+    if (backend) backend->cancel(ExportReason::Maintenance);
     wake();
 }
 
@@ -295,9 +303,12 @@ void ExportTask::apply_inputs(const PublishedInputs &inputs,
         applied_activity_generation_ = inputs.activity_generation;
     }
 
-    if (inputs.smb_defer_generation != applied_smb_defer_generation_) {
-        runtime_->smb.defer_idle_work_until(inputs.smb_defer_until_ms);
-        applied_smb_defer_generation_ = inputs.smb_defer_generation;
+    if (inputs.defer_generation != applied_defer_generation_) {
+        for (const auto &backend : runtime_->backends) {
+            backend.defer_idle_work_until(
+                inputs.defer_until_ms[static_cast<size_t>(backend.definition().id)]);
+        }
+        applied_defer_generation_ = inputs.defer_generation;
     }
 
     for (const auto &backend : runtime_->backends) {
@@ -312,13 +323,12 @@ bool ExportTask::apply_command(const Command &command) {
         if (backend.status().busy()) return false;
     }
 
-    const auto &backend =
-        runtime_->backends[static_cast<size_t>(command.request.endpoint)];
-    if (!backend.status().configured) {
+    const auto *backend = runtime_->backends.find(command.request.endpoint);
+    if (!backend || !backend->status().configured) {
         finish_command(command, true);
         return true;
     }
-    if (!backend.request(command.request)) return false;
+    if (!backend->request(command.request)) return false;
 
     finish_command(command, false);
     return true;
@@ -352,7 +362,7 @@ ExportStep ExportTask::step_endpoint() {
     }
 
     const ExportStep result = runtime_->backends[next_idle_endpoint_].step();
-    next_idle_endpoint_ = (next_idle_endpoint_ + 1) % AC_EXPORT_ENDPOINT_COUNT;
+    next_idle_endpoint_ = (next_idle_endpoint_ + 1) % runtime_->backends.count;
     return result;
 }
 
@@ -422,9 +432,12 @@ void ExportTask::publish_status() {
 
     control.active = false;
     control.busy = command_pending;
-    for (size_t i = 0; i < AC_EXPORT_ENDPOINT_COUNT; ++i) {
-        const auto status = runtime_->backends[i].status();
-        control.endpoints[i] = status;
+    control.order.count = 0;
+    for (const auto &backend : runtime_->backends) {
+        const auto status = backend.status();
+        const auto id = backend.definition().id;
+        control.order.ids[control.order.count++] = id;
+        control.endpoint(id) = status;
         control.active = control.active || status.executing();
         control.busy = control.busy || status.busy();
     }

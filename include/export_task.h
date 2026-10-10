@@ -32,7 +32,21 @@ struct ExportTaskControlSnapshot {
     bool busy = false;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
-    std::array<ExportEndpointStatus, AC_EXPORT_ENDPOINT_COUNT> endpoints;
+    ExportEndpointOrder order;
+    std::array<ExportEndpointStatus, AC_EXPORT_ENDPOINT_CAPACITY> endpoints;
+
+    bool accepts(ExportWorkPolicy incoming) const {
+        if (command_pending) return false;
+
+        for (const auto id : order) {
+            const auto &current = endpoint(id);
+            if (!current.busy()) continue;
+            if (current.can_preempt(incoming)) continue;
+            if (current.durable_state_pending || incoming.exclusive ||
+                current.work.exclusive) return false;
+        }
+        return true;
+    }
 
     const ExportEndpointStatus &endpoint(ExportEndpoint id) const {
         return endpoints[static_cast<size_t>(id)];
@@ -85,11 +99,11 @@ public:
     void publish_network(const NetworkSnapshot &network);
     void set_storage_suspended(bool suspended);
     bool storage_quiesced() const { return !task_ || storage_paused_.load(); }
-    void defer_smb_until(uint32_t until_ms);
+    void defer_idle_until(ExportEndpoint endpoint, uint32_t until_ms);
 
     // endpoint commands
     bool request(const ExportRequest &request);
-    void cancel_smb_scheduled_reconcile();
+    void cancel_maintenance(ExportEndpoint endpoint);
     bool cancel_post_therapy();
 
     // Update checks yield to export demand; release only after task cleanup.
@@ -125,8 +139,8 @@ private:
         uint32_t config_generation = 1;
         uint32_t activity_generation = 0;
         uint32_t network_generation = 0;
-        uint32_t smb_defer_generation = 0;
-        uint32_t smb_defer_until_ms = 0;
+        uint32_t defer_generation = 0;
+        std::array<uint32_t, AC_EXPORT_ENDPOINT_CAPACITY> defer_until_ms = {};
         Command command;
     };
 
@@ -168,7 +182,7 @@ private:
     uint32_t applied_config_generation_ = 0;
     uint32_t applied_activity_generation_ = 0;
     uint32_t applied_network_generation_ = 0;
-    uint32_t applied_smb_defer_generation_ = 0;
+    uint32_t applied_defer_generation_ = 0;
     uint32_t network_ready_since_ms_ = 0;
     bool network_ready_ = false;
     bool runtime_blocked_ = true;
