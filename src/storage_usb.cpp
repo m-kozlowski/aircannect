@@ -60,7 +60,7 @@ uint16_t descriptor(uint8_t *destination, uint8_t *interface) {
 
 // Arduino starts USB before setup(). Register the fixed composite interface now.
 const bool registered = tinyusb_enable_interface(
-    USB_INTERFACE_MSC, TUD_MSC_DESC_LEN, descriptor);
+    USB_INTERFACE_MSC, TUD_MSC_DESC_LEN, descriptor) == ESP_OK;
 #endif
 
 void publish_locked(StorageUsbState next, const char *error = nullptr) {
