@@ -1413,10 +1413,12 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         failure_reason_ = "report_signal_store_metrics_merge_failed";
         return false;
     }
+    night.statistics = runtime_->metrics.finish();
+    night.settings = runtime_->plan->night().settings;
     report_night_complete_metrics(
         night.metrics,
         night.events,
-        runtime_->metrics.finish(),
+        night.statistics,
         night.requested_event_mask,
         night.missing_event_mask,
         csr_duration_ms);

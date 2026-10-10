@@ -64,12 +64,16 @@ struct ReportEventCounts {
 
 struct ReportMetricStatistics {
     bool valid = false;
+    bool extrema_valid = false;
+    int32_t min_milli = 0;
+    int32_t max_milli = 0;
     int32_t mean_milli = 0;
     int32_t p50_milli = 0;
     int32_t p95_milli = 0;
 };
 
 struct ReportCalculatedMetrics {
+    static constexpr size_t Count = 8;
     ReportMetricStatistics pressure;
     ReportMetricStatistics ipap;
     ReportMetricStatistics leak;
@@ -77,6 +81,10 @@ struct ReportCalculatedMetrics {
     ReportMetricStatistics respiratory_rate;
     ReportMetricStatistics tidal_volume;
     ReportMetricStatistics spo2;
+    ReportMetricStatistics epap;
+
+    ReportMetricStatistics &at(size_t index);
+    const ReportMetricStatistics &at(size_t index) const;
 };
 
 class ReportMetricAccumulator {

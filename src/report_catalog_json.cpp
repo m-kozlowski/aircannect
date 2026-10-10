@@ -51,8 +51,9 @@ uint64_t catalog_identity(const NightCatalog &catalog,
         mix(night->source_revision.value());
         const ReportSignalStoreCatalogRecord *stored = store
             ? store->find(night->sleep_day) : nullptr;
-        mix(stored && stored->source_revision == night->source_revision
-                ? stored->generation : 0);
+        mix(stored ? stored->generation : 0);
+        mix(stored ? stored->source_revision.value() : 0);
+        mix(stored && stored->metadata ? stored->metadata->size() : 0);
     }
     return hash;
 }
@@ -153,6 +154,32 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
              ++session) {
             if (session) json += ',';
             append_session_json(json, sessions[session]);
+        }
+        json += ']';
+
+        // Published night metadata supplies trends; no historical builds or I/O.
+        json += ",\"means\":[";
+        const auto *report = stored ? &stored->view.night : nullptr;
+        ReportNightMetrics metrics;
+        if (report) metrics = report->metrics;
+        else report_night_metrics_from_catalog(night->metrics, metrics);
+
+        const int32_t values[] = {metrics.ahi_milli, metrics.ipap_mean_milli,
+            metrics.leak_mean_milli,
+            report ? report->statistics.tidal_volume.mean_milli : 0,
+            report ? report->statistics.minute_ventilation.mean_milli : 0};
+        const bool present[] = {
+            (metrics.valid_mask & 1u) != 0,
+            (metrics.valid_mask & REPORT_NIGHT_METRIC_IPAP_MEAN) != 0,
+            (metrics.valid_mask & REPORT_NIGHT_METRIC_LEAK_MEAN) != 0,
+            report && report->statistics.tidal_volume.valid,
+            report && report->statistics.minute_ventilation.valid};
+        for (size_t metric = 0; metric < 5; ++metric) {
+            if (metric) json += ',';
+            if (!present[metric]) { json += "null"; continue; }
+
+            snprintf(number, sizeof(number), "%.3f", values[metric] / 1000.0);
+            json += number;
         }
         json += "]}";
     }

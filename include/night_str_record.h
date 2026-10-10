@@ -5,6 +5,7 @@
 
 #include "report_daily_metrics.h"
 #include "sleep_day_id.h"
+#include "report_therapy_settings.h"
 
 namespace aircannect {
 
@@ -18,6 +19,7 @@ struct NightStrMaskWindow {
 struct NightStrRecord {
     SleepDayId sleep_day;
     ReportDailyMetrics metrics;
+    ReportTherapySettings settings;
     uint64_t source_identity = 0;
     uint8_t mask_window_count = 0;
     NightStrMaskWindow mask_windows[AC_NIGHT_STR_MASK_WINDOW_MAX] = {};

@@ -43,6 +43,20 @@ int64_t get_i64(const uint8_t *in) {
     return static_cast<int64_t>(get_le64(in));
 }
 
+void encode_night_details(uint8_t *bytes, const ReportSignalStoreNight &night) {
+    for (size_t i = 0; i < ReportCalculatedMetrics::Count; ++i) {
+        const auto &stat = night.statistics.at(i);
+        uint8_t *out = bytes + 232 + i * 24;
+        put_le32(out, (stat.valid ? 1u : 0u) | (stat.extrema_valid ? 2u : 0u));
+        put_i32(out + 4, stat.min_milli);
+        put_i32(out + 8, stat.mean_milli);
+        put_i32(out + 12, stat.p50_milli);
+        put_i32(out + 16, stat.p95_milli);
+        put_i32(out + 20, stat.max_milli);
+    }
+    night.settings.encode(bytes + 232 + ReportCalculatedMetrics::Count * 24);
+}
+
 void set_bit(uint8_t *bitmap, size_t index) {
     bitmap[index / 8] |= static_cast<uint8_t>(1u << (index % 8));
 }
@@ -327,6 +341,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
     put_le32(bytes + 208, night.events.arousal);
     put_le32(bytes + 212, night.events.csr);
     put_le64(bytes + 224, night.rejected_source_revision.value());
+    encode_night_details(bytes, night);
 
     uint8_t *session_records = bytes + HeaderBytes;
     for (size_t i = 0; i < night.session_count; ++i) {
@@ -367,6 +382,7 @@ bool ReportSignalStoreNightCodec::decode(
     const uint16_t version = get_le16(bytes + 8);
     const size_t header_bytes = get_le16(bytes + 10);
     if (!((version == 2 && header_bytes == 224) ||
+          (version == 3 && header_bytes == 232) ||
           (version == Version && header_bytes == HeaderBytes)) ||
         length < header_bytes) {
         return false;
@@ -379,8 +395,28 @@ bool ReportSignalStoreNightCodec::decode(
     }
     night.generation = get_le32(bytes + 20);
     night.source_revision = SourceRevision(get_le64(bytes + 24));
-    if (version == Version) {
+    if (version >= 3) {
         night.rejected_source_revision = SourceRevision(get_le64(bytes + 224));
+    }
+    if (version >= 4) {
+        for (size_t i = 0; i < ReportCalculatedMetrics::Count; ++i) {
+            const uint8_t *in = bytes + 232 + i * 24;
+            const uint32_t flags = get_le32(in);
+            if (flags > 3 || flags == 2) return false;
+
+            auto &stat = night.statistics.at(i);
+            stat.valid = flags & 1;
+            stat.extrema_valid = flags & 2;
+            stat.min_milli = get_i32(in + 4);
+            stat.mean_milli = get_i32(in + 8);
+            stat.p50_milli = get_i32(in + 12);
+            stat.p95_milli = get_i32(in + 16);
+            stat.max_milli = get_i32(in + 20);
+            if (stat.extrema_valid && stat.min_milli > stat.max_milli) return false;
+        }
+        if (!night.settings.decode(bytes + 232 + ReportCalculatedMetrics::Count * 24)) {
+            return false;
+        }
     }
     night.day_start_ms = get_i64(bytes + 32);
     night.day_end_ms = get_i64(bytes + 40);
@@ -502,13 +538,15 @@ ReportSignalStoreMetadata ReportSignalStoreNightCodec::reject_revision(
     auto output = LargeByteBuffer::allocate(total_bytes);
     if (!output) return {};
 
-    // Both accepted versions share the first 224 bytes. No record changes.
+    // Accepted versions share the first 224 bytes. Preserve available details.
     uint8_t *bytes = output->data();
+    memset(bytes, 0, HeaderBytes);
     memcpy(bytes, saved.metadata->data(), 224);
     put_le16(bytes + 8, Version);
     put_le16(bytes + 10, HeaderBytes);
     put_le32(bytes + 12, static_cast<uint32_t>(total_bytes));
     put_le64(bytes + 224, revision.value());
+    encode_night_details(bytes, view.night);
     memcpy(bytes + HeaderBytes, view.session_records, records_size);
 
     auto updated = view;

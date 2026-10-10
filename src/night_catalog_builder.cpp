@@ -30,6 +30,7 @@ struct BuildNight {
     int64_t day_start_ms = 0;
     int64_t day_end_ms = 0;
     ReportDailyMetrics str_metrics;
+    ReportTherapySettings settings;
     ReportDailyMetrics summary_metrics;
     uint64_t summary_identity = 0;
     int32_t timezone_offset_minutes = 0;
@@ -852,6 +853,7 @@ bool ingest_str(const NightCatalogBuildInput &input,
     if (!append_file(files, night->owner, file, nullptr)) return false;
 
     night->str_metrics = source.record.metrics;
+    night->settings = source.record.settings;
     night->has_str = true;
     return true;
 }
@@ -1304,6 +1306,7 @@ struct NightCatalogBuilder::Runtime {
         }
 
         if (source.has_str) {
+            record.settings = source.settings;
             (void)apply_metrics(record.metrics,
                                 source.str_metrics,
                                 NightCatalogMetricSource::Str,

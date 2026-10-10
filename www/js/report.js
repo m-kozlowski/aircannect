@@ -2283,7 +2283,8 @@
       const version = view.getUint16(8, true);
       const headerBytes = view.getUint16(10, true);
       if (!((version === 2 && headerBytes === 224) ||
-            (version === 3 && headerBytes === 232)) ||
+            (version === 3 && headerBytes === 232) ||
+            (version === 4 && headerBytes === 520)) ||
           buffer.byteLength < headerBytes) {
         return invalid;
       }
@@ -2452,6 +2453,34 @@
         result[field + "_source"] = signalStoreMetricSource(
           metricValid, metricStr, metricSummary, index);
       });
+      result.statistics = {};
+      result.settings = [];
+      if (version >= 4) {
+        const names = ["mask_pressure", "leak", "minute_ventilation",
+          "respiratory_rate", "tidal_volume", "spo2", "pressure", "epap"];
+        for (let i = 0; i < names.length; i++) {
+          const offset = 232 + i * 24;
+          const flags = view.getUint32(offset, true);
+          if (flags > 3 || flags === 2) return invalid;
+          if (!(flags & 1)) continue;
+
+          const stat = {
+            min: flags & 2 ? view.getInt32(offset + 4, true) / 1000 : null,
+            mean: view.getInt32(offset + 8, true) / 1000,
+            median: view.getInt32(offset + 12, true) / 1000,
+            p95: view.getInt32(offset + 16, true) / 1000,
+            max: flags & 2 ? view.getInt32(offset + 20, true) / 1000 : null,
+          };
+          if (flags & 2 && stat.min > stat.max) return invalid;
+          result.statistics[names[i]] = stat;
+        }
+        const settingsMask = view.getUint32(424, true);
+        if (settingsMask >>> 23) return invalid;
+        for (let i = 0; i < 23; i++) {
+          result.settings.push(settingsMask & (1 << i)
+            ? view.getInt32(428 + i * 4, true) / 1000 : null);
+        }
+      }
       if (result.ahi !== undefined && result.arousal_index !== undefined) {
         result.rdi = result.ahi + result.arousal_index;
       }

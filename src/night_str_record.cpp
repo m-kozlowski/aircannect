@@ -1,6 +1,10 @@
 #include "night_str_record.h"
 
 #include "edf_str_record_reader.h"
+#include "edf_str_signal_table.h"
+#include "as11_settings.h"
+#include <math.h>
+#include <string.h>
 
 namespace aircannect {
 namespace {
@@ -30,6 +34,58 @@ bool read_minute(const uint8_t *record,
 
     out = static_cast<uint16_t>(value);
     return true;
+}
+
+void read_settings(const uint8_t *record, size_t len,
+                   ReportTherapySettings &out) {
+    int16_t mode = 0;
+    if (!edf_str_record_read_digital(record, len, "Mode", 0, mode) ||
+        mode < 0 || mode >= static_cast<int>(As11SettingsState::MaxModes)) return;
+
+    out.valid_mask = 1;
+    out.values[ReportTherapySettings::Mode] = mode * 1000;
+    // Profile ownership and applicability come from the settings registry.
+    static constexpr const char *fields[] = {
+        "TherapyMode", "SetPressure", "MinPressure", "MaxPressure",
+        "TargetInspiratoryPressure", "TargetExpiratoryPressure",
+        "MaxInspiratoryPressure", "MinExpiratoryPressure", "MaxExpiratoryPressure",
+        "SetPressureSupport", "MinPressureSupport", "MaxPressureSupport",
+        "SetMinInspiratoryTime", "SetMaxInspiratoryTime", "SetInspiratoryTime",
+        "SetRespiratoryRate", "StartPressure",
+    };
+    static constexpr const char *flat_keys[] = {"EPX", "EPR", "EPT", "RMA", "RMT", "HMS"};
+    static_assert(sizeof(fields) / sizeof(fields[0]) == ReportTherapySettings::EprEnabled);
+    static_assert(sizeof(flat_keys) / sizeof(flat_keys[0]) ==
+                  ReportTherapySettings::Count - ReportTherapySettings::EprEnabled);
+
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const auto *signal = edf_str_signal_descriptor(i);
+        if (signal->source != EdfStrFieldSource::SettingGet || !signal->short_tag) continue;
+
+        const auto *def = as11_find_setting(signal->short_tag);
+        if (!def || !as11_setting_visible_for_mode(*def, mode)) continue;
+
+        size_t field = ReportTherapySettings::Count;
+        if (def->source == As11SettingSource::TherapyProfile) {
+            for (size_t j = 1; j < ReportTherapySettings::EprEnabled; ++j) {
+                if (strcmp(def->source_field, fields[j]) == 0) { field = j; break; }
+            }
+        } else {
+            for (size_t j = 0; j < sizeof(flat_keys) / sizeof(flat_keys[0]); ++j) {
+                if (strcmp(signal->short_tag, flat_keys[j]) == 0) {
+                    field = ReportTherapySettings::EprEnabled + j;
+                    break;
+                }
+            }
+        }
+        if (field == ReportTherapySettings::Count) continue;
+
+        float value = 0;
+        if (edf_str_record_read_physical(record, len, signal->spec.label, 0, value)) {
+            out.values[field] = static_cast<int32_t>(lroundf(value * 1000));
+            out.valid_mask |= 1u << field;
+        }
+    }
 }
 
 }  // namespace
@@ -68,6 +124,7 @@ bool night_str_record_parse(const uint8_t *record,
     }
 
     (void)report_daily_metrics_from_str_record(record, len, out.metrics);
+    read_settings(record, len, out.settings);
     out.source_identity = record_identity(record, len);
     return true;
 }

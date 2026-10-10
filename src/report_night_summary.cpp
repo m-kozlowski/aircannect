@@ -23,17 +23,18 @@ enum class MetricHistogramId : uint8_t {
     TidalVolume,
     Spo2,
     Ipap,
+    Epap,
     Count,
 };
 
 constexpr size_t METRIC_HISTOGRAM_COUNT =
     static_cast<size_t>(MetricHistogramId::Count);
-constexpr uint16_t METRIC_CHECKPOINT_VERSION = 1;
-constexpr size_t METRIC_CHECKPOINT_HEADER_BYTES = 7;
+constexpr uint16_t METRIC_CHECKPOINT_VERSION = 2;
+constexpr size_t METRIC_CHECKPOINT_HEADER_BYTES = 8;
 constexpr size_t METRIC_CHECKPOINT_ACTIVE_MASK_OFFSET = 6;
 constexpr size_t METRIC_CHECKPOINT_SUM_OFFSET = 0;
 constexpr size_t METRIC_CHECKPOINT_SAMPLES_OFFSET = 8;
-constexpr size_t METRIC_CHECKPOINT_BINS_OFFSET = 16;
+constexpr size_t METRIC_CHECKPOINT_BINS_OFFSET = 28;
 constexpr size_t METRIC_CHECKPOINT_HISTOGRAM_BYTES =
     METRIC_CHECKPOINT_BINS_OFFSET + METRIC_HISTOGRAM_BINS * sizeof(uint32_t);
 constexpr uint8_t METRIC_CHECKPOINT_ACTIVE_MASK =
@@ -58,6 +59,7 @@ constexpr MetricHistogramConfig METRIC_HISTOGRAM_CONFIGS[] = {
     {ReportSignalId::TidalVolume, 0, 4000},
     {ReportSignalId::SpO2, 0, 100000},
     {ReportSignalId::InspiratoryPressure, 0, 40000},
+    {ReportSignalId::ExpiratoryPressure, 0, 40000},
 };
 static_assert(sizeof(METRIC_HISTOGRAM_CONFIGS) /
                   sizeof(METRIC_HISTOGRAM_CONFIGS[0]) ==
@@ -68,6 +70,9 @@ struct MetricHistogram {
     uint32_t *bins = nullptr;
     int64_t sum_milli = 0;
     uint64_t samples = 0;
+    int32_t minimum = INT32_MAX;
+    int32_t maximum = INT32_MIN;
+    bool extrema_valid = true;
     bool active = false;
 };
 
@@ -89,6 +94,9 @@ void copy_histogram(MetricHistogram &target,
                     const MetricHistogram &source) {
     target.sum_milli = source.sum_milli;
     target.samples = source.samples;
+    target.minimum = source.minimum;
+    target.maximum = source.maximum;
+    target.extrema_valid = source.extrema_valid;
     memcpy(target.bins,
            source.bins,
            METRIC_HISTOGRAM_BINS * sizeof(uint32_t));
@@ -96,6 +104,9 @@ void copy_histogram(MetricHistogram &target,
 
 void add_histogram(MetricHistogram &target,
                    const MetricHistogram &source) {
+    target.minimum = std::min(target.minimum, source.minimum);
+    target.maximum = std::max(target.maximum, source.maximum);
+    target.extrema_valid &= source.extrema_valid;
     for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
         target.bins[bin] = saturating_add_uint32(
             target.bins[bin], source.bins[bin]);
@@ -146,13 +157,14 @@ uint8_t histogram_active_mask(
     return mask;
 }
 
-size_t checkpoint_size(uint8_t active_mask) {
+size_t checkpoint_size(uint8_t active_mask, bool legacy = false) {
     size_t active_count = 0;
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         if ((active_mask & (1u << i)) != 0) ++active_count;
     }
-    return METRIC_CHECKPOINT_HEADER_BYTES +
-        active_count * METRIC_CHECKPOINT_HISTOGRAM_BYTES;
+    return (legacy ? 7 : METRIC_CHECKPOINT_HEADER_BYTES) +
+        active_count * (legacy ? 16 + METRIC_HISTOGRAM_BINS * 4
+                              : METRIC_CHECKPOINT_HISTOGRAM_BYTES);
 }
 
 uint32_t metric_bit(NightCatalogMetric metric) {
@@ -191,6 +203,9 @@ void add_metric_sample(MetricHistogram &histogram,
                        const MetricHistogramConfig &config,
                        int32_t value_milli) {
     if (!histogram.active || !histogram.bins) return;
+
+    histogram.minimum = std::min(histogram.minimum, value_milli);
+    histogram.maximum = std::max(histogram.maximum, value_milli);
 
     const int32_t bounded = std::max(
         config.minimum_milli,
@@ -290,6 +305,11 @@ void finish_metric(const MetricHistogram &histogram,
     out.valid = metric_mean(histogram, out.mean_milli) &&
         metric_percentile(histogram, config, 50, 100, out.p50_milli) &&
         metric_percentile(histogram, config, 95, 100, out.p95_milli);
+    out.extrema_valid = out.valid && histogram.extrema_valid;
+    if (out.extrema_valid) {
+        out.min_milli = histogram.minimum;
+        out.max_milli = histogram.maximum;
+    }
 }
 
 }  // namespace
@@ -297,10 +317,12 @@ void finish_metric(const MetricHistogram &histogram,
 struct ReportMetricAccumulator::Runtime {
     MetricHistogram histograms[METRIC_HISTOGRAM_COUNT];
     uint32_t *bins = nullptr;
+    bool legacy_epap = false;
 
     void clear() {
         Memory::free(bins);
         bins = nullptr;
+        legacy_epap = false;
         for (MetricHistogram &histogram : histograms) histogram = {};
     }
 };
@@ -362,21 +384,23 @@ ReportCalculatedMetrics ReportMetricAccumulator::finish() const {
     ReportCalculatedMetrics out;
     if (!runtime_) return out;
 
-    ReportMetricStatistics *outputs[] = {
-        &out.pressure,
-        &out.leak,
-        &out.minute_ventilation,
-        &out.respiratory_rate,
-        &out.tidal_volume,
-        &out.spo2,
-        &out.ipap,
-    };
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         finish_metric(runtime_->histograms[i],
                       METRIC_HISTOGRAM_CONFIGS[i],
-                      *outputs[i]);
+                      out.at(i));
     }
+    if (runtime_->legacy_epap) out.epap = {};
     return out;
+}
+
+ReportMetricStatistics &ReportCalculatedMetrics::at(size_t index) {
+    ReportMetricStatistics *values[] = {&pressure, &leak, &minute_ventilation,
+        &respiratory_rate, &tidal_volume, &spo2, &ipap, &epap};
+    return *values[index];
+}
+
+const ReportMetricStatistics &ReportCalculatedMetrics::at(size_t index) const {
+    return const_cast<ReportCalculatedMetrics *>(this)->at(index);
 }
 
 bool report_signal_has_metric_consumer(ReportSignalId signal) {
@@ -403,6 +427,7 @@ std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
     LittleEndian::put_le32(
         output->data() + 2, static_cast<uint32_t>(output->size()));
     output->data()[METRIC_CHECKPOINT_ACTIVE_MASK_OFFSET] = active_mask;
+    output->data()[7] = runtime_->legacy_epap ? 1 : 0;
 
     uint8_t *record = output->data() + METRIC_CHECKPOINT_HEADER_BYTES;
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
@@ -414,6 +439,9 @@ std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
             static_cast<uint64_t>(histogram.sum_milli));
         LittleEndian::put_le64(
             record + METRIC_CHECKPOINT_SAMPLES_OFFSET, histogram.samples);
+        LittleEndian::put_le32(record + 16, histogram.minimum);
+        LittleEndian::put_le32(record + 20, histogram.maximum);
+        record[24] = histogram.extrema_valid ? 1 : 0;
         for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
             LittleEndian::put_le32(
                 record + METRIC_CHECKPOINT_BINS_OFFSET + bin * sizeof(uint32_t),
@@ -426,15 +454,17 @@ std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
 }
 
 bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
-    if (!runtime_ || !data || length < METRIC_CHECKPOINT_HEADER_BYTES ||
-        LittleEndian::get_le16(data) != METRIC_CHECKPOINT_VERSION ||
+    if (!runtime_ || !data || length < 7 ||
+        (LittleEndian::get_le16(data) != 1 &&
+         LittleEndian::get_le16(data) != METRIC_CHECKPOINT_VERSION) ||
         LittleEndian::get_le32(data + 2) != length) {
         return false;
     }
 
     const uint8_t active_mask = data[METRIC_CHECKPOINT_ACTIVE_MASK_OFFSET];
+    const bool legacy = LittleEndian::get_le16(data) == 1;
     if ((active_mask & ~METRIC_CHECKPOINT_ACTIVE_MASK) != 0 ||
-        checkpoint_size(active_mask) != length) {
+        checkpoint_size(active_mask, legacy) != length) {
         return false;
     }
 
@@ -448,7 +478,8 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
 
     MetricHistogram next[METRIC_HISTOGRAM_COUNT];
     bind_histograms(next, active, next_bins);
-    const uint8_t *record = data + METRIC_CHECKPOINT_HEADER_BYTES;
+    const size_t bins_offset = legacy ? 16 : METRIC_CHECKPOINT_BINS_OFFSET;
+    const uint8_t *record = data + (legacy ? 7 : METRIC_CHECKPOINT_HEADER_BYTES);
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         if (!active[i]) continue;
 
@@ -456,16 +487,22 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
             record + METRIC_CHECKPOINT_SUM_OFFSET));
         next[i].samples = LittleEndian::get_le64(
             record + METRIC_CHECKPOINT_SAMPLES_OFFSET);
+        next[i].extrema_valid = legacy ? next[i].samples == 0 : record[24] != 0;
+        if (!legacy) {
+            next[i].minimum = static_cast<int32_t>(LittleEndian::get_le32(record + 16));
+            next[i].maximum = static_cast<int32_t>(LittleEndian::get_le32(record + 20));
+        }
         for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
             next[i].bins[bin] = LittleEndian::get_le32(
-                record + METRIC_CHECKPOINT_BINS_OFFSET +
+                record + bins_offset +
                 bin * sizeof(uint32_t));
         }
-        record += METRIC_CHECKPOINT_HISTOGRAM_BYTES;
+        record += bins_offset + METRIC_HISTOGRAM_BINS * sizeof(uint32_t);
     }
 
     runtime_->clear();
     runtime_->bins = next_bins;
+    runtime_->legacy_epap = legacy || data[7] != 0;
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         runtime_->histograms[i] = next[i];
     }
@@ -474,6 +511,7 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
 
 bool ReportMetricAccumulator::merge(const ReportMetricAccumulator &other) {
     if (!runtime_ || !other.runtime_) return false;
+    runtime_->legacy_epap |= other.runtime_->legacy_epap;
 
     bool added_active = false;
     bool merged_active[METRIC_HISTOGRAM_COUNT] = {};
@@ -521,8 +559,10 @@ bool ReportMetricAccumulator::merge(const ReportMetricAccumulator &other) {
         add_histogram(next[i], previous);
     }
 
+    const bool legacy_epap = runtime_->legacy_epap;
     runtime_->clear();
     runtime_->bins = next_bins;
+    runtime_->legacy_epap = legacy_epap;
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         runtime_->histograms[i] = next[i];
     }

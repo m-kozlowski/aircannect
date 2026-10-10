@@ -7,6 +7,7 @@
 
 #include "edf_report_catalog.h"
 #include "report_artifact_key.h"
+#include "report_therapy_settings.h"
 
 namespace aircannect {
 
@@ -188,6 +189,7 @@ struct NightCatalogRecord {
     int32_t timezone_offset_minutes = 0;
     bool timezone_offset_valid = false;
     NightCatalogMetrics metrics;
+    ReportTherapySettings settings;
 };
 
 class NightCatalogBuilder;
