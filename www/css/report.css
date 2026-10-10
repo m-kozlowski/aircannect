@@ -1,9 +1,9 @@
     .report-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 6px;
       flex-wrap: wrap;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
     }
 
     .report-actions select {
@@ -323,54 +323,87 @@
       font-weight: 600;
     }
 
-    /* Compact report metric strip: therapy time, AHI, event breakdown. */
-    .report-metrics {
+    .report-overview { margin-bottom: 16px; }
+    .report-overview h3 { margin: 0 0 10px; }
+    .report-summary-caption {
       display: flex;
+      justify-content: space-between;
       flex-wrap: wrap;
+      gap: 4px 16px;
+      margin: 8px 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .report-metrics {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
     }
 
     .report-metric {
-      border: 1px solid #30364166;
-      border-radius: 6px;
-      padding: 6px 12px;
-      background: #10111466;
+      min-width: 0;
+      min-height: 84px;
+      border: 1px solid var(--line);
+      border-top: 2px solid var(--metric-color);
+      border-radius: 5px;
+      padding: 8px;
+      background: var(--panel);
+      color: var(--text);
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
     }
 
+    .report-metric:hover, .report-metric[aria-expanded="true"] {
+      background: var(--line);
+    }
+    .report-metric-main { display: flex; align-items: center; gap: 4px; justify-content: space-between; }
     .report-metric-value {
-      font-size: 18px;
+      font-size: 20px;
       font-weight: 600;
       line-height: 1.15;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
 
     .report-metric-label {
       color: var(--muted);
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin-bottom: 5px;
+      font-size: 11px;
+      letter-spacing: 0;
+      margin-bottom: 6px;
+      display: block;
     }
+    .report-metric-footer { display: flex; justify-content: space-between; gap: 4px; margin-top: 5px; font-size: 11px; }
+    .report-metric-unit { color: var(--muted); }
+    .report-spark { width: 48px; min-width: 18px; height: 22px; color: var(--metric-color); }
+    .report-ahi-pie { flex: 0 0 28px; width: 28px; height: 28px; }
+    .report-event-strip, .report-stat-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--muted); margin: 8px 0; }
+    .report-stat-strip b { color: var(--text); font-weight: 500; }
+    .report-details { border-top: 1px solid var(--line); }
+    .report-details summary { cursor: pointer; padding: 10px 0; font-size: 13px; }
+    .report-details summary span { margin-left: 8px; color: var(--muted); font-size: 11px; }
+    .report-table-wrap { overflow-x: auto; }
+    .report-stat-table, .report-settings-table { border-collapse: collapse; width: 100%; font-size: 12px; margin-bottom: 10px; }
+    .report-stat-table th, .report-stat-table td, .report-settings-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+    .report-stat-table th { color: var(--muted); font-weight: 500; }
+    .report-stat-table :is(th, td):first-child, .report-settings-table td:first-child { padding-left: 0; text-align: left; }
+    .report-stat-table td small { display: block; color: var(--muted); font-size: 11px; }
+    .report-settings-table { max-width: 600px; }
+    .report-history { padding: 10px 0; border-top: 1px solid var(--line); }
+    .report-history-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+    #reportHistoryTitle { margin-right: auto; }
+    #reportHistoryPlot { display: block; width: 100%; height: 150px; }
+    #reportHistoryPlot text { font-size: 11px; fill: var(--muted); }
 
-    .report-metric-events {
-      flex: 0 1 auto;
+    @media (max-width: 800px) {
+      .report-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
-
-    /* Fixed width so AHI up to NNN.NN never resizes the box / shifts layout. */
-    .report-metric-ahi {
-      min-width: 84px;
-    }
-
-    .report-metric-ahi .report-metric-value {
-      font-variant-numeric: tabular-nums;
-    }
-
-    .report-metric-small {
-      min-width: 104px;
-    }
-
-    .report-metric-small .report-metric-value {
-      font-variant-numeric: tabular-nums;
+    @media (max-width: 430px) {
+      .report-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .report-stat-table th, .report-stat-table td { padding: 7px 4px; }
+      .report-details summary span { display: inline-block; }
     }
 
     .report-events {
@@ -385,9 +418,7 @@
       font-size: 12px;
       color: var(--muted);
       white-space: nowrap;
-      background: #1E293B;
-      border-radius: 5px;
-      padding: 12px;
+      padding: 0;
     }
 
     .report-events .evt b {

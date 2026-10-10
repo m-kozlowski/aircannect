@@ -593,18 +593,24 @@
       if (!container) return;
       container.textContent = "";
       // Event source not covered for this night: counts are unknown, not zero.
-      const unavailable = !!result && result.events_available === false;
+      const unavailable = !result || result.events_available === false ||
+        !!(result.missing_event_mask & 1);
       reportEventCountFields.forEach((item) => {
         const count = result ? Number(result[item.field] || 0) : 0;
         const chip = document.createElement("span");
         chip.className = "evt";
+        const def = reportEventDefs.find((entry) => entry.key === item.key);
+        const dot = document.createElement("span");
+        dot.className = "report-legend-dot";
+        dot.style.background = def.color;
+        chip.appendChild(dot);
         chip.appendChild(document.createTextNode(item.key));
         const value = document.createElement("b");
         value.textContent = unavailable ? "--" : String(count);
         chip.appendChild(value);
         container.appendChild(chip);
       });
-      if (unavailable) {
+      if (unavailable && result) {
         const note = document.createElement("span");
         note.className = "report-res-badge";
         note.textContent = "events not captured";
@@ -1994,15 +2000,288 @@
       updateReportZoomControls();
     }
 
-    function reportMetricValues(result, fields, scale) {
-      const values = fields.map((field) =>
-        result && Number.isFinite(Number(result[field])) ?
-          Number(result[field]) * scale : null);
-      if (values.every((value) => value === null)) return "--";
+    const reportMetricTiles = [
+      {key: "duration", label: "Therapy time", unit: "", color: "#7dd3fc", scale: 1},
+      {key: "ahi", label: "AHI", unit: "/h", color: "#c084fc", scale: 1},
+      {key: "pressure", label: "Pressure · avg", unit: "cmH2O", color: "#34d399", scale: 1},
+      {key: "leak", label: "Leak · avg", unit: "L/min", color: "#fb923c", scale: 1},
+      {key: "tidal_volume", label: "Vt · avg", unit: "mL", color: "#f0abfc", scale: 1000},
+      {key: "minute_ventilation", label: "MV · avg", unit: "L/min", color: "#a78bfa", scale: 1},
+    ];
+    let reportHistoryMetric = "";
 
-      const decimals = scale === 1000 ? 0 : 1;
-      return values.map((value) =>
-        value === null ? "--" : value.toFixed(decimals)).join(" / ");
+    function reportNumber(value) {
+      return value !== null && value !== undefined && Number.isFinite(Number(value))
+        ? Number(value) : null;
+    }
+
+    function reportStatistics(result) {
+      const stats = {...(result && result.statistics || {})};
+      const legacy = {
+        pressure: ["average_pressure", "ipap_50", "ipap_95"],
+        leak: ["average_leak", "leak_50", "leak_95"],
+        tidal_volume: [null, "tidal_volume_50", "tidal_volume_95"],
+        respiratory_rate: [null, "respiratory_rate_50", "respiratory_rate_95"],
+        minute_ventilation: [null, "minute_ventilation_50", "minute_ventilation_95"],
+        spo2: [null, "spo2_median", null],
+      };
+      Object.entries(legacy).forEach(([key, fields]) => {
+        if (stats[key]) return;
+        const values = fields.map((field) => reportNumber(result && field ? result[field] : null));
+        if (values.some((value) => value !== null)) {
+          stats[key] = {mean: values[0], median: values[1], p95: values[2]};
+        }
+      });
+      return stats;
+    }
+
+    function reportMetricValue(metric, result, selected) {
+      if (metric.key === "duration") {
+        return reportNumber(result ? result.duration_min : selected && selected.duration_min);
+      }
+      if (metric.key === "ahi") return reportNumber(result && result.ahi);
+      const stat = reportStatistics(result)[metric.key];
+      return stat ? reportNumber(stat.mean) : null;
+    }
+
+    function formatReportMetric(metric, value, delta = false) {
+      if (value === null) return "--";
+      const scaled = Math.abs(value * metric.scale);
+      const text = metric.key === "duration"
+        ? (Math.round(scaled) === 0 ? "0m" : fmtMinutes(Math.round(scaled)))
+        : scaled.toFixed(metric.scale === 1000 ? 0 : 2);
+      return (delta ? value < 0 ? "−" : value > 0 ? "+" : "" : value < 0 ? "−" : "") + text;
+    }
+
+    function reportTrend(metric, selected, value) {
+      if (!selected || !/^\d{8}$/.test(selected.id)) return {points: [], mean: null, count: 0};
+      const end = Date.UTC(+selected.id.slice(0, 4), +selected.id.slice(4, 6) - 1,
+        +selected.id.slice(6, 8));
+      const nights = new Map((reportSummary && reportSummary.nights || []).map((night) => [night.id, night]));
+      const metricIndex = reportMetricTiles.indexOf(metric) - 1;
+      const points = [];
+      for (let ago = 13; ago >= 0; ago--) {
+        const date = new Date(end - ago * 86400000);
+        const iso = date.toISOString().slice(0, 10);
+        const night = nights.get(iso.replace(/-/g, ""));
+        const saved = !night || night.active ? null : metric.key === "duration"
+          ? reportNumber(night.duration_min)
+          : reportNumber(night.means && night.means[metricIndex]);
+        points.push({date: iso, value: ago === 0 ? value : saved});
+      }
+      const reference = points.slice(6, 13).map((point) => point.value).filter((v) => v !== null);
+      return {points, count: reference.length,
+        mean: reference.length ? reference.reduce((sum, v) => sum + v, 0) / reference.length : null};
+    }
+
+    function drawReportTrend(svg, trend, metric, expanded) {
+      svg.replaceChildren();
+      const width = expanded ? Math.max(260, svg.clientWidth || 600) : 48;
+      const height = expanded ? 150 : 22;
+      const left = expanded ? 50 : 2, right = expanded ? 24 : 2;
+      const top = expanded ? 16 : 2, bottom = expanded ? 28 : 2;
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      const values = trend.points.map((point) => point.value).filter((v) => v !== null);
+      if (!values.length) return;
+      if (trend.mean !== null) values.push(trend.mean);
+
+      const low = Math.min(...values), high = Math.max(...values);
+      const padding = Math.max((high - low) * 0.12, metric.key === "duration" ? 1 : 0.01);
+      const y = (v) => top + (high + padding - v) / (high - low + padding * 2) * (height - top - bottom);
+      const x = (i) => left + i / 13 * (width - left - right);
+      let path = "", previous = false;
+      trend.points.forEach((point, i) => {
+        if (point.value === null) { previous = false; return; }
+        path += `${previous ? "L" : "M"}${x(i)},${y(point.value)} `;
+        previous = true;
+      });
+      svg.appendChild(svgNode("path", {d: path, fill: "none", stroke: metric.color, "stroke-width": 1.5}));
+
+      if (expanded) {
+        [low, high].forEach((v, i) => {
+          if (i && high === low) return;
+          svg.appendChild(svgText(formatReportMetric(metric, v), left - 7, y(v) + 4, {"text-anchor": "end"}));
+        });
+        if (trend.mean !== null) svg.appendChild(svgNode("line", {
+          x1: left, x2: width - right, y1: y(trend.mean), y2: y(trend.mean),
+          stroke: "var(--muted)", "stroke-width": 1, "stroke-dasharray": "3 4",
+        }));
+        [0, 6, 13].forEach((i) => svg.appendChild(svgText(
+          trend.points[i].date.slice(5), x(i), height - 6,
+          {"text-anchor": i === 0 ? "start" : i === 13 ? "end" : "middle"})));
+      }
+      trend.points.forEach((point, i) => {
+        if (point.value === null) return;
+        const dot = svgNode("circle", {cx: x(i), cy: y(point.value), r: expanded ? 3 : 1.3, fill: metric.color});
+        const title = svgNode("title", {});
+        title.textContent = point.date + ": " + formatReportMetric(metric, point.value) + " " + metric.unit;
+        dot.appendChild(title);
+        svg.appendChild(dot);
+      });
+
+      if (expanded) {
+        const show = (event) => {
+          const rect = svg.getBoundingClientRect();
+          const index = Math.max(0, Math.min(13, Math.round(
+            ((event.clientX - rect.left) * width / rect.width - left) / (width - left - right) * 13)));
+          const point = trend.points[index];
+          AirCANnect.ui.text("reportHistoryValue", point.date + " · " + formatReportMetric(metric, point.value) + " " + metric.unit);
+        };
+        svg.onpointermove = show;
+        svg.onpointerdown = show;
+      }
+    }
+
+    function reportAhiPie(result) {
+      const svg = svgNode("svg", {viewBox: "0 0 32 32", class: "report-ahi-pie", role: "img"});
+      const available = result && result.events_available && !(result.missing_event_mask & 1);
+      const parts = reportEventCountFields.slice(0, 4).map((item) => ({...item,
+        value: available ? Number(result[item.field] || 0) : 0,
+        color: reportEventDefs.find((def) => def.key === item.key).color}));
+      const total = parts.reduce((sum, part) => sum + part.value, 0);
+      const label = !available ? "Event breakdown unavailable" : total === 0 ? "No apnea or hypopnea events" :
+        parts.map((part) => part.key + " " + part.value).join(", ");
+      svg.setAttribute("aria-label", label);
+      const title = svgNode("title", {});
+      title.textContent = label;
+      svg.appendChild(title);
+
+      if (!total) {
+        svg.appendChild(svgNode("circle", {cx: 16, cy: 16, r: 13, fill: "var(--line)"}));
+        return svg;
+      }
+
+      let angle = -Math.PI / 2;
+      parts.forEach((part) => {
+        if (!part.value) return;
+        const next = angle + part.value / total * Math.PI * 2;
+        svg.appendChild(part.value === total
+          ? svgNode("circle", {cx: 16, cy: 16, r: 13, fill: part.color})
+          : svgNode("path", {d: `M16 16 L${16 + 13 * Math.cos(angle)} ${16 + 13 * Math.sin(angle)} A13 13 0 ${part.value / total > .5 ? 1 : 0} 1 ${16 + 13 * Math.cos(next)} ${16 + 13 * Math.sin(next)} Z`, fill: part.color}));
+        angle = next;
+      });
+      return svg;
+    }
+
+    function renderReportTiles(result, selected) {
+      const container = document.getElementById("reportMetricTiles");
+      if (!container) return;
+      container.replaceChildren();
+      reportMetricTiles.forEach((metric) => {
+        const value = reportMetricValue(metric, result, selected);
+        const trend = reportTrend(metric, selected, value);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "report-metric";
+        button.dataset.action = "report.metric";
+        button.dataset.value = metric.key;
+        button.style.setProperty("--metric-color", metric.color);
+        button.setAttribute("aria-expanded", String(reportHistoryMetric === metric.key));
+        button.setAttribute("aria-controls", "reportMetricHistory");
+        button.title = metric.label + "; previous 7 days: " + formatReportMetric(metric, trend.mean) +
+          " " + metric.unit + " (" + trend.count + "/7 nights)";
+
+        button.innerHTML = '<span class="report-metric-label"></span><span class="report-metric-main">' +
+          '<span class="report-metric-value"></span></span><span class="report-metric-footer">' +
+          '<span class="report-metric-unit"></span><span class="report-metric-delta"></span></span>';
+        button.querySelector(".report-metric-label").textContent = metric.label;
+        button.querySelector(".report-metric-value").textContent = formatReportMetric(metric, value);
+        button.querySelector(".report-metric-unit").textContent = metric.unit;
+        button.querySelector(".report-metric-delta").textContent = formatReportMetric(metric,
+          value === null || trend.mean === null ? null : value - trend.mean, true);
+
+        if (metric.key === "ahi") button.querySelector(".report-metric-main").appendChild(reportAhiPie(result));
+        else {
+          const spark = svgNode("svg", {class: "report-spark", "aria-hidden": "true"});
+          (metric.key === "duration" ? button.querySelector(".report-metric-unit") :
+            button.querySelector(".report-metric-main")).appendChild(spark);
+          drawReportTrend(spark, trend, metric, false);
+        }
+        container.appendChild(button);
+      });
+      renderReportHistory();
+    }
+
+    function renderReportHistory() {
+      const panel = document.getElementById("reportMetricHistory");
+      if (!panel) return;
+      document.querySelectorAll('#reportMetricTiles [data-value]').forEach((button) => {
+        button.setAttribute("aria-expanded", String(button.dataset.value === reportHistoryMetric));
+      });
+      const metric = reportMetricTiles.find((item) => item.key === reportHistoryMetric);
+      panel.hidden = !metric;
+      if (!metric) return;
+
+      const selected = selectedReportNight();
+      const trend = reportTrend(metric, selected, reportMetricValue(metric, reportResult, selected));
+      AirCANnect.ui.text("reportHistoryTitle", [metric.label, metric.unit,
+        trend.count + "/7 comparison nights"].filter(Boolean).join(" · "));
+      AirCANnect.ui.text("reportHistoryValue", "Previous 7 days: " + formatReportMetric(metric, trend.mean));
+
+      const plot = document.getElementById("reportHistoryPlot");
+      plot.setAttribute("aria-label", metric.label + ": " + trend.points.map((p) => p.date + " " + formatReportMetric(metric, p.value)).join(", "));
+      drawReportTrend(plot, trend, metric, true);
+    }
+
+    function renderReportStatistics(result) {
+      const body = document.getElementById("reportStatisticsBody");
+      if (!body) return;
+      body.replaceChildren();
+      const stats = reportStatistics(result);
+      const rows = [["pressure", "Pressure (IPAP)", "cmH2O", 1], ["epap", "EPAP", "cmH2O", 1],
+        ["leak", "Leak", "L/min", 1], ["respiratory_rate", "Resp. rate", "/min", 1],
+        ["tidal_volume", "Tidal volume", "mL", 1000], ["minute_ventilation", "Minute vent.", "L/min", 1],
+        ["spo2", "SpO2", "%", 1]];
+      rows.forEach(([key, label, unit, scale]) => {
+        if (key === "spo2" && !stats[key]) return;
+        const row = body.insertRow();
+        const cell = row.insertCell();
+        cell.textContent = label;
+        const small = document.createElement("small");
+        small.textContent = unit;
+        cell.appendChild(small);
+
+        ["min", "mean", "median", "p95", "max"].forEach((field) => {
+          const value = reportNumber(stats[key] && stats[key][field]);
+          row.insertCell().textContent = value === null ? "--" : (value * scale).toFixed(scale === 1000 ? 0 : 2);
+        });
+      });
+    }
+
+    function renderReportSettings(result) {
+      const body = document.getElementById("reportSettingsBody");
+      if (!body) return;
+      body.replaceChildren();
+      const values = result && result.settings || [];
+      const modes = ["CPAP", "AutoSet", "AutoSet for Her", "S", "ST", "T", "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC"];
+      const mode = reportNumber(values[0]);
+      AirCANnect.ui.text("reportSettingsMode", mode === null ? "Not recorded" : modes[mode] || "Mode " + mode);
+      AirCANnect.ui.text("reportSettingsSource", mode === null
+        ? "No historical settings recorded for this night."
+        : "Daily STR snapshot; changes within the night are not recorded.");
+
+      const labels = ["Mode", "Pressure", "Min pressure", "Max pressure", "IPAP", "EPAP",
+        "Max IPAP", "Min EPAP", "Max EPAP", "PS", "Min PS", "Max PS", "Ti min", "Ti max",
+        "Ti", "Resp. rate", "Start pressure", "EPR", "EPR level", "EPR mode", "Ramp", "Ramp time", "Humidity"];
+      values.forEach((value, i) => {
+        if (reportNumber(value) === null || mode === null) return;
+        if ((i === 18 || i === 19) && values[17] === 0) return;
+        if (i === 21 && values[20] !== 1) return;
+
+        let text = String(value);
+        if (i === 0) text = modes[value] || text;
+        else if ((i >= 1 && i <= 11) || i === 16 || i === 18) text = value.toFixed(1) + " cmH2O";
+        else if (i >= 12 && i <= 14) text = value.toFixed(2) + " s";
+        else if (i === 15) text += " /min";
+        else if (i === 17) text = ["Off", "On"][value] || text;
+        else if (i === 19) text = ["Ramp only", "Full time"][value] || text;
+        else if (i === 20) text = ["Off", "Timed", "Auto"][value] || text;
+        else if (i === 21) text += " min";
+
+        const row = body.insertRow();
+        row.insertCell().textContent = labels[i];
+        row.insertCell().textContent = text;
+      });
     }
 
     function renderOptionalReportMetric(cardId, valueId, visible, value) {
@@ -2018,10 +2297,8 @@
       const dateBtn = document.getElementById("reportDateBtn");
       if (dateBtn) {
         if (selected) {
-          dateBtn.innerHTML = fmtReportDate(selected.start) +
-            "<span class=\"np-dur\">" + fmtMinutes(selected.duration_min) +
-            (selected.active ? " · Recording" : "") +
-            "</span>";
+          dateBtn.textContent = fmtReportDate(selected.start) +
+            (selected.active ? " · Recording" : "");
         } else {
           dateBtn.textContent = nights.length ? "Select night" : "No nights";
         }
@@ -2039,53 +2316,17 @@
       if (pop && pop.classList.contains("open")) renderReportCalendar();
       const displayable = reportResult &&
         (reportResult.state === "ready" || reportResult.state === "partial");
-      const durationMin = displayable && reportResult.duration_min ?
-        reportResult.duration_min : (selected ? selected.duration_min : 0);
-      AirCANnect.ui.text("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
-      AirCANnect.ui.text("reportAhi", displayable && Number.isFinite(Number(reportResult.ahi)) ?
-        Number(reportResult.ahi).toFixed(1) : "--");
-      AirCANnect.ui.text("reportRdi", displayable && Number.isFinite(Number(reportResult.rdi)) ?
-        Number(reportResult.rdi).toFixed(1) : "--");
-      AirCANnect.ui.text("reportPressure", displayable ? reportMetricValues(
-        reportResult, ["average_pressure", "ipap_50", "ipap_95"], 1) : "--");
-      AirCANnect.ui.text("reportLeak", displayable ? reportMetricValues(
-        reportResult, ["average_leak", "leak_50", "leak_95"], 1) : "--");
-
-      const tidalVolumeVisible = displayable && (
-        Number.isFinite(Number(reportResult.tidal_volume_50)) ||
-        Number.isFinite(Number(reportResult.tidal_volume_95)));
-      renderOptionalReportMetric(
-        "reportTidalVolumeMetric",
-        "reportTidalVolume",
-        tidalVolumeVisible,
-        reportMetricValues(reportResult,
-          ["tidal_volume_50", "tidal_volume_95"], 1000));
-
-      const respiratoryRateVisible = displayable && (
-        Number.isFinite(Number(reportResult.respiratory_rate_50)) ||
-        Number.isFinite(Number(reportResult.respiratory_rate_95)));
-      renderOptionalReportMetric(
-        "reportRespiratoryRateMetric",
-        "reportRespiratoryRate",
-        respiratoryRateVisible,
-        reportMetricValues(reportResult,
-          ["respiratory_rate_50", "respiratory_rate_95"], 1));
-
-      const minuteVentilationVisible = displayable && (
-        Number.isFinite(Number(reportResult.minute_ventilation_50)) ||
-        Number.isFinite(Number(reportResult.minute_ventilation_95)));
-      renderOptionalReportMetric(
-        "reportMinuteVentilationMetric",
-        "reportMinuteVentilation",
-        minuteVentilationVisible,
-        reportMetricValues(reportResult,
-          ["minute_ventilation_50", "minute_ventilation_95"], 1));
+      AirCANnect.ui.text("reportRdi", displayable && reportNumber(reportResult.rdi) !== null ?
+        Number(reportResult.rdi).toFixed(2) : "--");
+      renderReportTiles(displayable ? reportResult : null, selected);
+      renderReportStatistics(displayable ? reportResult : null);
+      renderReportSettings(displayable ? reportResult : null);
 
       const spo2Median = displayable &&
-        Number.isFinite(Number(reportResult.spo2_median)) ?
+        reportNumber(reportResult.spo2_median) !== null ?
         Number(reportResult.spo2_median).toFixed(0) + "%" : "--";
       const spo2Threshold = displayable &&
-        Number.isFinite(Number(reportResult.spo2_threshold_minutes)) ?
+        reportNumber(reportResult.spo2_threshold_minutes) !== null ?
         Math.round(Number(reportResult.spo2_threshold_minutes)) + "m" : "--";
       const spo2Visible = spo2Median !== "--" || spo2Threshold !== "--";
       renderOptionalReportMetric(
@@ -2095,12 +2336,8 @@
         spo2Median + " / " + spo2Threshold);
 
       const csrVisible = displayable &&
-        Number.isFinite(Number(reportResult.csr_minutes));
-      renderOptionalReportMetric(
-        "reportCsrMetric",
-        "reportCsr",
-        csrVisible,
-        csrVisible ? Math.round(Number(reportResult.csr_minutes)) + "m" : "--");
+        reportNumber(reportResult.csr_minutes) !== null;
+      AirCANnect.ui.text("reportCsr", csrVisible ? Math.round(Number(reportResult.csr_minutes)) + "m" : "--");
 
       renderReportEventCounts(displayable ? reportResult : null);
       renderReportSessions(reportResult && reportResult.sessions ?
@@ -3646,6 +3883,18 @@
     }
 
     AirCANnect.events.subscribe("report", handleReportCompletion);
+    AirCANnect.actions.register("report.metric", (_event, element) => {
+      const key = element.dataset.value;
+      if (!reportMetricTiles.some((metric) => metric.key === key)) return;
+      reportHistoryMetric = reportHistoryMetric === key ? "" : key;
+      renderReportHistory();
+    });
+    AirCANnect.actions.register("report.close-history", () => {
+      const selected = document.querySelector('#reportMetricTiles [aria-expanded="true"]');
+      reportHistoryMetric = "";
+      renderReportHistory();
+      if (selected) selected.focus();
+    });
     AirCANnect.events.subscribe("report_preferences", (data) => {
       const preserveDraft = !!reportPreferencesSavePromise;
       applyReportPreferencesSnapshot(data, preserveDraft);
@@ -3677,6 +3926,7 @@
     });
     AirCANnect.pages.onLeave("report", () => cancelReportRequests());
     window.addEventListener("resize", () => scheduleReportDraw());
+    window.addEventListener("resize", renderReportHistory);
 
     let reportSummary = null;
     let reportPollTimer = null;

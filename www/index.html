@@ -339,7 +339,7 @@
         </section>
 
         <section class="pane" id="p-report">
-          <div class="card">
+          <div class="report-overview">
             <h3>Therapy Report</h3>
             <div class="report-actions">
               <div class="night-picker">
@@ -373,59 +373,35 @@
                 Charts
               </button>
             </div>
-            <div class="report-metrics">
-              <div class="report-metric">
-                <div class="report-metric-label">Therapy Time</div>
-                <div class="report-metric-value" id="reportDuration">--</div>
-              </div>
-              <div class="report-metric report-metric-ahi">
-                <div class="report-metric-label">AHI</div>
-                <div class="report-metric-value" id="reportAhi">--</div>
-              </div>
-              <div class="report-metric report-metric-ahi">
-                <div class="report-metric-label">RDI</div>
-                <div class="report-metric-value" id="reportRdi">--</div>
-              </div>
-              <div class="report-metric report-metric-small"
-                   id="reportCsrMetric" hidden>
-                <div class="report-metric-label">CSR</div>
-                <div class="report-metric-value" id="reportCsr">--</div>
-              </div>
-              <div class="report-metric report-metric-events">
-                <div class="report-metric-label">Events</div>
-                <div class="report-events" id="reportEventCounts"></div>
-              </div>
+            <div class="report-summary-caption"><span>Night summary</span>
+              <span>Change vs previous 7 days · History: 14 days</span></div>
+            <div class="report-metrics" id="reportMetricTiles"></div>
+            <div class="report-event-strip"><span>Events</span>
+              <div class="report-events" id="reportEventCounts"></div></div>
+            <div class="report-history" id="reportMetricHistory" hidden>
+              <div class="report-history-heading"><span id="reportHistoryTitle"></span>
+                <span id="reportHistoryValue" aria-live="polite"></span>
+                <button type="button" class="btn" data-action="report.close-history"
+                        aria-label="Close history" title="Close history">&times;</button></div>
+              <svg id="reportHistoryPlot" role="img" aria-label="Nightly history"></svg>
             </div>
-            <div class="report-metrics">
-              <div class="report-metric report-metric-small"
-                   id="reportSpo2Metric" hidden>
-                <div class="report-metric-label">SpO2 P50 / &lt; Thr</div>
-                <div class="report-metric-value" id="reportSpo2Summary">--</div>
+            <details class="report-details" id="reportStatistics">
+              <summary>Statistics <span>Full night</span></summary>
+              <div class="report-stat-strip">
+                <span>RDI <b id="reportRdi">--</b> /h</span>
+                <span>CSR <b id="reportCsr">--</b></span>
+                <span id="reportSpo2Metric" hidden>SpO2 P50 / &lt; Thr <b id="reportSpo2Summary">--</b></span>
               </div>
-              <div class="report-metric report-metric-small">
-                <div class="report-metric-label">Pressure avg / P50 / P95</div>
-                <div class="report-metric-value" id="reportPressure">--</div>
-              </div>
-              <div class="report-metric report-metric-small">
-                <div class="report-metric-label">Leak avg / P50 / P95</div>
-                <div class="report-metric-value" id="reportLeak">--</div>
-              </div>
-              <div class="report-metric report-metric-small"
-                   id="reportTidalVolumeMetric" hidden>
-                <div class="report-metric-label">Vt P50 / P95</div>
-                <div class="report-metric-value" id="reportTidalVolume">--</div>
-              </div>
-              <div class="report-metric report-metric-small"
-                   id="reportRespiratoryRateMetric" hidden>
-                <div class="report-metric-label">RR P50 / P95</div>
-                <div class="report-metric-value" id="reportRespiratoryRate">--</div>
-              </div>
-              <div class="report-metric report-metric-small"
-                   id="reportMinuteVentilationMetric" hidden>
-                <div class="report-metric-label">MV P50 / P95</div>
-                <div class="report-metric-value" id="reportMinuteVentilation">--</div>
-              </div>
-            </div>
+              <div class="report-table-wrap"><table class="report-stat-table">
+                <thead><tr><th>Signal</th><th>Min</th><th>Mean</th><th>Median</th><th>P95</th><th>Max</th></tr></thead>
+                <tbody id="reportStatisticsBody"></tbody>
+              </table></div>
+            </details>
+            <details class="report-details" id="reportTherapySettings">
+              <summary>Therapy settings <span id="reportSettingsMode">--</span></summary>
+              <div class="report-summary-caption" id="reportSettingsSource"></div>
+              <table class="report-settings-table"><tbody id="reportSettingsBody"></tbody></table>
+            </details>
             <div class="report-sessions" id="reportSessions"></div>
           </div>
           <div id="reportCharts" class="report-charts"></div>
