@@ -392,7 +392,6 @@
     .report-stat-table th { color: var(--muted); font-weight: 500; }
     .report-stat-table :is(th, td):first-child, .report-settings-table td:first-child { padding-left: 0; text-align: left; }
     .report-stat-table td small { display: block; color: var(--muted); font-size: 11px; }
-    .report-leak-duration { font-size: 12px; color: var(--muted); }
     .report-settings-table { max-width: 600px; }
     .report-history { padding: 10px 0; border-top: 1px solid var(--line); }
     .report-history-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
