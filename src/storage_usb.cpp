@@ -202,9 +202,9 @@ void restored(bool success) {
                    success ? nullptr : "SD remount failed; no format attempted");
     xSemaphoreGive(mutex);
 
-    Log::logf(CAT_STORAGE, success ? LOG_INFO : LOG_ERROR,
-              "[USB] %s", success ? "SD returned to application"
-                                  : "SD remount failed");
+    if (!success) {
+        Log::logf(CAT_STORAGE, LOG_ERROR, "[USB] SD remount failed\n");
+    }
 }
 
 void fail(const char *error) {
@@ -215,12 +215,20 @@ void fail(const char *error) {
 }
 
 void resume_local() {
+    bool resumed = false;
     xSemaphoreTake(mutex, portMAX_DELAY);
     if (snapshot.state == StorageUsbState::Restoring) {
         storage_local_requests_enabled.store(true);
         publish_locked(StorageUsbState::Local);
+        resumed = true;
     }
     xSemaphoreGive(mutex);
+
+    if (resumed) {
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "[USB] SD returned to application; resuming recording, "
+                  "reports, exports and SD logging\n");
+    }
     if (wake) wake();
 }
 

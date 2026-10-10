@@ -2475,6 +2475,9 @@ bool process_usb_mode() {
 
     if (!sealing) {
         initial_io_errors = Storage::io_error_count();
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "[USB] preparing SD handoff; recording, reports and exports "
+                  "paused; SD logging stops until return\n");
         sealing = true;
     }
     if (state == StorageUsbState::Preparing &&
