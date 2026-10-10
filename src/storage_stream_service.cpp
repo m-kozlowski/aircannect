@@ -1,4 +1,5 @@
 #include "storage_stream_service.h"
+#include "storage_access.h"
 
 #include <algorithm>
 #include <atomic>
@@ -160,7 +161,8 @@ bool StorageStreamService::request_stream(
         return false;
     }
 
-    if (writer_conflicts_locked(command.path.c_str(),
+    if (!storage_local_requests_enabled.load() ||
+        writer_conflicts_locked(command.path.c_str(),
                                 command.source_offset,
                                 command.source_length)) {
         unlock();
@@ -584,6 +586,17 @@ bool StorageStreamService::step() {
                         step_lane_locked(StorageStreamLane::Export);
     unlock();
     return worked;
+}
+
+bool StorageStreamService::release_media() {
+    if (!lock(0)) return false;
+
+    for (size_t i = 0; i < STREAM_CAPACITY; ++i) {
+        if (streams_[i]) retire_locked(i, StorageStreamState::Cancelled);
+    }
+    const bool idle = write_owner_ == nullptr;
+    unlock();
+    return idle;
 }
 
 }  // namespace aircannect

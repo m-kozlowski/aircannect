@@ -19,6 +19,7 @@ public:
     bool begin(WakeCallback wake);
     void set_task_available(bool available);
     bool step();
+    bool release_media();
 
     bool request_stream(
         const StorageStreamCommand &command,

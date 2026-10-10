@@ -11,6 +11,9 @@ namespace aircannect { struct StorageRangeWriteCommand; }
 
 namespace aircannect::Storage {
 
+// Storage task only, after all local filesystem users have closed their files.
+void unmount();
+
 bool ensure_dir(const char *path);
 bool exists(const char *path);
 bool file_stat(const char *path, struct stat &info);

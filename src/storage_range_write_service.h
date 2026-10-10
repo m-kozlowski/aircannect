@@ -23,6 +23,7 @@ public:
 
     // Called only by the StorageService task, below EDF work.
     bool step(StorageAtomicWriteLane lane);
+    bool release_media();
 
     OperationSubmission request_write(
         const StorageRangeWriteCommand &command) override;

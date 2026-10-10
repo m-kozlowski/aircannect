@@ -23,6 +23,7 @@ public:
     void set_task_available(bool available);
     void set_paused(bool paused);
     bool step();
+    bool release_media();
 
     // scan requests
     OperationSubmission request_scan(

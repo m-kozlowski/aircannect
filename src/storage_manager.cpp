@@ -339,6 +339,20 @@ bool retry_mount() {
     return mounted_now;
 }
 
+void unmount() {
+    release_write_handles();
+
+#if AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED
+    SD_MMC.end();
+#endif
+#if AC_STORAGE_SPI_SD_ENABLED
+    SD.end();
+#endif
+
+    set_state(owner_status.type, StorageState::NotPresent, "USB owns SD");
+    publish_status();
+}
+
 StorageStatus status() {
     StorageStatus out;
     if (!lock_status()) return out;

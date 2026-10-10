@@ -22,6 +22,7 @@ public:
     void set_task_available(bool available);
     void set_stream_service(StorageStreamService *stream_service);
     bool step(StorageAtomicWriteLane lane);
+    bool release_media();
 
     OperationSubmission request_write(const StorageAtomicWriteCommand &command) override;
     bool abandon(OperationTicket ticket) override;

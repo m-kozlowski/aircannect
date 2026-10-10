@@ -1,4 +1,5 @@
 #include "storage_file_log_sink.h"
+#include "storage_access.h"
 
 #include <new>
 #include <stdio.h>
@@ -103,7 +104,7 @@ bool StorageFileLogSink::enqueue(const char *line, size_t length) {
     if (!lock(0)) return false;
 
     bool accepted = false;
-    if (desired_enabled_ && queue_) {
+    if (desired_enabled_ && queue_ && storage_local_requests_enabled.load()) {
         Line item;
         item.sequence = next_sequence_;
         item.length = static_cast<uint16_t>(length);
@@ -386,6 +387,14 @@ FileLogSinkStatus StorageFileLogSink::status() const {
     result = status_;
     unlock();
     return result;
+}
+
+bool StorageFileLogSink::release_media() {
+#if AC_FILE_LOG_ENABLED
+    if (!prepare_tail_read(capture_tail_fence())) return false;
+    directory_ready_ = false;
+#endif
+    return true;
 }
 
 }  // namespace aircannect

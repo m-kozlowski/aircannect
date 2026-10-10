@@ -1,4 +1,5 @@
 #include "storage_scan_service.h"
+#include "storage_access.h"
 
 #include <new>
 #include <string.h>
@@ -135,6 +136,10 @@ OperationSubmission StorageScanService::request_scan(
     }
     if (!ready()) return OperationSubmission::busy();
     if (!lock()) return OperationSubmission::busy();
+    if (!storage_local_requests_enabled.load()) {
+        unlock();
+        return OperationSubmission::rejected();
+    }
     if (job_->active || completion_ready_) {
         unlock();
         return OperationSubmission::busy();
@@ -498,6 +503,16 @@ bool StorageScanService::step() {
     release_maintenance_locked();
     unlock();
     return worked;
+}
+
+bool StorageScanService::release_media() {
+    if (!lock(0)) return false;
+
+    if (job_) clear_job_locked();
+    completion_ready_ = false;
+    completion_ = {};
+    unlock();
+    return true;
 }
 
 }  // namespace aircannect

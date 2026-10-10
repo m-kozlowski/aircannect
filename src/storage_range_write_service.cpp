@@ -1,4 +1,5 @@
 #include "storage_range_write_service.h"
+#include "storage_access.h"
 
 #include <algorithm>
 #include <new>
@@ -86,6 +87,10 @@ OperationSubmission StorageRangeWriteService::request_write(
     const StorageRangeWriteCommand &command) {
     if (!command.valid()) return OperationSubmission::rejected();
     if (!ready() || !lock()) return OperationSubmission::busy();
+    if (!storage_local_requests_enabled.load()) {
+        unlock();
+        return OperationSubmission::rejected();
+    }
 
     (void)apply_abandon_locked();
     if (job_->ticket.valid() || completion_.ticket.valid()) {
@@ -331,6 +336,15 @@ bool StorageRangeWriteService::step(StorageAtomicWriteLane lane) {
 
     unlock();
     return true;
+}
+
+bool StorageRangeWriteService::release_media() {
+    if (!lock()) return false;
+
+    const bool idle = !job_ || !job_->ticket.valid();
+    if (idle) completion_ = {};
+    unlock();
+    return idle;
 }
 
 }  // namespace aircannect

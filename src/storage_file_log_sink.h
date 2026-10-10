@@ -25,6 +25,7 @@ public:
     uint32_t capture_tail_fence() const;
     bool prepare_tail_read(uint32_t fence_sequence);
     bool step();
+    bool release_media();
     FileLogSinkStatus status() const override;
 
 private:

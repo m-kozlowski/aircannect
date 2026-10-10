@@ -29,6 +29,7 @@ public:
     void set_task_available(bool available);
     void set_paused(bool paused);
     bool step();
+    bool release_media();
 
     // archive requests
     bool start(const char *path,

@@ -1,4 +1,5 @@
 #include "storage_upload_service.h"
+#include "storage_access.h"
 
 #include <algorithm>
 #include <Arduino.h>
@@ -251,7 +252,7 @@ StorageUploadStartResult StorageUploadService::start(
         copy_cstr(result.error, sizeof(result.error), "service_busy");
         return result;
     }
-    if (job_->status.active()) {
+    if (job_->status.active() || !storage_local_requests_enabled.load()) {
         result.admission = OperationAdmission::Busy;
         copy_cstr(result.error, sizeof(result.error), "upload_active");
         unlock();
@@ -816,6 +817,16 @@ bool StorageUploadService::step() {
 
     unlock();
     return worked;
+}
+
+bool StorageUploadService::release_media() {
+    if (!lock(0)) return false;
+
+    if (job_ && job_->status.active()) cancel_locked();
+    cleanup_pending_ = true;
+    publication_notice_pending_ = false;
+    unlock();
+    return true;
 }
 
 }  // namespace aircannect

@@ -16,6 +16,7 @@ public:
     bool begin(WakeCallback wake);
     void set_task_available(bool available);
     bool step();
+    bool release_media();
 
     OperationSubmission request(const StoragePathCommand &command) override;
     bool abandon(OperationTicket ticket) override;

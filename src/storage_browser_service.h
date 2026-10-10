@@ -22,6 +22,7 @@ public:
     bool begin(WakeCallback wake);
     void set_task_available(bool available);
     StorageBrowserStep step();
+    bool release_media();
 
     StorageListingRead listing(
         const char *path,

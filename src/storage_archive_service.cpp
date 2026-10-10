@@ -1,4 +1,5 @@
 #include "storage_archive_service.h"
+#include "storage_access.h"
 
 #include <algorithm>
 #include <new>
@@ -464,7 +465,7 @@ bool StorageArchiveService::start(const char *path,
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
-    if (paused_.load()) {
+    if (paused_.load() || !storage_local_requests_enabled.load()) {
         copy_cstr(error_out, error_out_size, "storage_busy");
         unlock();
         return false;
@@ -521,7 +522,7 @@ bool StorageArchiveService::start_selected(const char *base_path,
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
-    if (paused_.load()) {
+    if (paused_.load() || !storage_local_requests_enabled.load()) {
         copy_cstr(error_out, error_out_size, "storage_busy");
         unlock();
         return false;
@@ -606,7 +607,7 @@ bool StorageArchiveService::begin_download(
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
-    if (paused_.load()) {
+    if (paused_.load() || !storage_local_requests_enabled.load()) {
         copy_cstr(error_out, error_out_size, "storage_busy");
         unlock();
         return false;
@@ -1339,6 +1340,19 @@ size_t StorageArchiveService::produce_download_locked(
     status_.archive_bytes = status_.estimated_archive_bytes;
     touch_status_locked();
     return written;
+}
+
+bool StorageArchiveService::release_media() {
+    if (!lock(0)) return false;
+
+    if (active_download_) {
+        fail_download_locked(*active_download_, "storage_usb");
+        close_download_input_locked(*active_download_);
+        active_download_.reset();
+    }
+    reset_job_locked(false);
+    unlock();
+    return true;
 }
 
 }  // namespace aircannect

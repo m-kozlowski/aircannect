@@ -1,4 +1,5 @@
 #include "storage_browser_service.h"
+#include "storage_access.h"
 
 #include <algorithm>
 #include <new>
@@ -75,6 +76,7 @@ public:
         size_t error_out_size);
     StorageBrowserStep step();
     void shutdown();
+    bool release_media();
 
 private:
     enum class Phase : uint8_t {
@@ -155,6 +157,7 @@ public:
     void finish(StoragePreparedDownload &download);
     StorageBrowserStep step();
     void shutdown();
+    bool release_media();
 
 private:
     bool lock(uint32_t timeout_ms = 20) const;
@@ -256,6 +259,11 @@ StorageListingRead StorageDirectoryListing::read(
         return StorageListingRead::Error;
     }
     if (!lock(0)) return StorageListingRead::Preparing;
+    if (!storage_local_requests_enabled.load()) {
+        copy_cstr(error_out, error_out_size, "storage_usb");
+        unlock();
+        return StorageListingRead::Error;
+    }
 
     const bool active_same = build_ &&
         strcmp(build_->path(), path) == 0;
@@ -665,6 +673,13 @@ StorageDownloadPrepareState StorageDownloadProducer::prepare(
              active.transfer.producer_done());
         status_out.state = ready ? StorageDownloadPrepareState::Ready
                                  : StorageDownloadPrepareState::Preparing;
+        unlock();
+        return status_out.state;
+    }
+
+    if (!storage_local_requests_enabled.load()) {
+        status_out.state = StorageDownloadPrepareState::Error;
+        copy_cstr(status_out.error, sizeof(status_out.error), "storage_usb");
         unlock();
         return status_out.state;
     }
@@ -1155,6 +1170,37 @@ StorageBrowserStep StorageBrowserService::step() {
         }
     }
     return overall;
+}
+
+bool StorageDirectoryListing::release_media() {
+    if (!lock(0)) return false;
+
+    clear_build_locked();
+    pending_ = false;
+    error_path_[0] = 0;
+    error_[0] = 0;
+    for (auto &snapshot : snapshots_) snapshot.reset();
+    unlock();
+    return true;
+}
+
+bool StorageDownloadProducer::release_media() {
+    if (!lock(0)) return false;
+
+    if (active_) {
+        active_->transfer.request_cancel();
+        fail_locked(*active_, "storage_usb");
+        close_file(*active_);
+        active_.reset();
+    }
+    unlock();
+    return true;
+}
+
+bool StorageBrowserService::release_media() {
+    const bool listing_closed = !listing_ || listing_->release_media();
+    const bool download_closed = !download_ || download_->release_media();
+    return listing_closed && download_closed;
 }
 
 }  // namespace aircannect

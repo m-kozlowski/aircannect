@@ -23,6 +23,10 @@ public:
     explicit EdfRecordingOverview(StorageScanPort &scan) : scan_(scan) {}
 
     bool poll(bool mounted, bool allow_scan, uint32_t now_ms);
+    bool release_media() {
+        (void)poll(false, false, 0);
+        return !ticket_.valid();
+    }
     void note_file(const char *path, uint64_t bytes);
     void path_changed(const char *path);
     const EdfRecordingOverviewSnapshot &snapshot() const { return snapshot_; }

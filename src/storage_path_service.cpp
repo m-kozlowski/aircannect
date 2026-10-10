@@ -1,4 +1,5 @@
 #include "storage_path_service.h"
+#include "storage_access.h"
 
 #include <FS.h>
 #include <string.h>
@@ -130,6 +131,10 @@ OperationSubmission StoragePathService::request(
         }
     }
     if (!ready() || !lock()) return OperationSubmission::busy();
+    if (!storage_local_requests_enabled.load()) {
+        unlock();
+        return OperationSubmission::rejected();
+    }
     if (job_count_ + completion_count_locked() >= Capacity) {
         unlock();
         return OperationSubmission::busy();
@@ -371,6 +376,17 @@ bool StoragePathService::step() {
     const StoragePathCompletion completion = execute(snapshot);
     finish(snapshot.ticket, completion);
     return true;
+}
+
+bool StoragePathService::release_media() {
+    if (!lock(0)) return false;
+
+    const bool idle = job_count_ == 0;
+    if (idle && completions_) {
+        for (size_t i = 0; i < Capacity; ++i) completions_[i] = {};
+    }
+    unlock();
+    return idle;
 }
 
 }  // namespace aircannect

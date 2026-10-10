@@ -25,6 +25,7 @@ public:
     void set_paused(bool paused);
     bool take_published_path(char *path, size_t path_size);
     bool step();
+    bool release_media();
 
     StorageUploadStartResult start(
         const StorageUploadStartCommand &command) override;

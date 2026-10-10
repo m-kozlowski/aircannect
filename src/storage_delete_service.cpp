@@ -1,4 +1,5 @@
 #include "storage_delete_service.h"
+#include "storage_access.h"
 
 #include <new>
 #include <stdio.h>
@@ -284,7 +285,7 @@ bool StorageDeleteService::start_selected(const char *base_path,
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
-    if (paused_.load()) {
+    if (paused_.load() || !storage_local_requests_enabled.load()) {
         copy_cstr(error_out, error_out_size, "storage_busy");
         unlock();
         return false;
@@ -539,6 +540,19 @@ bool StorageDeleteService::finish_done_locked() {
               static_cast<unsigned>(status_.roots),
               static_cast<unsigned>(status_.files_deleted),
               static_cast<unsigned>(status_.dirs_deleted));
+    return true;
+}
+
+bool StorageDeleteService::release_media() {
+    if (!lock(0)) return false;
+
+    close_walk_locked();
+    release_maintenance_locked();
+    if (active_.exchange(false)) {
+        status_.state = StorageDeleteState::Cancelled;
+        touch_status_locked();
+    }
+    unlock();
     return true;
 }
 

@@ -30,6 +30,7 @@ public:
     void set_stream_service(StorageStreamService *service) { streams_ = service; }
     void set_paused(bool paused);
     bool step();
+    bool release_media();
 
     // delete requests
     bool cancel(uint32_t id) override;

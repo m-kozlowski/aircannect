@@ -1,4 +1,5 @@
 #include "storage_atomic_write_service.h"
+#include "storage_access.h"
 
 #include <algorithm>
 #include <new>
@@ -190,6 +191,10 @@ OperationSubmission StorageAtomicWriteService::request_write(
         return OperationSubmission::rejected();
     }
     if (!ready() || !lock(0)) return OperationSubmission::busy();
+    if (!storage_local_requests_enabled.load()) {
+        unlock();
+        return OperationSubmission::rejected();
+    }
     (void)apply_abandon_request_locked();
     if (job_->active || completion_ready_) {
         unlock();
@@ -589,6 +594,20 @@ bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
     if (!ok) fail_locked(error ? error : "write_failed");
     unlock();
     return true;
+}
+
+bool StorageAtomicWriteService::release_media() {
+    if (!lock(0)) return false;
+
+    const bool idle = !job_ || !job_->active;
+    if (idle) {
+        completion_ready_ = false;
+        completion_ = {};
+        recovery_needed_ = true;
+        recovery_attempt_requested_ = true;
+    }
+    unlock();
+    return idle;
 }
 
 }  // namespace aircannect

@@ -6,9 +6,16 @@
 
 namespace aircannect::Storage {
 
+namespace {
+uint32_t error_count = 0;
+}
+
+uint32_t io_error_count() { return error_count; }
+
 void log_io_error(const char *operation, const char *path, int error,
                   size_t actual, size_t requested) {
     if (error == ENOENT || error == ENOTDIR || error == EEXIST) return;
+    ++error_count;
 
     const int saved_errno = errno;
     static bool reported = false;
