@@ -538,9 +538,9 @@
               <span class="badge" id="storageBadge">--</span>
             </div>
             <div class="row" id="storageUsbRow" hidden>
-              <label class="check"><input type="checkbox" id="storageUsbToggle"
-                data-change-action="storage.usb"> USB disk</label>
-              <span class="value" id="storageUsbStatus">Local</span>
+              <button class="btn" type="button" id="storageUsbBtn"
+                data-action="storage.usb" disabled>Share SD via USB</button>
+              <span class="value" id="storageUsbStatus" role="status">Local</span>
             </div>
             <div class="msg" id="storageUsbMsg"></div>
             <div class="storage-toolbar">

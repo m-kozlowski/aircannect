@@ -1034,10 +1034,14 @@
       storageUsbState = usb.state || "local";
       const row = document.getElementById("storageUsbRow");
       if (row) row.hidden = !usb.supported;
-      const toggle = document.getElementById("storageUsbToggle");
-      if (toggle) {
-        toggle.checked = storageUsbState !== "local";
-        toggle.disabled = storageUsbRequestPending ||
+      const button = document.getElementById("storageUsbBtn");
+      if (button) {
+        const actions = {local: "Share SD via USB", preparing: "Preparing USB...",
+          shared: "Return SD to AirCANnect", returning: "Returning SD...",
+          restoring: "Reloading SD...", error: "Retry SD return"};
+        button.textContent = storageUsbRequestPending ? "Requesting..."
+          : actions[storageUsbState] || "USB unavailable";
+        button.disabled = storageUsbRequestPending ||
           !["local", "shared", "error"].includes(storageUsbState);
       }
       const labels = {local: "Local", preparing: "Preparing",
@@ -1183,8 +1187,8 @@
     }
 
     AirCANnect.actions.register("storage.up", () => storageUp());
-    AirCANnect.actions.register("storage.usb", (_event, element) =>
-      storageSetUsb(element.checked));
+    AirCANnect.actions.register("storage.usb", () =>
+      storageSetUsb(storageUsbState === "local"));
     AirCANnect.actions.register("storage.upload-choose", () =>
       storageChooseUpload());
     AirCANnect.actions.register("storage.refresh", () =>

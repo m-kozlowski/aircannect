@@ -242,6 +242,12 @@
       background: #10111466;
     }
 
+    #storageUsbBtn {
+      width: 220px;
+      max-width: 100%;
+      min-height: 34px;
+    }
+
     #storageUsbRow[hidden],
     .storage-upload-progress[hidden] {
       display: none;
