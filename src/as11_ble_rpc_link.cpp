@@ -1,6 +1,7 @@
 #include "as11_ble_rpc_link.h"
 
 #include <ArduinoJson.h>
+#include <atomic>
 #include <ctype.h>
 #include <strings.h>
 
@@ -68,6 +69,12 @@ public:
     void onResult(const NimBLEAdvertisedDevice *device) override {
         if (owner_) owner_->note_scan_result(device);
     }
+
+    void onScanEnd(const NimBLEScanResults &, int reason) override {
+        completion_reason.store(reason);
+    }
+
+    std::atomic<int> completion_reason{-1};
 
 private:
     As11BleRpcLink *owner_ = nullptr;
@@ -1086,7 +1093,10 @@ bool As11BleRpcLink::scan_and_connect(
     set_status(As11BleLinkState::WaitingForScanner);
     BleRuntime::ScanLease scan_lease =
         runtime_.acquire_scan(pdMS_TO_TICKS(500));
-    if (!scan_lease) return false;
+    if (!scan_lease) {
+        set_status(As11BleLinkState::Backoff, "scanner_busy");
+        return false;
+    }
 
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (!scan) {
@@ -1120,7 +1130,16 @@ bool As11BleRpcLink::scan_and_connect(
     portEXIT_CRITICAL(&mux_);
 
     if (!found) {
-        set_status(As11BleLinkState::Backoff, "device_not_found");
+        const int reason = callbacks.completion_reason.load();
+        char error[sizeof(status_.error)];
+        if (reason == 0) {
+            copy_text(error, sizeof(error), "device_not_found");
+        } else if (reason == -1) {
+            copy_text(error, sizeof(error), "scan_not_completed");
+        } else {
+            snprintf(error, sizeof(error), "scan_failed_%d", reason);
+        }
+        set_status(As11BleLinkState::Backoff, error);
         return false;
     }
 
@@ -1156,7 +1175,9 @@ bool As11BleRpcLink::connect_device(
     const NimBLEAddress peer(std::string(device.address),
                              device.address_type);
     if (!client_->connect(peer)) {
-        set_status(As11BleLinkState::Backoff, "connect_failed");
+        char error[sizeof(status_.error)];
+        snprintf(error, sizeof(error), "connect_failed_%d", client_->getLastError());
+        set_status(As11BleLinkState::Backoff, error);
         return false;
     }
 
