@@ -1,4 +1,5 @@
 #include "export_task.h"
+#include "export_backend.h"
 
 #include <new>
 #include <stdio.h>
@@ -18,6 +19,9 @@ namespace aircannect {
 struct ExportTask::Runtime {
     StorageSyncEngine smb;
     SleepHqSyncEngine sleephq;
+    ExportBackend backends[AC_EXPORT_ENDPOINT_COUNT] = {
+        ExportBackend(smb), ExportBackend(sleephq),
+    };
     PublishedInputs inputs;
     PublishedInputs input_snapshot;
     ExportTaskControlSnapshot control_status;
@@ -124,8 +128,9 @@ void ExportTask::publish_activity(const ActivitySnapshot &activity) {
     if (blocked && runtime_) {
         // The export task may be inside blocking network I/O. Its operation
         // controls must observe the gate before the task can process inputs.
-        runtime_->smb.set_runtime_blocked(true);
-        runtime_->sleephq.set_runtime_blocked(true);
+        for (const auto &backend : runtime_->backends) {
+            backend.set_runtime_blocked(true);
+        }
     }
 
     if (!runtime_ || !lock_inputs()) return;
@@ -170,24 +175,24 @@ void ExportTask::defer_smb_until(uint32_t until_ms) {
     wake();
 }
 
-bool ExportTask::queue_command(CommandKind kind, const char *day) {
-    if (storage_suspend_requested_.load()) return false;
-    if (!runtime_ || kind == CommandKind::None) return false;
-    if (kind == CommandKind::SleepHqSyncDay &&
-        (!day || !storage_export_is_datalog_day_name(day))) {
-        return false;
-    }
+bool ExportTask::request(const ExportRequest &request) {
+    if (storage_suspend_requested_.load() || !runtime_) return false;
+    if (!request.supported()) return false;
     if (!lock_inputs()) return false;
 
     if (storage_suspend_requested_.load()) {
         unlock_inputs();
         return false;
     }
-    if (runtime_->inputs.command.kind != CommandKind::None) {
-        const bool same_day = kind != CommandKind::SleepHqSyncDay ||
-                              strcmp(runtime_->inputs.command.day, day) == 0;
+
+    Command &command = runtime_->inputs.command;
+    if (command.sequence != 0) {
+        const ExportRequest &queued = command.request;
         const bool already_queued =
-            runtime_->inputs.command.kind == kind && same_day;
+            queued.endpoint == request.endpoint &&
+            queued.operation == request.operation &&
+            queued.reason == request.reason &&
+            strcmp(queued.day, request.day) == 0;
         unlock_inputs();
 
         if (already_queued) return true;
@@ -200,91 +205,39 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
         return false;
     }
 
-    runtime_->inputs.command.kind = kind;
-    runtime_->inputs.command.sequence = next_command_sequence_++;
+    command.request = request;
+    command.sequence = next_command_sequence_++;
     if (next_command_sequence_ == 0) next_command_sequence_++;
-    runtime_->inputs.command.day[0] = '\0';
-    if (day) {
-        snprintf(runtime_->inputs.command.day,
-                 sizeof(runtime_->inputs.command.day), "%s", day);
-    }
 
     work_reservation_.fetch_or(ExportDemand);
     unlock_inputs();
-    if (kind != CommandKind::SmbScheduledReconcile) {
-        runtime_->smb.cancel_scheduled_reconcile();
+    if (request.reason != ExportReason::Maintenance) {
+        cancel_smb_scheduled_reconcile();
     }
     wake();
     return true;
 }
 
-bool ExportTask::request_smb_sync() {
-    return queue_command(CommandKind::SmbSync);
-}
-
-bool ExportTask::request_smb_startup_check() {
-    return queue_command(CommandKind::SmbStartupCheck);
-}
-
-bool ExportTask::request_smb_idle_backfill() {
-    return queue_command(CommandKind::SmbIdleBackfill);
-}
-
-bool ExportTask::request_smb_verify() {
-    return queue_command(CommandKind::SmbVerify);
-}
-
-bool ExportTask::request_smb_scheduled_reconcile() {
-    return queue_command(CommandKind::SmbScheduledReconcile);
-}
-
-bool ExportTask::request_smb_post_therapy() {
-    return queue_command(CommandKind::SmbPostTherapy);
-}
-
 void ExportTask::cancel_smb_scheduled_reconcile() {
     if (!runtime_) return;
 
-    runtime_->smb.cancel_scheduled_reconcile();
+    runtime_->backends[static_cast<size_t>(ExportEndpoint::Smb)].cancel(
+        ExportReason::Maintenance);
     wake();
-}
-
-bool ExportTask::request_sleephq_check() {
-    return queue_command(CommandKind::SleepHqCheck);
-}
-
-bool ExportTask::request_sleephq_startup_check() {
-    return queue_command(CommandKind::SleepHqStartupCheck);
-}
-
-bool ExportTask::request_sleephq_sync() {
-    return queue_command(CommandKind::SleepHqSync);
-}
-
-bool ExportTask::request_sleephq_idle_backfill() {
-    return queue_command(CommandKind::SleepHqIdleBackfill);
-}
-
-bool ExportTask::request_sleephq_sync_day(const char *day) {
-    return queue_command(CommandKind::SleepHqSyncDay, day);
-}
-
-bool ExportTask::request_sleephq_post_therapy() {
-    return queue_command(CommandKind::SleepHqPostTherapy);
 }
 
 bool ExportTask::cancel_post_therapy() {
     if (!runtime_ || !lock_inputs(0)) return false;
 
-    const CommandKind kind = runtime_->inputs.command.kind;
-    if (kind == CommandKind::SmbPostTherapy ||
-        kind == CommandKind::SleepHqPostTherapy) {
+    if (runtime_->inputs.command.sequence != 0 &&
+        runtime_->inputs.command.request.reason == ExportReason::PostTherapy) {
         runtime_->inputs.command = Command();
     }
     unlock_inputs();
 
-    runtime_->smb.cancel_post_therapy_sync();
-    runtime_->sleephq.cancel_post_therapy_sync();
+    for (const auto &backend : runtime_->backends) {
+        backend.cancel(ExportReason::PostTherapy);
+    }
     wake();
     return true;
 }
@@ -347,82 +300,25 @@ void ExportTask::apply_inputs(const PublishedInputs &inputs,
         applied_smb_defer_generation_ = inputs.smb_defer_generation;
     }
 
-    runtime_->smb.set_network_available(network_ready_);
-    runtime_->sleephq.set_network_available(network_ready_);
+    for (const auto &backend : runtime_->backends) {
+        backend.set_network_available(network_ready_);
+    }
 }
 
 bool ExportTask::apply_command(const Command &command) {
-    if (command.kind == CommandKind::None) return true;
+    if (command.sequence == 0) return true;
 
-    const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
-    const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
-    if (smb.state == StorageSyncState::Working || smb.pending ||
-        smb.durable_state_pending ||
-        sleephq.state == SleepHqSyncState::Working || sleephq.pending) {
-        return false;
+    for (const auto &backend : runtime_->backends) {
+        if (backend.status().busy()) return false;
     }
 
-    bool accepted = false;
-    bool configured = true;
-    switch (command.kind) {
-        case CommandKind::SmbSync:
-            configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_manual_sync();
-            break;
-        case CommandKind::SmbStartupCheck:
-            configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_startup_check();
-            break;
-        case CommandKind::SmbIdleBackfill:
-            configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_idle_backfill();
-            break;
-        case CommandKind::SmbVerify:
-            configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_manual_reconcile();
-            break;
-        case CommandKind::SmbScheduledReconcile:
-            configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_scheduled_reconcile();
-            break;
-        case CommandKind::SmbPostTherapy:
-            configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_post_therapy_sync();
-            break;
-        case CommandKind::SleepHqCheck:
-            configured = sleephq.configured;
-            accepted = runtime_->sleephq.request_check("manual");
-            break;
-        case CommandKind::SleepHqStartupCheck:
-            configured = sleephq.configured;
-            accepted = runtime_->sleephq.request_check("startup_check");
-            break;
-        case CommandKind::SleepHqSync:
-            configured = sleephq.configured;
-            accepted = runtime_->sleephq.request_sync("manual");
-            break;
-        case CommandKind::SleepHqIdleBackfill:
-            configured = sleephq.configured;
-            accepted = runtime_->sleephq.request_sync("idle_backfill");
-            break;
-        case CommandKind::SleepHqSyncDay:
-            configured = sleephq.configured;
-            accepted = runtime_->sleephq.request_sync_day(command.day,
-                                                           "manual_day");
-            break;
-        case CommandKind::SleepHqPostTherapy:
-            configured = sleephq.configured;
-            accepted = runtime_->sleephq.request_post_therapy_sync();
-            break;
-        case CommandKind::None:
-            return true;
-    }
-
-    if (!configured) {
+    const auto &backend =
+        runtime_->backends[static_cast<size_t>(command.request.endpoint)];
+    if (!backend.status().configured) {
         finish_command(command, true);
         return true;
     }
-    if (!accepted) return false;
+    if (!backend.request(command.request)) return false;
 
     finish_command(command, false);
     return true;
@@ -447,41 +343,30 @@ void ExportTask::finish_command(const Command &command, bool failed) {
 }
 
 ExportStep ExportTask::step_endpoint() {
-    const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
-    const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
-
-    if (smb.durable_state_pending) return runtime_->smb.step();
-    if (smb.state == StorageSyncState::Working) return runtime_->smb.step();
-    if (sleephq.state == SleepHqSyncState::Working) {
-        return runtime_->sleephq.step();
+    // Local completion must drain before another endpoint can use storage.
+    for (const auto &backend : runtime_->backends) {
+        if (backend.status().durable_state_pending) return backend.step();
+    }
+    for (const auto &backend : runtime_->backends) {
+        if (backend.status().executing()) return backend.step();
     }
 
-    ExportStep result = ExportStep::Idle;
-    if (next_idle_endpoint_smb_) {
-        result = runtime_->smb.step();
-    } else {
-        result = runtime_->sleephq.step();
-    }
-    next_idle_endpoint_smb_ = !next_idle_endpoint_smb_;
+    const ExportStep result = runtime_->backends[next_idle_endpoint_].step();
+    next_idle_endpoint_ = (next_idle_endpoint_ + 1) % AC_EXPORT_ENDPOINT_COUNT;
     return result;
 }
 
 bool ExportTask::publish_work_claim() {
     if (!runtime_ || !lock_inputs(0)) return false;
 
-    const bool command_pending =
-        runtime_->inputs.command.kind != CommandKind::None;
-    const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
-    const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
-    const bool active = smb.durable_state_pending ||
-                        smb.state == StorageSyncState::Working ||
-                        sleephq.state == SleepHqSyncState::Working;
-    const bool pending = smb.pending ||
-                         smb.state == StorageSyncState::Pending ||
-                         sleephq.pending ||
-                         sleephq.state == SleepHqSyncState::Pending;
-    const bool ready_pending =
-        (pending || command_pending) && network_ready_ && !runtime_blocked_;
+    bool active = false;
+    bool pending = runtime_->inputs.command.sequence != 0;
+    for (const auto &backend : runtime_->backends) {
+        const auto status = backend.status();
+        active = active || status.executing();
+        pending = pending || status.awaiting();
+    }
+    const bool ready_pending = pending && network_ready_ && !runtime_blocked_;
 
     if (active || ready_pending) {
         work_reservation_.fetch_or(ExportDemand);
@@ -501,7 +386,7 @@ void ExportTask::publish_status() {
     char sleephq_device_id[AC_SLEEPHQ_ID_MAX] = {};
     if (lock_inputs()) {
         command_pending =
-            runtime_->inputs.command.kind != CommandKind::None;
+            runtime_->inputs.command.sequence != 0;
         copy_cstr(smb_endpoint, sizeof(smb_endpoint),
                   runtime_->inputs.config.smb.endpoint);
         copy_cstr(sleephq_team_id, sizeof(sleephq_team_id),
@@ -583,7 +468,7 @@ ExportTaskControlSnapshot ExportTask::control_snapshot() const {
 
     if (runtime_ && lock_inputs()) {
         out.command_pending =
-            runtime_->inputs.command.kind != CommandKind::None;
+            runtime_->inputs.command.sequence != 0;
         out.busy = out.busy || out.command_pending;
         unlock_inputs();
     }
@@ -638,8 +523,9 @@ void ExportTask::task_entry(void *context) {
 void ExportTask::set_storage_suspended(bool suspended) {
     if (storage_suspend_requested_.exchange(suspended) == suspended) return;
     if (suspended && runtime_) {
-        runtime_->smb.set_runtime_blocked(true);
-        runtime_->sleephq.set_runtime_blocked(true);
+        for (const auto &backend : runtime_->backends) {
+            backend.set_runtime_blocked(true);
+        }
     }
     wake();
 }
@@ -657,9 +543,11 @@ void ExportTask::run() {
         apply_inputs(inputs, now_ms);
         if (storage_suspend_requested_.load()) {
             if (!storage_paused_.load()) {
-                const bool smb = runtime_->smb.release_media();
-                const bool shq = runtime_->sleephq.release_media();
-                if (smb && shq) {
+                bool released = true;
+                for (const auto &backend : runtime_->backends) {
+                    released = backend.release_media() && released;
+                }
+                if (released) {
                     finish_command(inputs.command, false);
                     if (publish_work_claim()) {
                         work_reservation_.fetch_and(static_cast<uint8_t>(~EndpointStep));
@@ -677,8 +565,9 @@ void ExportTask::run() {
         // Block run startup, but still let engines publish due retries and
         // process cancellation/configuration while a check is shutting down.
         const bool admitted = try_begin_endpoint_step();
-        runtime_->smb.set_runtime_blocked(runtime_blocked_ || !admitted);
-        runtime_->sleephq.set_runtime_blocked(runtime_blocked_ || !admitted);
+        for (const auto &backend : runtime_->backends) {
+            backend.set_runtime_blocked(runtime_blocked_ || !admitted);
+        }
 
         const ExportStep result = step_endpoint();
         const bool claim_published = publish_work_claim();
@@ -688,17 +577,10 @@ void ExportTask::run() {
         publish_status();
 
         uint32_t delay_ms = AC_EXPORT_TASK_IDLE_TICK_MS;
-        const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
-
-        const SleepHqSyncRuntimeStatus sleephq =
-            runtime_->sleephq.runtime_status();
-
-        const bool busy = smb.durable_state_pending ||
-                          smb.state == StorageSyncState::Working ||
-                          smb.pending ||
-                          sleephq.state == SleepHqSyncState::Working ||
-                          sleephq.pending ||
-                          inputs.command.kind != CommandKind::None;
+        bool busy = inputs.command.sequence != 0;
+        for (const auto &backend : runtime_->backends) {
+            busy = busy || backend.status().busy();
+        }
 
         if (result == ExportStep::Working) {
             delay_ms = AC_EXPORT_TASK_WORK_TICK_MS;

@@ -1,5 +1,7 @@
 #include "export_coordinator.h"
 
+#include <string.h>
+
 #include "board_report.h"
 #include "debug_log.h"
 #include "storage_export_plan.h"
@@ -79,7 +81,7 @@ bool ExportCoordinator::request_sync() {
 bool ExportCoordinator::request_smb_sync() {
     if (!task_) return false;
     const ExportTaskControlSnapshot current = control_snapshot();
-    if (!external_request_allowed(current) || !task_->request_smb_sync()) {
+    if (!external_request_allowed(current) || !task_->request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::Manual})) {
         return false;
     }
 
@@ -98,7 +100,7 @@ bool ExportCoordinator::request_smb_sync() {
 bool ExportCoordinator::request_smb_verify() {
     if (!task_) return false;
     const ExportTaskControlSnapshot current = control_snapshot();
-    if (!external_request_allowed(current) || !task_->request_smb_verify()) {
+    if (!external_request_allowed(current) || !task_->request({ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Manual})) {
         return false;
     }
 
@@ -118,7 +120,7 @@ bool ExportCoordinator::request_sleephq_sync() {
     if (!task_) return false;
     const ExportTaskControlSnapshot current = control_snapshot();
     if (!external_request_allowed(current) ||
-        !task_->request_sleephq_sync()) {
+        !task_->request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual})) {
         return false;
     }
 
@@ -129,12 +131,16 @@ bool ExportCoordinator::request_sleephq_sync() {
 
 bool ExportCoordinator::request_sleephq_sync_day(const char *day) {
     if (!task_ || !external_request_allowed(control_snapshot())) return false;
-    return task_->request_sleephq_sync_day(day);
+    if (!day || !storage_export_is_datalog_day_name(day)) return false;
+
+    ExportRequest request{ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual};
+    memcpy(request.day, day, sizeof(request.day));
+    return task_->request(request);
 }
 
 bool ExportCoordinator::request_sleephq_check() {
     if (!task_ || !external_request_allowed(control_snapshot())) return false;
-    return task_->request_sleephq_check();
+    return task_->request({ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Manual});
 }
 
 void ExportCoordinator::poll(const ExportReportActivity &report,
@@ -384,7 +390,7 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
     }
 
     const ExportTaskControlSnapshot current = control_snapshot();
-    if (task_->request_sleephq_post_therapy()) {
+    if (task_->request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::PostTherapy})) {
         startup_backfill_.sleephq_queued_generation =
             current.sleephq.config_generation;
         clear_post_therapy_sleephq();
@@ -402,7 +408,7 @@ void ExportCoordinator::queue_post_therapy_storage_sync(uint32_t now_ms) {
     }
 
     const ExportTaskControlSnapshot current = control_snapshot();
-    if (task_->request_smb_post_therapy()) {
+    if (task_->request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::PostTherapy})) {
         startup_backfill_.smb_queued_generation =
             current.smb.config_generation;
         if (startup_check_.smb_completed_generation !=
@@ -487,7 +493,7 @@ void ExportCoordinator::maybe_queue_smb_startup_check(
         return;
     }
 
-    if (task_->request_smb_startup_check()) {
+    if (task_->request({ExportEndpoint::Smb, ExportOperation::Check, ExportReason::Startup})) {
         startup_check_.smb_requested_generation =
             status.config_generation;
         startup_check_.smb_request_completed_sequence =
@@ -522,7 +528,7 @@ void ExportCoordinator::maybe_queue_sleephq_startup_check(
         return;
     }
 
-    if (task_->request_sleephq_startup_check()) {
+    if (task_->request({ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Startup})) {
         startup_check_.sleephq_requested_generation =
             status.config_generation;
     }
@@ -603,12 +609,12 @@ void ExportCoordinator::poll_startup_backfill(
     }
     if (static_cast<int32_t>(now_ms - startup_backfill_.due_ms) < 0) return;
 
-    if (smb_ready && task_->request_smb_idle_backfill()) {
+    if (smb_ready && task_->request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::IdleBackfill})) {
         startup_backfill_.smb_queued_generation = smb.config_generation;
         startup_backfill_.due_ms = 0;
         return;
     }
-    if (sleephq_ready && task_->request_sleephq_idle_backfill()) {
+    if (sleephq_ready && task_->request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::IdleBackfill})) {
         startup_backfill_.sleephq_queued_generation =
             sleephq.config_generation;
         startup_backfill_.due_ms = 0;
@@ -752,7 +758,7 @@ void ExportCoordinator::poll_full_reconcile(
         return;
     }
 
-    if (task_->request_smb_scheduled_reconcile()) {
+    if (task_->request({ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Maintenance})) {
         full_reconcile_.queued = true;
         full_reconcile_.idle_due_ms = 0;
     }

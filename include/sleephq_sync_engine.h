@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "export_endpoint_config.h"
+#include "export_endpoint.h"
 #include "export_step.h"
 #include "large_byte_buffer.h"
 #include "sleephq_client.h"
@@ -27,13 +28,7 @@ namespace aircannect {
 static constexpr size_t AC_SLEEPHQ_SYNC_REASON_MAX = 24;
 static constexpr size_t AC_SLEEPHQ_SYNC_STATE_PATH_MAX = AC_STORAGE_PATH_MAX;
 
-enum class SleepHqSyncState : uint8_t {
-    Disabled,
-    Idle,
-    Pending,
-    Working,
-    Error,
-};
+using SleepHqSyncState = ExportState;
 
 const char *sleephq_sync_state_name(SleepHqSyncState state);
 

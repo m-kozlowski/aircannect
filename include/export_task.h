@@ -80,19 +80,8 @@ public:
     void defer_smb_until(uint32_t until_ms);
 
     // endpoint commands
-    bool request_smb_sync();
-    bool request_smb_startup_check();
-    bool request_smb_idle_backfill();
-    bool request_smb_verify();
-    bool request_smb_scheduled_reconcile();
-    bool request_smb_post_therapy();
+    bool request(const ExportRequest &request);
     void cancel_smb_scheduled_reconcile();
-    bool request_sleephq_check();
-    bool request_sleephq_startup_check();
-    bool request_sleephq_sync();
-    bool request_sleephq_idle_backfill();
-    bool request_sleephq_sync_day(const char *day);
-    bool request_sleephq_post_therapy();
     bool cancel_post_therapy();
 
     // Update checks yield to export demand; release only after task cleanup.
@@ -116,26 +105,9 @@ private:
         UpdateCheck = 4,
     };
 
-    enum class CommandKind : uint8_t {
-        None,
-        SmbSync,
-        SmbStartupCheck,
-        SmbIdleBackfill,
-        SmbVerify,
-        SmbScheduledReconcile,
-        SmbPostTherapy,
-        SleepHqCheck,
-        SleepHqStartupCheck,
-        SleepHqSync,
-        SleepHqIdleBackfill,
-        SleepHqSyncDay,
-        SleepHqPostTherapy,
-    };
-
     struct Command {
-        CommandKind kind = CommandKind::None;
+        ExportRequest request;
         uint32_t sequence = 0;
-        char day[9] = {};
     };
 
     struct PublishedInputs {
@@ -163,7 +135,6 @@ private:
     void unlock_inputs() const;
     bool copy_inputs(PublishedInputs &out) const;
     void apply_inputs(const PublishedInputs &inputs, uint32_t now_ms);
-    bool queue_command(CommandKind kind, const char *day = nullptr);
     bool apply_command(const Command &command);
     void finish_command(const Command &command, bool failed);
     void wake();
@@ -193,7 +164,7 @@ private:
     uint32_t network_ready_since_ms_ = 0;
     bool network_ready_ = false;
     bool runtime_blocked_ = true;
-    bool next_idle_endpoint_smb_ = true;
+    size_t next_idle_endpoint_ = 0;
     uint32_t next_command_sequence_ = 1;
     std::atomic<uint8_t> work_reservation_{0};
     std::atomic<bool> storage_suspend_requested_{false};

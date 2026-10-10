@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "export_endpoint_config.h"
+#include "export_endpoint.h"
 #include "export_step.h"
 #include "large_byte_buffer.h"
 #include "storage_atomic_write_port.h"
@@ -27,13 +28,7 @@ static constexpr size_t AC_STORAGE_SYNC_REASON_MAX = 24;
 static constexpr size_t AC_STORAGE_SYNC_STATE_PATH_MAX = AC_STORAGE_PATH_MAX;
 static constexpr size_t AC_STORAGE_SYNC_UPLOAD_CHUNK = 16 * 1024;
 
-enum class StorageSyncState : uint8_t {
-    Disabled,
-    Idle,
-    Pending,
-    Working,
-    Error,
-};
+using StorageSyncState = ExportState;
 
 const char *storage_sync_state_name(StorageSyncState state);
 
