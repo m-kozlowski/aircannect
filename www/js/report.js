@@ -2255,9 +2255,12 @@
       const values = result && result.settings || [];
       const modes = ["CPAP", "AutoSet", "AutoSet for Her", "S", "ST", "T", "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC"];
       const mode = reportNumber(values[0]);
-      AirCANnect.ui.text("reportSettingsMode", mode === null ? "Not recorded" : modes[mode] || "Mode " + mode);
-      AirCANnect.ui.text("reportSettingsSource", mode === null
-        ? "No historical settings recorded for this night."
+      const needsRefresh = result && result.settings_need_refresh;
+      AirCANnect.ui.text("reportSettingsMode", needsRefresh ? "Needs refresh"
+        : mode === null ? "Unavailable" : modes[mode] || "Mode " + mode);
+      AirCANnect.ui.text("reportSettingsSource", needsRefresh
+        ? "Saved settings require a fresh read from STR."
+        : mode === null ? "Historical settings are unavailable in this saved report."
         : "Daily STR snapshot; changes within the night are not recorded.");
 
       const labels = ["Mode", "Pressure", "Min pressure", "Max pressure", "IPAP", "EPAP",
@@ -2711,10 +2714,13 @@
           if (flags & 2 && stat.min > stat.max) return invalid;
           result.statistics[names[i]] = stat;
         }
-        const settingsMask = view.getUint32(424, true);
+        const settingsFlags = view.getUint32(424, true);
+        const normalizedEnums = !!(settingsFlags & (1 << 23));
+        const settingsMask = settingsFlags & ~(1 << 23);
         if (settingsMask >>> 23) return invalid;
+        result.settings_need_refresh = !!settingsMask && !normalizedEnums;
         for (let i = 0; i < 23; i++) {
-          result.settings.push(settingsMask & (1 << i)
+          result.settings.push(normalizedEnums && settingsMask & (1 << i)
             ? view.getInt32(428 + i * 4, true) / 1000 : null);
         }
       }

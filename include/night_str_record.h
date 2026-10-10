@@ -6,6 +6,7 @@
 #include "report_daily_metrics.h"
 #include "sleep_day_id.h"
 #include "report_therapy_settings.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -27,6 +28,7 @@ struct NightStrRecord {
 
 bool night_str_record_parse(const uint8_t *record,
                             size_t len,
-                            NightStrRecord &out);
+                            NightStrRecord &out,
+                            ResmedDeviceModel model);
 
 }  // namespace aircannect

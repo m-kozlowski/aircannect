@@ -349,7 +349,8 @@ const EdfStrDigitalRemap *str_digital_remap_for_rpc_name(
 
     for (size_t i = 0; i < count; ++i) {
         const EdfStrDigitalRemap &remap = maps[i];
-        if (strcmp(remap.rpc_name, rpc_name) == 0) return &remap;
+        const char *name = rpc_name[0] == '_' ? remap.rpc_name : remap.rpc_name + 1;
+        if (strcmp(name, rpc_name) == 0) return &remap;
     }
     return nullptr;
 }
@@ -531,6 +532,23 @@ bool apply_summary_spool_record(void *opaque,
 }
 
 }  // namespace
+
+bool edf_str_decode_setting_option(const char *tag, ResmedDeviceModel model,
+                                   int16_t digital, int16_t &option_index) {
+    if (model != ResmedDeviceModel::AirSense11 &&
+        model != ResmedDeviceModel::AirMini) return false;
+
+    const auto *remap = str_digital_remap_for_rpc_name(tag, model);
+    if (!remap) return false;
+
+    for (size_t i = 0; i < remap->code_count; ++i) {
+        if (remap->codes[i] == digital) {
+            option_index = static_cast<int16_t>(i);
+            return true;
+        }
+    }
+    return false;
+}
 
 std::string edf_str_setting_get_names() {
     std::string names;

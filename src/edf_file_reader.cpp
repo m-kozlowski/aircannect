@@ -134,6 +134,32 @@ bool parse_total_samples_per_record(const uint8_t *header,
 
 }  // namespace
 
+ResmedDeviceModel edf_parse_header_device_model(const uint8_t *header,
+                                               size_t available_size) {
+    if (!header || available_size < AC_EDF_HEADER_FIXED_SIZE) {
+        return ResmedDeviceModel::Unknown;
+    }
+
+    const uint8_t *recording = header + AC_EDF_HEADER_PATIENT_ID_OFFSET +
+        AC_EDF_HEADER_PATIENT_ID_WIDTH;
+    constexpr size_t width = AC_EDF_HEADER_RECORDING_ID_WIDTH;
+    for (size_t start = 0; start + 4 < width; ++start) {
+        if ((start != 0 && recording[start - 1] != ' ') ||
+            memcmp(recording + start, "MID=", 4) != 0) continue;
+
+        const size_t value_start = start + 4;
+        size_t end = value_start;
+        while (end < width && recording[end] != ' ') ++end;
+
+        uint32_t platform = 0;
+        if (!parse_u32_field(recording + value_start, end - value_start, platform) ||
+            platform > INT32_MAX) return ResmedDeviceModel::Unknown;
+
+        return resmed_device_model(static_cast<int32_t>(platform));
+    }
+    return ResmedDeviceModel::Unknown;
+}
+
 bool edf_parse_header_declared_size(const uint8_t *header,
                                     size_t available_size,
                                     uint32_t &out) {

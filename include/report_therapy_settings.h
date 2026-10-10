@@ -8,7 +8,8 @@
 namespace aircannect {
 
 // STR's daily snapshot, not a claim about when settings changed within the day.
-// Values are physical thousandths; absent fields have no validity bit.
+// Values are physical thousandths or normalized option indices * 1000.
+// Absent fields have no validity bit.
 struct ReportTherapySettings {
     enum Field : uint8_t {
         Mode, Pressure, MinPressure, MaxPressure, Ipap, Epap, MaxIpap,
@@ -18,19 +19,25 @@ struct ReportTherapySettings {
     };
 
     static constexpr size_t WireBytes = 4 + Count * 4;
+    static constexpr uint32_t NormalizedEnums = 1u << Count;
     uint32_t valid_mask = 0;
     int32_t values[Count] = {};
+    // Keep untagged legacy bytes, but do not present their ambiguous enum codes.
+    bool normalized_enums = true;
 
     void encode(uint8_t *out) const {
-        LittleEndian::put_le32(out, valid_mask);
+        LittleEndian::put_le32(out, valid_mask |
+            (valid_mask && normalized_enums ? NormalizedEnums : 0));
         for (size_t i = 0; i < Count; ++i) {
             LittleEndian::put_le32(out + 4 + i * 4, values[i]);
         }
     }
 
     bool decode(const uint8_t *in) {
-        valid_mask = LittleEndian::get_le32(in);
+        const uint32_t flags = LittleEndian::get_le32(in);
+        valid_mask = flags & ~NormalizedEnums;
         if (valid_mask >> Count) return false;
+        normalized_enums = !valid_mask || (flags & NormalizedEnums);
 
         for (size_t i = 0; i < Count; ++i) {
             values[i] = static_cast<int32_t>(LittleEndian::get_le32(in + 4 + i * 4));

@@ -2,6 +2,7 @@
 
 #include "edf_str_record_reader.h"
 #include "edf_str_signal_table.h"
+#include "edf_str_settings.h"
 #include "as11_settings.h"
 #include <math.h>
 #include <string.h>
@@ -12,8 +13,9 @@ namespace {
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
 
-uint64_t record_identity(const uint8_t *record, size_t len) {
-    uint64_t hash = FNV_OFFSET;
+uint64_t record_identity(const uint8_t *record, size_t len, ResmedDeviceModel model) {
+    // Include the interpretation: the old reader treated STR codes as indices.
+    uint64_t hash = (FNV_OFFSET ^ static_cast<uint8_t>(model)) * FNV_PRIME;
     for (size_t i = 0; i < len; ++i) {
         hash ^= record[i];
         hash *= FNV_PRIME;
@@ -37,13 +39,15 @@ bool read_minute(const uint8_t *record,
 }
 
 void read_settings(const uint8_t *record, size_t len,
-                   ReportTherapySettings &out) {
+                   ResmedDeviceModel model, ReportTherapySettings &out) {
+    int16_t digital = 0;
     int16_t mode = 0;
-    if (!edf_str_record_read_digital(record, len, "Mode", 0, mode) ||
-        mode < 0 || mode >= static_cast<int>(As11SettingsState::MaxModes)) return;
+    if (!edf_str_record_read_digital(record, len, "Mode", 0, digital) ||
+        !edf_str_decode_setting_option("MOP", model, digital, mode)) return;
 
     out.valid_mask = 1;
     out.values[ReportTherapySettings::Mode] = mode * 1000;
+
     // Profile ownership and applicability come from the settings registry.
     static constexpr const char *fields[] = {
         "TherapyMode", "SetPressure", "MinPressure", "MaxPressure",
@@ -80,11 +84,28 @@ void read_settings(const uint8_t *record, size_t len,
         }
         if (field == ReportTherapySettings::Count) continue;
 
-        float value = 0;
-        if (edf_str_record_read_physical(record, len, signal->spec.label, 0, value)) {
+        if (def->kind == As11SettingKind::Enum) {
+            int16_t option = 0;
+            if (!edf_str_record_read_digital(record, len, signal->spec.label, 0, digital)) {
+                continue;
+            }
+
+            if (!edf_str_decode_setting_option(signal->short_tag, model, digital, option)) {
+                // Older Mini exports used AS11 codes. Do not mix conventions.
+                out = {};
+                return;
+            }
+
+            out.values[field] = option * 1000;
+        } else {
+            float value = 0;
+            if (!edf_str_record_read_physical(record, len, signal->spec.label, 0, value)) {
+                continue;
+            }
+
             out.values[field] = static_cast<int32_t>(lroundf(value * 1000));
-            out.valid_mask |= 1u << field;
         }
+        out.valid_mask |= 1u << field;
     }
 }
 
@@ -92,7 +113,8 @@ void read_settings(const uint8_t *record, size_t len,
 
 bool night_str_record_parse(const uint8_t *record,
                             size_t len,
-                            NightStrRecord &out) {
+                            NightStrRecord &out,
+                            ResmedDeviceModel model) {
     out = NightStrRecord();
     if (!record) return false;
 
@@ -124,8 +146,8 @@ bool night_str_record_parse(const uint8_t *record,
     }
 
     (void)report_daily_metrics_from_str_record(record, len, out.metrics);
-    read_settings(record, len, out.settings);
-    out.source_identity = record_identity(record, len);
+    read_settings(record, len, model, out.settings);
+    out.source_identity = record_identity(record, len, model);
     return true;
 }
 

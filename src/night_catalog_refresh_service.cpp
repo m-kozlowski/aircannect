@@ -505,6 +505,8 @@ struct NightCatalogRefreshRuntime {
         str_next_record = 0;
         str_chunk_records = 0;
         str_chunk_index = 0;
+        str_header_read = false;
+        str_model = ResmedDeviceModel::Unknown;
         current_scan_entry = 0;
     }
 
@@ -583,6 +585,8 @@ struct NightCatalogRefreshRuntime {
     uint64_t current_modified = 0;
 
     bool str_file_found = false;
+    bool str_header_read = false;
+    ResmedDeviceModel str_model = ResmedDeviceModel::Unknown;
     uint64_t str_file_size = 0;
     uint64_t str_file_modified = 0;
     uint32_t str_next_record = 0;
@@ -1549,6 +1553,10 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     command.path = "/STR.edf";
     command.offset = edf_str_record_offset(first_record);
     command.length = chunk_records * record_size;
+    if (!runtime.str_header_read) {
+        command.offset = 0;
+        command.length = AC_EDF_HEADER_FIXED_SIZE;
+    }
     command.lane = StorageReadLane::Report;
     command.generation = status.generation;
 
@@ -1559,8 +1567,10 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
-    runtime.str_next_record = first_record;
-    runtime.str_chunk_records = chunk_records;
+    if (runtime.str_header_read) {
+        runtime.str_next_record = first_record;
+        runtime.str_chunk_records = chunk_records;
+    }
     runtime.source_read.begin(submission.ticket);
     runtime.phase = NightCatalogRefreshRuntime::Phase::WaitStr;
     copy_cstr(status.current_path,
@@ -1573,7 +1583,8 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
                      StorageReadPort &read_port,
                      NightCatalogRefreshStatus &status) {
     const size_t record_size = edf_str_record_size();
-    const size_t expected = runtime.str_chunk_records * record_size;
+    const size_t expected = runtime.str_header_read
+        ? runtime.str_chunk_records * record_size : AC_EDF_HEADER_FIXED_SIZE;
     const SourceReadState read_state = runtime.source_read.poll(
         read_port, runtime.read_buffer, SOURCE_READ_BUFFER_BYTES, expected);
     if (read_state == SourceReadState::Waiting) return false;
@@ -1583,6 +1594,13 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
     }
     if (read_state == SourceReadState::CopyFailed) {
         skip_str(runtime, status, "night_catalog_str_read_short");
+        return true;
+    }
+
+    if (!runtime.str_header_read) {
+        runtime.str_model = edf_parse_header_device_model(runtime.read_buffer, expected);
+        runtime.str_header_read = true;
+        runtime.phase = NightCatalogRefreshRuntime::Phase::SubmitStr;
         return true;
     }
 
@@ -1601,7 +1619,7 @@ bool parse_str_chunk_record(NightCatalogRefreshRuntime &runtime,
         NightStrRecord record;
         if (!night_str_record_parse(runtime.read_buffer + i * record_size,
                                     record_size,
-                                    record)) {
+                                    record, runtime.str_model)) {
             return true;
         }
         if (targeted && record.sleep_day != runtime.target.sleep_day) return true;

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "edf_layout.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -69,6 +70,9 @@ struct EdfSignalScale {
 bool edf_parse_header_declared_size(const uint8_t *header,
                                     size_t available_size,
                                     uint32_t &out);
+
+ResmedDeviceModel edf_parse_header_device_model(const uint8_t *header,
+                                               size_t available_size);
 
 bool edf_parse_header_summary(const uint8_t *header,
                               size_t available_size,

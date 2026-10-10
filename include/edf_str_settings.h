@@ -7,6 +7,7 @@
 #include "report_proto.h"
 #include "report_spool_types.h"
 #include "rpc_payload.h"
+#include "resmed_device_model.h"
 
 namespace aircannect {
 
@@ -23,6 +24,8 @@ struct EdfStrSummaryApplyResult : EdfStrSettingsApplyResult {
 };
 
 std::string edf_str_setting_get_names();
+bool edf_str_decode_setting_option(const char *tag, ResmedDeviceModel model,
+                                   int16_t digital, int16_t &option_index);
 bool edf_str_summary_field_for_tag(const char *tag,
                                    ReportSummaryField &out);
 
