@@ -74,6 +74,7 @@ struct As11BlePairingStatus {
     uint32_t revision = 1;
     As11BlePairingState state = As11BlePairingState::Idle;
     bool paired = false;
+    char paired_address[AC_AS11_BLE_ADDRESS_MAX + 1] = {};
     bool active = false;
     bool passkey_required = false;
     uint8_t device_count = 0;

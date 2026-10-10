@@ -29,6 +29,7 @@ bool build_ble_pairing_json(LargeTextBuffer &json,
     json_add_uint64(json, "revision", pairing.revision);
     json_add_bool(json, "enabled", link.enabled);
     json_add_bool(json, "paired", pairing.paired);
+    json_add_string(json, "paired_address", pairing.paired_address);
     json_add_string(json, "state",
                     as11_ble_pairing_state_name(pairing.state));
     json_add_bool(json, "active", pairing.active);

@@ -279,16 +279,22 @@ void As11BleRpcLink::configure(bool enabled,
     const bool paired = next.address[0] && next.client_id[0] &&
                         strlen(next.master_key_hex) ==
                             AS11_BLE_KEY_HEX_BYTES;
+    const char *paired_address = paired ? next.address : "";
+
 #if AC_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
     const bool pairing_changed =
-        status_.enabled != enabled || pairing_status_.paired != paired;
+        status_.enabled != enabled || pairing_status_.paired != paired ||
+        strcmp(pairing_status_.paired_address, paired_address) != 0;
     next.generation = config_.generation + 1;
     if (next.generation == 0) next.generation = 1;
     config_ = next;
     status_.enabled = enabled;
     pairing_status_.paired = paired;
+    copy_text(pairing_status_.paired_address,
+              sizeof(pairing_status_.paired_address), paired_address);
+
     if (pairing_changed) bump_pairing_revision_locked();
 #if AC_BLE_ENABLED
     portEXIT_CRITICAL(&mux_);

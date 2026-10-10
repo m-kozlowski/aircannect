@@ -281,10 +281,16 @@
       const state = AirCANnect.ui.valueSpan(as11BleStateLabel(data));
       panel.appendChild(AirCANnect.ui.row("BLE pairing", state));
 
-      if (data.selected_name || data.selected_address) {
+      if (data.paired_address) {
+        panel.appendChild(AirCANnect.ui.row("Paired device",
+          AirCANnect.ui.valueSpan(data.paired_address)));
+      }
+
+      if ((data.selected_name || data.selected_address) &&
+          (!data.paired_address || data.selected_address !== data.paired_address)) {
         const selected = [data.selected_name, data.selected_address]
           .filter(Boolean).join(" / ");
-        panel.appendChild(AirCANnect.ui.row("AS11", AirCANnect.ui.valueSpan(selected)));
+        panel.appendChild(AirCANnect.ui.row("Selected device", AirCANnect.ui.valueSpan(selected)));
       }
 
       if (data.state === "select_device") {

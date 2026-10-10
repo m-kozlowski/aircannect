@@ -217,6 +217,11 @@ void print_as11_ble_status(Print &out, const As11BleRpcLink &link) {
     out.print(as11_ble_pairing_state_name(pairing.state));
     out.print(" paired=");
     out.print(pairing.paired ? "yes" : "no");
+    if (pairing.paired_address[0]) {
+        out.print(" address=");
+        out.print(pairing.paired_address);
+    }
+
     out.print(" connected=");
     out.print(link_status.connected ? "yes" : "no");
     if (pairing.selected_address[0]) {
