@@ -335,6 +335,15 @@ void tud_msc_capacity_cb(uint8_t, uint32_t *count, uint16_t *size) {
 
 bool tud_msc_is_writable_cb(uint8_t) { return true; }
 
+bool tud_msc_prevent_allow_medium_removal_cb(uint8_t, uint8_t prevent, uint8_t) {
+    if (!StorageUsb::media_mutex) return false;
+
+    xSemaphoreTake(StorageUsb::media_mutex, portMAX_DELAY);
+    StorageUsb::prevent_removal = prevent != 0;
+    xSemaphoreGive(StorageUsb::media_mutex);
+    return true;
+}
+
 bool tud_msc_start_stop_cb(uint8_t, uint8_t, bool start, bool eject) {
     if (!eject || start) return true;
     if (!StorageUsb::mutex) return false;
@@ -367,13 +376,6 @@ int32_t tud_msc_scsi_cb(uint8_t, const uint8_t command[16], void *, uint16_t) {
 
     // Writes are synchronous, so SYNCHRONIZE CACHE has nothing left to flush.
     if (command[0] == 0x35) return 0;
-    if (command[0] == SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL) {
-        xSemaphoreTake(StorageUsb::media_mutex, portMAX_DELAY);
-        StorageUsb::prevent_removal = (command[4] & 1) != 0;
-        xSemaphoreGive(StorageUsb::media_mutex);
-        return 0;
-    }
-
     tud_msc_set_sense(0, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0);
     return -1;
 }
