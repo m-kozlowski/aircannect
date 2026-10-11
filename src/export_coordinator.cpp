@@ -1,7 +1,5 @@
 #include "export_coordinator.h"
 
-#include <string.h>
-
 #include "board_report.h"
 #include "debug_log.h"
 #include "storage_export_plan.h"
@@ -133,30 +131,6 @@ bool ExportCoordinator::request_sync() {
         }
     }
     return queued;
-}
-
-bool ExportCoordinator::request_smb_sync() {
-    return request({ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::Manual});
-}
-
-bool ExportCoordinator::request_smb_verify() {
-    return request({ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Manual});
-}
-
-bool ExportCoordinator::request_sleephq_sync() {
-    return request({ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual});
-}
-
-bool ExportCoordinator::request_sleephq_sync_day(const char *day) {
-    if (!day || !storage_export_is_datalog_day_name(day)) return false;
-
-    ExportRequest work{ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual};
-    memcpy(work.day, day, sizeof(work.day));
-    return request(work);
-}
-
-bool ExportCoordinator::request_sleephq_check() {
-    return request({ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Manual});
 }
 
 void ExportCoordinator::defer_idle_work(

@@ -38,11 +38,6 @@ public:
     // external requests
     bool request(const ExportRequest &request);
     bool request_sync();
-    bool request_smb_sync();
-    bool request_smb_verify();
-    bool request_sleephq_sync();
-    bool request_sleephq_sync_day(const char *day);
-    bool request_sleephq_check();
 
 private:
     struct PostTherapyState {

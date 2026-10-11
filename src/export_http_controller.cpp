@@ -190,7 +190,9 @@ void ExportHttpController::send_smb_sync_start(
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
     }
-    if (!coordinator_->request_smb_sync()) {
+
+    if (!coordinator_->request(
+            {ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::Manual})) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"sync_not_ready\"}");
         return;
@@ -207,7 +209,9 @@ void ExportHttpController::send_smb_sync_verify(
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
     }
-    if (!coordinator_->request_smb_verify()) {
+
+    if (!coordinator_->request(
+            {ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Manual})) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"sync_not_ready\"}");
         return;
@@ -242,7 +246,9 @@ void ExportHttpController::send_sleephq_sync_start(
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
     }
-    if (!coordinator_->request_sleephq_sync()) {
+
+    if (!coordinator_->request(
+            {ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual})) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"sync_not_ready\"}");
         return;
@@ -259,7 +265,9 @@ void ExportHttpController::send_sleephq_sync_check(
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
     }
-    if (!coordinator_->request_sleephq_check()) {
+
+    if (!coordinator_->request(
+            {ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Manual})) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"check_not_ready\"}");
         return;

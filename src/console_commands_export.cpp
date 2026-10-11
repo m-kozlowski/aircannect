@@ -68,14 +68,18 @@ void handle_smb(Print &out, String rest, ExportCoordinator &exports) {
     }
 
     if (rest == "verify" || rest == "check") {
-        const bool queued = exports.request_smb_verify();
+        const bool queued = exports.request(
+            {ExportEndpoint::Smb, ExportOperation::Reconcile, ExportReason::Manual});
+
         out.print("[SMB] verify ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
 
     if (rest == "run") {
-        const bool queued = exports.request_smb_sync();
+        const bool queued = exports.request(
+            {ExportEndpoint::Smb, ExportOperation::Sync, ExportReason::Manual});
+
         out.print("[SMB] sync ");
         out.println(queued ? "queued" : "rejected");
         return;
@@ -138,14 +142,18 @@ void handle_sleephq(Print &out,
     }
 
     if (rest == "check" || rest == "verify") {
-        const bool queued = exports.request_sleephq_check();
+        const bool queued = exports.request(
+            {ExportEndpoint::SleepHq, ExportOperation::Check, ExportReason::Manual});
+
         out.print("[SLEEPHQ] check ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
 
     if (rest == "run") {
-        const bool queued = exports.request_sleephq_sync();
+        const bool queued = exports.request(
+            {ExportEndpoint::SleepHq, ExportOperation::Sync, ExportReason::Manual});
+
         out.print("[SLEEPHQ] sync ");
         out.println(queued ? "queued" : "rejected");
         return;
@@ -159,7 +167,12 @@ void handle_sleephq(Print &out,
             return;
         }
 
-        const bool queued = exports.request_sleephq_sync_day(day.c_str());
+        ExportRequest request{ExportEndpoint::SleepHq, ExportOperation::Sync,
+                              ExportReason::Manual};
+
+        copy_cstr(request.day, sizeof(request.day), day.c_str());
+        const bool queued = exports.request(request);
+
         out.print("[SLEEPHQ] sync day=");
         out.print(day);
         out.print(" ");
