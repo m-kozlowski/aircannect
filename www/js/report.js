@@ -664,6 +664,106 @@
       }
     }
 
+    function openReportCache() {
+      if (reportCacheOpening) return reportCacheOpening;
+      reportCacheOpening = new Promise((resolve) => {
+        let settled = false;
+        const finish = (db) => { settled = true; resolve(db); };
+        try {
+          const request = window.indexedDB.open("aircannect-reports-v1", 1);
+          request.onupgradeneeded = () => {
+            const entries = request.result.createObjectStore("entries", {keyPath: "key"});
+            entries.createIndex("saved", "saved");
+            request.result.createObjectStore("size");
+          };
+          request.onerror = request.onblocked = () => finish(null);
+          request.onsuccess = () => {
+            const db = request.result;
+            if (settled) { db.close(); return; }
+            db.onversionchange = () => { db.close(); reportCacheOpening = null; };
+            db.onclose = () => { reportCacheOpening = null; };
+            finish(db);
+          };
+        } catch (_) { finish(null); }
+      });
+      return reportCacheOpening;
+    }
+
+    async function readReportCache(keys) {
+      const values = new Map();
+      if (!keys.length) return values;
+      const db = await openReportCache();
+      if (!db) return values;
+
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction("entries", "readonly");
+          const store = tx.objectStore("entries");
+          keys.forEach((key) => {
+            const request = store.get(key);
+            request.onsuccess = () => {
+              if (request.result) values.set(key, request.result.value);
+            };
+          });
+          tx.oncomplete = () => resolve(values);
+          tx.onerror = tx.onabort = () => resolve(new Map());
+        } catch (_) { resolve(new Map()); }
+      });
+    }
+
+    async function writeReportCache(entries) {
+      if (!entries.length) return;
+      const db = await openReportCache();
+      if (!db) return;
+
+      // IndexedDB serializes writers, including writers in other tabs. Evict in
+      // the same transaction so neither byte accounting nor the cap can race.
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction(["entries", "size"], "readwrite");
+          const store = tx.objectStore("entries");
+          const sizeStore = tx.objectStore("size");
+          const sizeRequest = sizeStore.get("total");
+          sizeRequest.onsuccess = () => {
+            const total = sizeRequest.result || {bytes: 0, count: 0};
+            let remaining = entries.length;
+            const finish = () => {
+              if (--remaining) return;
+              const cursor = store.index("saved").openCursor();
+              cursor.onsuccess = () => {
+                const row = cursor.result;
+                if (row && (total.bytes > REPORT_CACHE_MAX_BYTES ||
+                            total.count > REPORT_CACHE_MAX_ENTRIES)) {
+                  total.bytes -= row.value.bytes;
+                  total.count--;
+                  row.delete();
+                  row.continue();
+                } else {
+                  sizeStore.put(total, "total");
+                }
+              };
+            };
+            entries.forEach(({key, value, bytes}) => {
+              const previous = store.get(key);
+              previous.onsuccess = () => {
+                const old = previous.result;
+                const cost = bytes + key.length * 2 + 256;
+                total.bytes += cost - (old ? old.bytes : 0);
+                if (!old) total.count++;
+                store.put({key, value, bytes: cost, saved: Date.now()});
+                finish();
+              };
+            });
+          };
+          tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+        } catch (_) { resolve(); }
+      });
+    }
+
+    function signalStorePersistentKey(key, context) {
+      return "block:" + context.revision + ":" + key;
+    }
+
     function activateSignalStoreNight(nightId, revision, generation, store) {
       cancelReportRangeRequest();
 
@@ -2808,6 +2908,23 @@
 
     async function pollSignalStoreNight(token, nightId, signal) {
       const url = "/api/report/result?night=" + encodeURIComponent(nightId);
+      if (!reportResultClientCache.has(url)) {
+        const saved = (await readReportCache([url])).get(url);
+        if (saved && saved.body instanceof ArrayBuffer) {
+          try {
+            const decoded = decodeSignalStoreNight(saved.body);
+            if (decoded.valid) lruSet(reportResultClientCache, url,
+              {etag: saved.etag, decoded}, REPORT_RESULT_CLIENT_CACHE_MAX);
+          } catch (_) { /* A corrupt browser entry is a cache miss. */ }
+        }
+      }
+      const offline = () => {
+        const cached = lruGet(reportResultClientCache, url);
+        if (!cached) throw new Error("Report unavailable; no browser copy");
+        return {done: true, value: {
+          status: 200, result: cached.decoded, cached: true,
+        }};
+      };
       const timeoutValue = {status: 0, result: null};
       return pollReportFetch({
         active: () => token === reportLoadToken,
@@ -2815,12 +2932,18 @@
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         timeoutValue,
-        request: () => {
+        request: async () => {
           const cached = lruGet(reportResultClientCache, url);
-          return AirCANnect.http.requestBody(
-            url, conditionalRequestOptions(cached, signal));
+          try {
+            return await AirCANnect.http.requestBody(
+              url, conditionalRequestOptions(cached, signal));
+          } catch (error) {
+            if (signal.aborted) throw error;
+            return {response: null};
+          }
         },
         handle: async ({response, body}) => {
+          if (!response) return offline();
           const update = response.headers.get("X-Report-Update") || "";
           if (response.status === 304) {
             const cached = lruGet(reportResultClientCache, url);
@@ -2849,6 +2972,9 @@
               etag: response.headers.get("ETag") || "",
               decoded,
             }, REPORT_RESULT_CLIENT_CACHE_MAX);
+            void writeReportCache([{key: url, value: {
+              etag: response.headers.get("ETag") || "", body: buffer,
+            }, bytes: buffer.byteLength}]);
             return {done: true, value: {status: 200, result: decoded, update}};
           }
           if (response.status === 202) {
@@ -2862,6 +2988,9 @@
           }
 
           const text = new TextDecoder().decode(body);
+          if (response.status === 503 && text.includes("storage_usb")) {
+            return offline();
+          }
           if (response.status === 503 && isTransientReportError(text)) {
             return {done: false};
           }
@@ -3222,6 +3351,7 @@
           }
 
           let packedOffset = 0;
+          const saved = [];
           for (let i = 0; i < blockCount; i++) {
             if (present[i] !== "1") continue;
 
@@ -3233,7 +3363,7 @@
               packedOffset += blockBytes;
               continue;
             }
-            reportSignalBlockCache.set(key, {
+            const entry = {
               buffer: buffer.slice(packedOffset, packedOffset + blockBytes),
               revision: context.revision,
               closed: blockStart + SIGNAL_STORE_BLOCK_MS <= track.lastValid,
@@ -3241,9 +3371,13 @@
               offset: track.offset,
               missingValue: track.missingValue,
               phase: track.phase,
-            });
+            };
+            reportSignalBlockCache.set(key, entry);
+            saved.push({key: signalStorePersistentKey(key, context),
+              value: entry, bytes: entry.buffer.byteLength});
             packedOffset += blockBytes;
           }
+          void writeReportCache(saved);
           trimSignalStoreBlockCache();
           return {done: true, value: true};
         },
@@ -3257,6 +3391,26 @@
     async function ensureSignalStoreTrackBlocks(track, level, from, to,
                                                 context) {
       if (!context.active()) return;
+
+      const absent = [];
+      for (let block = from; block < to; block += SIGNAL_STORE_BLOCK_MS) {
+        const slot = (block - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
+        const key = signalStoreCacheKey(track, level, block, context);
+        if (signalStoreBlockPresent(track, slot) &&
+            !signalStoreTouchBlock(key, track, context)) absent.push(key);
+      }
+      const stored = await readReportCache(
+        absent.map((key) => signalStorePersistentKey(key, context)));
+      if (!context.active()) return;
+      absent.forEach((key) => {
+        const entry = stored.get(signalStorePersistentKey(key, context));
+        if (entry && entry.revision === context.revision &&
+            entry.buffer instanceof ArrayBuffer &&
+            entry.buffer.byteLength === signalStoreLevelBlockBytes(track, level)) {
+          reportSignalBlockCache.set(key, entry);
+        }
+      });
+      trimSignalStoreBlockCache();
 
       const runs = [];
       for (let cursor = from; cursor < to;) {
@@ -3278,6 +3432,9 @@
         if (missing) runs.push(tile);
       }
 
+      if (runs.length && context.offline) {
+        throw new Error("This range is not saved in the browser");
+      }
       await runReportFetchJobs(runs.map((run) => () =>
         fetchSignalStoreBlocks(
           track, level, run.from, run.to, context)), 1);
@@ -3343,7 +3500,7 @@
       }
       if (rawBucketState) flushSignalStoreRawBucket(rawBucketState);
 
-      if (context.prefetchJobs) {
+      if (context.prefetchJobs && !context.offline) {
         const margin = SIGNAL_STORE_PREFETCH_BLOCKS * SIGNAL_STORE_BLOCK_MS;
         const ranges = [
           {from: Math.max(track.firstBlock, from - margin), to: from},
@@ -3416,6 +3573,17 @@
       const cached = lruGet(reportEventClientCache, key);
       if (cached) return cached;
 
+      const saved = (await readReportCache([key])).get(key);
+      if (!context.active()) return [];
+      if (saved instanceof ArrayBuffer) {
+        try {
+          const events = decodeSignalStoreEvents(saved, context);
+          lruSet(reportEventClientCache, key, events, SIGNAL_STORE_EVENT_CACHE_MAX);
+          return events;
+        } catch (_) { /* Refetch an invalid browser entry. */ }
+      }
+      if (context.offline) throw new Error("Events are not saved in the browser");
+
       const url = "/api/report/plot?night=" +
         encodeURIComponent(context.nightId) + "&part=events&v=" +
         context.generation + "." + encodeURIComponent(context.revision);
@@ -3438,7 +3606,9 @@
             }
             throw new Error(text || "report events request failed");
           }
-          return {done: true, value: decodeSignalStoreEvents(body, context)};
+          const decoded = decodeSignalStoreEvents(body, context);
+          void writeReportCache([{key, value: body, bytes: body.byteLength}]);
+          return {done: true, value: decoded};
         },
       });
       if (!context.active()) return [];
@@ -3503,6 +3673,7 @@
         revision: reportCurrentRevision,
         generation: reportCurrentGeneration,
         store: reportSignalStore,
+        offline: reportOffline,
         signal,
         active: () => !signal.aborted && token === reportLoadToken &&
           context.nightId === reportCurrentNightId &&
@@ -3624,6 +3795,7 @@
         revision: reportCurrentRevision,
         generation: reportCurrentGeneration,
         store: reportSignalStore,
+        offline: reportOffline,
         prefetchJobs: [],
         signal: controller.signal,
         active: () => !controller.signal.aborted &&
@@ -3741,6 +3913,7 @@
       const savedZoom = keepView ? reportZoom : null;
       const savedHiddenSessions = keepView ? [...reportHiddenSessions] : [];
       const token = ++reportLoadToken;
+      reportOffline = false;
       if (!keepView) {
         resetReportData();
         renderReportSummary();
@@ -3774,6 +3947,7 @@
         const changed = !keepView ||
           res.result.source_revision !== reportCurrentRevision ||
           res.result.generation !== reportCurrentGeneration;
+        reportOffline = !!res.cached;
         if (changed) {
           if (keepView) resetReportData();
           reportResult = res.result;
@@ -3799,7 +3973,7 @@
 
         renderReportSummary();
         AirCANnect.ui.message("reportMsg",
-          res.update
+          res.cached ? "Browser copy; freshness not verified" : res.update
             ? res.update === "pending"
               ? "Showing saved report; update pending"
               : res.update === REPORT_RETAINED_REASON
@@ -3810,10 +3984,11 @@
             : reportResult.state === "partial"
             ? "Report loaded (incomplete - some data missing)"
             : "Report loaded", !res.update || res.update === "pending" ||
-              res.update === REPORT_RETAINED_REASON, !!res.update);
+              res.update === REPORT_RETAINED_REASON, !!res.update || res.cached);
       } catch (error) {
         if (token !== reportLoadToken) return;
-        AirCANnect.ui.message("reportMsg", error.message, false, true);
+        AirCANnect.ui.message("reportMsg", (reportOffline
+          ? "Browser copy; freshness not verified. " : "") + error.message, false, true);
       } finally {
         if (reportLoadAbortController === controller) {
           reportLoadAbortController = null;
@@ -3828,23 +4003,42 @@
 
     async function loadReportSummary(loadNight) {
       try {
+        if (!reportSummary) {
+          const saved = (await readReportCache(["summary"])).get("summary");
+          if (saved && Array.isArray(saved.body?.nights)) {
+            reportSummary = saved.body;
+            reportSummaryEtag = saved.etag;
+          }
+        }
         const headers = {};
         if (reportSummaryEtag) {
           headers["If-None-Match"] = reportSummaryEtag;
         }
-        const response = await AirCANnect.http.request("/api/report/summary",
-          {cache: "no-cache", headers});
-        if (response.status === 202) {
+        let response = null;
+        try {
+          response = await AirCANnect.http.request("/api/report/summary",
+            {cache: "no-cache", headers});
+        } catch (_) { /* A saved index remains useful without the device. */ }
+        if (response?.status === 202) {
           AirCANnect.ui.message("reportMsg", "Preparing report index...", true, true);
           scheduleReportPoll(loadNight);
           return;
         }
-        if (response.status === 200) {
+        let cached = !response;
+        if (response?.status === 200) {
           reportSummary = await response.json();
           reportSummaryEtag = response.headers.get("ETag") || "";
-        } else if (response.status !== 304 || !reportSummary) {
-          throw new Error(await response.text() || "report summary failed");
+          void writeReportCache([{key: "summary", value: {
+            etag: reportSummaryEtag, body: reportSummary,
+          }, bytes: JSON.stringify(reportSummary).length * 2}]);
+        } else if (response && response.status !== 304) {
+          const text = await response.text();
+          cached = response.status === 503 && text.includes("storage_usb");
+          if (!cached) throw new Error(text || "report summary failed");
         }
+        if (!reportSummary) throw new Error("Report index unavailable; no browser copy");
+        if (cached) AirCANnect.ui.message(
+          "reportMsg", "Browser copy; freshness not verified", true, true);
 
         renderReportSummary();
         if (!reportNightsNewestFirst().length) {
@@ -3997,6 +4191,8 @@
     let reportLoadToken = 0;
     let reportLoadAbortController = null;
     let reportSummaryEtag = "";
+    let reportCacheOpening = null;
+    let reportOffline = false;
     let reportResult = null;
     const reportResultClientCache = new Map();
     let reportSeries = {};
@@ -4035,6 +4231,8 @@
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
+    const REPORT_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+    const REPORT_CACHE_MAX_ENTRIES = 16384;
     const REPORT_MIN_ZOOM_MS = 10000;
     const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
     const SIGNAL_STORE_SESSION_BYTES = 16;
