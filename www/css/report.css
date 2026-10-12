@@ -250,6 +250,15 @@
       cursor: default;
     }
 
+    .report-chart svg {
+      touch-action: pan-y;
+    }
+
+    .report-chart svg:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     .report-chart-title {
       display: flex;
       gap: 12px;

@@ -619,6 +619,7 @@
     }
 
     function resetReportData() {
+      reportFinishDrag(true, false);
       cancelReportRangeRequest();
       disconnectReportResizeObserver();
       reportHiddenSessions.clear();
@@ -1513,7 +1514,7 @@
     }
 
     function updateReportSelectionRects() {
-      if (!reportDrag) {
+      if (!reportDrag || reportDrag.pinch) {
         hideReportSelectionRects();
         return;
       }
@@ -1541,19 +1542,31 @@
       });
     }
 
-    // Item 7: drag a range on any chart to zoom every chart to it.
-    function reportFinishDrag() {
+    function reportFinishDrag(cancelled = false, loadRange = true) {
       if (!reportDrag) return;
       const drag = reportDrag;
       reportDrag = null;
       hideReportSelectionRects();
+      drag.pointers?.forEach((_point, id) => {
+        if (drag.canvas.hasPointerCapture(id)) drag.canvas.releasePointerCapture(id);
+      });
+      if (drag.pinch) {
+        if (cancelled) reportZoom = drag.initialZoom;
+        if (!reportZoom) {
+          reportSeries = reportBaseSeries;
+          reportEvents = reportBaseEvents;
+        }
+        updateRenderedReportRange(loadRange);
+        return;
+      }
+      if (cancelled) return;
+
       const lo = Math.min(drag.t0, drag.t1);
       const hi = Math.max(drag.t0, drag.t1);
       if (hi > lo) {
         setReportZoomRange(lo, hi);
       }
     }
-    document.addEventListener("mouseup", reportFinishDrag);
 
     function validReportRange(range) {
       return range && Number.isFinite(range.start) && Number.isFinite(range.end) &&
@@ -1570,12 +1583,12 @@
       if (zoomIn) zoomIn.disabled = !haveRange;
     }
 
-    function setReportZoomRange(start, end) {
+    function setReportZoomRange(start, end, preview = false) {
       const bounds = reportRange();
       if (!validReportRange(bounds)) return false;
       let width = Math.max(REPORT_MIN_ZOOM_MS, end - start);
       const boundsWidth = bounds.end - bounds.start;
-      if (width >= boundsWidth - 1000) {
+      if (width >= boundsWidth) {
         resetReportZoom();
         return true;
       }
@@ -1595,7 +1608,7 @@
       hi = Math.min(bounds.end, hi);
       if (hi - lo < REPORT_MIN_ZOOM_MS) return false;
       reportZoom = {start: lo, end: hi};
-      if (!updateRenderedReportRange()) renderReportCharts();
+      if (!updateRenderedReportRange(!preview)) renderReportCharts();
       return true;
     }
 
@@ -1627,7 +1640,7 @@
     }
 
     document.addEventListener("keydown", (ev) => {
-      if (!AirCANnect.pages.isActive("report") || !reportZoom) return;
+      if (!AirCANnect.pages.isActive("report") || (!reportZoom && !reportDrag)) return;
       const tag = ev.target && ev.target.tagName ?
         ev.target.tagName.toLowerCase() : "";
       if (tag === "input" || tag === "textarea" || tag === "select" ||
@@ -1640,35 +1653,111 @@
       } else if (ev.key === "ArrowRight") {
         ev.preventDefault();
         panReportZoom(1);
+      } else if (ev.key === "Home" || ev.key === "Escape") {
+        ev.preventDefault();
+        reportFinishDrag(true, false);
+        resetReportZoom();
       }
     });
 
     function attachReportChartPointer(canvas) {
-      canvas.addEventListener("mousemove", (ev) => {
+      canvas.setAttribute("tabindex", "0");
+      canvas.setAttribute("aria-label", canvas._item?.key || "Report chart");
+      const fraction = (x) => {
+        const item = canvas._item;
+        return (reportCanvasTime(canvas, x) - item.start) / (item.end - item.start);
+      };
+      const capture = (id) => {
+        // A pointer can have been cancelled by the browser before capture.
+        try { canvas.setPointerCapture(id); } catch (_) {}
+      };
+      canvas.addEventListener("pointermove", (ev) => {
         const t = reportCanvasTime(canvas, ev.clientX);
         if (t == null) return;
         if (reportDrag) {
-          if (reportDrag.canvas !== canvas) return;
-          reportDrag.t1 = t;
+          const drag = reportDrag;
+          if (drag.canvas !== canvas || !drag.pointers.has(ev.pointerId)) return;
+          if (drag.awaitDirection) {
+            const dx = Math.abs(ev.clientX - drag.origin[0]);
+            const dy = Math.abs(ev.clientY - drag.origin[1]);
+            if (dy >= 5 && dy > dx) { reportFinishDrag(true); return; }
+            if (dx < 5) return;
+            drag.awaitDirection = false;
+            capture(ev.pointerId);
+          }
+          drag.pointers.set(ev.pointerId, fraction(ev.clientX));
+          if (drag.pinch) {
+            const points = [...drag.pointers.values()];
+            if (points.length !== 2) return;
+            const {points: original, range} = drag.pinch;
+            const distance = Math.abs(points[1] - points[0]);
+            if (distance < 0.001 || Math.abs(original[1] - original[0]) < 0.001) return;
+            const bounds = reportRange();
+            const width = Math.max(REPORT_MIN_ZOOM_MS, Math.min(
+              bounds.end - bounds.start, (range.end - range.start) *
+                Math.abs(original[1] - original[0]) / distance));
+            const anchor = range.start + (original[0] + original[1]) / 2 *
+              (range.end - range.start);
+            const start = anchor - (points[0] + points[1]) / 2 * width;
+            setReportZoomRange(start, start + width, true);
+          } else {
+            drag.t1 = Math.abs(ev.clientX - drag.origin[0]) >= 3 ? t : drag.t0;
+          }
           updateReportSelectionRects();
           return;
         }
         reportHoverTime = t;
         updateReportHover();
       });
-      canvas.addEventListener("mouseleave", () => {
+      canvas.addEventListener("pointerleave", () => {
         if (reportDrag) return;
         reportHoverTime = null;
         updateReportHover();
       });
-      canvas.addEventListener("mousedown", (ev) => {
+      canvas.addEventListener("pointerdown", (ev) => {
         const t = reportCanvasTime(canvas, ev.clientX);
-        if (t == null || !canvas._geom) return;
-        ev.preventDefault();
-        reportDrag = {canvas, t0: t, t1: t};
+        if (t == null || !canvas._geom || ev.button !== 0) return;
+        if (reportDrag && (reportDrag.canvas !== canvas ||
+            reportDrag.pointers.size >= 2 || reportDrag.pinch)) return;
+        if (ev.pointerType !== "touch") {
+          ev.preventDefault();
+          capture(ev.pointerId);
+        }
+        canvas.focus({preventScroll: true});
+        if (!reportDrag) reportDrag = {
+          canvas, t0: t, t1: t, pointers: new Map(), initialZoom: reportZoom,
+          origin: [ev.clientX, ev.clientY], awaitDirection: ev.pointerType === "touch",
+        };
+        reportDrag.pointers.set(ev.pointerId, fraction(ev.clientX));
+        if (reportDrag.pointers.size === 2) {
+          reportDrag.pinch = {points: [...reportDrag.pointers.values()],
+            range: reportZoom || reportRange()};
+          reportDrag.awaitDirection = false;
+          reportDrag.pointers.forEach((_point, id) => capture(id));
+          cancelReportRangeRequest();
+          reportRangeActiveKey = "";
+        }
         reportHoverTime = null;
         updateReportHover();
         updateReportSelectionRects();
+      });
+      canvas.addEventListener("pointerup", (ev) => {
+        const drag = reportDrag;
+        if (!drag || drag.canvas !== canvas || !drag.pointers.has(ev.pointerId)) return;
+        drag.pointers.delete(ev.pointerId);
+        if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
+        if (!drag.pointers.size) reportFinishDrag();
+      });
+      const cancel = (ev) => {
+        if (reportDrag?.canvas === canvas && reportDrag.pointers.has(ev.pointerId)) {
+          reportFinishDrag(true);
+        }
+      };
+      canvas.addEventListener("pointercancel", cancel);
+      canvas.addEventListener("lostpointercapture", cancel);
+      canvas.addEventListener("dblclick", () => {
+        reportFinishDrag(true, false);
+        resetReportZoom();
       });
     }
 
@@ -1778,11 +1867,11 @@
       item.name.appendChild(item.loadingBadge);
     }
 
-    function updateRenderedReportRange() {
+    function updateRenderedReportRange(loadRange = true) {
       const range = reportZoom || reportRange();
       if (!validReportRange(range) || !reportDrawItems.length) return false;
 
-      if (reportZoom) {
+      if (reportZoom && loadRange) {
         ensureSignalStoreRangeLoaded(reportZoom.start, reportZoom.end);
       }
       const ranges = reportVisibleSessionRanges();
@@ -2512,6 +2601,7 @@
     }
 
     function cancelReportRequests(preserveRange = false) {
+      reportFinishDrag(true, false);
       cancelReportLoadRequest();
       cancelReportRangeRequest();
       reportLoadToken++;
@@ -4233,7 +4323,7 @@
     const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
     const REPORT_CACHE_MAX_BYTES = 128 * 1024 * 1024;
     const REPORT_CACHE_MAX_ENTRIES = 16384;
-    const REPORT_MIN_ZOOM_MS = 10000;
+    const REPORT_MIN_ZOOM_MS = 1000;
     const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
     const SIGNAL_STORE_SESSION_BYTES = 16;
     const SIGNAL_STORE_TRACK_BYTES = 88;
