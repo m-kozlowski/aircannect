@@ -1097,8 +1097,12 @@ uint64_t calculate_revision(const NightCatalog &catalog,
         const NightCatalogSourceFile &file = files[i];
         hash = hash_byte(hash, static_cast<uint8_t>(file.kind));
         hash = hash_u64(hash, file.identity);
-        hash = hash_u64(hash, file.file_size);
-        hash = hash_i64(hash, file.last_write_ms);
+        // STR identity covers this day's record, not writes to other days.
+        if (file.kind != NightCatalogFileKind::Str) {
+            hash = hash_u64(hash, file.file_size);
+            hash = hash_i64(hash, file.last_write_ms);
+        }
+
         hash = hash_u64(hash, file.data_offset);
         hash = hash_u64(hash, file.data_size);
         hash = hash_i64(hash, file.record_start_ms);
