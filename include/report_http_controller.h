@@ -67,6 +67,7 @@ private:
     LargeTextBuffer completion_json_;
     OperationTicket observed_completion_;
     uint32_t completion_serial_ = 0;
+    uint32_t observed_period_serial_ = 0;
     mutable std::atomic<uint32_t> next_generation_{1};
     mutable std::atomic<uint32_t> next_preference_request_{1};
     MainLoopInbox<PreferenceCommand, 4, InboxStorage::Psram>

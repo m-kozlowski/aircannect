@@ -1090,6 +1090,41 @@ void ReportHttpController::send_summary(
     AsyncWebServerRequest *request) const {
     if (!report_task_ || !report_task_available(request, *report_task_)) return;
 
+    if (request->hasArg("days")) {
+        uint64_t days = 0;
+        SleepDayId end;
+        if (!parse_uint64_arg(request, "days", 365, days) || !parse_sleep_day(request, end) ||
+            !ReportPeriodKey{end, static_cast<uint16_t>(days)}.valid()) {
+            send_json_error(request, 400, "bad_period");
+            return;
+        }
+        const ReportPeriodKey key{end, static_cast<uint16_t>(days)};
+        const auto period = report_task_->period_snapshot(key);
+        if (!period) {
+            if (report_task_->request_period(key) != OperationAdmission::Accepted) {
+                send_json_error(request, 503, "period_busy");
+            } else send_preparing(request);
+            return;
+        }
+        if (period->error[0]) { send_json_error(request, 503, period->error); return; }
+        char etag[64];
+        snprintf(etag, sizeof(etag), "\"period-v1-%08ld-%u-%016llx\"",
+                 static_cast<long>(end.epoch_days()), key.days,
+                 static_cast<unsigned long long>(period->revision));
+        if (request_etag_matches(request, etag)) { send_not_modified(request, etag, {}, 0); return; }
+        auto *response = new (std::nothrow) AsyncPreparedResponse("application/json", period->body.length(),
+            [period](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
+                if (!buffer || offset >= period->body.length()) return 0;
+                const size_t count = std::min(capacity, period->body.length() - offset);
+                memcpy(buffer, period->body.c_str() + offset, count);
+                return count;
+            });
+        if (!response) { send_json_error(request, 503, "response_alloc"); return; }
+        add_common_headers(response, etag, {}, 0);
+        request->send(response);
+        return;
+    }
+
     const auto summary = report_task_->catalog_json_snapshot();
     if (!summary) {
         if (report_task_->catalog_snapshot()) {
@@ -1440,6 +1475,25 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 
 void ReportHttpController::publish_completion() {
     if (!report_task_) return;
+
+    uint32_t serial = observed_period_serial_;
+    const auto period = report_task_->period_completion(serial);
+    if (period && serial != observed_period_serial_) {
+        char day[9];
+        period->key.end.format_yyyymmdd(day, sizeof(day));
+        completion_json_ = "{";
+        json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
+        json_add_string(completion_json_, "kind", "period");
+        json_add_string(completion_json_, "night", day);
+        json_add_int(completion_json_, "days", period->key.days);
+        json_add_bool(completion_json_, "success", !period->error[0]);
+        json_add_string(completion_json_, "error", period->error);
+        completion_json_ += '}';
+        if (!completion_json_.overflowed() && completion_snapshot_.replace(completion_json_)) {
+            observed_period_serial_ = serial;
+        }
+        return;
+    }
 
     const ReportEngineCompletion completion = report_task_->last_completion();
     if (!completion.valid() ||

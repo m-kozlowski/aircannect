@@ -13,7 +13,7 @@
 namespace aircannect {
 namespace {
 
-constexpr size_t METRIC_HISTOGRAM_BINS = 2048;
+constexpr size_t METRIC_HISTOGRAM_BINS = ReportMetricAccumulator::HistogramBins;
 
 enum class MetricHistogramId : uint8_t {
     Pressure,
@@ -273,19 +273,7 @@ bool metric_value_at_rank(const MetricHistogram &histogram,
         cumulative += histogram.bins[bin];
         if (cumulative <= rank) continue;
 
-        const int64_t span = static_cast<int64_t>(
-            config.maximum_milli - config.minimum_milli);
-        if (config.quadratic_bins) {
-            constexpr int64_t bins_squared =
-                (METRIC_HISTOGRAM_BINS - 1) * (METRIC_HISTOGRAM_BINS - 1);
-            out = config.minimum_milli + static_cast<int32_t>(
-                (static_cast<int64_t>(bin) * bin * span + bins_squared / 2) / bins_squared);
-            return true;
-        }
-        out = config.minimum_milli + static_cast<int32_t>(
-            (static_cast<int64_t>(bin) * span +
-             (METRIC_HISTOGRAM_BINS - 1) / 2) /
-            (METRIC_HISTOGRAM_BINS - 1));
+        out = ReportMetricAccumulator::bin_value(&config - METRIC_HISTOGRAM_CONFIGS, bin);
         return true;
     }
     return false;
@@ -653,6 +641,34 @@ bool ReportMetricAccumulator::merge(const ReportMetricAccumulator &other) {
 
 void ReportMetricAccumulator::clear() {
     if (runtime_) runtime_->clear();
+}
+
+bool ReportMetricAccumulator::histogram(size_t index, Histogram &out) const {
+    out = {};
+    if (!runtime_ || index >= METRIC_HISTOGRAM_COUNT ||
+        (runtime_->incomplete_mask & (1u << index))) return false;
+
+    const auto &h = runtime_->histograms[index];
+    if (!h.active || !h.bins || !h.samples) return false;
+    out = {h.bins, METRIC_HISTOGRAM_BINS, h.sum_milli, h.samples,
+           h.minimum, h.maximum, h.extrema_valid};
+    return true;
+}
+
+ReportSignalId ReportMetricAccumulator::metric_signal(size_t index) {
+    return index < METRIC_HISTOGRAM_COUNT
+        ? METRIC_HISTOGRAM_CONFIGS[index].signal : ReportSignalId::Invalid;
+}
+
+int32_t ReportMetricAccumulator::bin_value(size_t index, size_t bin) {
+    const auto &config = METRIC_HISTOGRAM_CONFIGS[index];
+    const int64_t span = config.maximum_milli - config.minimum_milli;
+    const int64_t numerator = config.quadratic_bins
+        ? static_cast<int64_t>(bin) * bin : bin;
+    const int64_t divisor = config.quadratic_bins
+        ? (METRIC_HISTOGRAM_BINS - 1) * (METRIC_HISTOGRAM_BINS - 1)
+        : METRIC_HISTOGRAM_BINS - 1;
+    return config.minimum_milli + (numerator * span + divisor / 2) / divisor;
 }
 
 void report_night_count_event(ReportEventCounts &counts,

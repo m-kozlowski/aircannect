@@ -48,6 +48,7 @@ constexpr uint32_t SPOOL_AVAILABILITY_RETRY_MS = 10 * 60 * 1000;
 enum class ReportTaskCommandKind : uint8_t {
     MaterializeNight,
     Rebuild,
+    Period,
 };
 
 struct ReportTaskCommand {
@@ -58,6 +59,7 @@ struct ReportTaskCommand {
     uint32_t generation = 0;
     SleepDayId first_day;
     SleepDayId last_day;
+    uint16_t period_days = 0;
 };
 
 struct PendingCatalogRefresh {
@@ -272,6 +274,12 @@ struct ReportTask::Runtime {
             return OperationAdmission::Rejected;
         }
 
+        if (command.kind == ReportTaskCommandKind::Period && period_running &&
+            period_key == ReportPeriodKey{command.sleep_day, command.period_days}) {
+            unlock();
+            return OperationAdmission::Accepted;
+        }
+
         if (command.kind == ReportTaskCommandKind::Rebuild && rebuild.active) {
             unlock();
             return OperationAdmission::Busy;
@@ -295,6 +303,7 @@ struct ReportTask::Runtime {
         for (size_t i = 0; i < command_count; ++i) {
             ReportTaskCommand &queued = commands[i];
             if (queued.kind != command.kind) continue;
+            if (queued.period_days != command.period_days) continue;
             if (queued.sleep_day == command.sleep_day) {
                 queued.force_rebuild =
                     queued.force_rebuild || command.force_rebuild;
@@ -338,18 +347,26 @@ struct ReportTask::Runtime {
 
         size_t selected = SIZE_MAX;
         for (size_t i = 0; i < command_count; ++i) {
+            if (commands[i].kind == ReportTaskCommandKind::Period &&
+                (period_running || !catalog || store_catalog_load_pending ||
+                 store_catalog_loader.status().active() || activity.ota_install_active)) continue;
+            if (selected == SIZE_MAX) selected = i;
             if (commands[i].priority == ReportRequestPriority::Foreground) {
                 selected = i;
                 break;
             }
         }
-        if (selected == SIZE_MAX) selected = 0;
+        if (selected == SIZE_MAX) { unlock(); return false; }
 
         command = commands[selected];
         for (size_t i = selected + 1; i < command_count; ++i) {
             commands[i - 1] = commands[i];
         }
         commands[--command_count] = {};
+        if (command.kind == ReportTaskCommandKind::Period) {
+            period_running = true;
+            period_key = {command.sleep_day, command.period_days};
+        }
         unlock();
         return true;
     }
@@ -868,7 +885,7 @@ struct ReportTask::Runtime {
         return activity.therapy_active || activity.realtime_stream_active ||
                activity.foreground_report_demand ||
                activity.ota_install_active || activity.export_work_claimed ||
-               engine.status().foreground_active;
+               engine.status().foreground_active || period_running;
     }
 
     void cancel_signal_tile_backfill() {
@@ -1959,6 +1976,15 @@ struct ReportTask::Runtime {
         if (!initialized) return out;
 
         out.condition = ReportTaskCondition::Working;
+        if (period_running) {
+            out.operation = ReportTaskOperation::Building;
+            out.sleep_day = period_key.end;
+            if (activity.ota_install_active) {
+                out.condition = ReportTaskCondition::Waiting;
+                out.wait_reason = ReportTaskWaitReason::Ota;
+            }
+            return out;
+        }
         if (catalog_store.active()) {
             out.operation = store_purpose == CatalogStorePurpose::Save ||
                             store_purpose == CatalogStorePurpose::SourceUpdate
@@ -2084,7 +2110,7 @@ struct ReportTask::Runtime {
         out.last_failure = last_failure;
         out.catalog_generation = catalog_generation;
         out.durable_catalog_generation = durable_catalog_generation;
-        out.foreground_active = engine_status.foreground_active;
+        out.foreground_active = engine_status.foreground_active || period_running;
         out.background_suspended = background_suspended;
 
         out.engine_state = engine_status.state;
@@ -2141,9 +2167,9 @@ struct ReportTask::Runtime {
             catalog_refresh.status().retryable;
 
         const ReportEngineStatus engine_status = engine.status();
-        next.foreground_active = engine_status.foreground_active;
+        next.foreground_active = engine_status.foreground_active || period_running;
         next.background_active =
-            rebuild_catalog != nullptr || engine_status.queued > 0 ||
+            period_running || rebuild_catalog != nullptr || engine_status.queued > 0 ||
             engine_status.state != ReportEngineState::Idle ||
             store_catalog_loader.status().active() ||
             catalog_refresh.active() || summary_acquisition.active() ||
@@ -2217,6 +2243,11 @@ struct ReportTask::Runtime {
             command_count = 0;
             for (auto &command : commands) command = {};
             rebuild = {};
+            period_running = false;
+            period_key = {};
+            for (auto &cached : period_cache) cached.reset();
+            period_latest.reset();
+            period_completed.reset();
             for (auto &failure : failures) failure = {};
             unlock();
 
@@ -2228,6 +2259,7 @@ struct ReportTask::Runtime {
 #pragma GCC diagnostic pop
 
             engine.clear();
+            period_service.cancel();
             catalog_refresh.cancel();
             catalog_store.forget_media();
             capture_sources.forget_media();
@@ -2311,6 +2343,14 @@ struct ReportTask::Runtime {
     NightCatalogStoreService capture_sources;
     ReportSignalStoreCatalogLoadService store_catalog_loader;
     ReportGenerationCleanup generation_cleanup;
+    ReportPeriodService period_service;
+    ReportPeriodKey period_key;
+    bool period_running = false;
+    std::shared_ptr<const ReportPeriodResult> period_cache[5];
+    std::shared_ptr<const ReportPeriodResult> period_latest;
+    std::shared_ptr<const ReportPeriodResult> period_completed;
+    uint32_t period_serial = 0;
+    size_t period_cache_cursor = 0;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
     ReportRebuildStatus rebuild;
@@ -2494,6 +2534,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
+    runtime_->period_service.begin(read_port);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port);
     }
@@ -2578,6 +2619,37 @@ OperationAdmission ReportTask::request_rebuild(
 ReportRebuildStatus ReportTask::rebuild_status() const {
     if (!runtime_ || !runtime_->lock()) return {};
     const ReportRebuildStatus result = runtime_->rebuild;
+    runtime_->unlock();
+    return result;
+}
+
+OperationAdmission ReportTask::request_period(ReportPeriodKey key) {
+    if (!runtime_ || !runtime_->initialized || !key.valid()) return OperationAdmission::Rejected;
+    ReportTaskCommand command;
+    command.kind = ReportTaskCommandKind::Period;
+    command.sleep_day = key.end;
+    command.period_days = key.days;
+    return runtime_->enqueue(command);
+}
+
+std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeriodKey key) const {
+    if (!runtime_ || !key.valid()) return {};
+    const auto state = runtime_->published_state();
+    if (!state || !state->catalog) return {};
+    const auto revision = report_period_revision(key, *state->catalog, state->store_catalog.get());
+    if (!runtime_->lock(0)) return {};
+    std::shared_ptr<const ReportPeriodResult> result;
+    for (const auto &cached : runtime_->period_cache) {
+        if (cached && cached->key == key && cached->revision == revision) { result = cached; break; }
+    }
+    runtime_->unlock();
+    return result;
+}
+
+std::shared_ptr<const ReportPeriodResult> ReportTask::period_completion(uint32_t &serial) const {
+    if (!runtime_ || !runtime_->lock(0)) return {};
+    serial = runtime_->period_serial;
+    const auto result = runtime_->period_latest;
     runtime_->unlock();
     return result;
 }
@@ -2873,7 +2945,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     ReportTaskCommand command;
     if (runtime.pop(command)) {
-        if (command.kind == ReportTaskCommandKind::Rebuild) {
+        if (command.kind == ReportTaskCommandKind::Period) {
+            const auto revision = report_period_revision(
+                runtime.period_key, *runtime.catalog, runtime.store_catalog.get());
+            if (!runtime.period_service.start(runtime.period_key, runtime.catalog, runtime.store_catalog, revision)) {
+                auto failed = std::make_shared<ReportPeriodResult>();
+                failed->key = runtime.period_key;
+                failed->revision = revision;
+                copy_cstr(failed->error, sizeof(failed->error), "period_alloc");
+                runtime.period_completed = std::move(failed);
+            }
+        } else if (command.kind == ReportTaskCommandKind::Rebuild) {
             runtime.rebuild_catalog = runtime.catalog;
             runtime.rebuild_cursor = 0;
             runtime.rebuild_sources_ready = false;
@@ -3384,6 +3466,24 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
+    if (!runtime.activity.ota_install_active && runtime.period_running) {
+        worked = runtime.period_service.poll() || worked;
+        if (!runtime.period_completed) runtime.period_completed = runtime.period_service.take_completed();
+        if (runtime.period_completed && runtime.lock(0)) {
+            if (!runtime.period_completed->error[0]) {
+                runtime.period_cache[runtime.period_cache_cursor++ % 5] = runtime.period_completed;
+            }
+            runtime.period_latest = runtime.period_completed;
+            runtime.period_serial = increment_generation(runtime.period_serial);
+            runtime.period_running = false;
+            runtime.unlock();
+            if (runtime.period_completed->error[0]) {
+                runtime.record_failure("period", runtime.period_completed->error, runtime.period_key.end);
+            }
+            runtime.period_completed.reset();
+            worked = true;
+        }
+    }
     runtime.publish_status();
 
     const auto published = runtime.published_state();

@@ -99,6 +99,18 @@ struct ReportCalculatedMetrics {
 
 class ReportMetricAccumulator {
 public:
+    static constexpr size_t HistogramBins = 2048;
+
+    struct Histogram {
+        const uint32_t *bins = nullptr;
+        size_t bin_count = 0;
+        int64_t sum_milli = 0;
+        uint64_t samples = 0;
+        int32_t minimum = 0;
+        int32_t maximum = 0;
+        bool extrema_valid = false;
+    };
+
     ReportMetricAccumulator();
     ~ReportMetricAccumulator();
 
@@ -116,6 +128,10 @@ public:
     std::shared_ptr<const LargeByteBuffer> snapshot() const;
     bool restore(const uint8_t *data, size_t length);
     bool merge(const ReportMetricAccumulator &other);
+
+    bool histogram(size_t index, Histogram &out) const;
+    static ReportSignalId metric_signal(size_t index);
+    static int32_t bin_value(size_t index, size_t bin);
 
     void clear();
 
