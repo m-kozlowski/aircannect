@@ -4,6 +4,7 @@
 #include "large_text_buffer.h"
 #include "report_signal_store_catalog.h"
 #include "storage_bounded_file_loader.h"
+#include "storage_atomic_write_port.h"
 
 namespace aircannect {
 
@@ -25,28 +26,35 @@ struct ReportPeriodResult {
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
-// Worker-owned, read-only aggregation of published nights and checkpoints.
+// Worker-owned aggregation; old checkpoints acquire a derived sparse cache.
 // Each poll advances at most one read, tail histogram or signal reduction.
 class ReportPeriodService {
 public:
     ReportPeriodService();
     ~ReportPeriodService();
 
-    void begin(StorageReadPort &port);
+    static constexpr size_t NightCacheBytes = 512 * 1024;
+
+    void begin(StorageReadPort &port, StorageAtomicWritePort &writes);
     bool start(ReportPeriodKey key,
                std::shared_ptr<const NightCatalog> catalog,
                std::shared_ptr<const ReportSignalStoreCatalog> store,
                uint64_t revision);
     bool poll();
     void cancel();
+    void clear_cache();
 
     bool active() const;
     std::shared_ptr<const ReportPeriodResult> take_completed();
 
 private:
     struct Runtime;
+    struct Cache;
     std::shared_ptr<Runtime> runtime_;
+    std::shared_ptr<Cache> cache_;
     StorageBoundedFileLoader loader_;
+    StorageAtomicWritePort *write_port_ = nullptr;
+    OperationTicket write_ticket_;
 };
 
 uint64_t report_period_revision(ReportPeriodKey key,

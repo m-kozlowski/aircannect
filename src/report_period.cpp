@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <limits.h>
+#include <list>
 #include "json_util.h"
 #include "large_allocator.h"
 #include "report_build_checkpoint.h"
+#include "report_night_histogram.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -71,6 +73,51 @@ uint64_t report_period_revision(ReportPeriodKey key, const NightCatalog &catalog
     return revision;
 }
 
+struct ReportPeriodService::Cache {
+    struct Entry {
+        std::shared_ptr<const LargeByteBuffer> bytes;
+        ReportNightHistogramView view;
+        uint64_t used = 0;
+    };
+    static constexpr size_t EntryBytes = sizeof(Entry) + 2 * sizeof(void *);
+    std::list<Entry, LargeAllocator<Entry>> entries;
+    size_t bytes = 0;
+    uint64_t serial = 0;
+
+    const Entry *find(const ReportSignalStoreNight &night) {
+        for (auto &entry : entries) {
+            if (!entry.view.matches(night)) continue;
+            entry.used = ++serial;
+            return &entry;
+        }
+        return nullptr;
+    }
+
+    void remember(std::shared_ptr<const LargeByteBuffer> data,
+                  const ReportNightHistogramView &view) {
+        const size_t cost = data->size() + EntryBytes;
+        if (cost > NightCacheBytes) return;
+
+        for (auto it = entries.begin(); it != entries.end();) {
+            if (it->view.sleep_day != view.sleep_day) { ++it; continue; }
+            bytes -= it->bytes->size() + EntryBytes;
+            it = entries.erase(it);
+        }
+        while (bytes + cost > NightCacheBytes && !entries.empty()) {
+            const auto oldest = std::min_element(entries.begin(), entries.end(),
+                [](const Entry &a, const Entry &b) { return a.used < b.used; });
+            bytes -= oldest->bytes->size() + EntryBytes;
+            entries.erase(oldest);
+        }
+        try {
+            entries.push_back({std::move(data), view, ++serial});
+            bytes += cost;
+        } catch (const std::bad_alloc &) {
+            // The current calculation owns its bytes; retention is optional.
+        }
+    }
+};
+
 struct ReportPeriodService::Runtime {
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const ReportSignalStoreCatalog> store;
@@ -80,6 +127,8 @@ struct ReportPeriodService::Runtime {
     ReportMetricAccumulator tail_metrics;
     std::shared_ptr<const LargeByteBuffer> bytes;
     ReportBuildCheckpointView checkpoint;
+    std::shared_ptr<const LargeByteBuffer> histogram_bytes;
+    ReportNightHistogramView histogram;
     const ReportSignalStoreCatalogRecord *saved = nullptr;
     LargeTextBuffer daily;
     uint16_t cursor = 0;
@@ -101,13 +150,16 @@ struct ReportPeriodService::Runtime {
     uint64_t csr_minutes = 0;
     uint64_t leak_ms = 0;
     uint64_t leak_above_ms = 0;
-    enum class Phase { Night, Reading, Tails, Metrics, Finish, Done } phase = Phase::Night;
+    enum class Phase { Night, ReadingHistogram, ReadCheckpoint, Reading,
+                       Tails, WriteHistogram, Metrics, Finish, Done } phase = Phase::Night;
 
     void finish_night() {
         bytes.reset();
         checkpoint = {};
         night_metrics.clear();
         tail_metrics.clear();
+        histogram_bytes.reset();
+        histogram = {};
         saved = nullptr;
         ++cursor;
         phase = Phase::Night;
@@ -178,24 +230,16 @@ struct ReportPeriodService::Runtime {
     }
 
     void accept_histogram(size_t index) {
-        ReportMetricAccumulator::Histogram h;
-        if (!night_metrics.histogram(index, h)) return;
-        const auto signal = index == 11 ? ReportSignalId::InspiratoryDuration
-            : ReportMetricAccumulator::metric_signal(index);
-        uint32_t interval = 0;
-        for (size_t i = 0; i < saved->view.night.track_count; ++i) {
-            ReportSignalStoreTrack track;
-            saved->view.track(i, track);
-            if (track.signal != signal || !track.valid_sample_count) continue;
-            // A pooled old histogram cannot separate mixed sampling cadences.
-            if (interval && interval != track.sample_interval_ms) return;
-            interval = track.sample_interval_ms;
-        }
-        if (!interval) return;
+        const auto &h = histogram.metrics[index];
+        if (!h.samples) return;
+        const uint32_t interval = h.interval_ms;
 
         auto &out = histograms[index];
-        for (size_t i = 0; i < h.bin_count; ++i) {
-            out.bins[i] += static_cast<uint64_t>(h.bins[i]) * interval;
+        for (size_t i = 0; i < h.count; ++i) {
+            uint16_t bin;
+            uint32_t samples;
+            h.bin(i, bin, samples);
+            out.bins[bin] += static_cast<uint64_t>(samples) * interval;
         }
         out.sum += static_cast<double>(h.sum_milli) * interval;
         out.weight += h.samples * interval;
@@ -278,8 +322,16 @@ struct ReportPeriodService::Runtime {
 };
 
 ReportPeriodService::ReportPeriodService() = default;
-ReportPeriodService::~ReportPeriodService() = default;
-void ReportPeriodService::begin(StorageReadPort &port) { loader_.begin(port); }
+ReportPeriodService::~ReportPeriodService() { cancel(); }
+
+void ReportPeriodService::begin(StorageReadPort &port, StorageAtomicWritePort &writes) {
+    cancel();
+    clear_cache();
+    loader_.begin(port);
+    write_port_ = &writes;
+}
+
+void ReportPeriodService::clear_cache() { cache_.reset(); }
 
 bool ReportPeriodService::start(ReportPeriodKey key,
     std::shared_ptr<const NightCatalog> catalog,
@@ -287,6 +339,7 @@ bool ReportPeriodService::start(ReportPeriodKey key,
     cancel();
     if (!key.valid() || !catalog) return false;
     try {
+        if (!cache_) cache_ = std::allocate_shared<Cache>(LargeAllocator<Cache>());
         runtime_ = std::allocate_shared<Runtime>(LargeAllocator<Runtime>());
         runtime_->result = std::make_shared<ReportPeriodResult>();
     } catch (const std::bad_alloc &) { cancel(); return false; }
@@ -317,17 +370,64 @@ bool ReportPeriodService::poll() {
         r.accept_metadata(day);
         char path[AC_STORAGE_PATH_MAX];
         if (!r.saved || !r.saved->view.night.checkpoint_slot ||
-            !report_build_checkpoint_path(day, r.saved->generation,
-                r.saved->view.night.checkpoint_slot, path, sizeof(path))) {
+            !ReportNightHistogramCodec::path(r.saved->view.night, path, sizeof(path))) {
             if (r.saved) ++r.checkpoint_missing;
             r.finish_night();
             return true;
         }
-        if (loader_.start(path, ReportBuildCheckpointCodec::MaxBytes, 1,
+        if (const auto *cached = cache_->find(r.saved->view.night)) {
+            r.histogram_bytes = cached->bytes;
+            r.histogram = cached->view;
+            r.metric = 0;
+            r.phase = Phase::Metrics;
+            return true;
+        }
+
+        if (loader_.start(path, ReportNightHistogramCodec::MaxBytes, 1,
                           StorageReadLane::Report) != OperationAdmission::Accepted) {
             copy_cstr(r.result->error, sizeof(r.result->error), "period_read_rejected");
             r.phase = Phase::Done;
-        } else r.phase = Phase::Reading;
+        } else r.phase = Phase::ReadingHistogram;
+        return true;
+    }
+    if (r.phase == Phase::ReadingHistogram) {
+        const bool worked = loader_.poll();
+        if (loader_.status().active()) return worked;
+        const auto status = loader_.status();
+        r.histogram_bytes = loader_.take_completed();
+        loader_.reset();
+
+        if (r.histogram_bytes && ReportNightHistogramCodec::decode(
+                r.histogram_bytes->data(), r.histogram_bytes->size(), r.histogram) &&
+            r.histogram.matches(r.saved->view.night)) {
+            cache_->remember(r.histogram_bytes, r.histogram);
+            r.metric = 0;
+            r.phase = Phase::Metrics;
+        } else if (status.state == StorageBoundedFileLoadState::Ready ||
+                   status.state == StorageBoundedFileLoadState::Missing ||
+                   strcmp(status.error, "storage_file_size_invalid") == 0) {
+            // Only this derived shortcut is expendable. Leave the checkpoint intact.
+            r.histogram_bytes.reset();
+            r.histogram = {};
+            r.phase = Phase::ReadCheckpoint;
+        } else {
+            copy_cstr(r.result->error, sizeof(r.result->error), status.error);
+            r.phase = Phase::Done;
+        }
+        return true;
+    }
+    if (r.phase == Phase::ReadCheckpoint) {
+        char path[AC_STORAGE_PATH_MAX];
+        const auto &night = r.saved->view.night;
+        if (!report_build_checkpoint_path(night.sleep_day, night.generation,
+                night.checkpoint_slot, path, sizeof(path)) ||
+            loader_.start(path, ReportBuildCheckpointCodec::MaxBytes, 1,
+                StorageReadLane::Report) != OperationAdmission::Accepted) {
+            copy_cstr(r.result->error, sizeof(r.result->error), "period_read_rejected");
+            r.phase = Phase::Done;
+        } else {
+            r.phase = Phase::Reading;
+        }
         return true;
     }
     if (r.phase == Phase::Reading) {
@@ -358,7 +458,19 @@ bool ReportPeriodService::poll() {
     }
     if (r.phase == Phase::Tails) {
         if (r.tail == r.checkpoint.track_count) {
-            r.metric = 0; r.phase = Phase::Metrics; return true;
+            r.histogram_bytes = ReportNightHistogramCodec::encode(
+                r.night_metrics, r.saved->view, &r.histogram);
+            if (!r.histogram_bytes) {
+                copy_cstr(r.result->error, sizeof(r.result->error), "period_histogram_alloc");
+                r.phase = Phase::Done;
+                return true;
+            }
+            r.bytes.reset();
+            r.checkpoint = {};
+            r.night_metrics.clear();
+            r.tail_metrics.clear();
+            r.phase = Phase::WriteHistogram;
+            return true;
         }
         ReportBuildTrackState track;
         r.checkpoint.track(r.tail++, track);
@@ -367,6 +479,41 @@ bool ReportPeriodService::poll() {
              !r.night_metrics.merge(r.tail_metrics))) {
             copy_cstr(r.result->error, sizeof(r.result->error), "period_tail_invalid");
             r.phase = Phase::Done;
+        }
+        return true;
+    }
+    if (r.phase == Phase::WriteHistogram) {
+        if (!write_ticket_.valid()) {
+            char path[AC_STORAGE_PATH_MAX];
+            ReportNightHistogramCodec::path(r.saved->view.night, path, sizeof(path));
+            StorageAtomicWriteCommand command;
+            command.path = path;
+            command.bytes = r.histogram_bytes;
+            command.generation = 1;
+            command.lane = StorageAtomicWriteLane::Foreground;
+            const auto submitted = write_port_->request_write(command);
+            if (submitted.admission == OperationAdmission::Busy) return false;
+            if (!submitted.accepted()) {
+                copy_cstr(r.result->error, sizeof(r.result->error), "period_cache_write_rejected");
+                r.phase = Phase::Done;
+            } else {
+                write_ticket_ = submitted.ticket;
+            }
+            return true;
+        }
+
+        StorageAtomicWriteCompletion completion;
+        if (!write_port_->take_completion(write_ticket_, completion)) return false;
+        write_ticket_ = {};
+        if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+            completion.bytes_written != r.histogram_bytes->size()) {
+            copy_cstr(r.result->error, sizeof(r.result->error),
+                completion.error[0] ? completion.error : "period_cache_write_failed");
+            r.phase = Phase::Done;
+        } else {
+            cache_->remember(r.histogram_bytes, r.histogram);
+            r.metric = 0;
+            r.phase = Phase::Metrics;
         }
         return true;
     }
@@ -379,7 +526,12 @@ bool ReportPeriodService::poll() {
     return true;
 }
 
-void ReportPeriodService::cancel() { loader_.reset(); runtime_.reset(); }
+void ReportPeriodService::cancel() {
+    loader_.reset();
+    if (write_port_ && write_ticket_.valid()) write_port_->abandon(write_ticket_);
+    write_ticket_ = {};
+    runtime_.reset();
+}
 
 std::shared_ptr<const ReportPeriodResult> ReportPeriodService::take_completed() {
     if (!runtime_ || active()) return {};

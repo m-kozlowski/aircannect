@@ -2260,6 +2260,7 @@ struct ReportTask::Runtime {
 
             engine.clear();
             period_service.cancel();
+            period_service.clear_cache();
             catalog_refresh.cancel();
             catalog_store.forget_media();
             capture_sources.forget_media();
@@ -2534,7 +2535,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
-    runtime_->period_service.begin(read_port);
+    runtime_->period_service.begin(read_port, write_port);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port);
     }
