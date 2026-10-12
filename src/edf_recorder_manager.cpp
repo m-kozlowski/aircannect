@@ -307,6 +307,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     }
 
     if (!numeric_files_open_ &&
+        !assembler_.status().active &&
         static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
         release_stream();
         sync_annotation_open_status();
@@ -320,14 +321,13 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         (numeric_files_open_ || open_numeric_files_from_stream(now_ms)) &&
         sync_numeric_open_status(now_ms);
 
-    if (!numeric_ready) {
-        buffer_numeric_open_stream();
-        return;
-    }
+    if (numeric_ready) log_startup_timing("ready");
 
-    log_startup_timing("ready");
-    drain_stream(now_ms);
-    drain_local_sa2();
+    if (assembler_.status().active) {
+        drain_stream(now_ms);
+        drain_local_sa2();
+    }
+    if (!numeric_ready) buffer_numeric_open_stream();
 }
 
 OperationAdmission EdfRecorderManager::request_str_summary_refresh(
@@ -840,8 +840,16 @@ bool EdfRecorderManager::close_recording_segment() {
     release_stream();
     drain_local_sa2();
 
-    const bool assembled = assembler_.end_session();
-    if (!assembled) return false;
+    if (!assembler_.end_session()) {
+        if (!numeric_open_synced_) {
+            const uint32_t now_ms = millis();
+            if (ensure_annotation_files_open(now_ms) &&
+                ensure_numeric_files_open(now_ms, status_.recording_start_time)) {
+                (void)sync_numeric_open_status(now_ms);
+            }
+        }
+        return false;
+    }
 
     const bool closed = close_session_files();
     if (!closed) return false;
@@ -1079,6 +1087,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
 
     release_stream();
     const StatusCarryover carryover = preserve_status_carryover(status_);
+    assembler_.reset();
 
     status_ = {};
     restore_status_carryover(status_, carryover);
@@ -1514,19 +1523,41 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
                       : "--");
     }
 
-    if (!ensure_annotation_files_open(now_ms)) {
-        return false;
+    if (!assembler_.status().active) {
+        if (!session_timezone_frozen_) return false;
+        if (!take_numeric_open_stream_frame(pending_stream_frame_)) return false;
+
+        if (!pending_stream_frame_->start_time[0]) {
+            pending_stream_frame_.reset();
+            status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+            set_error("missing_numeric_start_time");
+            return false;
+        }
+
+        EdfLocalDateTime start;
+        const bool have_start =
+            parse_session_local_time(status_.recording_start_time, start) &&
+            edf_sleep_day_epoch_days(start, numeric_segment_day_);
+
+        if (!have_start) set_error("bad_numeric_start_time");
+        if (!have_start || !build_numeric_schemas()) {
+            status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+            return false;
+        }
+
+        if (!assembler_.start_session(status_.recording_start_time,
+                                       session_clock_, true)) {
+            set_error(assembler_.status().last_error);
+            status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+            return false;
+        }
+        numeric_open_synced_ = false;
     }
 
-    if (!take_numeric_open_stream_frame(pending_stream_frame_)) return false;
-
-    if (!pending_stream_frame_->start_time[0]) {
-        pending_stream_frame_.reset();
-        status_.file_open_failures++;
-        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        set_error("missing_numeric_start_time");
-        return false;
-    }
+    if (!ensure_annotation_files_open(now_ms)) return false;
 
     return ensure_numeric_files_open(now_ms, status_.recording_start_time);
 }
@@ -1536,10 +1567,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     const char *numeric_start_time) {
     if (numeric_files_open_) return true;
     if (static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
-        return true;
-    }
-    if (!numeric_stream_ready()) {
-        return true;
+        return false;
     }
 
     EdfLocalDateTime numeric_start;
@@ -1576,18 +1604,6 @@ bool EdfRecorderManager::ensure_numeric_files_open(
         return false;
     }
 
-    if (!build_numeric_schemas()) {
-        status_.file_open_failures++;
-        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        return false;
-    }
-
-    if (!assembler_.start_session(numeric_start_time, session_clock_)) {
-        set_error(assembler_.status().last_error);
-        status_.file_open_failures++;
-        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        return false;
-    }
     numeric_open_synced_ = false;
 
     EdfHeaderInfo info;
@@ -1789,10 +1805,8 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
 
         enqueue_numeric_file_closes();
         numeric_files_open_ = false;
-        numeric_open_synced_ = true;
-        reset_numeric_schemas();
+        numeric_open_synced_ = false;
         next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        release_stream();
         return false;
     }
 
@@ -2807,10 +2821,6 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
             pending_stream_frame_ = frame;
             break;
         }
-        if (!numeric_open_synced_) {
-            pending_stream_frame_ = frame;
-            break;
-        }
         const EdfFramePrepareStatus prepared =
             assembler_.prepare_frame(*frame, AC_EDF_GAP_RECORD_BUDGET);
         if (prepared == EdfFramePrepareStatus::Deferred) {
@@ -2826,7 +2836,7 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
 
 void EdfRecorderManager::drain_local_sa2() {
     if (active_sa2_input_ != EdfSa2Input::LocalOximetry ||
-        !numeric_files_open_ || !numeric_open_synced_ ||
+        !assembler_.status().active ||
         !local_sa2_clock_.valid) {
         return;
     }
@@ -2904,9 +2914,7 @@ bool EdfRecorderManager::sleep_day_boundary_epoch_ms(
 bool EdfRecorderManager::roll_segment_if_needed(
     const StreamFrameData &frame,
     uint32_t now_ms) {
-    if (!numeric_files_open_ || !numeric_open_synced_) {
-        return true;
-    }
+    if (!assembler_.status().active) return true;
 
     EdfLocalDateTime frame_local;
     uint16_t frame_day = 0;
@@ -2915,6 +2923,8 @@ bool EdfRecorderManager::roll_segment_if_needed(
     }
     if (frame_day == numeric_segment_day_) return true;
     if (frame_day < numeric_segment_day_) return true;
+
+    if (!numeric_files_open_ || !numeric_open_synced_) return false;
 
     EdfLocalDateTime boundary;
     if (!edf_sleep_day_start(frame_local, boundary)) {
@@ -2980,6 +2990,8 @@ bool EdfRecorderManager::roll_segment_if_needed(
 
 bool EdfRecorderManager::handle_completed_record(
     const EdfCompletedRecordView &record) {
+    if (!numeric_files_open_ || !numeric_open_synced_) return false;
+
     const size_t index = edf_series_index(record.series);
     const NumericSchemaState *state = edf_series_id_valid(record.series)
         ? &cold_->numeric_schemas[index]

@@ -76,10 +76,12 @@ void EdfStreamAssembler::set_record_observer(EdfRecordObserver observer,
 
 bool EdfStreamAssembler::start_session(
     const char *device_start_time,
-    const As11ClockTransform &clock_transform) {
+    const As11ClockTransform &clock_transform,
+    bool awaiting_file_records) {
     if (!allocate_buffers()) return false;
     reset();
     status_.active = true;
+    awaiting_file_records_ = awaiting_file_records;
     clock_transform_ = clock_transform;
     declared_start_epoch_ms_ = 0;
     initial_epoch_rebase_allowed_ = false;
@@ -101,15 +103,50 @@ void EdfStreamAssembler::set_current_records(
     if (!status_.buffers_ready) return;
 
     bool have_existing_records = false;
+    for (uint32_t count : records) {
+        have_existing_records = have_existing_records || count != 0;
+    }
+
+    const int64_t persisted_epoch =
+        edf_floor_epoch_ms_to_second(declared_start_epoch_ms_);
+    const int64_t shift_ms = have_existing_records && awaiting_file_records_
+        ? status_.session_start_epoch_ms - persisted_epoch : 0;
+
     size_t count = 0;
     const EdfFileSchema *schemas = edf_numeric_schemas(count);
     for (size_t i = 0; i < count; ++i) {
         SeriesBuffer buffer = series(schemas[i].series);
-        reset_record(buffer);
-        if (buffer.status) buffer.status->current_record = records[i];
-        have_existing_records = have_existing_records || records[i] != 0;
+
+        if (records[i] > buffer.status->current_record) {
+            reset_record(buffer);
+            buffer.status->current_record = records[i];
+        } else if (shift_ms > 0 && record_has_samples(buffer)) {
+            // Before open completion only the first file minute is accepted.
+            // A partially existing file set keeps that minute in empty files.
+            const size_t shift = static_cast<size_t>(shift_ms / buffer.sample_ms);
+            for (size_t signal = 0; signal < buffer.signal_count; ++signal) {
+                const size_t base = signal * buffer.samples_per_record;
+                for (size_t slot = buffer.samples_per_record; slot-- > 0;) {
+                    const bool present = slot >= shift &&
+                        edf_bit_get(buffer.present, base + slot - shift);
+                    const bool valid = present &&
+                        edf_bit_get(buffer.valid, base + slot - shift);
+                    buffer.values[base + slot] = present
+                        ? buffer.values[base + slot - shift] : 0.0f;
+                    edf_bit_set(buffer.present, base + slot, present);
+                    edf_bit_set(buffer.valid, base + slot, valid);
+                }
+            }
+        }
     }
-    if (have_existing_records) initial_epoch_rebase_allowed_ = false;
+
+    if (have_existing_records) {
+        if (awaiting_file_records_) {
+            status_.session_start_epoch_ms = persisted_epoch;
+        }
+        initial_epoch_rebase_allowed_ = false;
+    }
+    awaiting_file_records_ = false;
 }
 
 EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
@@ -129,6 +166,23 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
         resolve_frame_timing(frame, frame_start_ms, timing);
     const int64_t effective_start_ms =
         have_timing ? timing.effective_start_ms : frame_start_ms;
+
+    if (awaiting_file_records_) {
+        const int64_t limit =
+            edf_floor_epoch_ms_to_second(declared_start_epoch_ms_) + AC_EDF_RECORD_MS;
+
+        for (size_t i = 0; i < frame.signal_count; ++i) {
+            const StreamSignalSpan &span = frame.signals[i];
+            const uint32_t interval = span.sample_interval_ms
+                ? span.sample_interval_ms : frame.interval_ms;
+
+            if (span.sample_count && effective_start_ms +
+                    static_cast<int64_t>(span.sample_count - 1) * interval >= limit) {
+                return EdfFramePrepareStatus::Deferred;
+            }
+        }
+    }
+
     maybe_rebase_initial_epoch(frame, effective_start_ms);
 
     struct TargetRecord {
@@ -247,6 +301,11 @@ EdfSa2IngestStatus EdfStreamAssembler::ingest_sa2_sample(
         return EdfSa2IngestStatus::Rejected;
     }
 
+    if (awaiting_file_records_ && sample.epoch_ms >=
+        edf_floor_epoch_ms_to_second(declared_start_epoch_ms_) + AC_EDF_RECORD_MS) {
+        return EdfSa2IngestStatus::Deferred;
+    }
+
     const uint64_t relative_ms = static_cast<uint64_t>(
         sample.epoch_ms - status_.session_start_epoch_ms);
     const uint64_t record_index = relative_ms / AC_EDF_RECORD_MS;
@@ -328,6 +387,7 @@ void EdfStreamAssembler::reset_session_counters() {
     status_.buffers_ready = buffers_ready;
     declared_start_epoch_ms_ = 0;
     initial_epoch_rebase_allowed_ = false;
+    awaiting_file_records_ = false;
     reset_timeline();
 }
 

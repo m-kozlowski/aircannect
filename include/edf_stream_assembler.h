@@ -74,8 +74,10 @@ public:
 
     void set_record_observer(EdfRecordObserver observer, void *context);
 
+    // Pending opens allow first-minute assembly, but no record advancement.
     bool start_session(const char *device_start_time,
-                       const As11ClockTransform &clock_transform);
+                       const As11ClockTransform &clock_transform,
+                       bool awaiting_file_records = false);
     void set_current_records(
         const uint32_t (&records)[AC_EDF_NUMERIC_SERIES_COUNT]);
     bool end_session();
@@ -178,6 +180,7 @@ private:
     int64_t timeline_next_frame_start_ms_ = 0;
     int64_t declared_start_epoch_ms_ = 0;
     bool initial_epoch_rebase_allowed_ = false;
+    bool awaiting_file_records_ = false;
     As11ClockTransform clock_transform_;
 
     EdfStreamAssemblerStatus status_;
