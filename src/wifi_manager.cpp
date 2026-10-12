@@ -992,6 +992,7 @@ void WifiManager::mark_ip_failed_for_current() {
 }
 
 void WifiManager::handle_associated_without_ip() {
+    const bool lost_ipv4 = sta_ipv4_online_;
     management_reachable_ = softap_running_;
     sta_ipv4_online_ = false;
     if (mode_state_ != WifiModeState::StaAssociated) {
@@ -999,8 +1000,9 @@ void WifiManager::handle_associated_without_ip() {
         ipv4_deadline_ms_ = millis() + AC_WIFI_IPV4_TIMEOUT_MS;
         char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
         format_bssid(bssid_text, sizeof(bssid_text), WiFi.BSSID());
-        Log::logf(CAT_WIFI, LOG_WARN,
-                  "STA associated without IPv4 SSID=%s BSSID=%s ch=%d rssi=%ld\n",
+        Log::logf(CAT_WIFI, lost_ipv4 ? LOG_WARN : LOG_DEBUG,
+                  "STA %s SSID=%s BSSID=%s ch=%d rssi=%ld\n",
+                  lost_ipv4 ? "lost IPv4" : "associated; waiting for IPv4",
                   sta_ssid_.c_str(), bssid_text, WiFi.channel(),
                   static_cast<long>(WiFi.RSSI()));
         return;
