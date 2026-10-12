@@ -889,20 +889,33 @@
       }));
     }
 
-    function reportTimeTickCount(graphW) {
-      return Math.max(3, Math.min(12, Math.round(graphW / 110)));
+    function reportTimeTicks(start, end, graphW) {
+      const rough = (end - start) / Math.max(2, Math.floor(graphW / 100));
+      const steps = [100, 200, 500, 1000, 2000, 5000, 10000, 15000, 30000,
+        60000, 120000, 300000, 600000, 900000, 1800000,
+        3600000, 7200000, 10800000, 21600000, 43200000, 86400000];
+      const step = steps.find((value) => value >= rough) || 86400000;
+      const offset = -new Date(start).getTimezoneOffset() * 60000;
+      const first = Math.ceil((start + offset) / step) * step - offset;
+      const ticks = [];
+
+      for (let time = first; time <= end; time += step) {
+        const label = step < 1000
+          ? fmtReportClock(time) + "." + String(new Date(time).getMilliseconds())
+            .padStart(3, "0")
+          : step < 60000 ? fmtReportClock(time) : fmtReportTime(time);
+        ticks.push({time, label});
+      }
+      return ticks;
     }
 
     // Vertical gridlines + time labels along the x-axis, shared by every chart
     // so they line up. Drawn before the data so traces/marks sit on top.
     function drawReportTimeAxis(svg, pad, graphW, graphH, height, start, end) {
-      const ticks = reportTimeTickCount(graphW);
-      const formatTime = (end - start) / ticks < 60000
-        ? fmtReportClock : fmtReportTime;
-      for (let i = 0; i <= ticks; i++) {
-        const frac = i / ticks;
+      for (const {time, label} of reportTimeTicks(start, end, graphW)) {
+        const frac = (time - start) / (end - start);
         const x = pad.left + graphW * frac;
-        const anchor = i === 0 ? "start" : i === ticks ? "end" : "middle";
+        const anchor = frac < 0.05 ? "start" : frac > 0.95 ? "end" : "middle";
         svg.appendChild(svgNode("line", {
           x1: x.toFixed(1),
           y1: String(pad.top),
@@ -912,7 +925,7 @@
           "stroke-width": "1",
           "stroke-dasharray": "2 5",
         }));
-        svg.appendChild(svgText(formatTime(start + (end - start) * frac),
+        svg.appendChild(svgText(label,
           x, height - 5, {"text-anchor": anchor}));
       }
     }
