@@ -17,6 +17,7 @@
 #include "memory_manager.h"
 #include "report_night_summary.h"
 #include "report_build_checkpoint.h"
+#include "report_night_histogram.h"
 #include "report_planner.h"
 
 namespace aircannect {
@@ -1542,6 +1543,15 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         night, &bundle->metadata_view);
     Memory::free(tracks);
     Memory::free(sessions);
+
+    if (bundle->metadata) {
+        bundle->histogram = ReportNightHistogramCodec::encode(
+            runtime_->metrics, bundle->metadata_view);
+    }
+    if (!bundle->histogram) {
+        failure_reason_ = "report_night_histogram_allocation_failed";
+        return false;
+    }
 
     const auto progress = ReportPlanner::capture_progress(
         runtime_->execution_plan ? *runtime_->execution_plan : *runtime_->plan,

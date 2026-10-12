@@ -6,6 +6,7 @@
 #include "little_endian.h"
 #include "large_object.h"
 #include "report_build_checkpoint.h"
+#include "report_night_histogram.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -558,6 +559,9 @@ ReportSignalStoreService::current_bytes() const {
         case Phase::SubmitCheckpoint:
         case Phase::WaitCheckpoint:
             return bundle_->checkpoint;
+        case Phase::SubmitHistogram:
+        case Phase::WaitHistogram:
+            return bundle_->histogram;
         default:
             return {};
     }
@@ -585,6 +589,10 @@ bool ReportSignalStoreService::current_path(
             return report_build_checkpoint_path(
                 bundle_->sleep_day, bundle_->generation,
                 bundle_->checkpoint_slot, path, path_size);
+        case Phase::SubmitHistogram:
+        case Phase::WaitHistogram:
+            return ReportNightHistogramCodec::path(
+                bundle_->metadata_view.night, path, path_size);
         default:
             return false;
     }
@@ -622,6 +630,9 @@ bool ReportSignalStoreService::submit_current() {
         case Phase::SubmitCheckpoint:
             phase_ = Phase::WaitCheckpoint;
             break;
+        case Phase::SubmitHistogram:
+            phase_ = Phase::WaitHistogram;
+            break;
         default:
             fail("report_signal_store_publish_phase_invalid");
             break;
@@ -657,6 +668,10 @@ bool ReportSignalStoreService::finish_current() {
             break;
         case Phase::WaitCheckpoint:
             bundle_->checkpoint.reset();
+            phase_ = bundle_->histogram ? Phase::SubmitHistogram : Phase::SubmitMetadata;
+            break;
+        case Phase::WaitHistogram:
+            bundle_->histogram.reset();
             phase_ = Phase::SubmitMetadata;
             break;
         case Phase::WaitMetadata:
@@ -699,10 +714,12 @@ bool ReportSignalStoreService::poll() {
             return finish_writes();
         case Phase::SubmitEvents:
         case Phase::SubmitCheckpoint:
+        case Phase::SubmitHistogram:
         case Phase::SubmitMetadata:
             return submit_current();
         case Phase::WaitEvents:
         case Phase::WaitCheckpoint:
+        case Phase::WaitHistogram:
         case Phase::WaitMetadata:
             return finish_current();
         case Phase::Idle:

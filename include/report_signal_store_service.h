@@ -137,6 +137,8 @@ private:
         WaitEvents,
         SubmitCheckpoint,
         WaitCheckpoint,
+        SubmitHistogram,
+        WaitHistogram,
         SubmitMetadata,
         WaitMetadata,
         Ready,

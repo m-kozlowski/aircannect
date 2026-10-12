@@ -230,6 +230,7 @@ public:
     ReportSignalStoreNightView metadata_view;
     std::shared_ptr<const LargeByteBuffer> events;
     std::shared_ptr<const LargeByteBuffer> checkpoint;
+    std::shared_ptr<const LargeByteBuffer> histogram;
     uint8_t checkpoint_slot = 0;
 
     size_t signal_count() const { return signal_count_; }
