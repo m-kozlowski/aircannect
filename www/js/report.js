@@ -2279,7 +2279,7 @@
         mean: reference.length ? reference.reduce((sum, v) => sum + v, 0) / reference.length : null};
     }
 
-    function drawReportTrend(svg, trend, metric, expanded) {
+    function drawReportTrend(svg, trend, metric, expanded, selectPoint) {
       svg.replaceChildren();
       const width = expanded ? Math.max(260, svg.clientWidth || 600) : 48;
       const height = expanded ? 150 : 22;
@@ -2293,7 +2293,8 @@
       const low = Math.min(...values), high = Math.max(...values);
       const padding = Math.max((high - low) * 0.12, metric.key === "duration" ? 1 : 0.01);
       const y = (v) => top + (high + padding - v) / (high - low + padding * 2) * (height - top - bottom);
-      const x = (i) => left + i / 13 * (width - left - right);
+      const last = Math.max(1, trend.points.length - 1);
+      const x = (i) => left + i / last * (width - left - right);
       let path = "", previous = false;
       trend.points.forEach((point, i) => {
         if (point.value === null) { previous = false; return; }
@@ -2311,9 +2312,9 @@
           x1: left, x2: width - right, y1: y(trend.mean), y2: y(trend.mean),
           stroke: "var(--muted)", "stroke-width": 1, "stroke-dasharray": "3 4",
         }));
-        [0, 6, 13].forEach((i) => svg.appendChild(svgText(
+        [0, Math.floor(last / 2), last].forEach((i) => svg.appendChild(svgText(
           trend.points[i].date.slice(5), x(i), height - 6,
-          {"text-anchor": i === 0 ? "start" : i === 13 ? "end" : "middle"})));
+          {"text-anchor": i === 0 ? "start" : i === last ? "end" : "middle"})));
       }
       trend.points.forEach((point, i) => {
         if (point.value === null) return;
@@ -2327,10 +2328,11 @@
       if (expanded) {
         const show = (event) => {
           const rect = svg.getBoundingClientRect();
-          const index = Math.max(0, Math.min(13, Math.round(
-            ((event.clientX - rect.left) * width / rect.width - left) / (width - left - right) * 13)));
+          const index = Math.max(0, Math.min(last, Math.round(
+            ((event.clientX - rect.left) * width / rect.width - left) / (width - left - right) * last)));
           const point = trend.points[index];
-          AirCANnect.ui.text("reportHistoryValue", point.date + " · " + formatReportMetric(metric, point.value) + " " + metric.unit);
+          if (selectPoint) selectPoint(point);
+          else AirCANnect.ui.text("reportHistoryValue", point.date + " · " + formatReportMetric(metric, point.value) + " " + metric.unit);
         };
         svg.onpointermove = show;
         svg.onpointerdown = show;
@@ -2368,14 +2370,16 @@
       return svg;
     }
 
-    function renderReportTiles(result, selected) {
+    function renderReportTiles(result, selected, period = false) {
       const container = document.getElementById("reportMetricTiles");
       if (!container) return;
       container.replaceChildren();
       reportMetricTiles.forEach((metric) => {
-        const value = reportMetricValue(metric, result, selected);
+        const value = period && metric.key === "duration"
+          ? result?.nights ? result.duration_min / result.nights : null
+          : reportMetricValue(metric, result, selected);
         const trend = reportTrend(metric, selected, value);
-        const button = document.createElement("button");
+        const button = document.createElement(period ? "div" : "button");
         button.type = "button";
         button.className = "report-metric";
         button.dataset.action = "report.metric";
@@ -2385,6 +2389,15 @@
         button.setAttribute("aria-controls", "reportMetricHistory");
         button.title = metric.label + "; previous 7 days: " + formatReportMetric(metric, trend.mean) +
           " " + metric.unit + " (" + trend.count + "/7 nights)";
+        if (period) {
+          delete button.dataset.action;
+          delete button.dataset.value;
+          button.removeAttribute("aria-expanded");
+          button.removeAttribute("aria-controls");
+          const coverage = metric.key === "duration" ? result?.nights
+            : metric.key === "ahi" ? result?.ahi_nights : result?.statistics?.[metric.key]?.nights;
+          button.title = (coverage || 0) + "/" + reportPeriodDays + " nights with data";
+        }
 
         button.innerHTML = '<span class="report-metric-label"></span><span class="report-metric-main">' +
           '<span class="report-metric-value"></span></span><span class="report-metric-footer">' +
@@ -2394,9 +2407,17 @@
         button.querySelector(".report-metric-unit").textContent = metric.unit;
         button.querySelector(".report-metric-delta").textContent = formatReportMetric(metric,
           value === null || trend.mean === null ? null : value - trend.mean, true);
+        if (period) {
+          button.querySelector(".report-metric-delta").textContent = "";
+          if (metric.key === "duration") {
+            button.querySelector(".report-metric-label").textContent = "Therapy time · avg/night";
+            button.querySelector(".report-metric-unit").textContent = result?.nights
+              ? fmtMinutes(Math.round(result.duration_min)) + " total" : "--";
+          }
+        }
 
         if (metric.key === "ahi") button.querySelector(".report-metric-main").appendChild(reportAhiPie(result));
-        else {
+        else if (!period) {
           const spark = svgNode("svg", {class: "report-spark", "aria-hidden": "true"});
           (metric.key === "duration" ? button.querySelector(".report-metric-unit") :
             button.querySelector(".report-metric-main")).appendChild(spark);
@@ -2404,7 +2425,7 @@
         }
         container.appendChild(button);
       });
-      renderReportHistory();
+      if (!period) renderReportHistory();
     }
 
     function renderReportHistory() {
@@ -2414,8 +2435,8 @@
         button.setAttribute("aria-expanded", String(button.dataset.value === reportHistoryMetric));
       });
       const metric = reportMetricTiles.find((item) => item.key === reportHistoryMetric);
-      panel.hidden = !metric;
-      if (!metric) return;
+      panel.hidden = !metric || reportViewMode === "period";
+      if (panel.hidden) return;
 
       const selected = selectedReportNight();
       const trend = reportTrend(metric, selected, reportMetricValue(metric, reportResult, selected));
@@ -2428,7 +2449,7 @@
       drawReportTrend(plot, trend, metric, true);
     }
 
-    function renderReportStatistics(result) {
+    function renderReportStatistics(result, period = false) {
       const body = document.getElementById("reportStatisticsBody");
       if (!body) return;
       body.replaceChildren();
@@ -2442,7 +2463,8 @@
         ["ie_ratio", "I:E", "", 0.01],
         ["spo2", "SpO2", "%", 1], ["pulse", "Pulse", "bpm", 1]];
       rows.forEach(([key, label, unit, scale]) => {
-        if ((key === "spo2" || key === "pulse") && !stats[key]) return;
+        if ((key === "spo2" || key === "pulse") &&
+            (!stats[key] || (period && !stats[key].nights))) return;
         const row = body.insertRow();
         const cell = row.insertCell();
         cell.textContent = label;
@@ -2455,6 +2477,7 @@
           row.insertCell().textContent = value === null ? "--"
             : (value * scale).toFixed(scale === 1000 ? 0 : 2) + (key === "ie_ratio" ? ":1" : "");
         });
+        if (period) row.insertCell().textContent = (stats[key]?.nights || 0) + "/" + reportPeriodDays;
       });
 
       const leak = result && result.leak_duration;
@@ -2516,7 +2539,165 @@
       AirCANnect.ui.text(valueId, visible ? value : "--");
     }
 
+    function reportDayOffset(day, offset) {
+      if (!/^\d{8}$/.test(day)) return "";
+      return new Date(Date.UTC(+day.slice(0, 4), +day.slice(4, 6) - 1,
+        +day.slice(6, 8) + offset)).toISOString().slice(0, 10).replace(/-/g, "");
+    }
+
+    function reportPeriodFirst() {
+      return reportDayOffset(reportPeriodEnd, 1 - reportPeriodDays);
+    }
+
+    function reportDayLabel(day) {
+      return day ? day.slice(0, 4) + "-" + day.slice(4, 6) + "-" + day.slice(6, 8) : "--";
+    }
+
+    function renderReportViewMode() {
+      const period = reportViewMode === "period";
+      for (const id of ["reportNightActions", "reportTherapySettings", "reportSessions", "reportCharts"]) {
+        const element = document.getElementById(id);
+        if (element) element.hidden = period;
+      }
+      for (const id of ["reportPeriodActions", "reportPeriodTrends", "reportPeriodNightsHeading"]) {
+        const element = document.getElementById(id);
+        if (element) element.hidden = !period;
+      }
+      document.querySelectorAll('[data-action="report.view"]').forEach((button) =>
+        button.setAttribute("aria-pressed", String(button.dataset.value === reportViewMode)));
+      AirCANnect.ui.text("reportSummaryCaption", period ? "Period summary" : "Night summary");
+      AirCANnect.ui.text("reportStatisticsScope", period ? "Full period" : "Full night");
+      if (period) {
+        const history = document.getElementById("reportMetricHistory");
+        if (history) history.hidden = true;
+        const oxygen = document.getElementById("reportSpo2Metric");
+        if (oxygen) oxygen.hidden = true;
+      }
+    }
+
+    function renderReportPeriod() {
+      if (!reportPeriodEnd) reportPeriodEnd = selectedReportNight()?.id || "";
+      const data = reportPeriodResult;
+      document.querySelectorAll('[data-action="report.period-days"]').forEach((button) =>
+        button.setAttribute("aria-pressed", String(Number(button.dataset.value) === reportPeriodDays)));
+      AirCANnect.ui.text("reportPeriodRange", reportDayLabel(reportPeriodFirst()) + " – " + reportDayLabel(reportPeriodEnd));
+      const next = document.getElementById("reportPeriodNext");
+      if (next) next.disabled = !reportPeriodEnd || reportPeriodEnd >= (reportNightsNewestFirst()[0]?.id || "");
+      AirCANnect.ui.text("reportPeriodCoverage", data ? data.nights + "/" + data.days + " nights with data" : "");
+
+      const result = data ? {...data, events_available: data.event_nights > 0,
+        ca_count: data.events[0], oa_count: data.events[1], ua_count: data.events[2],
+        hypopnea_count: data.events[3], arousal_count: data.events[4]} : null;
+      renderReportTiles(result, null, true);
+      renderReportStatistics(result, true);
+      renderReportEventCounts(result);
+      const events = document.getElementById("reportEventCounts");
+      if (events) events.title = (data?.event_nights || 0) + "/" + reportPeriodDays + " nights with event data";
+      AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) === null ? "--" : data.rdi.toFixed(2));
+      AirCANnect.ui.text("reportCsr", formatReportMetric(reportMetricTiles[0], reportNumber(data?.csr_minutes)));
+      renderReportPeriodCharts();
+    }
+
+    function renderReportPeriodCharts() {
+      const container = document.getElementById("reportPeriodCharts");
+      if (!container || reportViewMode !== "period") return;
+      container.replaceChildren();
+      AirCANnect.ui.text("reportPeriodReadout", "");
+      const daily = reportPeriodResult?.nights_daily || [];
+      if (!daily.length) return;
+      reportMetricTiles.slice(0, 4).forEach((metric, index) => {
+        const section = document.createElement("div");
+        section.className = "report-period-chart";
+        const heading = document.createElement("h4");
+        heading.textContent = metric.label + (metric.unit ? " · " + metric.unit : "");
+        section.appendChild(heading);
+        const svg = svgNode("svg", {role: "img", "aria-label": metric.label + " by night"});
+        section.appendChild(svg);
+        container.appendChild(section);
+        const points = daily.map((night) => ({id: night.id, date: reportDayLabel(night.id),
+          value: reportNumber(index === 0 ? night.duration_min : night.means[index - 1])}));
+        drawReportTrend(svg, {points, mean: null}, metric, true, (point) => {
+          const readout = document.getElementById("reportPeriodReadout");
+          if (!readout) return;
+          readout.replaceChildren(document.createTextNode(point.date + " · " + metric.label + ": " +
+            formatReportMetric(metric, point.value) + " " + metric.unit));
+          if (point.value === null) return;
+          const button = document.createElement("button");
+          button.className = "btn";
+          button.textContent = "Open night";
+          button.dataset.action = "report.period-night";
+          button.dataset.value = point.id;
+          readout.appendChild(button);
+        });
+      });
+    }
+
+    function cancelReportPeriodRequest() {
+      if (reportPeriodController) reportPeriodController.abort();
+      reportPeriodController = null;
+      reportPeriodReload = false;
+      reportPeriodWaiting = false;
+    }
+
+    async function loadReportPeriod() {
+      if (reportViewMode !== "period") return;
+      if (reportPeriodController) { reportPeriodReload = true; return; }
+      if (!reportPeriodEnd) reportPeriodEnd = selectedReportNight()?.id || "";
+      if (!reportPeriodEnd) return;
+
+      const controller = new AbortController();
+      reportPeriodController = controller;
+      const current = () => reportPeriodController === controller && !controller.signal.aborted;
+      const key = "period:v1:" + reportPeriodEnd + ":" + reportPeriodDays;
+      const url = "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays;
+      let saved = null;
+      AirCANnect.ui.message("reportMsg", "Loading period...", true, true);
+      try {
+        saved = (await readReportCache([key])).get(key);
+        if (!current()) return;
+        const response = await AirCANnect.http.request(url, conditionalRequestOptions(saved, controller.signal));
+        if (!current()) return;
+        if (response.status === 202) {
+          reportPeriodWaiting = true;
+          AirCANnect.ui.message("reportMsg", "Preparing period...", true, true);
+          return;
+        }
+        if (response.status !== 200 && !(response.status === 304 && saved)) {
+          const text = await response.text();
+          throw new Error(text || "Period unavailable");
+        }
+        const body = response.status === 304 ? saved.body : await response.json();
+        if (!current()) return;
+        reportPeriodResult = body;
+        reportPeriodWaiting = false;
+        if (response.status === 200) void writeReportCache([{key, value: {
+          body, etag: response.headers.get("ETag") || "",
+        }, bytes: JSON.stringify(body).length * 2}]);
+        renderReportSummary();
+        const notes = [];
+        if (body.active_nights) notes.push(body.active_nights + " recording night(s) excluded");
+        if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) awaiting update");
+        if (body.checkpoint_missing) notes.push(body.checkpoint_missing + " night(s) without saved distributions");
+        AirCANnect.ui.message("reportMsg", notes.join("; ") || "Period loaded", true, !!notes.length);
+      } catch (error) {
+        if (!current()) return;
+        reportPeriodWaiting = false;
+        if (saved) { reportPeriodResult = saved.body; renderReportSummary(); }
+        AirCANnect.ui.message("reportMsg", (saved ? "Browser copy; freshness not verified. " : "") + error.message, false, true);
+      } finally {
+        if (current()) {
+          reportPeriodController = null;
+          if (reportPeriodReload) { reportPeriodReload = false; loadReportPeriod(); }
+        }
+      }
+    }
+
     function renderReportSummary() {
+      renderReportViewMode();
+      if (reportViewMode === "period") {
+        renderReportPeriod();
+        return;
+      }
       const nights = reportNightsNewestFirst();
       const selected = selectedReportNight();
 
@@ -2601,6 +2782,7 @@
     }
 
     function cancelReportRequests(preserveRange = false) {
+      cancelReportPeriodRequest();
       reportFinishDrag(true, false);
       cancelReportLoadRequest();
       cancelReportRangeRequest();
@@ -3987,6 +4169,7 @@
     }
 
     async function loadSelectedReportNight(preserveView = false) {
+      if (reportViewMode === "period") return loadReportPeriod();
       cancelReportLoadRequest();
       const night = selectedReportNight();
       if (!night) {
@@ -4187,6 +4370,19 @@
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
       reportHandledCompletionKey = completionKey;
+      if (data.kind === "period") {
+        if (AirCANnect.pages.isActive("report") && reportViewMode === "period" &&
+            data.night === reportPeriodEnd && Number(data.days) === reportPeriodDays) {
+          if (data.success) loadReportPeriod();
+          else {
+            cancelReportPeriodRequest();
+            AirCANnect.ui.message("reportMsg", data.error || "Period unavailable", false, true);
+          }
+        } else if (reportPeriodWaiting && AirCANnect.pages.isActive("report") && reportViewMode === "period") {
+          loadReportPeriod();
+        }
+        return;
+      }
       if (data.kind !== "night" || !data.night) return;
 
       const nightId = String(data.night);
@@ -4219,6 +4415,11 @@
       const reload = active && (current ||
         (!reportResult && nightId === selectedNightId));
       invalidateReportNightCache(nightId, !!data.forced);
+      if (active && reportViewMode === "period") {
+        if (reportPeriodWaiting || (nightId >= reportPeriodFirst() && nightId <= reportPeriodEnd)) loadReportPeriod();
+        loadReportSummary(false);
+        return;
+      }
       if (current) cancelReportRequests(!data.forced);
       if (reload) loadSelectedReportNight(current && !!reportResult);
       if (active) {
@@ -4231,6 +4432,41 @@
     }
 
     AirCANnect.events.subscribe("report", handleReportCompletion);
+    AirCANnect.actions.register("report.view", (_event, element) => {
+      const mode = element.dataset.value;
+      if (mode === reportViewMode || !["night", "period"].includes(mode)) return;
+      cancelReportRequests();
+      reportViewMode = mode;
+      reportPeriodEnd = selectedReportNight()?.id || reportPeriodEnd;
+      if (reportPeriodResult?.end !== reportPeriodEnd) reportPeriodResult = null;
+      renderReportSummary();
+      loadSelectedReportNight();
+    });
+    AirCANnect.actions.register("report.period-days", (_event, element) => {
+      const days = Number(element.dataset.value);
+      if (![7, 30, 90, 180, 365].includes(days) || days === reportPeriodDays) return;
+      cancelReportPeriodRequest();
+      reportPeriodDays = days;
+      reportPeriodResult = null;
+      renderReportSummary();
+      loadReportPeriod();
+    });
+    AirCANnect.actions.register("report.period-step", (_event, element) => {
+      const step = Number(element.dataset.value);
+      if (step !== -1 && step !== 1) return;
+      cancelReportPeriodRequest();
+      const end = reportDayOffset(reportPeriodEnd, step * reportPeriodDays);
+      const latest = reportNightsNewestFirst()[0]?.id;
+      reportPeriodEnd = latest && end > latest ? latest : end;
+      reportPeriodResult = null;
+      renderReportSummary();
+      loadReportPeriod();
+    });
+    AirCANnect.actions.register("report.period-night", (_event, element) => {
+      cancelReportRequests();
+      reportViewMode = "night";
+      pickReportNight(element.dataset.value);
+    });
     AirCANnect.actions.register("report.metric", (_event, element) => {
       const key = element.dataset.value;
       if (!reportMetricTiles.some((metric) => metric.key === key)) return;
@@ -4275,8 +4511,16 @@
     AirCANnect.pages.onLeave("report", () => cancelReportRequests());
     window.addEventListener("resize", () => scheduleReportDraw());
     window.addEventListener("resize", renderReportHistory);
+    window.addEventListener("resize", renderReportPeriodCharts);
 
     let reportSummary = null;
+    let reportViewMode = "night";
+    let reportPeriodDays = 30;
+    let reportPeriodEnd = "";
+    let reportPeriodResult = null;
+    let reportPeriodController = null;
+    let reportPeriodReload = false;
+    let reportPeriodWaiting = false;
     let reportPollTimer = null;
     let reportLoadToken = 0;
     let reportLoadAbortController = null;

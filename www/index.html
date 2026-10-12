@@ -340,8 +340,13 @@
 
         <section class="pane" id="p-report">
           <div class="report-overview">
-            <h3>Therapy Report</h3>
-            <div class="report-actions">
+            <div class="report-view-heading"><h3>Therapy Report</h3>
+              <div class="report-segment" role="group" aria-label="Report view">
+                <button type="button" data-action="report.view" data-value="night" aria-pressed="true">Night</button>
+                <button type="button" data-action="report.view" data-value="period" aria-pressed="false">Period</button>
+              </div>
+            </div>
+            <div class="report-actions" id="reportNightActions">
               <div class="night-picker">
                 <button class="btn np-arrow" id="reportPrevNight"
                         title="Older night" data-action="report.step-night" data-value="1">&larr;</button>
@@ -373,7 +378,22 @@
                 Charts
               </button>
             </div>
-            <div class="report-summary-caption"><span>Night summary</span></div>
+            <div class="report-actions" id="reportPeriodActions" hidden>
+              <div class="report-segment" role="group" aria-label="Period length">
+                <button type="button" data-action="report.period-days" data-value="7" aria-pressed="false">7 d</button>
+                <button type="button" data-action="report.period-days" data-value="30" aria-pressed="true">30 d</button>
+                <button type="button" data-action="report.period-days" data-value="90" aria-pressed="false">90 d</button>
+                <button type="button" data-action="report.period-days" data-value="180" aria-pressed="false">180 d</button>
+                <button type="button" data-action="report.period-days" data-value="365" aria-pressed="false">365 d</button>
+              </div>
+              <div class="report-period-navigation">
+                <button type="button" class="btn np-arrow" data-action="report.period-step" data-value="-1" title="Previous period" aria-label="Previous period">&larr;</button>
+                <span id="reportPeriodRange">--</span>
+                <button type="button" class="btn np-arrow" id="reportPeriodNext" data-action="report.period-step" data-value="1" title="Next period" aria-label="Next period">&rarr;</button>
+              </div>
+              <span id="reportPeriodCoverage"></span>
+            </div>
+            <div class="report-summary-caption" id="reportSummaryCaption"><span>Night summary</span></div>
             <div class="report-metrics" id="reportMetricTiles"></div>
             <div class="report-event-strip"><span>Events</span>
               <div class="report-events" id="reportEventCounts"></div></div>
@@ -385,7 +405,7 @@
               <svg id="reportHistoryPlot" role="img" aria-label="Nightly history"></svg>
             </div>
             <details class="report-details" id="reportStatistics">
-              <summary>Statistics <span>Full night</span></summary>
+              <summary>Statistics <span id="reportStatisticsScope">Full night</span></summary>
               <div class="report-stat-strip">
                 <span>RDI <b id="reportRdi">--</b> /h</span>
                 <span>CSR <b id="reportCsr">--</b></span>
@@ -393,7 +413,7 @@
                 <span id="reportSpo2Metric" hidden>SpO2 P50 / &lt; Thr <b id="reportSpo2Summary">--</b></span>
               </div>
               <div class="report-table-wrap"><table class="report-stat-table">
-                <thead><tr><th>Signal</th><th>Min</th><th>Mean</th><th>Median</th><th>P95</th><th>Max</th></tr></thead>
+                <thead><tr><th>Signal</th><th>Min</th><th>Mean</th><th>Median</th><th>P95</th><th>Max</th><th id="reportPeriodNightsHeading" hidden>Nights</th></tr></thead>
                 <tbody id="reportStatisticsBody"></tbody>
               </table></div>
             </details>
@@ -405,6 +425,11 @@
             <div class="report-sessions" id="reportSessions"></div>
           </div>
           <div id="reportCharts" class="report-charts"></div>
+          <details class="report-details" id="reportPeriodTrends" hidden open>
+            <summary>Daily trends</summary>
+            <div id="reportPeriodCharts"></div>
+            <div id="reportPeriodReadout" aria-live="polite"></div>
+          </details>
         </section>
 
         <section class="pane" id="p-edf">
