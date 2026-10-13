@@ -7,6 +7,11 @@
 #include "little_endian.h"
 #include "report_signal_store.h"
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#include "memory_manager.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -140,6 +145,14 @@ std::shared_ptr<const LargeByteBuffer> ReportBuildCheckpointCodec::encode(
     std::unique_ptr<LargeByteBuffer> output =
         LargeByteBuffer::allocate(total);
     if (!output) {
+#ifdef ARDUINO
+        const auto memory = Memory::status(true);
+        Log::logf(CAT_REPORT, LOG_ERROR,
+                  "checkpoint allocation failed bytes=%u psram_free=%u max_alloc=%u\n",
+                  static_cast<unsigned>(total),
+                  static_cast<unsigned>(memory.psram_free),
+                  static_cast<unsigned>(memory.psram_max_alloc));
+#endif
         if (error) *error = "report_checkpoint_allocation_failed";
         return {};
     }

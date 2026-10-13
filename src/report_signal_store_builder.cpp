@@ -78,6 +78,8 @@ struct TrackWork {
     int newest_slot = -1;
     int append_slot = 0;
     bool file_exists = false;
+    size_t first_changed_slot = REPORT_SIGNAL_STORE_MAX_BLOCKS;
+    size_t changed_end_slot = 0;
     bool recount_samples = false;
     int64_t last_accepted_ms = -1;
     size_t last_slot = 0;
@@ -179,7 +181,7 @@ struct ReportSignalStoreBuilder::Runtime {
     size_t writing_count = 0;
     bool completed_blocks_pending = false;
     size_t buffered_raw_bytes = 0;
-    bool flushing_partial = false;
+    FlushMode flush_mode = FlushMode::FullBatches;
 
     void release_track_blocks(TrackWork &track) {
         for (size_t slot = 0;
@@ -232,7 +234,7 @@ struct ReportSignalStoreBuilder::Runtime {
         writing_count = 0;
         completed_blocks_pending = false;
         buffered_raw_bytes = 0;
-        flushing_partial = false;
+        flush_mode = FlushMode::FullBatches;
     }
 
     bool reserve_events(size_t required) {
@@ -978,15 +980,15 @@ bool ReportSignalStoreBuilder::accept_series_span(
 }
 
 
-bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
-                                             bool *progressed) {
+bool ReportSignalStoreBuilder::flush_blocks(FlushMode mode, bool *progressed) {
     if (!runtime_ || failure_reason_) return false;
     if (!store_) {
         failure_reason_ = "report_signal_store_writer_unavailable";
         return false;
     }
 
-    if (!include_partial && !runtime_->completed_blocks_pending &&
+    const bool include_partial = mode == FlushMode::AllBlocks;
+    if (mode == FlushMode::FullBatches && !runtime_->completed_blocks_pending &&
         runtime_->writing_track == SIZE_MAX) return true;
 
     if (runtime_->writing_track != SIZE_MAX) {
@@ -999,6 +1001,11 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
         }
 
         TrackWork &work = runtime_->tracks[runtime_->writing_track];
+        work.first_changed_slot = std::min(work.first_changed_slot,
+                                           runtime_->writing_slot);
+        work.changed_end_slot = std::max(work.changed_end_slot,
+            runtime_->writing_slot + runtime_->writing_count);
+
         for (size_t i = 0; i < runtime_->writing_count; ++i) {
             const size_t slot = runtime_->writing_slot + i;
             work.raw_blocks[slot].reset();
@@ -1052,7 +1059,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
                     }
                 }
 
-                if (!include_partial && block_count < batch_limit &&
+                if (mode == FlushMode::FullBatches && block_count < batch_limit &&
                     slot + block_count >= static_cast<size_t>(work.newest_slot)) {
                     // Batch by bytes: slow signals need not close a file
                     // after only a few kilobytes. Gaps still end a batch.
@@ -1094,15 +1101,24 @@ bool ReportSignalStoreBuilder::ready(bool *progressed) {
     if (progressed) *progressed = false;
     if (!runtime_) return false;
 
-    // Finish draining a pressure-triggered batch before accepting more input.
-    // Otherwise freeing the first track drops below the threshold, leaving
-    // other tracks pinned while that same first track is rewritten repeatedly.
-    runtime_->flushing_partial |= runtime_->buffered_raw_bytes >
-        Memory::buffer_budget(RAW_BUFFER_BUDGET, 192 * 1024);
+    const size_t budget = Memory::buffer_budget(RAW_BUFFER_BUDGET, 192 * 1024);
+    if (runtime_->flush_mode == FlushMode::FullBatches &&
+        runtime_->buffered_raw_bytes > budget) {
+        runtime_->flush_mode = FlushMode::ClosedBlocks;
+    }
 
-    if (!flush_blocks(runtime_->flushing_partial, progressed)) return false;
+    if (!flush_blocks(runtime_->flush_mode, progressed)) return false;
 
-    runtime_->flushing_partial = false;
+    // Pressure allows smaller batches first. Spill open blocks only if the
+    // closed blocks did not release enough memory for continued decoding.
+    if (runtime_->flush_mode == FlushMode::ClosedBlocks &&
+        runtime_->buffered_raw_bytes > budget) {
+        runtime_->flush_mode = FlushMode::AllBlocks;
+        if (progressed) *progressed = true;
+        return false;
+    }
+
+    runtime_->flush_mode = FlushMode::FullBatches;
     return true;
 }
 
@@ -1204,7 +1220,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
 
     if (progressed) *progressed = false;
 
-    if (!flush_blocks(true, progressed)) return false;
+    if (!flush_blocks(FlushMode::AllBlocks, progressed)) return false;
 
     if (runtime_->event_count > 1) {
         std::sort(runtime_->events,
@@ -1292,6 +1308,11 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         TrackWork &work = runtime_->tracks[i];
         ReportSignalStoreFilePayload &payload = bundle->signals_[i];
         payload.track = work.track;
+        if (work.changed_end_slot > work.first_changed_slot) {
+            payload.first_changed_slot = work.first_changed_slot;
+            payload.changed_block_count =
+                work.changed_end_slot - work.first_changed_slot;
+        }
         runtime_->release_track_blocks(work);
     }
 
@@ -1469,6 +1490,9 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     checkpoint.metrics_size = metrics->size();
     checkpoint.events = bundle->events->data();
     checkpoint.events_size = bundle->events->size();
+
+    // The bundle and snapshots now own every checkpoint input.
+    runtime_->clear_work();
     bundle->checkpoint = ReportBuildCheckpointCodec::encode(
         checkpoint, &failure_reason_);
     if (!bundle->checkpoint) {
@@ -1476,7 +1500,6 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     }
 
     runtime_->completed = std::move(bundle);
-    runtime_->clear_work();
     failure_reason_ = nullptr;
     return true;
 }

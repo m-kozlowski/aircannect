@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "report_signal_store.h"
-#include "report_signal_tile_writer.h"
+#include "report_signal_tile_backfill.h"
 #include "storage_atomic_write_port.h"
 #include "storage_range_write_port.h"
 #include "storage_read_port.h"
@@ -144,6 +144,7 @@ private:
     bool current_path(char *path, size_t path_size) const;
     bool submit_current();
     bool finish_current();
+    void prepare_tiles();
 
     // Operation lifetime
     void fail(const char *error);
@@ -175,12 +176,12 @@ private:
     size_t read_offset_ = 0;
     uint8_t read_low_byte_ = 0;
     OperationTicket range_ticket_;
-    ReportSignalTileWriter tile_writer_;
 
     // Events and metadata publication
     std::shared_ptr<ReportSignalStoreBundle> bundle_;
     ReportSignalStoreMetadata published_metadata_;
     OperationTicket write_ticket_;
+    ReportSignalTileBackfill tile_backfill_;
 
     // Operation lifetime
     uint32_t operation_generation_ = 0;

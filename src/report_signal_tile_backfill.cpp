@@ -30,6 +30,18 @@ bool ReportSignalTileBackfill::start(
     return true;
 }
 
+bool ReportSignalTileBackfill::start(
+    std::shared_ptr<const ReportSignalStoreBundle> build,
+    uint32_t generation, StorageAtomicWriteLane lane) {
+    if (!build || !start({build->metadata, build->metadata_view}, generation)) {
+        return false;
+    }
+
+    build_ = std::move(build);
+    lane_ = lane;
+    return true;
+}
+
 void ReportSignalTileBackfill::remember_error(const char *error) {
     if (error_[0] || !error || !error[0]) return;
 
@@ -64,10 +76,18 @@ bool ReportSignalTileBackfill::start_next_level() {
             continue;
         }
 
-        if (level_index_ == 0 && !night_.track(track_index_, track_)) {
-            ++track_index_;
-            level_index_ = 0;
-            continue;
+        const auto *changed = build_ ? build_->signal(track_index_) : nullptr;
+        if (level_index_ == 0) {
+            if (build_) {
+                if (!changed || !changed->changed_block_count) {
+                    ++track_index_;
+                    continue;
+                }
+                track_ = changed->track;
+            } else if (!night_.track(track_index_, track_)) {
+                ++track_index_;
+                continue;
+            }
         }
 
         const ReportSignalStoreLevel level = levels[level_index_++];
@@ -76,14 +96,16 @@ bool ReportSignalTileBackfill::start_next_level() {
         }
 
         StorageRangeWriteCommand memory;
-        writer_.start(track_, level, 0, track_.block_slot_count,
-                      std::move(memory), 0, generation_,
-                      StorageAtomicWriteLane::Maintenance);
+        writer_.start(track_, level,
+                      changed ? changed->first_changed_slot : 0,
+                      changed ? changed->changed_block_count : track_.block_slot_count,
+                      std::move(memory), 0, generation_, lane_, build_ != nullptr);
         if (!writer_.active() && !writer_.succeeded()) {
             succeeded_ = false;
             remember_error(writer_.error());
             active_ = false;
             metadata_.reset();
+            build_.reset();
             return true;
         }
         return true;
@@ -91,6 +113,7 @@ bool ReportSignalTileBackfill::start_next_level() {
 
     active_ = false;
     metadata_.reset();
+    build_.reset();
     return true;
 }
 
@@ -105,6 +128,7 @@ bool ReportSignalTileBackfill::poll() {
             remember_error(writer_.error());
             active_ = false;
             metadata_.reset();
+            build_.reset();
         }
         return true;
     }
@@ -115,11 +139,13 @@ bool ReportSignalTileBackfill::poll() {
 void ReportSignalTileBackfill::reset() {
     writer_.reset();
     metadata_.reset();
+    build_.reset();
     night_ = {};
     track_ = {};
     track_index_ = 0;
     level_index_ = 0;
     generation_ = 0;
+    lane_ = StorageAtomicWriteLane::Maintenance;
     active_ = false;
     succeeded_ = true;
     error_[0] = '\0';

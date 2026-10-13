@@ -47,7 +47,7 @@ void ReportSignalStoreService::begin(
     read_port_ = &read_port;
     range_write_port_ = &range_write_port;
     write_port_ = &write_port;
-    tile_writer_.begin(read_port, range_write_port);
+    tile_backfill_.begin(read_port, range_write_port);
 }
 
 void ReportSignalStoreService::begin(StorageAtomicWritePort &write_port) {
@@ -424,15 +424,7 @@ bool ReportSignalStoreService::finish_range() {
     if (phase_ == Phase::WaitHeader) {
         phase_ = Phase::EncodeBlock;
     } else {
-        StorageRangeWriteCommand memory;
-        memory.bytes = block_bytes_;
-        memory.buffers = block_buffers_;
-        const size_t prefix = range_.offset == 0
-            ? ReportSignalStoreFileCodec::HeaderBytes : 0;
-
-        tile_writer_.start(track_, level_, slot_, block_count_,
-            std::move(memory), prefix, operation_generation_, lane_);
-        phase_ = Phase::PrepareTiles;
+        advance_level();
     }
     block_bytes_.reset();
     block_buffers_.reset();
@@ -610,17 +602,18 @@ bool ReportSignalStoreService::finish_current() {
     switch (phase_) {
         case Phase::WaitEvents:
             bundle_->release_events();
-            phase_ = bundle_->checkpoint ? Phase::SubmitCheckpoint
-                                         : Phase::SubmitMetadata;
+            if (bundle_->checkpoint) phase_ = Phase::SubmitCheckpoint;
+            else prepare_tiles();
             status_.state = ReportSignalStoreState::PublishingMetadata;
             break;
         case Phase::WaitCheckpoint:
             bundle_->checkpoint.reset();
-            phase_ = bundle_->histogram ? Phase::SubmitHistogram : Phase::SubmitMetadata;
+            if (bundle_->histogram) phase_ = Phase::SubmitHistogram;
+            else prepare_tiles();
             break;
         case Phase::WaitHistogram:
             bundle_->histogram.reset();
-            phase_ = Phase::SubmitMetadata;
+            prepare_tiles();
             break;
         case Phase::WaitMetadata:
             published_metadata_ = {bundle_->metadata, bundle_->metadata_view};
@@ -633,6 +626,14 @@ bool ReportSignalStoreService::finish_current() {
             break;
     }
     return true;
+}
+
+void ReportSignalStoreService::prepare_tiles() {
+    // Compression is optional, but the post-therapy build includes it. Release
+    // checkpoint/histogram buffers first and read each changed tile only once.
+    phase_ = read_port_ && range_write_port_ &&
+        tile_backfill_.start(bundle_, operation_generation_, lane_)
+            ? Phase::PrepareTiles : Phase::SubmitMetadata;
 }
 
 bool ReportSignalStoreService::poll() {
@@ -653,8 +654,8 @@ bool ReportSignalStoreService::poll() {
         case Phase::WaitBlock:
             return finish_range();
         case Phase::PrepareTiles: {
-            const bool worked = tile_writer_.poll();
-            if (!tile_writer_.active()) advance_level();
+            const bool worked = tile_backfill_.poll();
+            if (!tile_backfill_.active()) phase_ = Phase::SubmitMetadata;
             return worked;
         }
         case Phase::SubmitFinish:
@@ -702,7 +703,7 @@ void ReportSignalStoreService::cancel() {
 }
 
 void ReportSignalStoreService::release_io() {
-    tile_writer_.reset();
+    tile_backfill_.reset();
 
     if (read_ticket_.valid() && read_port_) {
         (void)read_port_->abandon(read_ticket_);

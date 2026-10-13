@@ -77,6 +77,8 @@ struct ReportSignalStoreTrack {
 
 struct ReportSignalStoreFilePayload {
     ReportSignalStoreTrack track;
+    uint16_t first_changed_slot = 0;
+    uint16_t changed_block_count = 0;
 
     bool valid() const;
 };
