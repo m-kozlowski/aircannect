@@ -129,6 +129,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  storage pwd               show the current directory");
         out.println("  storage ls [PATH]         list a directory");
         out.println("  storage cd PATH           change the current directory");
+        out.println("  storage mkdir PATH        create a directory");
         out.println("  storage rm PATH           remove a file or directory");
         out.println("  storage rename PATH NAME  rename within its directory");
         return;

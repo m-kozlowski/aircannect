@@ -402,16 +402,17 @@ void StorageConsoleCommands::execute_storage(
         out.println("[STORAGE] usage: storage ls [PATH]");
         return;
     }
-    if (command == "cd" && (!has_first || has_second)) {
-        out.println("[STORAGE] usage: storage cd PATH");
+    if ((command == "cd" || command == "mkdir") &&
+        (!has_first || has_second)) {
+        out.printf("[STORAGE] usage: storage %s PATH\n", command.c_str());
         return;
     }
-    if (command != "ls" && command != "cd" && command != "rm" &&
+    if (command != "ls" && command != "cd" && command != "mkdir" && command != "rm" &&
         command != "rename") {
         print_unknown_command(
             out, "STORAGE",
             "storage status, mount, usb [status|on|off], pwd, ls [PATH], cd PATH, "
-            "rm PATH, rename PATH NEW_NAME");
+            "mkdir PATH, rm PATH, rename PATH NEW_NAME");
         return;
     }
 
@@ -450,7 +451,8 @@ void StorageConsoleCommands::execute_storage(
         return;
     }
 
-    if (command == "cd" && has_first && !has_second) {
+    if ((command == "cd" || command == "mkdir") && has_first && !has_second) {
+        const bool create = command == "mkdir";
         char path[AC_STORAGE_PATH_MAX] = {};
         if (!storage_resolve_user_path(
                 state.cwd, first.c_str(), path, sizeof(path))) {
@@ -460,7 +462,8 @@ void StorageConsoleCommands::execute_storage(
 
         const StorageAdmissionResult admission =
             StorageService::storage_request_admission(
-                StorageAdmissionKind::BrowserRead);
+                create ? StorageAdmissionKind::PathMutation
+                       : StorageAdmissionKind::BrowserRead);
         if (admission != StorageAdmissionResult::Accepted) {
             out.println(admission == StorageAdmissionResult::Unavailable
                 ? "[STORAGE] storage unavailable"
@@ -472,16 +475,18 @@ void StorageConsoleCommands::execute_storage(
         if (!state.storage_generation) state.storage_generation++;
 
         StoragePathCommand request;
-        request.operation = StoragePathOperation::Stat;
+        request.operation = create ? StoragePathOperation::EnsureDirectory
+                                   : StoragePathOperation::Stat;
         request.source = path;
         request.generation = state.storage_generation;
         const OperationSubmission submission = storage_path_.request(request);
         if (!submission.accepted()) {
-            out.println("[STORAGE] path lookup rejected");
+            out.println("[STORAGE] path operation rejected");
             return;
         }
 
-        state.storage_operation = StorageOperation::ChangeDirectory;
+        state.storage_operation = create ? StorageOperation::CreateDirectory
+                                         : StorageOperation::ChangeDirectory;
         state.storage_ticket = submission.ticket;
         copy_cstr(state.operation_path, sizeof(state.operation_path), path);
         return;
@@ -674,6 +679,14 @@ void StorageConsoleCommands::poll_storage(
             out.println(completion.error[0]
                 ? completion.error
                 : completion.exists ? "not_directory" : "not_found");
+        }
+    } else if (state.storage_operation == StorageOperation::CreateDirectory) {
+        if (completion.outcome.disposition == OperationDisposition::Succeeded) {
+            out.print("[STORAGE] directory ready: ");
+            out.println(state.operation_path);
+        } else {
+            out.print("[STORAGE] mkdir failed: ");
+            out.println(completion.error[0] ? completion.error : "error");
         }
     } else if (state.storage_operation == StorageOperation::Rename) {
         if (completion.outcome.disposition ==

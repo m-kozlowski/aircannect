@@ -267,6 +267,7 @@ private:
         None,
         List,
         ChangeDirectory,
+        CreateDirectory,
         Rename,
         Delete,
     };
