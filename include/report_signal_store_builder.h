@@ -49,7 +49,6 @@ public:
     const char *failure_reason() const override { return failure_reason_; }
 
 private:
-    enum class FlushMode { FullBatches, ClosedBlocks, AllBlocks };
     struct Runtime;
     bool accept_prepared_sample(uint16_t session_index,
                                 const ReportSeriesDescriptor &series,
@@ -64,7 +63,7 @@ private:
                         const EdfReportSeriesSpan &span,
                         size_t begin,
                         size_t end);
-    bool flush_blocks(FlushMode mode, bool *progressed);
+    bool flush_blocks(bool include_partial, bool *progressed);
     Runtime *runtime_ = nullptr;
     ReportSignalStoreService *store_ = nullptr;
     const char *failure_reason_ = nullptr;

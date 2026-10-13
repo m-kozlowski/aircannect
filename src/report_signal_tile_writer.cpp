@@ -18,8 +18,7 @@ void ReportSignalTileWriter::begin(StorageReadPort &read,
 void ReportSignalTileWriter::start(
     const ReportSignalStoreTrack &track, ReportSignalStoreLevel level,
     size_t first_slot, size_t block_count, StorageRangeWriteCommand memory,
-    size_t memory_prefix, uint32_t generation, StorageAtomicWriteLane lane,
-    bool refresh) {
+    size_t memory_prefix, uint32_t generation, StorageAtomicWriteLane lane) {
     reset();
     track_ = track;
     level_ = level;
@@ -29,7 +28,6 @@ void ReportSignalTileWriter::start(
     memory_prefix_ = memory_prefix;
     generation_ = generation;
     lane_ = lane;
-    refresh_ = refresh;
 
     const bool metadata_valid = read_ && write_ && block_count && generation;
     const bool range_valid = metadata_valid &&
@@ -88,8 +86,7 @@ bool ReportSignalTileWriter::poll() {
             return true;
         }
         // A later batch owns a tile that still has unwritten blocks.
-        const bool memory = memory_.bytes || memory_.buffers;
-        for (size_t s = end_slot_; memory && s < tile_.first_slot + tile_.block_count; ++s) {
+        for (size_t s = end_slot_; s < tile_.first_slot + tile_.block_count; ++s) {
             if (track_.present_blocks[s / 8] & (1u << (s % 8))) {
                 advance();
                 return true;
@@ -100,6 +97,7 @@ bool ReportSignalTileWriter::poll() {
             return true;
         }
 
+        const bool memory = memory_.bytes || memory_.buffers;
         from_memory_ = memory && tile_.range.offset >= memory_range_.offset &&
             tile_.range.offset + tile_.range.length <=
                 memory_range_.offset + memory_range_.length;
@@ -142,7 +140,7 @@ bool ReportSignalTileWriter::poll() {
             phase_ = Phase::Copy;
         } else {
             // Existing reports are inspected only by background preparation.
-            phase_ = memory || refresh_ ? Phase::Read : Phase::Check;
+            phase_ = memory ? Phase::Read : Phase::Check;
         }
         return true;
     }

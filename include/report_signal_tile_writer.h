@@ -15,8 +15,7 @@ public:
     void start(const ReportSignalStoreTrack &track, ReportSignalStoreLevel level,
                size_t first_slot, size_t block_count,
                StorageRangeWriteCommand memory, size_t memory_prefix,
-               uint32_t generation, StorageAtomicWriteLane lane,
-               bool refresh = false);
+               uint32_t generation, StorageAtomicWriteLane lane);
     bool poll();
 
     bool active() const { return phase_ != Phase::Idle; }
@@ -52,7 +51,6 @@ private:
     bool from_memory_ = false;
 
     bool checking_ = false;
-    bool refresh_ = false;
     OperationTicket read_ticket_;
     OperationTicket write_ticket_;
     StoragePreparedRead prepared_;

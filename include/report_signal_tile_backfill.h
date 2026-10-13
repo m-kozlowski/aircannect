@@ -18,9 +18,6 @@ public:
     void begin(StorageReadPort &read, StorageRangeWritePort &write);
     bool start(const ReportSignalStoreMetadata &metadata,
                uint32_t generation);
-    // Refresh only ranges written by this build, including same-size changes.
-    bool start(std::shared_ptr<const ReportSignalStoreBundle> build,
-               uint32_t generation, StorageAtomicWriteLane lane);
     bool poll();
     void reset();
 
@@ -39,13 +36,11 @@ private:
 
     ReportSignalTileWriter writer_;
     std::shared_ptr<const LargeByteBuffer> metadata_;
-    std::shared_ptr<const ReportSignalStoreBundle> build_;
     ReportSignalStoreNightView night_;
     ReportSignalStoreTrack track_;
     size_t track_index_ = 0;
     size_t level_index_ = 0;
     uint32_t generation_ = 0;
-    StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;
     bool active_ = false;
     bool succeeded_ = true;
     char error_[AC_STORAGE_ERROR_MAX] = {};
