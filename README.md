@@ -70,7 +70,8 @@ Supported build profiles require an ESP32-S3 with PSRAM and microSD:
 - `waveshare-esp32s3-touch-lcd-1-54` - onboard SDMMC and BLE transport on the
   Waveshare ESP32-S3-Touch-LCD-1.54, with its local status display and action
   button enabled.
-- `waveshare-esp32s3-geek` - onboard microSD, BLE by default, and optional CAN.
+- `waveshare-esp32s3-geek` - onboard microSD, status display, configurable
+  button, BLE by default, and optional CAN.
 
 ## Related tools
 

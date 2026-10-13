@@ -29,6 +29,7 @@ constexpr uint16_t COLOR_ERROR = 0xF986;
 constexpr uint32_t MANUAL_OFF_WAKE_GRACE_MS = 3000;
 constexpr uint8_t IDLE_PAGE_COUNT = 3;
 constexpr uint8_t THERAPY_PAGE_COUNT = 2;
+constexpr uint8_t COMPACT_THERAPY_PAGE_COUNT = 4;
 
 struct TherapyDetailRow {
     const char *label = nullptr;
@@ -157,12 +158,18 @@ struct DisplayManager::Field {
         char value[40] = {};
 
         void set(int16_t left, int16_t top, const char *text,
-                 uint16_t text_color, uint8_t text_size) {
+                 uint16_t text_color, uint8_t text_size,
+                 size_t max_chars = sizeof(value) - 1) {
             x = left;
             y = top;
             color = text_color;
             size = text_size;
-            snprintf(value, sizeof(value), "%s", text);
+            const size_t limit = max_chars < sizeof(value)
+                ? max_chars : sizeof(value) - 1;
+            snprintf(value, limit + 1, "%s", text);
+            if (limit >= 3 && strlen(text) > limit) {
+                memcpy(value + limit - 3, "...", 3);
+            }
         }
 
         bool equals(const Text &other) const {
@@ -201,6 +208,12 @@ struct DisplayManager::RenderState {
     uint8_t page = 0;
 };
 
+struct DisplayManager::StatusRow {
+    const char *label = nullptr;
+    char value[40] = {};
+    uint16_t color = COLOR_TEXT;
+};
+
 void DisplayManager::configure(DisplayOrientation orientation,
                                bool auto_rotate) {
     configured_rotation_.store(display_orientation_rotation(
@@ -213,6 +226,8 @@ void DisplayManager::configure(DisplayOrientation orientation,
 bool DisplayManager::begin() {
     device_ = board_display_device();
     if (!device_) return true;
+
+    compact_layout_ = device_->width() < 200 || device_->height() < 200;
 
     if (!device_->begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
@@ -271,7 +286,8 @@ void DisplayManager::publish(const DisplaySnapshot &snapshot, uint32_t now_ms) {
     if (xSemaphoreTake(snapshot_lock_, 0) != pdTRUE) return;
 
     const uint8_t therapy_page_count = snapshot.therapy_active
-        ? THERAPY_PAGE_COUNT : 1;
+        ? (compact_layout_ ? COMPACT_THERAPY_PAGE_COUNT : THERAPY_PAGE_COUNT)
+        : 1;
     therapy_page_count_.store(therapy_page_count);
     if (therapy_page_.load() >= therapy_page_count) {
         therapy_page_.store(0);
@@ -343,7 +359,7 @@ bool DisplayManager::navigate_page(int8_t direction) {
     const bool therapy = therapy_active_.load();
     std::atomic<uint8_t> &page = therapy ? therapy_page_ : idle_page_;
     const uint8_t count = therapy
-        ? therapy_page_count_.load() : IDLE_PAGE_COUNT;
+        ? therapy_page_count_.load() : idle_page_count();
     const DisplayPageNavigation navigation = display_page_navigate(
         page.load(), count, direction, backlight_visible_.load());
     if (!navigation.handled) return false;
@@ -490,7 +506,7 @@ void DisplayManager::render(const DisplaySnapshot &snapshot, bool force) {
     RenderState &state = *render_state_;
     state.count = 0;
     const uint8_t count = snapshot.therapy_active
-        ? therapy_page_count_.load() : IDLE_PAGE_COUNT;
+        ? therapy_page_count_.load() : idle_page_count();
     const uint8_t page = (snapshot.therapy_active
         ? therapy_page_.load() : idle_page_.load()) % count;
 
@@ -505,139 +521,136 @@ void DisplayManager::render(const DisplaySnapshot &snapshot, bool force) {
 
 void DisplayManager::render_idle(const DisplaySnapshot &snapshot,
                                  uint8_t page) {
-    if (page == 1) render_idle_latest(snapshot);
-    else if (page == 2) render_idle_period(snapshot);
-    else render_idle_dashboard(snapshot);
+    const uint8_t section = compact_layout_ ? page / 2 : page;
+    const uint8_t part = compact_layout_ ? page % 2 : 0;
+    if (section == 1) render_idle_latest(snapshot, part);
+    else if (section == 2) render_idle_period(snapshot, part);
+    else render_idle_dashboard(snapshot, part);
 
-    draw_page_indicator(page, IDLE_PAGE_COUNT);
+    draw_page_indicator(page, idle_page_count());
+}
+
+uint8_t DisplayManager::idle_page_count() const {
+    return compact_layout_ ? IDLE_PAGE_COUNT * 2 : IDLE_PAGE_COUNT;
 }
 
 void DisplayManager::render_idle_dashboard(
-    const DisplaySnapshot &snapshot) {
-    const int16_t width = device_->width();
-    const int16_t height = device_->height();
-    const int16_t margin = width / 20;
-    const int16_t header_height = height / 4;
-    const int16_t row_height =
-        (height - header_height - margin) / 4;
+    const DisplaySnapshot &snapshot, uint8_t part) {
+    StatusRow rows[4] = {
+        {"AIR11", {}, air11_state_color(snapshot.air11)},
+        {snapshot.wifi == DisplayWifiState::SoftAp ? "WI-FI AP" : "WI-FI",
+         {}, snapshot.wifi == DisplayWifiState::Offline ? COLOR_ERROR : COLOR_TEXT},
+        {"SMB", {}, export_state_color(snapshot.smb)},
+        {"SLEEPHQ", {}, export_state_color(snapshot.sleephq)},
+    };
+    snprintf(rows[0].value, sizeof(rows[0].value), "%s",
+             air11_state_text(snapshot.air11));
+    snprintf(rows[1].value, sizeof(rows[1].value), "%s",
+             snapshot.wifi_value[0] ? snapshot.wifi_value : "--");
+    snprintf(rows[2].value, sizeof(rows[2].value), "%s",
+             export_state_text(snapshot.smb));
+    snprintf(rows[3].value, sizeof(rows[3].value), "%s",
+             export_state_text(snapshot.sleephq));
 
-    draw_centered(margin, snapshot.local_time,
-                  COLOR_TEXT, width >= 220 ? 5 : 4);
-
-    int16_t y = header_height;
-    draw_status_row(y, row_height, "AIR11",
-                    air11_state_text(snapshot.air11),
-                    air11_state_color(snapshot.air11));
-    y += row_height;
-
-    draw_status_row(y, row_height,
-                    snapshot.wifi == DisplayWifiState::SoftAp
-                        ? "WI-FI AP" : "WI-FI",
-                    snapshot.wifi_value[0] ? snapshot.wifi_value : "--",
-                    snapshot.wifi == DisplayWifiState::Offline
-                        ? COLOR_ERROR : COLOR_TEXT);
-    y += row_height;
-
-    draw_status_row(y, row_height, "SMB",
-                    export_state_text(snapshot.smb),
-                    export_state_color(snapshot.smb));
-    y += row_height;
-
-    draw_status_row(y, row_height, "SLEEPHQ",
-                    export_state_text(snapshot.sleephq),
-                    export_state_color(snapshot.sleephq));
+    draw_status_page(snapshot.local_time, COLOR_TEXT,
+                     device_->width() >= 220 ? 5 : 4, rows, part);
 }
 
-void DisplayManager::render_idle_latest(const DisplaySnapshot &snapshot) {
-    const int16_t width = device_->width();
-    const int16_t height = device_->height();
-    const int16_t margin = width / 20;
-    const int16_t header_height = height / 5;
-    const int16_t row_height = (height - header_height - margin) / 4;
+void DisplayManager::render_idle_latest(const DisplaySnapshot &snapshot,
+                                       uint8_t part) {
     const DisplayNightSummary &night = snapshot.reports.latest;
-
-    draw_centered(margin, night.valid ? night.date : "LATEST NIGHT",
-                  COLOR_ACCENT, 2);
-
-    char value[24] = {};
-    int16_t y = header_height;
+    StatusRow rows[4] = {
+        {"THERAPY"}, {"AHI / RDI"},
+        {compact_layout_ ? "PRESSURE P50/P95" : "PRESSURE P50 / P95"},
+        {"LEAK P50 / P95"},
+    };
     if (night.duration_valid) {
-        format_duration(night.duration_min, value, sizeof(value));
+        format_duration(night.duration_min, rows[0].value, sizeof(rows[0].value));
     } else {
-        snprintf(value, sizeof(value), "--");
+        snprintf(rows[0].value, sizeof(rows[0].value), "--");
     }
-    draw_status_row(y, row_height, "THERAPY", value, COLOR_TEXT);
-    y += row_height;
 
     format_metric_pair(night.ahi_valid, night.ahi,
                        night.rdi_valid, night.rdi,
-                       value, sizeof(value));
-    draw_status_row(y, row_height, "AHI / RDI", value, COLOR_TEXT);
-    y += row_height;
+                       rows[1].value, sizeof(rows[1].value));
 
     format_metric_pair(night.pressure_valid, night.pressure_cm_h2o,
                        night.pressure_95_valid,
                        night.pressure_95_cm_h2o,
-                       value, sizeof(value));
-    draw_status_row(y, row_height, "PRESSURE P50 / P95", value, COLOR_TEXT);
-    y += row_height;
+                       rows[2].value, sizeof(rows[2].value));
 
     format_metric_pair(night.leak_valid, night.leak_l_min,
                        night.leak_95_valid, night.leak_95_l_min,
-                       value, sizeof(value));
-    draw_status_row(y, row_height, "LEAK P50 / P95", value, COLOR_TEXT);
+                       rows[3].value, sizeof(rows[3].value));
+
+    draw_status_page(night.valid ? night.date : "LATEST NIGHT",
+                     COLOR_ACCENT, 2, rows, part);
 }
 
-void DisplayManager::render_idle_period(const DisplaySnapshot &snapshot) {
-    const int16_t width = device_->width();
-    const int16_t height = device_->height();
-    const int16_t margin = width / 20;
-    const int16_t header_height = height / 5;
-    const int16_t row_height = (height - header_height - margin) / 4;
+void DisplayManager::render_idle_period(const DisplaySnapshot &snapshot,
+                                       uint8_t part) {
     const DisplayPeriodSummary &period = snapshot.reports.last_30_days;
-
-    draw_centered(margin, "LAST 30 DAYS", COLOR_ACCENT, 2);
-
-    char value[24] = {};
-    int16_t y = header_height;
+    StatusRow rows[4] = {
+        {"USED NIGHTS"}, {"AHI / RDI"},
+        {compact_layout_ ? "PRESSURE P50/P95" : "PRESSURE P50 / P95"},
+        {"LEAK P50 / P95"},
+    };
     if (period.valid) {
-        snprintf(value, sizeof(value), "%u",
+        snprintf(rows[0].value, sizeof(rows[0].value), "%u",
                  static_cast<unsigned>(period.used_nights));
     } else {
-        snprintf(value, sizeof(value), "--");
+        snprintf(rows[0].value, sizeof(rows[0].value), "--");
     }
-    draw_status_row(y, row_height, "USED NIGHTS", value, COLOR_TEXT);
-    y += row_height;
 
     format_metric_pair(period.ahi_valid,
                        period.duration_weighted_ahi,
                        period.rdi_valid,
                        period.duration_weighted_rdi,
-                       value, sizeof(value));
-    draw_status_row(y, row_height, "AHI / RDI", value, COLOR_TEXT);
-    y += row_height;
+                       rows[1].value, sizeof(rows[1].value));
 
     format_metric_pair(
         period.pressure_valid,
         period.duration_weighted_pressure_cm_h2o,
         period.pressure_95_valid,
         period.duration_weighted_pressure_95_cm_h2o,
-        value, sizeof(value));
-    draw_status_row(y, row_height, "PRESSURE P50 / P95", value, COLOR_TEXT);
-    y += row_height;
+        rows[2].value, sizeof(rows[2].value));
 
     format_metric_pair(period.leak_valid,
                        period.duration_weighted_leak_l_min,
                        period.leak_95_valid,
                        period.duration_weighted_leak_95_l_min,
-                       value, sizeof(value));
-    draw_status_row(y, row_height, "LEAK P50 / P95", value, COLOR_TEXT);
+                       rows[3].value, sizeof(rows[3].value));
+
+    draw_status_page("LAST 30 DAYS", COLOR_ACCENT, 2, rows, part);
+}
+
+void DisplayManager::draw_status_page(const char *title, uint16_t title_color,
+                                      uint8_t title_size, const StatusRow *rows,
+                                      uint8_t part) {
+    const int16_t height = device_->height();
+    const int16_t margin = device_->width() / 20;
+    const int16_t header_height = compact_layout_
+        ? 32 : height / (title_size >= 4 ? 4 : 5);
+    const uint8_t row_count = compact_layout_ ? 2 : 4;
+    const int16_t footer = compact_layout_ ? 12 : margin;
+    const int16_t row_height = (height - header_height - footer) / row_count;
+
+    draw_centered(compact_layout_ ? 6 : margin, title, title_color,
+                  compact_layout_ ? 2 : title_size);
+
+    for (uint8_t i = 0; i < row_count; ++i) {
+        const StatusRow &row = rows[part * row_count + i];
+        draw_status_row(header_height + i * row_height, row_height,
+                        row.label, row.value, row.color);
+    }
 }
 
 void DisplayManager::render_therapy(const DisplaySnapshot &snapshot,
                                     uint8_t page, uint8_t count) {
-    if (page == 1) render_therapy_detail(snapshot);
-    else render_therapy_primary(snapshot);
+    if (compact_layout_ && page == 1) render_therapy_metrics(snapshot);
+    else if (page > 0) {
+        render_therapy_detail(snapshot, compact_layout_ ? page - 2 : 0);
+    } else render_therapy_primary(snapshot);
 
     draw_page_indicator(page, count);
 }
@@ -648,12 +661,15 @@ void DisplayManager::render_therapy_primary(
     const int16_t height = device_->height();
     const int16_t margin = width / 20;
 
-    draw_text(margin, margin, 60, snapshot.local_time, COLOR_TEXT, 2);
+    const int16_t top = compact_layout_ ? 6 : margin;
+    const bool narrow = width < 200;
+    const bool short_screen = height < 200;
+    draw_text(margin, top, 60, snapshot.local_time, COLOR_TEXT, 2);
 
     const char *therapy_label = "THERAPY";
     const int16_t therapy_label_width =
         static_cast<int16_t>(strlen(therapy_label) * 6);
-    draw_text(width - margin - therapy_label_width, margin + 4,
+    draw_text(width - margin - therapy_label_width, top + 4,
               therapy_label_width, therapy_label, COLOR_ACCENT, 1);
 
     char elapsed[12] = {};
@@ -662,13 +678,13 @@ void DisplayManager::render_therapy_primary(
     snprintf(elapsed, sizeof(elapsed), "%02u:%02u",
              static_cast<unsigned>(hours),
              static_cast<unsigned>(minutes));
-    draw_centered(height / 6, elapsed, COLOR_TEXT,
-                  width >= 220 ? 4 : 3);
+    draw_centered(short_screen ? 30 : height / 6, elapsed, COLOR_TEXT,
+                  compact_layout_ ? 3 : (width >= 220 ? 4 : 3));
 
     const bool pressure_pair =
         snapshot.pressure.kind == DisplayPressureSnapshot::Kind::Pair;
-    const int16_t pressure_label_y = height / 3;
-    const int16_t pressure_value_y = height * 2 / 5;
+    const int16_t pressure_label_y = short_screen ? 60 : height / 3;
+    const int16_t pressure_value_y = short_screen ? 76 : height * 2 / 5;
 
     draw_text(margin, pressure_label_y, width - margin * 2,
               pressure_pair ? "PRESSURES" : "PRESSURE", COLOR_MUTED, 1);
@@ -677,9 +693,12 @@ void DisplayManager::render_therapy_primary(
         DisplayPressureSnapshot::Kind::Unavailable) {
         draw_centered(pressure_value_y, "--", COLOR_MUTED, 4);
     } else if (pressure_pair) {
-        const int16_t column_width = (width - margin * 3) / 2;
+        const int16_t column_width = narrow
+            ? width - margin * 2 : (width - margin * 3) / 2;
         const int16_t pressure_panel_y = pressure_value_y - 4;
-        const int16_t pressure_panel_height = height / 5;
+        const int16_t pressure_panel_height = narrow
+            ? (height - pressure_panel_y - 16 - margin) / 2
+            : (compact_layout_ ? 42 : height / 5);
         char ipap[12] = {};
         char epap[12] = {};
         snprintf(ipap, sizeof(ipap), "%.1f",
@@ -689,10 +708,14 @@ void DisplayManager::render_therapy_primary(
 
         draw_panel(margin, pressure_panel_y,
                    column_width, pressure_panel_height,
-                   "IPAP", ipap, COLOR_TEXT, 3, 8, 6, 22);
-        draw_panel(margin * 2 + column_width, pressure_panel_y,
+                   "IPAP", ipap, COLOR_TEXT, 3,
+                   compact_layout_ ? 6 : 8, 6, compact_layout_ ? 16 : 22);
+        draw_panel(narrow ? margin : margin * 2 + column_width,
+                   narrow ? pressure_panel_y + pressure_panel_height + margin
+                          : pressure_panel_y,
                    column_width, pressure_panel_height,
-                   "EPAP", epap, COLOR_TEXT, 3, 8, 6, 22);
+                   "EPAP", epap, COLOR_TEXT, 3,
+                   compact_layout_ ? 6 : 8, 6, compact_layout_ ? 16 : 22);
     } else {
         char pressure[12] = {};
         snprintf(pressure, sizeof(pressure), "%.1f",
@@ -700,20 +723,31 @@ void DisplayManager::render_therapy_primary(
         draw_centered(pressure_value_y, pressure, COLOR_TEXT, 4);
     }
 
+    if (!compact_layout_) render_therapy_metrics(snapshot);
+}
+
+void DisplayManager::render_therapy_metrics(const DisplaySnapshot &snapshot) {
+    const int16_t width = device_->width();
+    const int16_t height = device_->height();
+    const int16_t margin = width / 20;
+    if (compact_layout_) draw_centered(6, "THERAPY", COLOR_ACCENT, 2);
+
+    const int16_t columns = width < 200 ? 1 : 2;
+    const int16_t rows = 4 / columns;
     const int16_t metric_gap = margin / 2;
     const int16_t metric_width =
-        (width - margin * 2 - metric_gap) / 2;
-    const int16_t metric_right_x = margin + metric_width + metric_gap;
-    const int16_t metric_top = height * 3 / 5;
+        (width - margin * 2 - metric_gap * (columns - 1)) / columns;
+    const int16_t metric_top = compact_layout_ ? 32 : height * 3 / 5;
     const int16_t metric_row_gap = 4;
     const int16_t metric_bottom = height - margin - 8;
     const int16_t metric_height =
-        (metric_bottom - metric_top - metric_row_gap) / 2;
-    auto draw_metric = [&](int16_t x,
-                           int16_t y,
+        (metric_bottom - metric_top - metric_row_gap * (rows - 1)) / rows;
+    auto draw_metric = [&](uint8_t index,
                            const char *label,
                            const char *value) {
-        draw_panel(x, y, metric_width, metric_height,
+        draw_panel(margin + (index % columns) * (metric_width + metric_gap),
+                   metric_top + (index / columns) * (metric_height + metric_row_gap),
+                   metric_width, metric_height,
                    label, value, COLOR_TEXT, 2, 7, 5, 17);
     };
 
@@ -726,29 +760,31 @@ void DisplayManager::render_therapy_primary(
         snprintf(rate, sizeof(rate), "%.1f",
                  snapshot.respiratory_rate);
     }
-    draw_metric(margin, metric_top, "LEAK", leak);
-    draw_metric(metric_right_x, metric_top, "RR", rate);
+    draw_metric(0, "LEAK", leak);
+    draw_metric(1, "RR", rate);
 
-    if (!snapshot.oximetry_valid) return;
+    if (!snapshot.oximetry_valid && !compact_layout_) return;
 
-    const int16_t oximetry_y =
-        metric_top + metric_height + metric_row_gap;
-    char spo2[12] = {};
-    char pulse[12] = {};
-    snprintf(spo2, sizeof(spo2), "%d%%", snapshot.spo2);
-    snprintf(pulse, sizeof(pulse), "%d", snapshot.pulse_bpm);
-    draw_metric(margin, oximetry_y, "SPO2", spo2);
-    draw_metric(metric_right_x, oximetry_y, "PULSE", pulse);
+    char spo2[12] = "--";
+    char pulse[12] = "--";
+    if (snapshot.oximetry_valid) {
+        snprintf(spo2, sizeof(spo2), "%d%%", snapshot.spo2);
+        snprintf(pulse, sizeof(pulse), "%d", snapshot.pulse_bpm);
+    }
+    draw_metric(2, "SPO2", spo2);
+    draw_metric(3, "PULSE", pulse);
 }
 
 void DisplayManager::render_therapy_detail(
-    const DisplaySnapshot &snapshot) {
+    const DisplaySnapshot &snapshot, uint8_t part) {
     const int16_t width = device_->width();
     const int16_t height = device_->height();
     const int16_t margin = width / 20;
-    const int16_t header_height = height / 4;
+    const int16_t header_height = compact_layout_ ? 24 : height / 4;
 
-    if (snapshot.pressure.kind == DisplayPressureSnapshot::Kind::Pair) {
+    if (compact_layout_) {
+        draw_centered(6, "RESPIRATORY", COLOR_ACCENT, 2);
+    } else if (snapshot.pressure.kind == DisplayPressureSnapshot::Kind::Pair) {
         char pressure[24] = {};
         draw_text(margin, margin, width - margin * 2,
                   "IPAP / EPAP", COLOR_MUTED, 1);
@@ -770,17 +806,19 @@ void DisplayManager::render_therapy_detail(
         draw_centered(margin + 14, "--", COLOR_MUTED, 2);
     }
 
-    TherapyDetailRow rows[4];
+    TherapyDetailRow rows[6];
     const size_t row_count = therapy_detail_rows(
-        snapshot, rows, sizeof(rows) / sizeof(rows[0]));
+        snapshot, rows, compact_layout_ ? 6 : 4);
+    const size_t visible_rows = compact_layout_ ? 3 : 4;
+    const int16_t footer = compact_layout_ ? 12 : margin;
     const int16_t row_height =
-        (height - header_height - margin) /
-        static_cast<int16_t>(sizeof(rows) / sizeof(rows[0]));
+        (height - header_height - footer) / static_cast<int16_t>(visible_rows);
     int16_t y = header_height;
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
-        if (i < row_count) {
-            draw_status_row(y, row_height, rows[i].label,
-                            rows[i].value, COLOR_TEXT);
+    for (size_t i = 0; i < visible_rows; ++i) {
+        const size_t index = part * visible_rows + i;
+        if (index < row_count) {
+            draw_status_row(y, row_height, rows[index].label,
+                            rows[index].value, COLOR_TEXT);
         } else {
             draw_status_row(y, row_height, "", "--", COLOR_MUTED);
         }
@@ -880,8 +918,12 @@ void DisplayManager::draw_panel(int16_t x, int16_t y,
     field.width = width;
     field.height = height;
     field.background = COLOR_PANEL;
-    field.text[0].set(inset, label_y, label, COLOR_MUTED, 1);
-    field.text[1].set(inset, value_y, value, value_color, value_size);
+    const int16_t text_width = width - inset * 2;
+    value_size = text_size_for_width(value, value_size, text_width);
+    while (value_size > 1 && value_y + value_size * 8 > height) --value_size;
+    field.text[0].set(inset, label_y, label, COLOR_MUTED, 1, text_width / 6);
+    field.text[1].set(inset, value_y, value, value_color, value_size,
+                      text_width / (6 * value_size));
 }
 
 void DisplayManager::draw_centered(int16_t y,
@@ -903,8 +945,10 @@ void DisplayManager::draw_status_row(int16_t y,
     const int16_t margin = width / 20;
     const uint8_t size = text_size_for_width(
         value, 2, width - margin * 2 - 16);
+    const bool short_row = height < 36;
     draw_panel(margin, y + 2, width - margin * 2, height - 4,
-               label, value, value_color, size);
+               label, value, value_color, size,
+               8, short_row ? 3 : 5, short_row ? 13 : 18);
 }
 
 uint8_t DisplayManager::text_size_for_width(const char *text,

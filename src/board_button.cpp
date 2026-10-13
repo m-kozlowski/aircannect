@@ -17,6 +17,13 @@ const BoardButtonDefinition *board_button_catalog(size_t &count) {
     };
     count = sizeof(BUTTONS) / sizeof(BUTTONS[0]);
     return BUTTONS;
+#elif AC_BUTTON_PROFILE == AC_BUTTON_PROFILE_WAVESHARE_GEEK
+    static constexpr BoardButtonDefinition BOOT = {
+        1, "boot", "BOOT", 0, true, BoardButtonPull::Up,
+        BUTTON_GESTURE_SHORT | BUTTON_GESTURE_LONG, 35, 1200,
+    };
+    count = 1;
+    return &BOOT;
 #else
     count = 0;
     return nullptr;
@@ -37,6 +44,16 @@ const ButtonBinding *board_button_binding_defaults(size_t &count) {
         {{1, 3}, ButtonGesture::LongPress,
          LocalActionId::PowerOff},
     };
+#elif AC_BUTTON_PROFILE == AC_BUTTON_PROFILE_WAVESHARE_GEEK
+    static constexpr ButtonBinding DEFAULTS[] = {
+        {{1, 0}, ButtonGesture::ShortPress,
+         LocalActionId::DisplayNextPage},
+        {{1, 0}, ButtonGesture::LongPress,
+         LocalActionId::DisplayToggleBacklight},
+    };
+#endif
+
+#if AC_BUTTON_PROFILE != AC_BUTTON_PROFILE_NONE
     count = sizeof(DEFAULTS) / sizeof(DEFAULTS[0]);
     return DEFAULTS;
 #else

@@ -35,6 +35,7 @@ public:
 private:
     struct Field;
     struct RenderState;
+    struct StatusRow;
 
     static void task_entry(void *context);
     void run();
@@ -47,14 +48,19 @@ private:
     bool motion_wake_blocked(uint32_t now_ms) const;
     void render(const DisplaySnapshot &snapshot, bool force);
     void render_idle(const DisplaySnapshot &snapshot, uint8_t page);
-    void render_idle_dashboard(const DisplaySnapshot &snapshot);
-    void render_idle_latest(const DisplaySnapshot &snapshot);
-    void render_idle_period(const DisplaySnapshot &snapshot);
+    uint8_t idle_page_count() const;
+    void render_idle_dashboard(const DisplaySnapshot &snapshot, uint8_t part);
+    void render_idle_latest(const DisplaySnapshot &snapshot, uint8_t part);
+    void render_idle_period(const DisplaySnapshot &snapshot, uint8_t part);
     void render_therapy(const DisplaySnapshot &snapshot,
                         uint8_t page, uint8_t count);
     void render_therapy_primary(const DisplaySnapshot &snapshot);
-    void render_therapy_detail(const DisplaySnapshot &snapshot);
+    void render_therapy_metrics(const DisplaySnapshot &snapshot);
+    void render_therapy_detail(const DisplaySnapshot &snapshot, uint8_t part);
     void draw_page_indicator(uint8_t page, uint8_t count);
+    void draw_status_page(const char *title, uint16_t title_color,
+                          uint8_t title_size, const StatusRow *rows,
+                          uint8_t part);
 
     Field &next_field();
     void flush_fields(bool full);
@@ -91,6 +97,7 @@ private:
 
     // Display-task-only field descriptions, allocated in PSRAM.
     RenderState *render_state_ = nullptr;
+    bool compact_layout_ = false;
 
     // Main-loop presentation cadence, independent of telemetry updates.
     uint32_t last_snapshot_ms_ = 0;

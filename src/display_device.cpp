@@ -47,9 +47,11 @@ public:
         : bus_(AC_DISPLAY_DC_GPIO, AC_DISPLAY_CS_GPIO,
                AC_DISPLAY_SCK_GPIO, AC_DISPLAY_MOSI_GPIO,
                AC_DISPLAY_MISO_GPIO),
+          // Rotation belongs to the canvas; the panel receives native rows.
           panel_(&bus_, AC_DISPLAY_RESET_GPIO,
-                 AC_DISPLAY_ROTATION, true,
-                 AC_DISPLAY_WIDTH, AC_DISPLAY_HEIGHT),
+                 0, true,
+                 AC_DISPLAY_WIDTH, AC_DISPLAY_HEIGHT,
+                 AC_DISPLAY_COL_OFFSET, AC_DISPLAY_ROW_OFFSET),
           canvas_(AC_DISPLAY_WIDTH, AC_DISPLAY_HEIGHT, &panel_) {}
 
     bool begin() override {

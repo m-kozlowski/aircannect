@@ -12,7 +12,7 @@ logging, and the ResMed firmware repository.
 | Board | microSD | ResMed connection | Local features |
 | --- | --- | --- | --- |
 | [**Waveshare ESP32-S3-Touch-LCD-1.54**](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54) | Onboard, 4-bit SDMMC | **BLE** | LCD, buttons, automatic rotation, speaker alerts |
-| [**Waveshare ESP32-S3-GEEK**](https://docs.waveshare.com/ESP32-S3-GEEK) | Onboard, 4-bit SDMMC | **BLE**, CAN | - |
+| [**Waveshare ESP32-S3-GEEK**](https://docs.waveshare.com/ESP32-S3-GEEK) | Onboard, 4-bit SDMMC | **BLE**, CAN | LCD, configurable button |
 | [**XIAO ESP32-S3 Plus**](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) | External, 4-bit SDMMC or SPI | BLE, **CAN** | - |
 
 The default connection is **bold**. BLE pairing is available in the setup
@@ -159,6 +159,11 @@ has been wired. Choose pins not already used by the board's peripherals.
 
 The `waveshare-esp32s3-geek` profile uses 16 MB flash, 2 MB quad PSRAM,
 native USB, and the onboard microSD slot.
+
+The 240x135 LCD shows status, report summaries, and current therapy values
+across multiple pages. BOOT advances to the next page on a short press and
+toggles the backlight on a long press. Both actions are configurable in the
+Config tab. Display orientation is also configurable; the default is landscape.
 
 ```text
 CAN (external 3.3 V transceiver)

@@ -51,6 +51,14 @@
 #define AC_DISPLAY_ROTATION 0
 #endif
 
+#ifndef AC_DISPLAY_COL_OFFSET
+#define AC_DISPLAY_COL_OFFSET 0
+#endif
+
+#ifndef AC_DISPLAY_ROW_OFFSET
+#define AC_DISPLAY_ROW_OFFSET 0
+#endif
+
 #ifndef AC_DISPLAY_SPI_HZ
 #define AC_DISPLAY_SPI_HZ 40000000
 #endif
