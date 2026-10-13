@@ -1469,14 +1469,18 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     checkpoint.metrics_size = metrics->size();
     checkpoint.events = bundle->events->data();
     checkpoint.events_size = bundle->events->size();
+
+    // The checkpoint now refers only to owned snapshots and bundle bytes.
+    runtime_->clear_work();
+
     bundle->checkpoint = ReportBuildCheckpointCodec::encode(
         checkpoint, &failure_reason_);
+
     if (!bundle->checkpoint) {
         return false;
     }
 
     runtime_->completed = std::move(bundle);
-    runtime_->clear_work();
     failure_reason_ = nullptr;
     return true;
 }

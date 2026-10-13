@@ -382,7 +382,10 @@ bool ensure_dir(const char *path) {
     struct stat info {};
     if (file_stat(path, info)) return S_ISDIR(info.st_mode);
 
-    const bool ok = fs->mkdir(path);
+    char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
+    if (!native_path(path, full_path, sizeof(full_path))) return false;
+
+    const bool ok = ::mkdir(full_path, 0777) == 0;
     if (!ok) log_io_error("mkdir", path, errno);
     return ok;
 }

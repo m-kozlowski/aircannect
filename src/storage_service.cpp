@@ -216,6 +216,7 @@ PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
 ReadCompletionSlot read_completions[AC_STORAGE_PREPARED_READ_CAPACITY];
 File active_read_file;
 size_t active_read_index = SIZE_MAX;
+uint64_t active_read_position = 0;
 size_t read_job_count = 0;
 size_t prepared_read_count = 0;
 uint32_t next_read_ticket_id = 0;
@@ -2018,6 +2019,7 @@ void close_active_read_file() {
         active_read_file.close();
     }
     active_read_index = SIZE_MAX;
+    active_read_position = 0;
 }
 
 void finish_read_job(size_t index,
@@ -2193,10 +2195,12 @@ bool open_read_job(size_t index, const char *&error) {
 
     const uint64_t position = job.offset + job.bytes_read;
     if (position > UINT32_MAX ||
-        !active_read_file.seek(static_cast<uint32_t>(position))) {
+        (position != active_read_position &&
+         !active_read_file.seek(static_cast<uint32_t>(position)))) {
         error = "read_seek_failed";
         return false;
     }
+    active_read_position = position;
     return true;
 }
 
@@ -2245,7 +2249,9 @@ bool scan_tail_step(ReadJob &job, const char *&error) {
         return false;
     }
 
+    active_read_position = block_start;
     const int read = active_read_file.read(job.bytes, requested);
+    if (read > 0) active_read_position += static_cast<size_t>(read);
     if (read != static_cast<int>(requested)) {
         error = "read_short_file";
         return false;
@@ -2362,6 +2368,7 @@ bool process_read_step() {
     }
 
     job.bytes_read += received;
+    active_read_position += received;
     if (job.bytes_read == job.target_length) {
         finish_read_job(index, OperationOutcome::succeeded());
     }
