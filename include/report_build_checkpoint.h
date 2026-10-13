@@ -66,7 +66,8 @@ public:
     static constexpr size_t MaxBytes = 512 * 1024;
 
     static std::shared_ptr<const LargeByteBuffer> encode(
-        const ReportBuildCheckpoint &checkpoint);
+        const ReportBuildCheckpoint &checkpoint,
+        const char **error = nullptr);
     static bool decode(const uint8_t *bytes,
                        size_t length,
                        ReportBuildCheckpointView &view);

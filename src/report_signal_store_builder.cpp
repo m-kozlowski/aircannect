@@ -1545,14 +1545,18 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     Memory::free(tracks);
     Memory::free(sessions);
 
-    if (bundle->metadata) {
-        bundle->histogram = ReportNightHistogramCodec::encode(
-            runtime_->metrics, bundle->metadata_view);
+    if (!bundle->metadata) {
+        failure_reason_ = "report_signal_store_metadata_encode_failed";
+        return false;
     }
+
+    bundle->histogram = ReportNightHistogramCodec::encode(
+        runtime_->metrics, bundle->metadata_view);
     if (!bundle->histogram) {
         failure_reason_ = "report_night_histogram_allocation_failed";
         return false;
     }
+    runtime_->metrics.clear();
 
     const auto progress = ReportPlanner::capture_progress(
         runtime_->execution_plan ? *runtime_->execution_plan : *runtime_->plan,
@@ -1566,8 +1570,10 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         failure_reason_ = "report_signal_store_checkpoint_allocation_failed";
         return false;
     }
+    runtime_->closed_metrics.clear();
+
     for (size_t i = 0; i < runtime_->track_count; ++i) {
-        const TrackWork &work = runtime_->tracks[i];
+        TrackWork &work = runtime_->tracks[i];
         auto &closed = *closed_tracks.append();
         closed = work.closed;
         closed.tail_metrics = nullptr;
@@ -1581,6 +1587,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
             }
             closed.tail_metrics = snapshot->data();
             closed.tail_metrics_size = snapshot->size();
+            work.tail_metrics->clear();
         }
     }
 
@@ -1597,10 +1604,9 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     checkpoint.metrics_size = metrics->size();
     checkpoint.events = bundle->events->data();
     checkpoint.events_size = bundle->events->size();
-    bundle->checkpoint = ReportBuildCheckpointCodec::encode(checkpoint);
-
-    if (!bundle->metadata || !bundle->checkpoint) {
-        failure_reason_ = "report_signal_store_metadata_encode_failed";
+    bundle->checkpoint = ReportBuildCheckpointCodec::encode(
+        checkpoint, &failure_reason_);
+    if (!bundle->checkpoint) {
         return false;
     }
 

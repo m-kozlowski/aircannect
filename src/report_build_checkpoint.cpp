@@ -126,7 +126,8 @@ bool ReportBuildCheckpointView::track(
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportBuildCheckpointCodec::encode(
-    const ReportBuildCheckpoint &checkpoint) {
+    const ReportBuildCheckpoint &checkpoint, const char **error) {
+    if (error) *error = "report_checkpoint_invalid";
     if (!checkpoint.sleep_day.valid() ||
         !checkpoint.source_revision.valid() || checkpoint.generation == 0) {
         return {};
@@ -138,7 +139,10 @@ std::shared_ptr<const LargeByteBuffer> ReportBuildCheckpointCodec::encode(
 
     std::unique_ptr<LargeByteBuffer> output =
         LargeByteBuffer::allocate(total);
-    if (!output) return {};
+    if (!output) {
+        if (error) *error = "report_checkpoint_allocation_failed";
+        return {};
+    }
 
     uint8_t *bytes = output->data();
     memset(bytes, 0, total);
@@ -197,6 +201,7 @@ std::shared_ptr<const LargeByteBuffer> ReportBuildCheckpointCodec::encode(
         memcpy(events, checkpoint.events, checkpoint.events_size);
     }
 
+    if (error) *error = nullptr;
     return LargeByteBuffer::freeze(std::move(output));
 }
 
