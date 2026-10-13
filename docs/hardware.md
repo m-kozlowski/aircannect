@@ -160,11 +160,6 @@ has been wired. Choose pins not already used by the board's peripherals.
 The `waveshare-esp32s3-geek` profile uses 16 MB flash, 2 MB quad PSRAM,
 native USB, and the onboard microSD slot.
 
-The 240x135 LCD shows status, report summaries, and current therapy values
-across multiple pages. BOOT advances to the next page on a short press and
-toggles the backlight on a long press. Both actions are configurable in the
-Config tab. Display orientation is also configurable; the default is landscape.
-
 ```text
 CAN (external 3.3 V transceiver)
   TX (to transceiver D/TXD)    GPIO 16

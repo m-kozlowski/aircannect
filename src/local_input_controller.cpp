@@ -32,6 +32,12 @@ void LocalInputController::poll(uint32_t now_ms) {
     buttons_.poll(now_ms);
 }
 
+void LocalInputController::set_interaction_handler(
+    InteractionHandler handler, void *context) {
+    interaction_handler_ = handler;
+    interaction_context_ = context;
+}
+
 bool LocalInputController::register_action(
     LocalActionId action,
     LocalActionRouter::Handler handler,
@@ -105,6 +111,8 @@ void LocalInputController::dispatch(ButtonInput input,
         actions_.effective_action(input, gesture);
     const LocalActionDefinition *definition = local_action_find(action);
     const bool accepted = actions_.dispatch(input, gesture, now_ms);
+
+    if (interaction_handler_) interaction_handler_(interaction_context_);
 
     if (input.chord()) {
         Log::logf(CAT_GENERAL, accepted ? LOG_DEBUG : LOG_WARN,

@@ -955,6 +955,13 @@ bool AppConfig::set_display_auto_rotate(bool enabled) {
     return mark_dirty(AC_CONFIG_DIRTY_DISPLAY);
 }
 
+bool AppConfig::set_display_timeout(uint16_t seconds) {
+    if (data_.display_timeout == seconds) return true;
+
+    data_.display_timeout = seconds;
+    return mark_dirty(AC_CONFIG_DIRTY_DISPLAY);
+}
+
 bool AppConfig::set_smb_credentials(const String &endpoint,
                                     const String &user,
                                     const String &password) {

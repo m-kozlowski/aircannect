@@ -66,6 +66,7 @@ struct AppConfigData {
     DisplayOrientation display_orientation =
         DisplayOrientation::BoardDefault;
     bool display_auto_rotate = true;
+    uint16_t display_timeout = 0;
 
     String smb_endpoint;
     String smb_user;
@@ -137,6 +138,7 @@ private:
     bool set_keybindings(const ButtonBindingConfig &keybindings);
     bool set_display_orientation(DisplayOrientation orientation);
     bool set_display_auto_rotate(bool enabled);
+    bool set_display_timeout(uint16_t seconds);
     bool set_smb_credentials(const String &endpoint,
                              const String &user,
                              const String &password);

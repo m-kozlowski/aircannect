@@ -215,10 +215,11 @@ struct DisplayManager::StatusRow {
 };
 
 void DisplayManager::configure(DisplayOrientation orientation,
-                               bool auto_rotate) {
+                               bool auto_rotate, uint16_t timeout_s) {
     configured_rotation_.store(display_orientation_rotation(
         orientation, AC_DISPLAY_ROTATION));
     auto_rotate_.store(auto_rotate);
+    idle_timeout_ms_.store(static_cast<uint32_t>(timeout_s) * 1000);
     config_dirty_.store(true);
     if (task_) xTaskNotifyGive(task_);
 }
@@ -238,6 +239,7 @@ bool DisplayManager::begin() {
     device_->set_rotation(configured_rotation_.load());
     motion_policy_.set_rotation(configured_rotation_.load());
     config_dirty_.store(false);
+    last_interaction_ms_ = millis();
 
     motion_ = board_motion_device();
     if (motion_ && !motion_->begin()) {
@@ -336,13 +338,18 @@ void DisplayManager::publish_therapy_telemetry(
 void DisplayManager::set_backlight(bool enabled) {
     if (!device_) return;
 
-    backlight_requested_.store(enabled);
-    if (!enabled) manual_backlight_off_.store(true);
+    backlight_request_.store(enabled ? BacklightRequest::On
+                                    : BacklightRequest::Off);
     if (task_) xTaskNotifyGive(task_);
 }
 
 void DisplayManager::toggle_backlight() {
     set_backlight(!backlight_visible_.load());
+}
+
+void DisplayManager::note_interaction() {
+    interaction_pending_.store(true);
+    if (task_) xTaskNotifyGive(task_);
 }
 
 bool DisplayManager::previous_page() {
@@ -364,9 +371,9 @@ bool DisplayManager::navigate_page(int8_t direction) {
         page.load(), count, direction, backlight_visible_.load());
     if (!navigation.handled) return false;
 
+    note_interaction();
     if (navigation.wake_only) {
-        navigation_wake_requested_.store(true);
-        if (task_) xTaskNotifyGive(task_);
+        set_backlight(true);
         return true;
     }
 
@@ -397,6 +404,23 @@ void DisplayManager::run() {
         if (config_dirty_.exchange(false)) {
             apply_display_config();
             presentation_dirty_.store(true);
+            last_interaction_ms_ = now_ms;
+        }
+
+        if (interaction_pending_.exchange(false)) {
+            last_interaction_ms_ = now_ms;
+        }
+
+        const BacklightRequest request =
+            backlight_request_.exchange(BacklightRequest::None);
+
+        if (request != BacklightRequest::None) {
+            awake_ = request == BacklightRequest::On;
+            last_interaction_ms_ = now_ms;
+            if (!awake_) {
+                motion_wake_blocked_until_ms_ =
+                    now_ms + MANUAL_OFF_WAKE_GRACE_MS;
+            }
         }
 
         if (motion_ &&
@@ -406,17 +430,12 @@ void DisplayManager::run() {
             if (poll_motion(now_ms)) presentation_dirty_.store(true);
         }
 
-        if (manual_backlight_off_.exchange(false)) {
-            motion_wake_until_ms_ = 0;
-            motion_wake_blocked_until_ms_ =
-                now_ms + MANUAL_OFF_WAKE_GRACE_MS;
-        }
-        if (navigation_wake_requested_.exchange(false)) {
-            motion_wake_until_ms_ = now_ms + AC_MOTION_WAKE_MS;
+        const uint32_t timeout_ms = idle_timeout_ms_.load();
+        if (timeout_ms != 0 && now_ms - last_interaction_ms_ >= timeout_ms) {
+            awake_ = false;
         }
 
-        const bool visible = backlight_requested_.load() ||
-                             temporary_wake_active(now_ms);
+        const bool visible = awake_;
         const bool waking = visible && !backlight_applied_;
         if (!visible) {
             if (backlight_applied_) {
@@ -484,17 +503,13 @@ bool DisplayManager::poll_motion(uint32_t now_ms) {
 
     const DisplayMotionUpdate update = motion_policy_.update(sample, now_ms);
     if (update.wake && !motion_wake_blocked(now_ms)) {
-        motion_wake_until_ms_ = now_ms + AC_MOTION_WAKE_MS;
+        last_interaction_ms_ = now_ms;
+        awake_ = true;
     }
     if (!auto_rotate_.load() || !update.rotation_changed) return false;
 
     device_->set_rotation(update.rotation);
     return true;
-}
-
-bool DisplayManager::temporary_wake_active(uint32_t now_ms) const {
-    return motion_wake_until_ms_ != 0 &&
-           static_cast<int32_t>(motion_wake_until_ms_ - now_ms) > 0;
 }
 
 bool DisplayManager::motion_wake_blocked(uint32_t now_ms) const {

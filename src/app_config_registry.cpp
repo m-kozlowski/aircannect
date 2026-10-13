@@ -389,6 +389,12 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      "Automatic rotation", "Rotate the display with the device.",
      nullptr, 0, -1, AC_CFG_OFFSET(display_auto_rotate)},
 #endif
+    {"display_timeout", AppConfigFieldId::DisplayTimeout,
+     AppConfigGroup::Display, 30, AppConfigFieldType::UInt16,
+     PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
+     "Idle timeout (seconds)",
+     "Turn off the backlight after inactivity; 0 disables the timeout.",
+     nullptr, 0, -1, AC_CFG_OFFSET(display_timeout)},
 #endif
 };
 
@@ -556,7 +562,8 @@ bool AppConfigFieldWriter::set_value(
         case AppConfigFieldId::AlertLeakThreshold:
             if (!parse_port(value, parsed_port)) return false;
             return config.set_alert_leak_threshold(parsed_port);
-        case AppConfigFieldId::AlertLeakDelay: {
+        case AppConfigFieldId::AlertLeakDelay:
+        case AppConfigFieldId::DisplayTimeout: {
             String parsed = value;
             parsed.trim();
             uint32_t delay_s = 0;
@@ -564,8 +571,9 @@ bool AppConfigFieldWriter::set_value(
                 delay_s > UINT16_MAX) {
                 return false;
             }
-            return config.set_alert_leak_delay(
-                static_cast<uint16_t>(delay_s));
+            return field.id == AppConfigFieldId::DisplayTimeout
+                ? config.set_display_timeout(static_cast<uint16_t>(delay_s))
+                : config.set_alert_leak_delay(static_cast<uint16_t>(delay_s));
         }
         case AppConfigFieldId::AlertAudibleEnabled:
             if (!parse_bool_yesno(value, parsed_bool)) return false;

@@ -17,7 +17,8 @@ class MotionDevice;
 
 class DisplayManager {
 public:
-    void configure(DisplayOrientation orientation, bool auto_rotate);
+    void configure(DisplayOrientation orientation, bool auto_rotate,
+                   uint16_t timeout_s);
     bool begin();
     bool snapshot_due(uint32_t now_ms) const;
     void publish(const DisplaySnapshot &snapshot, uint32_t now_ms);
@@ -29,6 +30,7 @@ public:
     bool backlight_on() const { return backlight_visible_.load(); }
     void set_backlight(bool enabled);
     void toggle_backlight();
+    void note_interaction();
     bool previous_page();
     bool next_page();
 
@@ -37,6 +39,8 @@ private:
     struct RenderState;
     struct StatusRow;
 
+    enum class BacklightRequest : uint8_t { None, Off, On };
+
     static void task_entry(void *context);
     void run();
 
@@ -44,7 +48,6 @@ private:
     bool poll_motion(uint32_t now_ms);
     void apply_display_config();
     bool navigate_page(int8_t direction);
-    bool temporary_wake_active(uint32_t now_ms) const;
     bool motion_wake_blocked(uint32_t now_ms) const;
     void render(const DisplaySnapshot &snapshot, bool force);
     void render_idle(const DisplaySnapshot &snapshot, uint8_t page);
@@ -107,18 +110,22 @@ private:
     std::atomic<uint8_t> configured_rotation_{0};
     std::atomic<bool> auto_rotate_{true};
     std::atomic<bool> config_dirty_{false};
-    uint32_t motion_wake_until_ms_ = 0;
+
+    // Requests cross tasks; idle timing and hardware state belong to run().
+    std::atomic<uint32_t> idle_timeout_ms_{0};
+    std::atomic<bool> interaction_pending_{false};
+    std::atomic<BacklightRequest> backlight_request_{BacklightRequest::None};
+    uint32_t last_interaction_ms_ = 0;
     uint32_t motion_wake_blocked_until_ms_ = 0;
-    std::atomic<bool> backlight_requested_{true};
+    bool awake_ = true;
     std::atomic<bool> backlight_visible_{false};
-    std::atomic<bool> manual_backlight_off_{false};
-    std::atomic<bool> navigation_wake_requested_{false};
+    bool backlight_applied_ = false;
+
     std::atomic<bool> presentation_dirty_{false};
     std::atomic<bool> therapy_active_{false};
     std::atomic<uint8_t> idle_page_{0};
     std::atomic<uint8_t> therapy_page_{0};
     std::atomic<uint8_t> therapy_page_count_{1};
-    bool backlight_applied_ = false;
 };
 
 }  // namespace aircannect

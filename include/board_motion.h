@@ -34,7 +34,3 @@
 #ifndef AC_MOTION_POLL_MS
 #define AC_MOTION_POLL_MS 100
 #endif
-
-#ifndef AC_MOTION_WAKE_MS
-#define AC_MOTION_WAKE_MS 10000
-#endif

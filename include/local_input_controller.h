@@ -11,9 +11,12 @@ namespace aircannect {
 
 class LocalInputController {
 public:
+    using InteractionHandler = void (*)(void *context);
+
     bool begin();
     void poll(uint32_t now_ms);
 
+    void set_interaction_handler(InteractionHandler handler, void *context);
     bool register_action(LocalActionId action,
                          LocalActionRouter::Handler handler,
                          void *context);
@@ -36,6 +39,8 @@ private:
 
     BoardButtonManager buttons_;
     LocalActionRouter actions_;
+    InteractionHandler interaction_handler_ = nullptr;
+    void *interaction_context_ = nullptr;
 };
 
 }  // namespace aircannect

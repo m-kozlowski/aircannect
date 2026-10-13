@@ -231,7 +231,7 @@
       } else {
         control = document.createElement("input");
         control.type = field.type === "password" ? "password" : field.type;
-        control.value = data[field.key] || "";
+        control.value = data[field.key] ?? "";
         if (field.secret) {
           const setKey = field.key + "_set";
           control.placeholder = data[setKey] ? "set" : "empty";

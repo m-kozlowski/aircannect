@@ -870,7 +870,8 @@ static void apply_config_runtime_effects(void *,
     }
     if (dirty & AC_CONFIG_DIRTY_DISPLAY) {
         display_manager.configure(config.display_orientation,
-                                  config.display_auto_rotate);
+                                  config.display_auto_rotate,
+                                  config.display_timeout);
     }
     if (dirty & AC_CONFIG_DIRTY_ALERTS) {
         configure_alerts(config, millis());
@@ -1125,11 +1126,16 @@ void setup() {
     log_memory_profile_checkpoint("ble_runtime");
 
     display_manager.configure(config_service.data().display_orientation,
-                              config_service.data().display_auto_rotate);
+                              config_service.data().display_auto_rotate,
+                              config_service.data().display_timeout);
     if (!display_manager.begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] display manager failed to start\n");
     }
+
+    local_inputs.set_interaction_handler([](void *) {
+        display_manager.note_interaction();
+    }, nullptr);
 
     (void)local_inputs.register_action(
         LocalActionId::DisplayPreviousPage,

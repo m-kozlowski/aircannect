@@ -143,6 +143,7 @@ enum class AppConfigFieldId : uint8_t {
     Keybindings,
     DisplayOrientation,
     DisplayAutoRotate,
+    DisplayTimeout,
 };
 
 struct AppConfigEnumValue {

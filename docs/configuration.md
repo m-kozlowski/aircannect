@@ -97,6 +97,7 @@ These keys are available on builds with a local display.
 | --- | --- | --- | --- |
 | `display_orient` | `default`, `0`, `90`, `180`, `270` | `default` | Initial and fixed display orientation. |
 | `display_autorot` | boolean | on when a motion sensor is present | Adapt display orientation to stable device movement. Motion wake remains available when this is off. |
+| `display_timeout` | seconds `0` to `65535` | `0` | Backlight inactivity timeout; `0` disables automatic blanking. Local button gestures and detected movement restart the timer. |
 
 ## Oximetry
 
