@@ -65,7 +65,8 @@ OperationAdmission ReportSignalStoreService::start_block(
     bool existing_file,
     uint32_t operation_generation,
     StorageAtomicWriteLane lane,
-    bool finalize_header) {
+    bool finalize_header,
+    const ReportSignalTileBuildProgress &tiles) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
 
     if (existing_block && (!read_port_ || !existing_file)) {
@@ -77,7 +78,7 @@ OperationAdmission ReportSignalStoreService::start_block(
     const std::shared_ptr<LargeByteBuffer> raw_blocks[] = {raw};
     const OperationAdmission admission = start_blocks(
         track, slot, raw_blocks, 1, existing_file, operation_generation,
-        lane, finalize_header);
+        lane, finalize_header, tiles);
     if (admission != OperationAdmission::Accepted) return admission;
 
     raw_ = reinterpret_cast<int16_t *>(raw->data());
@@ -93,7 +94,8 @@ OperationAdmission ReportSignalStoreService::start_blocks(
     bool existing_file,
     uint32_t operation_generation,
     StorageAtomicWriteLane lane,
-    bool finalize_header) {
+    bool finalize_header,
+    const ReportSignalTileBuildProgress &tiles) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
 
     if (!range_write_port_ || !raw_blocks || block_count == 0 ||
@@ -143,6 +145,8 @@ OperationAdmission ReportSignalStoreService::start_blocks(
     block_count_ = block_count;
     existing_file_ = existing_file;
     write_header_ = !existing_file || finalize_header;
+    tiles_ = tiles;
+    tiles_only_ = false;
     range_ = range;
     level_ = ReportSignalStoreLevel::Raw;
     operation_generation_ = operation_generation;
@@ -152,6 +156,30 @@ OperationAdmission ReportSignalStoreService::start_blocks(
     status_.sleep_day = track.sleep_day;
     status_.signal_count = 1;
     phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
+    return OperationAdmission::Accepted;
+}
+
+OperationAdmission ReportSignalStoreService::finish_tiles(
+    const ReportSignalStoreTrack &track,
+    const ReportSignalTileBuildProgress &tiles,
+    uint32_t operation_generation,
+    StorageAtomicWriteLane lane) {
+    if (phase_ != Phase::Idle) return OperationAdmission::Busy;
+
+    track_ = track;
+    tiles_ = tiles;
+    tiles_.closed_before_slot = track.block_slot_count;
+    tiles_only_ = true;
+    slot_ = 0;
+    block_count_ = track.block_slot_count;
+    level_ = ReportSignalStoreLevel::Raw;
+    operation_generation_ = operation_generation;
+    lane_ = lane;
+    status_ = {};
+    status_.state = ReportSignalStoreState::WritingBlock;
+    status_.sleep_day = track.sleep_day;
+    status_.signal_count = 1;
+    prepare_tiles();
     return OperationAdmission::Accepted;
 }
 
@@ -430,13 +458,19 @@ bool ReportSignalStoreService::finish_range() {
         const size_t prefix = range_.offset == 0
             ? ReportSignalStoreFileCodec::HeaderBytes : 0;
 
-        tile_writer_.start(track_, level_, slot_, block_count_,
-            std::move(memory), prefix, operation_generation_, lane_);
-        phase_ = Phase::PrepareTiles;
+        prepare_tiles(std::move(memory), prefix);
     }
     block_bytes_.reset();
     block_buffers_.reset();
     return true;
+}
+
+void ReportSignalStoreService::prepare_tiles(
+    StorageRangeWriteCommand memory, size_t prefix) {
+    tile_writer_.start(track_, level_, slot_, block_count_,
+        std::move(memory), prefix, operation_generation_, lane_,
+        tiles_.next_slot[static_cast<size_t>(level_)], tiles_.closed_before_slot);
+    phase_ = Phase::PrepareTiles;
 }
 
 bool ReportSignalStoreService::finish_writes() {
@@ -490,7 +524,8 @@ void ReportSignalStoreService::advance_level() {
         return;
     }
 
-    phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
+    if (tiles_only_) prepare_tiles();
+    else phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
 }
 
 std::shared_ptr<const LargeByteBuffer>
@@ -654,7 +689,10 @@ bool ReportSignalStoreService::poll() {
             return finish_range();
         case Phase::PrepareTiles: {
             const bool worked = tile_writer_.poll();
-            if (!tile_writer_.active()) advance_level();
+            if (!tile_writer_.active()) {
+                tiles_.next_slot[static_cast<size_t>(level_)] = tile_writer_.next_slot();
+                advance_level();
+            }
             return worked;
         }
         case Phase::SubmitFinish:
@@ -749,6 +787,8 @@ void ReportSignalStoreService::clear_operation() {
     block_count_ = 0;
     existing_file_ = false;
     write_header_ = true;
+    tiles_ = {};
+    tiles_only_ = false;
     read_offset_ = 0;
     read_low_byte_ = 0;
     bundle_.reset();

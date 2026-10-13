@@ -68,6 +68,7 @@ uint8_t lod_mask(uint32_t interval_ms) {
 
 struct TrackWork {
     ReportSignalStoreTrack track;
+    ReportSignalTileBuildProgress tiles;
     ReportBuildTrackState closed;
     ReportBuildTrackState previous_full;
     ReportMetricAccumulator *tail_metrics = nullptr;
@@ -979,7 +980,8 @@ bool ReportSignalStoreBuilder::accept_series_span(
 
 
 bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
-                                             bool *progressed) {
+                                             bool *progressed,
+                                             bool finish_tiles) {
     if (!runtime_ || failure_reason_) return false;
     if (!store_) {
         failure_reason_ = "report_signal_store_writer_unavailable";
@@ -999,6 +1001,7 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
         }
 
         TrackWork &work = runtime_->tracks[runtime_->writing_track];
+        work.tiles = store_->tile_progress();
         for (size_t i = 0; i < runtime_->writing_count; ++i) {
             const size_t slot = runtime_->writing_slot + i;
             work.raw_blocks[slot].reset();
@@ -1061,16 +1064,23 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
             }
 
             OperationAdmission admitted = OperationAdmission::Rejected;
+            if (work.tiles.next_slot[0] == SIZE_MAX) {
+                for (auto &next : work.tiles.next_slot) next = slot;
+            }
+            work.tiles.closed_before_slot = finish_tiles
+                ? work.track.block_slot_count
+                : static_cast<size_t>(work.newest_slot);
+
             if (existing_block) {
                 admitted = store_->start_block(
                     work.track, slot, work.raw_blocks[slot], true,
                     work.file_exists, runtime_->request.ticket.generation,
-                    lane, include_partial);
+                    lane, include_partial, work.tiles);
             } else {
                 admitted = store_->start_blocks(
                     work.track, slot, work.raw_blocks + slot, block_count,
                     work.file_exists, runtime_->request.ticket.generation,
-                    lane, include_partial);
+                    lane, include_partial, work.tiles);
             }
 
             if (admitted == OperationAdmission::Busy) return false;
@@ -1086,6 +1096,38 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
             return false;
         }
     }
+
+    if (finish_tiles) {
+        for (size_t i = 0; i < runtime_->track_count; ++i) {
+            auto &work = runtime_->tracks[i];
+            const auto &track = work.track;
+            const bool pending = work.tiles.next_slot[0] < track.block_slot_count ||
+                ((track.lod_mask & REPORT_SIGNAL_STORE_LOD_1S) &&
+                 work.tiles.next_slot[1] < track.block_slot_count) ||
+                ((track.lod_mask & REPORT_SIGNAL_STORE_LOD_10S) &&
+                 work.tiles.next_slot[2] < track.block_slot_count);
+            if (!pending) continue;
+
+            const auto lane =
+                runtime_->request.priority == ReportRequestPriority::Foreground
+                ? StorageAtomicWriteLane::Foreground
+                : StorageAtomicWriteLane::Maintenance;
+
+            const auto admitted = store_->finish_tiles(
+                track, work.tiles, runtime_->request.ticket.generation, lane);
+            if (admitted == OperationAdmission::Busy) return false;
+            if (admitted != OperationAdmission::Accepted) {
+                failure_reason_ = "report_signal_store_tile_write_rejected";
+                return false;
+            }
+
+            runtime_->writing_track = i;
+            runtime_->writing_count = 0;
+            if (progressed) *progressed = true;
+            return false;
+        }
+    }
+
     runtime_->completed_blocks_pending = false;
     return true;
 }
@@ -1204,7 +1246,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
 
     if (progressed) *progressed = false;
 
-    if (!flush_blocks(true, progressed)) return false;
+    if (!flush_blocks(true, progressed, true)) return false;
 
     if (runtime_->event_count > 1) {
         std::sort(runtime_->events,

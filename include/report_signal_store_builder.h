@@ -63,7 +63,8 @@ private:
                         const EdfReportSeriesSpan &span,
                         size_t begin,
                         size_t end);
-    bool flush_blocks(bool include_partial, bool *progressed);
+    bool flush_blocks(bool include_partial, bool *progressed,
+                      bool finish_tiles = false);
     Runtime *runtime_ = nullptr;
     ReportSignalStoreService *store_ = nullptr;
     const char *failure_reason_ = nullptr;

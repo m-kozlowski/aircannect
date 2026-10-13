@@ -18,12 +18,15 @@ void ReportSignalTileWriter::begin(StorageReadPort &read,
 void ReportSignalTileWriter::start(
     const ReportSignalStoreTrack &track, ReportSignalStoreLevel level,
     size_t first_slot, size_t block_count, StorageRangeWriteCommand memory,
-    size_t memory_prefix, uint32_t generation, StorageAtomicWriteLane lane) {
+    size_t memory_prefix, uint32_t generation, StorageAtomicWriteLane lane,
+    size_t next_slot, size_t closed_before_slot) {
     reset();
     track_ = track;
     level_ = level;
-    cursor_ = first_slot;
+    cursor_ = next_slot == SIZE_MAX ? first_slot : next_slot;
     end_slot_ = first_slot + block_count;
+    closed_before_slot_ = closed_before_slot;
+    building_ = next_slot != SIZE_MAX;
     memory_ = std::move(memory);
     memory_prefix_ = memory_prefix;
     generation_ = generation;
@@ -45,7 +48,8 @@ void ReportSignalTileWriter::start(
                            ? "report_signal_tile_invalid_range"
                            : "report_signal_tile_invalid_metadata");
     }
-    if (succeeded_) phase_ = Phase::Select;
+    if (succeeded_ && cursor_ < end_slot_) phase_ = Phase::Select;
+    if (!active()) memory_ = {};
 }
 
 void ReportSignalTileWriter::release_read() {
@@ -85,10 +89,18 @@ bool ReportSignalTileWriter::poll() {
             memory_ = {};
             return true;
         }
-        // A later batch owns a tile that still has unwritten blocks.
+        // A memory-pressure flush does not close the newest time block.
+        // Keep the cursor here so a later batch can finish the same tile.
+        if (tile_.first_slot + tile_.block_count > closed_before_slot_) {
+            phase_ = Phase::Idle;
+            memory_ = {};
+            return true;
+        }
+
         for (size_t s = end_slot_; s < tile_.first_slot + tile_.block_count; ++s) {
             if (track_.present_blocks[s / 8] & (1u << (s % 8))) {
-                advance();
+                phase_ = Phase::Idle;
+                memory_ = {};
                 return true;
             }
         }
@@ -140,7 +152,7 @@ bool ReportSignalTileWriter::poll() {
             phase_ = Phase::Copy;
         } else {
             // Existing reports are inspected only by background preparation.
-            phase_ = memory ? Phase::Read : Phase::Check;
+            phase_ = memory || building_ ? Phase::Read : Phase::Check;
         }
         return true;
     }

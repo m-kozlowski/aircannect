@@ -12,15 +12,21 @@ public:
     void begin(StorageReadPort &read, StorageRangeWritePort &write);
     void reset();
 
+    // An explicit cursor resumes a build and rewrites changed tiles. Without
+    // it, disk-only backfill checks whether an existing tile can be reused.
+    // Blocks at and after closed_before_slot may still receive samples.
     void start(const ReportSignalStoreTrack &track, ReportSignalStoreLevel level,
                size_t first_slot, size_t block_count,
                StorageRangeWriteCommand memory, size_t memory_prefix,
-               uint32_t generation, StorageAtomicWriteLane lane);
+               uint32_t generation, StorageAtomicWriteLane lane,
+               size_t next_slot = SIZE_MAX,
+               size_t closed_before_slot = SIZE_MAX);
     bool poll();
 
     bool active() const { return phase_ != Phase::Idle; }
     bool succeeded() const { return succeeded_; }
     const char *error() const { return error_; }
+    size_t next_slot() const { return cursor_; }
 
 private:
     enum class Phase { Idle, Select, Check, Read, WaitRead, Copy, Compress,
@@ -39,6 +45,7 @@ private:
     ReportSignalTile tile_;
     size_t cursor_ = 0;
     size_t end_slot_ = 0;
+    size_t closed_before_slot_ = SIZE_MAX;
     uint32_t generation_ = 0;
     StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;
     bool succeeded_ = true;
@@ -49,6 +56,7 @@ private:
     StorageRangeWriteCommand memory_;
     ReportSignalStorePlaneRange memory_range_;
     bool from_memory_ = false;
+    bool building_ = false;
 
     bool checking_ = false;
     OperationTicket read_ticket_;

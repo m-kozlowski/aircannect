@@ -33,6 +33,12 @@ struct ReportSignalStoreStatus {
     bool terminal() const;
 };
 
+struct ReportSignalTileBuildProgress {
+    // RAW, 1 s, 10 s. SIZE_MAX starts at the first changed block.
+    size_t next_slot[3] = {SIZE_MAX, SIZE_MAX, SIZE_MAX};
+    size_t closed_before_slot = SIZE_MAX;
+};
+
 class ReportSignalStoreService {
 public:
     static constexpr size_t MaxWriteBatchBlocks = REPORT_SIGNAL_STORE_MAX_BLOCKS;
@@ -70,7 +76,8 @@ public:
         bool existing_file,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane,
-        bool finalize_header = true);
+        bool finalize_header = true,
+        const ReportSignalTileBuildProgress &tiles = {});
 
     // Persists RAW and its LOD levels before completing the batch. LOD is
     // computed from these buffers, without retaining data from earlier batches.
@@ -84,7 +91,17 @@ public:
         bool existing_file,
         uint32_t operation_generation,
         StorageAtomicWriteLane lane,
-        bool finalize_header = true);
+        bool finalize_header = true,
+        const ReportSignalTileBuildProgress &tiles = {});
+
+    // Complete only the tile suffix left pending by earlier RAW/LOD batches.
+    OperationAdmission finish_tiles(
+        const ReportSignalStoreTrack &track,
+        const ReportSignalTileBuildProgress &tiles,
+        uint32_t operation_generation,
+        StorageAtomicWriteLane lane);
+
+    const ReportSignalTileBuildProgress &tile_progress() const { return tiles_; }
 
     // Closes signal files first; metadata is published only after success.
     OperationAdmission start(
@@ -138,6 +155,7 @@ private:
     bool finish_range();
     bool finish_writes();
     void advance_level();
+    void prepare_tiles(StorageRangeWriteCommand memory = {}, size_t prefix = 0);
 
     // Events and metadata publication
     std::shared_ptr<const LargeByteBuffer> current_bytes() const;
@@ -176,6 +194,8 @@ private:
     uint8_t read_low_byte_ = 0;
     OperationTicket range_ticket_;
     ReportSignalTileWriter tile_writer_;
+    ReportSignalTileBuildProgress tiles_;
+    bool tiles_only_ = false;
 
     // Events and metadata publication
     std::shared_ptr<ReportSignalStoreBundle> bundle_;
