@@ -821,8 +821,10 @@ StorageBrowserStep StorageDownloadProducer::step() {
     if (!download->metadata_ready && !download->opening) {
         download->opening = true;
 
+        const size_t ring_bytes =
+            Memory::buffer_budget(DOWNLOAD_RING_BYTES, DOWNLOAD_READY_BYTES);
         uint8_t *ring_storage = static_cast<uint8_t *>(
-            Memory::alloc_large(DOWNLOAD_RING_BYTES, false));
+            Memory::alloc_large(ring_bytes, false));
         File input;
         bool directory = false;
         uint64_t size = 0;
@@ -849,7 +851,7 @@ StorageBrowserStep StorageDownloadProducer::step() {
                         directory ? "not_file" : "not_found");
         } else {
             download->ring_storage = ring_storage;
-            download->transfer.bind(ring_storage, DOWNLOAD_RING_BYTES);
+            download->transfer.bind(ring_storage, ring_bytes);
             download->input = input;
             download->input_open = true;
             download->size = size;

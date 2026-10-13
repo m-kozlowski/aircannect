@@ -63,13 +63,14 @@ between CAN and Bluetooth.
 
 ## Build profiles
 
-Supported release profiles require an ESP32-S3 with PSRAM and microSD:
+Supported build profiles require an ESP32-S3 with PSRAM and microSD:
 
 - `xiao-esp32s3-plus-sdmmc4` *(default)* - 4-bit microSD on the exposed non-strapping GPIOs.
 - `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules.
 - `waveshare-esp32s3-touch-lcd-1-54` - onboard SDMMC and BLE transport on the
   Waveshare ESP32-S3-Touch-LCD-1.54, with its local status display and action
   button enabled.
+- `waveshare-esp32s3-geek` - onboard microSD, BLE by default, and optional CAN.
 
 ## Related tools
 

@@ -5,6 +5,7 @@
 #include <list>
 #include "json_util.h"
 #include "large_allocator.h"
+#include "memory_manager.h"
 #include "report_build_checkpoint.h"
 #include "report_night_histogram.h"
 #include "string_util.h"
@@ -96,14 +97,15 @@ struct ReportPeriodService::Cache {
     void remember(std::shared_ptr<const LargeByteBuffer> data,
                   const ReportNightHistogramView &view) {
         const size_t cost = data->size() + EntryBytes;
-        if (cost > NightCacheBytes) return;
+        const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
+        if (cost > budget) return;
 
         for (auto it = entries.begin(); it != entries.end();) {
             if (it->view.sleep_day != view.sleep_day) { ++it; continue; }
             bytes -= it->bytes->size() + EntryBytes;
             it = entries.erase(it);
         }
-        while (bytes + cost > NightCacheBytes && !entries.empty()) {
+        while (bytes + cost > budget && !entries.empty()) {
             const auto oldest = std::min_element(entries.begin(), entries.end(),
                 [](const Entry &a, const Entry &b) { return a.used < b.used; });
             bytes -= oldest->bytes->size() + EntryBytes;

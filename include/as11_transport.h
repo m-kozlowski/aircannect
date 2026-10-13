@@ -9,6 +9,10 @@
 
 namespace aircannect {
 
+#ifndef AC_DEFAULT_AS11_TRANSPORT_BLE
+#define AC_DEFAULT_AS11_TRANSPORT_BLE (!AC_CAN_ENABLED)
+#endif
+
 enum class As11Transport : uint8_t {
     Can = 0,
     Ble = 1,
@@ -16,6 +20,8 @@ enum class As11Transport : uint8_t {
 
 static_assert(AC_CAN_ENABLED || AC_BLE_ENABLED,
               "AirCANnect requires at least one AS11 transport");
+static_assert(AC_DEFAULT_AS11_TRANSPORT_BLE ? AC_BLE_ENABLED : AC_CAN_ENABLED,
+              "The default AS11 transport must be enabled");
 
 inline const char *as11_transport_name(As11Transport transport) {
     return transport == As11Transport::Ble ? "ble" : "can";
@@ -32,10 +38,10 @@ inline bool as11_transport_supported(As11Transport transport) {
 }
 
 inline constexpr As11Transport default_as11_transport() {
-#if AC_CAN_ENABLED
-    return As11Transport::Can;
-#elif AC_BLE_ENABLED
+#if AC_DEFAULT_AS11_TRANSPORT_BLE
     return As11Transport::Ble;
+#else
+    return As11Transport::Can;
 #endif
 }
 

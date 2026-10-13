@@ -43,6 +43,10 @@ MemoryStatus status(bool include_largest_free_block = true);
 MemoryDetailStatus detail_status();
 bool psram_available();
 
+// Select a smaller working set on boards with at most 2 MiB PSRAM.
+// Uses boot-time capacity, not transient free heap or a heap walk.
+size_t buffer_budget(size_t normal_bytes, size_t small_psram_bytes);
+
 void *alloc_dma(size_t size);
 void *alloc_large(size_t size, bool allow_internal_fallback = true);
 void *realloc_large(void *ptr,

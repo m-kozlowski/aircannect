@@ -4,33 +4,20 @@ Build notes for supported ESP32-S3 targets. AirCANnect assumes PSRAM and
 microSD storage. CAN and BLE are independent build capabilities; a board may
 provide either or both.
 
-## Choose a hardware path
-
-| Setup | Assembly | AS11 connection |
-| --- | --- | --- |
-| [**Waveshare ESP32-S3-Touch-LCD-1.54**](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54) | **No soldering required.** Insert a microSD card and power the board over USB. | BLE pairing from the setup wizard. |
-| **XIAO ESP32-S3 Plus over BLE** | Wire an external microSD socket or module to the XIAO. USB can provide power. | BLE pairing from the setup wizard; no CAN transceiver or AS11 cable is needed. |
-| **XIAO ESP32-S3 Plus over CAN** | Full hardware assembly: external microSD, CAN transceiver, buck regulator, and AS11 cable. | Physical CAN connection. |
-
-The Waveshare profile is the ready-made option when no soldering is desired.
-Its display, button, accelerometer, microSD slot, USB power, and BLE radio are
-already onboard. Its speaker can be used for configured local alerts. Adding
-physical CAN to it is possible, but requires an
-external transceiver, wiring, and a custom build.
-
-The published XIAO profiles use an external microSD card in either 4-bit SDMMC
-or SPI mode. Reliable SD wiring should be short and soldered; breadboard and
-long jumper-wire builds are unsuitable for regular use.
-
-## Parts by capability
-
-- **Every setup:** a supported ESP32-S3 board with PSRAM and a microSD card.
-- **XIAO setups:** an external microSD socket or module and its wiring.
-- **Physical CAN setups:** a mating AS11 power connector, 3.3 V CAN
-  transceiver, 24 V to 3.3 V buck regulator, and the wiring described below.
-
 The microSD card provides first-boot provisioning, EDF capture, reports, file
 logging, and the ResMed firmware repository.
+
+## Choose a hardware path
+
+| Board | microSD | ResMed connection | Local features |
+| --- | --- | --- | --- |
+| [**Waveshare ESP32-S3-Touch-LCD-1.54**](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.54) | Onboard, 4-bit SDMMC | **BLE** | LCD, buttons, automatic rotation, speaker alerts |
+| [**Waveshare ESP32-S3-GEEK**](https://docs.waveshare.com/ESP32-S3-GEEK) | Onboard, 4-bit SDMMC | **BLE**, CAN | - |
+| [**XIAO ESP32-S3 Plus**](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) | External, 4-bit SDMMC or SPI | BLE, **CAN** | - |
+
+The default connection is **bold**. BLE pairing is available in the setup
+wizard. Boards with onboard microSD need no external wiring for BLE use.
+AirMini requires CAN. See [Wiring tips](#wiring-tips) for external SD wiring.
 
 ## XIAO CAN wiring
 
@@ -38,17 +25,9 @@ Default wiring for the `xiao-esp32s3-plus-sdmmc4` profile:
 
 ![AirCANnect reference wiring](images/aircannect-wiring.svg)
 
-This diagram is not needed for the standard Waveshare BLE setup.
-
 AirCANnect sits in-line between the ResMed PSU and the AirSense. +24 V
 and GND pass through to the AirSense; AirCANnect taps them locally for
 the buck regulator.
-
-For AirSense 11 with the 65 W PSU, PSU-side CAN is optional. \
-For AirCurve 11 with the 90 W PSU, the PSU identification uses CAN bus
-and the cable uses all four connector pins. In that build, CAN-H and CAN-L
-must pass through from the PSU connector to the AirCurve connector,
-and the AirCANnect CAN transceiver must tap that same pass-through CAN pair.
 
 Signal summary:
 
@@ -63,16 +42,23 @@ Signal summary:
 | Transceiver `CANH` | AirSense `CAN-H` |
 | Transceiver `CANL` | AirSense `CAN-L` |
 
-For a suitably rated 90 W AC supply without CAN identification, the optional
-[`psu_90w` setting](configuration.md#as11-connection) can supply that
-identification. Leave it off when the original PSU already sends CAN messages.
-
-The microSD wiring is shown in the diagram and repeated in the pin assignment
-section below. Keep SDMMC wires short, ideally under 5 cm.
+For microSD connections, see the [pin assignments](#xiao-esp32-s3-plus-pin-assignments)
+and [Wiring tips](#wiring-tips).
 
 ## AirSense 11 power-and-CAN connector
 
-AirMini uses the same connector, pinout, and wiring.
+The CAN cable needs a mating Air11 connector. AirMini uses the same connector,
+pinout, and wiring.
+
+For AirSense 11 with the 65 W PSU, PSU-side CAN is optional.
+For AirCurve 11 with the 90 W PSU, the PSU identification uses CAN bus
+and the cable uses all four connector pins. CAN-H and CAN-L must pass through
+from the PSU connector to the AirCurve connector, and the AirCANnect CAN
+transceiver must tap that same pass-through CAN pair.
+
+For a suitably rated 90 W AC supply without CAN identification, the optional
+[`psu_90w` setting](configuration.md#as11-connection) can supply that
+identification. Leave it off when the original PSU already sends CAN messages.
 
 **Pinout (device side):**
 
@@ -83,8 +69,6 @@ AirMini uses the same connector, pinout, and wiring.
 | 3 | CAN-L |
 | 4 | GND |
 
-
-
 **Sourcing.** The original plug and socket are custom OEM parts. The
 most practical source is salvaging a Pilot-24 cable kit ([Amazon
 B0B3F7ZY65](https://www.amazon.com/dp/B0B3F7ZY65)) - you need both
@@ -94,15 +78,21 @@ runs between them. See [airbreak-plus AS11 CAN connection
 notes](https://github.com/m-kozlowski/airbreak-plus/blob/master/docs/as11/can_connection.md)
 for photos and additional context.
 
-
 ## Power
 
-24 V from the AirSense feeds a step-down regulator that produces 3.3 V for
-the ESP32. Reference part:
+All listed boards can be powered over USB, including when using CAN. The
+transceiver still needs 3.3 V power and a common ground with the board and
+ResMed device. Never connect the ResMed 24 V supply directly to an ESP32 board.
+
+For the XIAO assembly shown above, 24 V from the ResMed supply feeds a
+step-down regulator that produces 3.3 V. Reference part:
 [SparkFun COM-18357 (AP63203 buck)](https://www.sparkfun.com/products/18357) -
 small, comfortable headroom for the ESP32-S3 + BLE peak draw. Any 24 V to
 3.3 V buck with >=1 A capability works; no hard requirement on the specific
 part.
+
+Keep the 24 V and GND wires from the ResMed supply to the buck under 1 m,
+using 22-24 AWG wire.
 
 ## CAN transceiver
 
@@ -111,20 +101,13 @@ Reference part: a generic **SN65HVD230** break-out board - the small blue
 PCBs sold everywhere as "CAN bus module" or similar. Any 3.3 V high-speed
 CAN transceiver works; no hard requirement on the specific part or board.
 
-Wiring:
-
-- ESP32 CAN TX -> transceiver `D` / `TXD`
-- ESP32 CAN RX <- transceiver `R` / `RXD`
-- Transceiver `VCC` -> 3.3 V 
-- Transceiver `CANH` / `CANL` -> AS11 connector pins 2 / 3
-- ESP32 `GND` -> transceiver `GND`
-- Transceiver `GND` -> AS11 connector pin 4 (GND)
+See the [signal table](#xiao-can-wiring) for transceiver connections.
+Use the CAN GPIOs listed for your board below.
 
 ## XIAO ESP32-S3 Plus pin assignments
 
-These are the defaults for the `xiao-esp32s3-plus-sdmmc4` build (the
-project's `default_envs`). Override at build time via `build_flags` if you
-wire differently.
+These are the defaults for the `xiao-esp32s3-plus-sdmmc4` build.
+Override at build time via `build_flags` if you wire differently.
 
 ```text
 CAN
@@ -140,9 +123,8 @@ microSD (4-bit SDMMC)
   D3      GPIO 40
 ```
 
-Supported storage profiles:
-
-- `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules: `CS` GPIO 10, `SCK` GPIO 13, `MISO` GPIO 12, `MOSI` GPIO 11.
+The `xiao-esp32s3-plus-spisd` profile supports SPI-mode SD modules with
+`CS` GPIO 10, `SCK` GPIO 13, `MISO` GPIO 12, and `MOSI` GPIO 11.
 
 ## Waveshare ESP32-S3-Touch-LCD-1.54
 
@@ -167,20 +149,34 @@ available, and a second page of current respiratory values. BOOT and PLUS move
 between pages. PWR toggles the backlight on a short press and starts or stops
 therapy on a long press. Touch is not initialized.
 
-Display and button support are build capabilities, not board identities. A
-display driver is selected with `AC_DISPLAY_DRIVER` and described by its pin,
-size, rotation, and backlight flags. `AC_BUTTON_PROFILE` independently selects
-a catalog containing any number of buttons, their electrical configuration,
-supported gestures, and default actions. Future board profiles can therefore
-use another resolution, display backend, or button layout without changing
-the dashboard or action owners.
-
-CAN is a build capability rather than a board identity. A custom environment
-may extend this profile, remove its inherited `-DAC_CAN_ENABLED=0` with
-`build_unflags`, then set `AC_CAN_ENABLED=1`, `AC_CAN_TX_GPIO`,
+To add CAN, a custom environment can extend this profile, remove its
+inherited `-DAC_CAN_ENABLED=0` with `build_unflags`, then set
+`AC_CAN_ENABLED=1`, `AC_CAN_TX_GPIO`,
 `AC_CAN_RX_GPIO`, and the appropriate timing after an external transceiver
-has been wired. Likewise, any XIAO environment can set `AC_CAN_ENABLED=0` for
-a BLE-only build.
+has been wired. Choose pins not already used by the board's peripherals.
+
+## Waveshare ESP32-S3-GEEK
+
+The `waveshare-esp32s3-geek` profile uses 16 MB flash, 2 MB quad PSRAM,
+native USB, and the onboard microSD slot.
+
+```text
+CAN (external 3.3 V transceiver)
+  TX (to transceiver D/TXD)    GPIO 16
+  RX (from transceiver R/RXD)  GPIO 17
+
+microSD (4-bit SDMMC)
+  CLK     GPIO 36
+  CMD     GPIO 35
+  D0      GPIO 37
+  D1      GPIO 33
+  D2      GPIO 38
+  D3      GPIO 34
+```
+
+The default is `as11_transport=ble`; select `can` in configuration after
+wiring a transceiver. No firmware change is needed. GPIO16/17 connect to
+the transceiver's logic pins, not directly to CAN-H/CAN-L.
 
 ## Wiring tips
 
@@ -198,12 +194,9 @@ Practical targets:
   already include a 120 Ohm resistor (sometimes with a removable jumper) -
   leave it in. If your board does not have one, add it.
 
-**Power leg.**
+**External microSD wiring (XIAO).** At 40 MHz:
 
-- 24 V and GND from AS11 to buck: under 1 m of 22-24 AWG wire.
-
-**microSD.** 40 MHz SDMMC is unforgiving:
-
+- Use soldered connections; breadboards are unsuitable for regular use.
 - Short wires only - under 5 cm from each SD pin to the GPIO. Socket
   choice matters less than how short you wire it.
 - Avoid the long (20 cm) Dupont jumpers - they cause intermittent
@@ -212,7 +205,6 @@ Practical targets:
   internal pull-ups (~45 kOhm) are marginal at SDMMC speed - add external
   **10 kOhm pull-ups to 3.3 V** on `CMD` and each `D0`-`D3` line. `CLK`
   does not need one.
-
 
 For first-boot, flash, and CAN-link test steps, see
 [quickstart.md](quickstart.md).

@@ -1158,7 +1158,8 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
 bool ReportSignalStoreBuilder::ready(bool *progressed) {
     if (progressed) *progressed = false;
     return flush_blocks(
-        runtime_ && runtime_->buffered_raw_bytes > RAW_BUFFER_BUDGET,
+        runtime_ && runtime_->buffered_raw_bytes >
+            Memory::buffer_budget(RAW_BUFFER_BUDGET, 256 * 1024),
         progressed);
 }
 

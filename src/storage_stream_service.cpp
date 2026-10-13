@@ -366,8 +366,10 @@ void StorageStreamService::fail_locked(StorageByteStream &stream,
 }
 
 bool StorageStreamService::open_locked(StorageByteStream &stream) {
+    const size_t ring_bytes =
+        Memory::buffer_budget(STREAM_RING_BYTES, STREAM_READY_BYTES);
     stream.ring_storage = static_cast<uint8_t *>(
-        Memory::alloc_large(STREAM_RING_BYTES, false));
+        Memory::alloc_large(ring_bytes, false));
     if (!stream.ring_storage) {
         fail_locked(stream, "stream_buffer_alloc");
         return false;
@@ -427,7 +429,7 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
         return false;
     }
 
-    stream.transfer.bind(stream.ring_storage, STREAM_RING_BYTES);
+    stream.transfer.bind(stream.ring_storage, ring_bytes);
     stream.metadata_ready = true;
     stream.ready_ms = nonzero_millis(millis());
     if (stream.size == 0) {

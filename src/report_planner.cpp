@@ -9,6 +9,7 @@
 #include "board_report.h"
 #include "checked_size.h"
 #include "large_scratch_array.h"
+#include "memory_manager.h"
 #include "report_records.h"
 #include "report_source_progress.h"
 #include "storage_read_port.h"
@@ -684,8 +685,11 @@ uint32_t records_per_operation(const NightCatalogSourceFile &file) {
         file.record_size > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
         return 0;
     }
+    const size_t budget = Memory::buffer_budget(
+        AC_STORAGE_PREPARED_READ_MAX_BYTES, 64 * 1024);
+
     return static_cast<uint32_t>(
-        AC_STORAGE_PREPARED_READ_MAX_BYTES / file.record_size);
+        std::max<size_t>(1, budget / file.record_size));
 }
 
 bool operation_span(const NightCatalogSourceFile &file,

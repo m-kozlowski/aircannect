@@ -17,6 +17,7 @@ constexpr size_t DEFAULT_ALLOCATION_INTERNAL_LIMIT = 1024;
 
 bool initialized = false;
 bool psram_detected = false;
+size_t psram_capacity = 0;
 
 bool detect_psram() {
     return psramFound() && ESP.getPsramSize() > 0;
@@ -32,6 +33,7 @@ void ensure_begin() {
 void begin() {
 #ifdef ARDUINO
     psram_detected = detect_psram();
+    psram_capacity = psram_detected ? ESP.getPsramSize() : 0;
     if (psram_detected) {
         heap_caps_malloc_extmem_enable(
             DEFAULT_ALLOCATION_INTERNAL_LIMIT);
@@ -112,6 +114,18 @@ bool psram_available() {
 #else
     return false;
 #endif
+}
+
+size_t buffer_budget(size_t normal_bytes, size_t small_psram_bytes) {
+#ifdef ARDUINO
+    ensure_begin();
+    if (psram_capacity && psram_capacity <= 2 * 1024 * 1024) {
+        return small_psram_bytes;
+    }
+#else
+    (void)small_psram_bytes;
+#endif
+    return normal_bytes;
 }
 
 void *alloc_dma(size_t size) {

@@ -276,7 +276,8 @@ StorageUploadStartResult StorageUploadService::start(
 
     result.admission = OperationAdmission::Accepted;
     result.id = id;
-    result.chunk_size = AC_STORAGE_UPLOAD_CHUNK_BYTES;
+    result.chunk_size =
+        Memory::buffer_budget(AC_STORAGE_UPLOAD_CHUNK_BYTES, 64 * 1024);
     unlock();
 
     wake();

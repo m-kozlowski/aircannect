@@ -624,15 +624,17 @@ bool StorageArchiveService::begin_download(
         return false;
     }
 
+    const size_t ring_bytes =
+        Memory::buffer_budget(ARCHIVE_RING_BYTES, 32 * 1024);
     download->ring_storage = static_cast<uint8_t *>(
-        Memory::alloc_large(ARCHIVE_RING_BYTES, false));
+        Memory::alloc_large(ring_bytes, false));
     if (!download->ring_storage) {
         copy_cstr(error_out, error_out_size, "download_buffer_alloc");
         release_maintenance_locked();
         unlock();
         return false;
     }
-    download->transfer.bind(download->ring_storage, ARCHIVE_RING_BYTES);
+    download->transfer.bind(download->ring_storage, ring_bytes);
 
     status_.state = StorageArchiveState::Downloading;
     status_.bytes_done = 0;
