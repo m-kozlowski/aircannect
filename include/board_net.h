@@ -17,10 +17,6 @@
 #define AC_SERIAL_BAUD 921600
 #endif
 
-#ifndef AC_ARDUINO_OTA_PORT
-#define AC_ARDUINO_OTA_PORT 3232
-#endif
-
 #ifndef AC_HOSTNAME
 #define AC_HOSTNAME "aircannect"
 #endif
@@ -43,10 +39,6 @@
 
 #ifndef AC_DEFAULT_TELNET_CONSOLE_ENABLED
 #define AC_DEFAULT_TELNET_CONSOLE_ENABLED 1
-#endif
-
-#ifndef AC_DEFAULT_OTA_PASSWORD
-#define AC_DEFAULT_OTA_PASSWORD "aircannect"
 #endif
 
 #ifndef AC_DEFAULT_UPDATE_URL

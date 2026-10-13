@@ -9,7 +9,6 @@
 #include <string.h>
 #include <utility>
 
-#include "arduino_ota_source.h"
 #include "async_prepared_response.h"
 #include "board.h"
 #include "debug_log.h"
@@ -99,7 +98,7 @@ bool request_url_args(AsyncWebServerRequest *request,
 }
 
 bool ota_status_active(const OtaStatusSnapshot &status) {
-    return status.arduino_active || status.http_prepare_pending ||
+    return status.http_prepare_pending ||
            status.http_prepared || status.http_active || status.http_ready ||
            status.url_active || status.update_check_pending ||
            status.update_check_active || status.reboot_pending;
@@ -107,9 +106,7 @@ bool ota_status_active(const OtaStatusSnapshot &status) {
 
 bool same_ota_status(const OtaStatusSnapshot &lhs,
                      const OtaStatusSnapshot &rhs) {
-    return lhs.arduino_started == rhs.arduino_started &&
-           lhs.arduino_active == rhs.arduino_active &&
-           lhs.http_prepare_pending == rhs.http_prepare_pending &&
+    return lhs.http_prepare_pending == rhs.http_prepare_pending &&
            lhs.http_prepared == rhs.http_prepared &&
            lhs.http_active == rhs.http_active &&
            lhs.http_ready == rhs.http_ready &&
@@ -124,8 +121,7 @@ bool same_ota_status(const OtaStatusSnapshot &lhs,
            lhs.update_release_notes_available ==
                rhs.update_release_notes_available &&
            lhs.reboot_pending == rhs.reboot_pending &&
-           lhs.auth_enabled == rhs.auth_enabled &&
-           lhs.arduino_port == rhs.arduino_port && lhs.bytes == rhs.bytes &&
+           lhs.bytes == rhs.bytes &&
            lhs.total_size == rhs.total_size &&
            lhs.wire_bytes == rhs.wire_bytes &&
            lhs.wire_total_size == rhs.wire_total_size &&
@@ -144,8 +140,6 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
     json_add_string(json, "release_target", AC_OTA_RELEASE_TARGET);
     json += ",\"upload_encodings\":[\"auto\",\"plain\",\"zlib\"]";
     json_add_bool(json, "url_update", true);
-    json_add_bool(json, "arduino_started", ota.arduino_started);
-    json_add_bool(json, "arduino_active", ota.arduino_active);
     json_add_bool(json, "http_prepare_pending", ota.http_prepare_pending);
     json_add_bool(json, "http_prepared", ota.http_prepared);
     json_add_bool(json, "http_active", ota.http_active);
@@ -169,8 +163,6 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
         json += ",\"update_last_check_age_ms\":null";
     }
     json_add_bool(json, "reboot_pending", ota.reboot_pending);
-    json_add_bool(json, "auth_enabled", ota.auth_enabled);
-    json_add_int(json, "arduino_port", ota.arduino_port);
     json_add_int(json, "bytes", static_cast<long>(ota.bytes));
     json_add_int(json, "total_size", static_cast<long>(ota.total_size));
     json_add_int(json, "wire_bytes", static_cast<long>(ota.wire_bytes));
@@ -278,13 +270,11 @@ void send_resmed_status(AsyncWebServerRequest *request,
 
 bool OtaHttpController::begin(FirmwareInstaller &installer,
                               FirmwareUrlSource &url_source,
-                              ArduinoOtaSource &arduino_source,
                               UpdateChecker &update_checker,
                               ResmedFirmwarePreparer &resmed_preparer,
                               ResmedOtaManager &resmed_ota) {
     installer_ = &installer;
     url_source_ = &url_source;
-    arduino_source_ = &arduino_source;
     update_checker_ = &update_checker;
     resmed_preparer_ = &resmed_preparer;
     resmed_ota_ = &resmed_ota;
@@ -308,7 +298,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
               [this](AsyncWebServerRequest *request) {
         send_esp_status(request,
                         collect_ota_status(*installer_, *url_source_,
-                                           *arduino_source_, *update_checker_),
+                                           *update_checker_),
                         200);
     });
 
@@ -317,7 +307,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
         const bool ok = update_checker_->request_check(installer_->active());
         request_snapshot();
         const OtaStatusSnapshot status = collect_ota_status(
-            *installer_, *url_source_, *arduino_source_, *update_checker_);
+            *installer_, *url_source_, *update_checker_);
         const int response_status =
             ok ? 202 : (status.update_error == "ota_busy" ? 409 : 400);
         send_esp_status(request, status, response_status);
@@ -374,7 +364,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                                                 *url_source_, error);
         request_snapshot();
         OtaStatusSnapshot status = collect_ota_status(
-            *installer_, *url_source_, *arduino_source_, *update_checker_);
+            *installer_, *url_source_, *update_checker_);
         if (!ok && error.length()) status.last_error = error;
         const int response_status =
             ok ? 202 : (status.last_error == "ota_busy" ||
@@ -405,7 +395,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                                              wire_size);
         request_snapshot();
         const OtaStatusSnapshot status = collect_ota_status(
-            *installer_, *url_source_, *arduino_source_, *update_checker_);
+            *installer_, *url_source_, *update_checker_);
         const int response_status =
             ok ? 202 : (status.last_error == "ota_busy" ||
                         status.last_error == "usb_storage_active" ? 409 : 400);
@@ -434,7 +424,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
             FirmwareInstallSource::HttpUpload);
         request_snapshot();
         const OtaStatusSnapshot status = collect_ota_status(
-            *installer_, *url_source_, *arduino_source_, *update_checker_);
+            *installer_, *url_source_, *update_checker_);
         const int response_status =
             ok ? 202 : (status.last_error == "ota_busy" ||
                         status.last_error == "usb_storage_active" ? 409 : 400);
@@ -455,7 +445,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
             send_esp_status(
                 request,
                 collect_ota_status(*installer_, *url_source_,
-                                   *arduino_source_, *update_checker_),
+                                   *update_checker_),
                 ok ? 200 : 400, ok ? installer_ : nullptr);
         },
         [this](AsyncWebServerRequest *request, const String &filename,
@@ -757,7 +747,7 @@ void OtaHttpController::request_resmed_snapshot() {
 }
 
 void OtaHttpController::publish_snapshot_if_needed(bool force) {
-    if (!installer_ || !url_source_ || !arduino_source_ || !update_checker_) {
+    if (!installer_ || !url_source_ || !update_checker_) {
         return;
     }
 
@@ -770,7 +760,7 @@ void OtaHttpController::publish_snapshot_if_needed(bool force) {
     }
 
     OtaStatusSnapshot status = collect_ota_status(
-        *installer_, *url_source_, *arduino_source_, *update_checker_);
+        *installer_, *url_source_, *update_checker_);
     next_snapshot_ms_ = now +
         (ota_status_active(status) ? SnapshotActiveIntervalMs
                                    : SnapshotIdleIntervalMs);

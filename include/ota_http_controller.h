@@ -16,7 +16,6 @@ class AsyncWebServerRequest;
 
 namespace aircannect {
 
-class ArduinoOtaSource;
 class FirmwareInstaller;
 class FirmwareUrlSource;
 class ResmedFirmwarePreparer;
@@ -29,7 +28,6 @@ class OtaHttpController final : public HttpRouteModule {
 public:
     bool begin(FirmwareInstaller &installer,
                FirmwareUrlSource &url_source,
-               ArduinoOtaSource &arduino_source,
                UpdateChecker &update_checker,
                ResmedFirmwarePreparer &resmed_preparer,
                ResmedOtaManager &resmed_ota);
@@ -88,7 +86,6 @@ private:
 
     FirmwareInstaller *installer_ = nullptr;
     FirmwareUrlSource *url_source_ = nullptr;
-    ArduinoOtaSource *arduino_source_ = nullptr;
     UpdateChecker *update_checker_ = nullptr;
     ResmedFirmwarePreparer *resmed_preparer_ = nullptr;
     ResmedOtaManager *resmed_ota_ = nullptr;

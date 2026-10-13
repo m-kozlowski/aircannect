@@ -718,10 +718,6 @@ bool AppConfig::normalize() {
         data_.telnet_console_port = defaults.telnet_console_port;
         unchanged = false;
     }
-    if (!valid_optional_secret(data_.ota_password)) {
-        data_.ota_password = defaults.ota_password;
-        unchanged = false;
-    }
     data_.update_url.trim();
     if (!valid_update_url(data_.update_url)) {
         data_.update_url = defaults.update_url;
@@ -1102,15 +1098,6 @@ bool AppConfig::set_telnet_console(bool enabled, uint16_t port) {
     data_.telnet_console_enabled = enabled;
     data_.telnet_console_port = port;
     return mark_dirty(AC_CONFIG_DIRTY_TELNET);
-}
-
-bool AppConfig::set_ota_password(const String &password) {
-    String value = password;
-    value.trim();
-    if (!valid_optional_secret(value)) return false;
-    if (data_.ota_password == value) return true;
-    data_.ota_password = value;
-    return mark_dirty(AC_CONFIG_DIRTY_OTA_PASSWORD);
 }
 
 bool AppConfig::set_update_url(const String &url) {

@@ -234,10 +234,6 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_AUTH_WHITELIST, "HTTP auth whitelist",
      "Comma-separated auth whitelist.", nullptr, 0, -1,
      AC_CFG_OFFSET(auth_whitelist)},
-    {"ota_pass", AppConfigFieldId::OtaPassword, AppConfigGroup::Access, 80,
-     AppConfigFieldType::Secret, SECRET_PROVISIONABLE,
-     AC_CONFIG_DIRTY_OTA_PASSWORD, "OTA password", "OTA password.", nullptr,
-     0, -1, AC_CFG_OFFSET(ota_password)},
 
     {"update_url", AppConfigFieldId::UpdateUrl, AppConfigGroup::Ota, 10,
      AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_UPDATE_URL,
@@ -631,8 +627,6 @@ bool AppConfigFieldWriter::set_value(
             if (!parse_port(value, parsed_port)) return false;
             return config.set_telnet_console(cfg.telnet_console_enabled,
                                              parsed_port);
-        case AppConfigFieldId::OtaPassword:
-            return config.set_ota_password(value);
         case AppConfigFieldId::UpdateUrl:
             return config.set_update_url(value);
         case AppConfigFieldId::SyslogEnabled:

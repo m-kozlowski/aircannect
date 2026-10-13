@@ -20,7 +20,6 @@ enum class FirmwareInstallSource : uint8_t {
     None,
     HttpUpload,
     Url,
-    Arduino,
     PartitionTable,
 };
 
@@ -88,12 +87,6 @@ public:
     bool write(size_t index, const uint8_t *data, size_t len);
     bool finish();
     void abort(const char *reason, bool log_error = true);
-
-    // External writers such as ArduinoOTA
-    bool begin_external_install(FirmwareInstallSource source);
-    void update_external_progress(size_t bytes, size_t total_size);
-    void complete_external_install();
-    void fail_external_install(const char *reason);
 
     // Lifecycle and query
     void http_response_closed();

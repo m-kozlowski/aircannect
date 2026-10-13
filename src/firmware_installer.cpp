@@ -51,7 +51,6 @@ const char *firmware_install_source_name(FirmwareInstallSource source) {
     switch (source) {
         case FirmwareInstallSource::HttpUpload: return "http_upload";
         case FirmwareInstallSource::Url: return "url";
-        case FirmwareInstallSource::Arduino: return "arduino";
         case FirmwareInstallSource::PartitionTable: return "partition_table";
         case FirmwareInstallSource::None:
         default: return "none";
@@ -111,7 +110,6 @@ void FirmwareInstaller::poll(bool reboot_allowed, bool therapy_active) {
     }
 
     const bool write_timed_out =
-        status_.source != FirmwareInstallSource::Arduino &&
         status_.writing && write_last_activity_ms_ &&
         static_cast<int32_t>(now - write_last_activity_ms_) >=
             static_cast<int32_t>(WriteIdleTimeoutSeconds * 1000);
@@ -285,8 +283,7 @@ bool FirmwareInstaller::request_prepare(size_t image_size,
                                         OtaUploadEncoding encoding,
                                         size_t wire_size,
                                         FirmwareInstallSource source) {
-    if (source == FirmwareInstallSource::None ||
-        source == FirmwareInstallSource::Arduino) {
+    if (source == FirmwareInstallSource::None) {
         return false;
     }
     if (wire_size == 0) wire_size = image_size;
@@ -922,67 +919,6 @@ void FirmwareInstaller::abort(const char *reason, bool log_error) {
     set_error_locked(reason ? reason : "aborted");
 
     unlock();
-}
-
-bool FirmwareInstaller::begin_external_install(FirmwareInstallSource source) {
-    if (source != FirmwareInstallSource::Arduino) return false;
-
-    if (!lock()) return false;
-    if (const char *blocked = source_blocked_locked()) {
-        set_error_locked(blocked);
-        unlock();
-        return false;
-    }
-
-    clear_install_state_locked();
-    status_.source = source;
-    status_.encoding = OtaUploadEncoding::Plain;
-    status_.writing = true;
-    status_.last_error = "";
-    write_last_activity_ms_ = millis();
-    unlock();
-    return true;
-}
-
-void FirmwareInstaller::update_external_progress(size_t bytes,
-                                                 size_t total_size) {
-    if (!lock()) return;
-    if (status_.source != FirmwareInstallSource::Arduino ||
-        !status_.writing) {
-        unlock();
-        return;
-    }
-
-    status_.bytes = bytes;
-    status_.total_size = total_size;
-    status_.wire_bytes = bytes;
-    status_.wire_total_size = total_size;
-    if (total_size > 0) {
-        status_.progress_percent = static_cast<uint8_t>(
-            (bytes * 100ULL) / total_size);
-    }
-    write_last_activity_ms_ = millis();
-    unlock();
-}
-
-void FirmwareInstaller::complete_external_install() {
-    if (!lock()) return;
-    if (status_.source != FirmwareInstallSource::Arduino ||
-        !status_.writing) {
-        unlock();
-        return;
-    }
-
-    status_.writing = false;
-    status_.ready = true;
-    status_.progress_percent = 100;
-    status_.last_error = "";
-    schedule_reboot(2000);
-    unlock();
-}
-
-void FirmwareInstaller::fail_external_install(const char *reason) {
-    abort(reason ? reason : "arduino_ota_failed", false);
 }
 
 void FirmwareInstaller::http_response_closed() {

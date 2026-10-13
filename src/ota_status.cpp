@@ -1,6 +1,5 @@
 #include "ota_status.h"
 
-#include "arduino_ota_source.h"
 #include "firmware_installer.h"
 #include "firmware_url_source.h"
 #include "update_checker.h"
@@ -10,22 +9,16 @@ namespace aircannect {
 OtaStatusSnapshot collect_ota_status(
     const FirmwareInstaller &installer,
     const FirmwareUrlSource &url_source,
-    const ArduinoOtaSource &arduino_source,
     const UpdateChecker &update_checker) {
     const FirmwareInstallStatus install = installer.status();
     const FirmwareUrlSourceStatus url = url_source.status();
-    const ArduinoOtaSourceStatus arduino = arduino_source.status();
     const UpdateCheckerStatus update = update_checker.status();
 
     OtaStatusSnapshot status;
-    status.arduino_started = arduino.started;
-    status.arduino_active = arduino.active;
     status.http_prepare_pending = install.prepare_pending;
     status.http_prepared = install.prepared;
-    status.http_active = install.writing &&
-                         install.source != FirmwareInstallSource::Arduino;
-    status.http_ready = install.ready &&
-                        install.source != FirmwareInstallSource::Arduino;
+    status.http_active = install.writing;
+    status.http_ready = install.ready;
     status.url_active = url.active;
     status.update_check_enabled = update.enabled;
     status.update_check_pending = update.pending;
@@ -40,21 +33,11 @@ OtaStatusSnapshot collect_ota_status(
     status.update_error = update.error;
     status.update_last_check_age_ms = update.last_check_age_ms;
     status.reboot_pending = install.reboot_pending;
-    status.auth_enabled = arduino.auth_enabled;
-    status.arduino_port = arduino.port;
-
-    const bool arduino_install =
-        install.source == FirmwareInstallSource::Arduino;
-    status.bytes = arduino_install ? arduino.bytes : install.bytes;
-    status.total_size =
-        arduino_install ? arduino.total_size : install.total_size;
-    status.wire_bytes = arduino_install ? arduino.bytes : install.wire_bytes;
-    status.wire_total_size = arduino_install
-                                 ? arduino.total_size
-                                 : install.wire_total_size;
-    status.progress_percent = arduino_install
-                                  ? arduino.progress_percent
-                                  : install.progress_percent;
+    status.bytes = install.bytes;
+    status.total_size = install.total_size;
+    status.wire_bytes = install.wire_bytes;
+    status.wire_total_size = install.wire_total_size;
+    status.progress_percent = install.progress_percent;
     if (install.source == FirmwareInstallSource::HttpUpload) {
         status.method = install.prepare_pending ? "http_prepare" : "http";
     } else {
@@ -69,12 +52,6 @@ OtaStatusSnapshot collect_ota_status(
         (url.active || install.source == FirmwareInstallSource::Url ||
          install.source == FirmwareInstallSource::None)) {
         status.last_error = url.last_error;
-    }
-    if (!status.last_error.length() && arduino.last_error.length() &&
-        (arduino.active ||
-         install.source == FirmwareInstallSource::Arduino ||
-         install.source == FirmwareInstallSource::None)) {
-        status.last_error = arduino.last_error;
     }
     return status;
 }
@@ -105,15 +82,10 @@ bool request_selected_update(UpdateChecker &update_checker,
 
 void abort_esp_ota(FirmwareInstaller &installer,
                    FirmwareUrlSource &url_source,
-                   ArduinoOtaSource &arduino_source,
                    UpdateChecker &update_checker,
                    const char *reason) {
     if (url_source.active()) {
         url_source.request_abort(reason);
-        return;
-    }
-    if (arduino_source.active()) {
-        arduino_source.request_abort(reason);
         return;
     }
 

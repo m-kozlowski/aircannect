@@ -26,7 +26,6 @@ class CoredumpPartitionUpdate;
 class EdfRecorderManager;
 class EventBroker;
 class ExportCoordinator;
-class ArduinoOtaSource;
 class FirmwareInstaller;
 class FirmwareUrlSource;
 class LiveChartService;
@@ -358,7 +357,6 @@ class OtaConsoleCommands final : public ConsoleCommandGroup {
 public:
     OtaConsoleCommands(FirmwareInstaller &installer,
                        FirmwareUrlSource &url_source,
-                       ArduinoOtaSource &arduino_source,
                        UpdateChecker &update_checker,
                        ResmedFirmwarePreparer &resmed_preparer,
                        ResmedOtaManager &resmed_ota,
@@ -372,7 +370,6 @@ public:
 private:
     FirmwareInstaller &installer_;
     FirmwareUrlSource &url_source_;
-    ArduinoOtaSource &arduino_source_;
     UpdateChecker &update_checker_;
     ResmedFirmwarePreparer &resmed_preparer_;
     ResmedOtaManager &resmed_ota_;

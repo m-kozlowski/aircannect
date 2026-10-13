@@ -15,7 +15,6 @@
 #include "alert_telemetry_adapter.h"
 #include "audible_alert_sink.h"
 #include "audible_output.h"
-#include "arduino_ota_source.h"
 #include "ble_sensor_source.h"
 #include "board.h"
 #include "can_driver.h"
@@ -143,7 +142,6 @@ static WebUI web_ui;
 static TimeSyncService time_sync_service;
 static FirmwareInstaller firmware_installer;
 static FirmwareUrlSource firmware_url_source(firmware_installer);
-static ArduinoOtaSource arduino_ota_source(firmware_installer);
 static UpdateChecker update_checker;
 static ResmedOtaManager resmed_ota_manager;
 static ResmedFirmwarePreparer resmed_firmware_preparer;
@@ -229,7 +227,6 @@ static ConfigConsoleCommands config_console_commands(config_service,
                                                      wifi_manager);
 static OtaConsoleCommands ota_console_commands(firmware_installer,
                                                firmware_url_source,
-                                               arduino_ota_source,
                                                update_checker,
                                                resmed_firmware_preparer,
                                                resmed_ota_manager,
@@ -843,7 +840,6 @@ static void apply_config_runtime_effects(void *,
 
     if (dirty & AC_CONFIG_DIRTY_HOSTNAME) {
         wifi_manager.set_hostname(config.hostname);
-        arduino_ota_source.mark_config_dirty();
     }
     if (dirty & AC_CONFIG_DIRTY_SOFTAP) {
         const bool retry_sta =
@@ -891,9 +887,6 @@ static void apply_config_runtime_effects(void *,
                  AC_CONFIG_DIRTY_OXIMETRY |
                  AC_CONFIG_DIRTY_AS11_TRANSPORT)) {
         configure_oximetry(config);
-    }
-    if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
-        arduino_ota_source.mark_config_dirty();
     }
     if (dirty & AC_CONFIG_DIRTY_UPDATE_URL) {
         update_checker.mark_config_dirty();
@@ -1431,14 +1424,13 @@ void setup() {
         history_transfer_active, &edf_recorder_manager);
     firmware_installer.begin();
     firmware_url_source.begin();
-    arduino_ota_source.begin(config_service.data());
     update_checker.begin(config_service.data(), export_task);
     if (!config_http_controller.begin(config_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] config HTTP controller failed to start\n");
     }
     if (!ota_http_controller.begin(firmware_installer, firmware_url_source,
-                                   arduino_ota_source, update_checker,
+                                   update_checker,
                                    resmed_firmware_preparer,
                                    resmed_ota_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
@@ -1730,7 +1722,7 @@ void loop() {
 
     drain_can_rx();
 
-    // ESP/Arduino OTA
+    // ESP OTA
     const FirmwareInstallStatus install_status = firmware_installer.status();
     const bool esp_reboot_allowed =
         !install_status.reboot_pending ||
@@ -1756,9 +1748,6 @@ void loop() {
         session_manager.status().state == SessionState::Active ||
         as11_device_service.state().therapy_state() ==
             As11TherapyState::Running;
-    const bool arduino_ota_poll_allowed =
-        as11_device_service.state().therapy_state() !=
-            As11TherapyState::Running;
     const ReportTaskControlSnapshot report_status =
         report_task.control_snapshot();
     const bool update_check_allowed =
@@ -1770,9 +1759,6 @@ void loop() {
                             !resmed_ota_transport_active,
                         firmware_installer.active(),
                         therapy_active);
-    arduino_ota_source.poll(runtime_network,
-                            !resmed_ota_transport_active,
-                            arduino_ota_poll_allowed);
     firmware_installer.poll(esp_reboot_allowed, therapy_active);
 
     drain_can_rx();

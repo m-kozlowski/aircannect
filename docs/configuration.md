@@ -58,7 +58,6 @@ Empty `http_user` and `http_pass` mean open access for HTTP and telnet.
 | `http_user` | ASCII string, max 64 chars, or empty | `admin` | Web UI/API username. |
 | `http_pass` | ASCII string, max 64 chars, or empty | `aircannect` | Web UI/API password. |
 | `auth_wl` | Empty, `*`, IPv4 addresses, CIDR ranges, or IPv4 start-end ranges separated by commas | empty | IP/range whitelist that bypasses HTTP and telnet auth. |
-| `ota_pass` | ASCII string up to 64 chars, or empty | `aircannect` | ArduinoOTA password. Empty value allows ArduinoOTA without authorization. |
 
 ## Updates
 

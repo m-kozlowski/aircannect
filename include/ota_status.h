@@ -3,18 +3,13 @@
 #include <Arduino.h>
 #include <stdint.h>
 
-#include "board_net.h"
-
 namespace aircannect {
 
-class ArduinoOtaSource;
 class FirmwareInstaller;
 class FirmwareUrlSource;
 class UpdateChecker;
 
 struct OtaStatusSnapshot {
-    bool arduino_started = false;
-    bool arduino_active = false;
     bool http_prepare_pending = false;
     bool http_prepared = false;
     bool http_active = false;
@@ -29,8 +24,6 @@ struct OtaStatusSnapshot {
     bool update_installable = false;
     bool update_release_notes_available = false;
     bool reboot_pending = false;
-    bool auth_enabled = true;
-    uint16_t arduino_port = AC_ARDUINO_OTA_PORT;
     size_t bytes = 0;
     size_t total_size = 0;
     size_t wire_bytes = 0;
@@ -48,7 +41,6 @@ struct OtaStatusSnapshot {
 OtaStatusSnapshot collect_ota_status(
     const FirmwareInstaller &installer,
     const FirmwareUrlSource &url_source,
-    const ArduinoOtaSource &arduino_source,
     const UpdateChecker &update_checker);
 
 bool request_selected_update(UpdateChecker &update_checker,
@@ -57,7 +49,6 @@ bool request_selected_update(UpdateChecker &update_checker,
 
 void abort_esp_ota(FirmwareInstaller &installer,
                    FirmwareUrlSource &url_source,
-                   ArduinoOtaSource &arduino_source,
                    UpdateChecker &update_checker,
                    const char *reason);
 

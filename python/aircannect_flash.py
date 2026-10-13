@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Flash AirCANnect firmware through the device HTTP OTA endpoint.
-
-This deliberately uses the same HTTP API as the web UI instead of PlatformIO
-espota. That makes it usable from WSL/NAT environments where espota callbacks
-are unreliable.
-"""
+"""Flash AirCANnect firmware through the device HTTP OTA endpoint."""
 
 from __future__ import annotations
 

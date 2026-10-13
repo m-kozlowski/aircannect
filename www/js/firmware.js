@@ -98,7 +98,7 @@
         data.http_active || data.http_ready || data.url_active ||
         data.update_check_active || data.reboot_pending ||
         data.method === "http" || data.method === "http_prepare" ||
-        data.method === "url" || data.method === "arduino";
+        data.method === "url";
 
       let latest = "--";
       if (!data.update_check_enabled) {

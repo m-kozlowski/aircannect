@@ -189,7 +189,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "ota") {
         out.println("[HELP ota]");
-        out.println("  ota status                show ArduinoOTA and HTTP OTA state");
+        out.println("  ota status                show firmware update state");
         out.println("  ota check                 check release manifest for an update");
         out.println("  ota install               install the available release");
         out.println("  ota url URL               install ESP32 image from URL");
