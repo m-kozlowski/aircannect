@@ -300,7 +300,12 @@ bool FirmwareInstaller::request_prepare(size_t image_size,
 
     const bool reserved_by_source =
         status_.source_reserved && status_.source == source;
-    const char *blocked = reserved_by_source ? nullptr : source_blocked_locked();
+    const bool replace_http_prepare =
+        status_.prepared && status_.source == FirmwareInstallSource::HttpUpload &&
+        source == FirmwareInstallSource::HttpUpload && !StorageUsb::suspended();
+    const char *blocked = (reserved_by_source || replace_http_prepare)
+        ? nullptr : source_blocked_locked();
+
     if (blocked) {
         set_error_locked(blocked);
         unlock();
