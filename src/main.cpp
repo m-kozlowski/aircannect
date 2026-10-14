@@ -1395,6 +1395,9 @@ void setup() {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report source change callback registration failed\n");
     }
+    StorageService::set_completion_callback([]() {
+        report_task.notify_storage_completion();
+    });
     edf_recorder_manager.set_str_summary_refresh_source_change_callback(
         route_report_source_change, &report_task);
     if (!report_preferences_service.begin(

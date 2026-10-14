@@ -103,8 +103,9 @@ StorageAtomicWriteService::~StorageAtomicWriteService() {
     if (lock_) vSemaphoreDelete(lock_);
 }
 
-bool StorageAtomicWriteService::begin(WakeCallback wake) {
+bool StorageAtomicWriteService::begin(WakeCallback wake, WakeCallback completed) {
     wake_ = wake;
+    completed_ = completed;
     if (!lock_) lock_ = xSemaphoreCreateMutex();
     if (!lock_) return false;
 
@@ -540,7 +541,9 @@ bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
                                              : "recovery_failed");
             }
         }
+        const bool completed = completion_ready_;
         unlock();
+        if (completed && completed_) completed_();
         return true;
     }
 
@@ -592,7 +595,9 @@ bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
     }
 
     if (!ok) fail_locked(error ? error : "write_failed");
+    const bool completed = completion_ready_;
     unlock();
+    if (completed && completed_) completed_();
     return true;
 }
 

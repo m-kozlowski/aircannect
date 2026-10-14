@@ -30,10 +30,15 @@ int close_descriptor(const char *path, int descriptor);
 using PathChangeCallback = void (*)(const char *path);
 void set_path_change_callback(PathChangeCallback callback);
 
-// Storage-task-only reuse of range-write descriptors, at most three
-// including the current write. Other mutations discard idle descriptors.
-// take reserves room before an open; finish reports errors from earlier closes.
-int take_write_handle(const char *path);
+// Before mutations; nullptr releases the reader for remount/resource pressure.
+using ReadReleaseCallback = bool (*)(const char *path);
+void set_read_release_callback(ReadReleaseCallback callback);
+bool release_read_handle(const char *path = nullptr);
+
+// At most three retained range-write descriptors, including an active retaining
+// write. One-shot writes reserve no cache slot; resource pressure evicts on open.
+// finish reports errors from earlier closes.
+int take_write_handle(const char *path, bool reserve = true);
 void close_write_handle(const char *path, int descriptor, bool retain);
 bool release_write_handles();
 void release_write_handle(const char *path);

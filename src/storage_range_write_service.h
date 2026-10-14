@@ -16,7 +16,7 @@ public:
     using WakeCallback = void (*)();
 
     ~StorageRangeWriteService();
-    bool begin(WakeCallback wake);
+    bool begin(WakeCallback wake, WakeCallback completed = nullptr);
     void set_task_available(bool available);
     void set_retention_allowed(bool allowed);
     void set_stream_service(StorageStreamService *stream_service);
@@ -63,6 +63,7 @@ private:
 
     SemaphoreHandle_t mutex_ = nullptr;
     WakeCallback wake_ = nullptr;
+    WakeCallback completed_ = nullptr;
     std::atomic<bool> task_available_{false};
     std::atomic<uint64_t> abandon_request_{0};
     std::atomic<bool> release_requested_{false};

@@ -4,6 +4,7 @@
 
 #include "storage_io_diagnostics.h"
 #include "storage_path.h"
+#include "storage_internal.h"
 
 namespace aircannect::Storage {
 namespace {
@@ -27,6 +28,7 @@ public:
     }
 
     size_t write(const uint8_t *data, size_t size) override {
+        release_read_handle(_path);
         errno = 0;
         const size_t actual = VFSFileImpl::write(data, size);
         if (actual < size) log_io_error("write", _path, errno, actual, size);

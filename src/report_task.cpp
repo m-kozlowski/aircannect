@@ -3502,6 +3502,10 @@ void ReportTask::publish_catalog(
     if (runtime_) runtime_->accept_catalog(std::move(catalog), generation);
 }
 
+void ReportTask::notify_storage_completion() {
+    if (runtime_) runtime_->wake();
+}
+
 void ReportTask::task_entry(void *context) {
     ReportTask *self = static_cast<ReportTask *>(context);
     if (self) self->run();

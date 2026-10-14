@@ -33,6 +33,7 @@ StorageStatus owner_status;
 StorageStatus published_status;
 bool initialized = false;
 PathChangeCallback path_change_callback = nullptr;
+ReadReleaseCallback read_release_callback = nullptr;
 
 SemaphoreHandle_t status_mutex() {
     static SemaphoreHandle_t m = xSemaphoreCreateMutex();
@@ -274,6 +275,7 @@ void update_capacity_if_due(uint32_t now_ms) {
 }
 
 bool mount_storage() {
+    release_read_handle();
     release_write_handles();
     reset_status();
 
@@ -340,6 +342,7 @@ bool retry_mount() {
 }
 
 void unmount() {
+    release_read_handle();
     release_write_handles();
 
 #if AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED
@@ -417,9 +420,11 @@ int open_descriptor(const char *path, int flags) {
     char full_path[AC_STORAGE_PATH_MAX + sizeof(AC_STORAGE_MOUNT_POINT)] = {};
     if (!native_path(path, full_path, sizeof(full_path))) return -1;
 
+    if ((flags & O_ACCMODE) != O_RDONLY) release_read_handle(path);
+
     int descriptor = ::open(full_path, flags, 0666);
     if (descriptor < 0 && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
-        release_write_handles()) {
+        (release_read_handle() | release_write_handles())) {
         descriptor = ::open(full_path, flags, 0666);
     }
     if (descriptor < 0) log_io_error("open", path, errno);
@@ -430,11 +435,20 @@ void set_path_change_callback(PathChangeCallback callback) {
     path_change_callback = callback;
 }
 
+void set_read_release_callback(ReadReleaseCallback callback) {
+    read_release_callback = callback;
+}
+
+bool release_read_handle(const char *path) {
+    return read_release_callback && read_release_callback(path);
+}
+
 bool remove(const char *path) {
     if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
 
+    release_read_handle(path);
     release_write_handle(path);
     if (fs->remove(path)) {
         if (path_change_callback) path_change_callback(path);
@@ -450,6 +464,7 @@ bool rmdir(const char *path) {
     fs::FS *fs = active_fs();
     if (!fs) return false;
 
+    release_read_handle(path);
     release_write_handles();
     if (fs->rmdir(path)) {
         if (path_change_callback) path_change_callback(path);
@@ -464,6 +479,8 @@ bool rename(const char *from, const char *to) {
     if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
 
+    release_read_handle(from);
+    release_read_handle(to);
     release_write_handles();
     if (!fs) return false;
     if (!fs->rename(from, to)) {
@@ -483,12 +500,14 @@ File open(const char *path, const char *mode) {
     fs::FS *fs = active_fs();
     if (!fs) return File();
 
-    if (mode[0] != 'r' || strchr(mode, '+')) release_write_handles();
-    else release_write_handle(path);
+    if (mode[0] != 'r' || strchr(mode, '+')) {
+        release_read_handle(path);
+        release_write_handles();
+    } else release_write_handle(path);
 
     File file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode);
     if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
-        release_write_handles()) {
+        (release_read_handle() | release_write_handles())) {
         file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode);
     }
 

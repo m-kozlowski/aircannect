@@ -27,8 +27,9 @@ StorageRangeWriteService::~StorageRangeWriteService() {
     if (mutex_) vSemaphoreDelete(mutex_);
 }
 
-bool StorageRangeWriteService::begin(WakeCallback wake) {
+bool StorageRangeWriteService::begin(WakeCallback wake, WakeCallback completed) {
     wake_ = wake;
+    completed_ = completed;
     if (!mutex_) mutex_ = xSemaphoreCreateMutex();
     if (!mutex_) return false;
 
@@ -157,7 +158,8 @@ const char *StorageRangeWriteService::open_locked() {
                       (command.truncate ? O_TRUNC : 0);
 
     if (job_->parent_cursor.offset == 0) {
-        job_->output = Storage::take_write_handle(command.path.c_str());
+        job_->output = Storage::take_write_handle(
+            command.path.c_str(), command.retain_handle);
         if (job_->output >= 0 && command.truncate) {
             const int closed = Storage::close_descriptor(command.path.c_str(),
                                                          job_->output);
@@ -334,7 +336,9 @@ bool StorageRangeWriteService::step(StorageAtomicWriteLane lane) {
         if (error) finish_locked(OperationOutcome::failed(), error);
     }
 
+    const bool completed = !job_->ticket.valid() && completion_.ticket.valid();
     unlock();
+    if (completed && completed_) completed_();
     return true;
 }
 

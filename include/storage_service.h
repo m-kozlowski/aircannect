@@ -154,6 +154,10 @@ public:
 
 namespace StorageService {
 
+// Advisory wake after a prepared read or write publishes its completion.
+// Callback must be nonblocking and outlive the storage worker.
+void set_completion_callback(void (*callback)());
+
 // Called from the storage task after a replacement STR record has been
 // durably published. Busy admission keeps the bounded notification pending.
 bool set_report_source_change_callback(ReportSourceChangeCallback callback,

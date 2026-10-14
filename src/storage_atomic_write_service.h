@@ -18,7 +18,7 @@ public:
 
     ~StorageAtomicWriteService();
 
-    bool begin(WakeCallback wake);
+    bool begin(WakeCallback wake, WakeCallback completed = nullptr);
     void set_task_available(bool available);
     void set_stream_service(StorageStreamService *stream_service);
     bool step(StorageAtomicWriteLane lane);
@@ -85,6 +85,7 @@ private:
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     WakeCallback wake_ = nullptr;
+    WakeCallback completed_ = nullptr;
     std::atomic<bool> task_available_{false};
     StorageStreamService *stream_service_ = nullptr;
 

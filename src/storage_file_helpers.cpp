@@ -52,7 +52,7 @@ int close_descriptor(const char *path, int descriptor) {
     return result;
 }
 
-int take_write_handle(const char *path) {
+int take_write_handle(const char *path, bool reserve) {
     if (!write_handles) return -1;
 
     for (size_t i = 0; i < write_handles->count; ++i) {
@@ -61,7 +61,7 @@ int take_write_handle(const char *path) {
         }
     }
 
-    if (write_handles->count == WriteHandleCache::Capacity) {
+    if (reserve && write_handles->count == WriteHandleCache::Capacity) {
         close_cached(0);
     }
     return -1;
@@ -243,6 +243,8 @@ size_t write_buffer(File &file, const uint8_t *data, size_t size,
 
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
                      size_t offset, size_t size, WriteStagingBuffer &staging) {
+    release_read_handle(command.path.c_str());
+
     return write_staged([descriptor, &command](const uint8_t *bytes, size_t count) {
         const ssize_t written = ::write(descriptor, bytes, count);
         if (written < 0 || static_cast<size_t>(written) != count) {

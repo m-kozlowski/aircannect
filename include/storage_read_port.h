@@ -32,6 +32,8 @@ struct StorageReadCommand {
     size_t tail_lines = 0;
     StorageReadLane lane = StorageReadLane::Report;
     uint32_t generation = 0;
+    // Advisory reuse between this producer's range reads, until release_handle.
+    bool retain_handle = false;
 
     bool valid() const {
         if (path.empty() || path.front() != '/' || length == 0 ||
@@ -99,6 +101,9 @@ public:
     // The caller that receives a completion owns its prepared slot and must
     // release it exactly once after all borrowed views are finished.
     virtual void release_prepared(StoragePreparedRead prepared) = 0;
+
+    // Queues storage-owner closure, including a handle from a completed read.
+    virtual void release_handle() {}
 };
 
 }  // namespace aircannect

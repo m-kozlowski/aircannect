@@ -216,6 +216,7 @@ bool ReportExecutor::submit_read() {
     command.length = operation->length;
     command.lane = StorageReadLane::Report;
     command.generation = generation_;
+    command.retain_handle = true;
     const OperationSubmission submission = read_port_->request_read(command);
     if (submission.admission == OperationAdmission::Busy) return false;
     if (!submission.accepted()) {
@@ -587,6 +588,7 @@ void ReportExecutor::finish(ReportExecutorState state,
 }
 
 void ReportExecutor::release_run_resources() {
+    if (read_port_ && generation_) read_port_->release_handle();
     if (read_port_ && ticket_.valid()) {
         (void)read_port_->abandon(ticket_);
     }
