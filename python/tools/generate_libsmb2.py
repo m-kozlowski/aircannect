@@ -32,27 +32,56 @@ def fail(message):
 
 
 def run(cmd, cwd=None):
-    return subprocess.check_output(cmd, cwd=cwd, text=True).strip()
+    diagnostics = []
+    result = run_completed(cmd, cwd=cwd, diagnostics=diagnostics)
+    if result.returncode != 0:
+        fail("command failed\n" + "\n".join(diagnostics))
+    return result.stdout.strip()
 
 
-def run_completed(cmd, cwd=None):
-    return subprocess.run(cmd,
-                          cwd=cwd,
-                          text=True,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE)
+def run_completed(cmd, cwd=None, diagnostics=None):
+    details = [f"command: {subprocess.list2cmdline(cmd)}",
+               f"cwd: {cwd or Path.cwd()}"]
+    try:
+        result = subprocess.run(cmd,
+                                cwd=cwd,
+                                text=True,
+                                errors="replace",
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+    except OSError as exc:
+        fail("\n".join((diagnostics or []) + details +
+                       [f"could not start command: {exc}"]))
+
+    if diagnostics is not None:
+        diagnostics.extend(details)
+        diagnostics.extend([
+            f"exit code: {result.returncode}",
+            f"stdout:\n{result.stdout.strip() or '(empty)'}",
+            f"stderr:\n{result.stderr.strip() or '(empty)'}",
+        ])
+    return result
 
 
-def git_repo_available(path):
+def git_repo_available(path, diagnostics=None):
     if not path.is_dir():
+        if diagnostics is not None:
+            diagnostics.append(f"repository directory missing: {path}")
         return False
 
     result = run_completed(["git", "rev-parse", "--show-toplevel"],
-                           cwd=path)
+                           cwd=path, diagnostics=diagnostics)
     if result.returncode != 0:
         return False
 
-    return Path(result.stdout.strip()).resolve() == path.resolve()
+    actual = Path(result.stdout.strip()).resolve()
+    expected = path.resolve()
+    if actual != expected:
+        if diagnostics is not None:
+            diagnostics.append(
+                f"repository root mismatch: expected {expected}, got {actual}")
+        return False
+    return True
 
 
 def source_available(path):
@@ -129,7 +158,8 @@ def upstream_source_dir():
 
 
 def upstream_commit():
-    if not git_repo_available(UPSTREAM_DIR):
+    diagnostics = []
+    if not git_repo_available(UPSTREAM_DIR, diagnostics):
         narrow = run_completed([
             "git",
             "submodule",
@@ -137,7 +167,7 @@ def upstream_commit():
             "--init",
             "--",
             "third_party/libsmb2",
-        ], cwd=PROJECT_DIR)
+        ], cwd=PROJECT_DIR, diagnostics=diagnostics)
         if narrow.returncode != 0:
             broad = run_completed([
                 "git",
@@ -145,19 +175,14 @@ def upstream_commit():
                 "update",
                 "--init",
                 "--recursive",
-            ], cwd=PROJECT_DIR)
+            ], cwd=PROJECT_DIR, diagnostics=diagnostics)
             if broad.returncode != 0:
-                detail = (broad.stderr or narrow.stderr).strip()
-                if detail:
-                    detail = f": {detail}"
-                fail("third_party/libsmb2 auto-init failed; "
-                     "run git submodule update --init --recursive"
-                     f"{detail}")
-        if not git_repo_available(UPSTREAM_DIR):
-            fail("third_party/libsmb2 auto-init failed; "
-                 "run git submodule update --init --recursive")
-    if not git_repo_available(UPSTREAM_DIR):
-        fail("third_party/libsmb2 is not initialized")
+                fail("third_party/libsmb2 auto-init failed\n" +
+                     "\n".join(diagnostics))
+        if not git_repo_available(UPSTREAM_DIR, diagnostics):
+            fail("third_party/libsmb2 auto-init completed, "
+                 "but the repository is unavailable\n" +
+                 "\n".join(diagnostics))
     return run(["git", "rev-parse", "HEAD"], cwd=UPSTREAM_DIR)
 
 
