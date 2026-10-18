@@ -1,0 +1,12 @@
+--- a/sd_diskio.cpp
++++ b/sd_diskio.cpp
+@@ -128,6 +128,9 @@
+ bool sdSelectCard(uint8_t pdrv) {
+   ardu_sdcard_t *card = s_cards[pdrv];
+   digitalWrite(card->ssPin, LOW);
++  // Clock the card after selection before interpreting its busy response.
++  card->spi->transfer(0xFF);
++
+   bool s = sdWait(pdrv, 500);
+   if (!s) {
+     log_e("Select Failed");
