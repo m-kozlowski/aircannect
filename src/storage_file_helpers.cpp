@@ -246,9 +246,11 @@ size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
     release_read_handle(command.path.c_str());
 
     return write_staged([descriptor, &command](const uint8_t *bytes, size_t count) {
+        errno = 0;
         const ssize_t written = ::write(descriptor, bytes, count);
+        const int error = errno;
         if (written < 0 || static_cast<size_t>(written) != count) {
-            log_io_error("write", command.path.c_str(), written < 0 ? errno : 0,
+            log_io_error("write", command.path.c_str(), error,
                          written > 0 ? static_cast<size_t>(written) : 0, count);
         }
         return written > 0 ? static_cast<size_t>(written) : 0;

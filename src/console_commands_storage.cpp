@@ -12,6 +12,7 @@
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "storage_manager.h"
+#include "storage_io_diagnostics.h"
 #include "storage_service.h"
 #include "storage_usb.h"
 #include "string_util.h"
@@ -370,6 +371,35 @@ void StorageConsoleCommands::execute_storage(
         ConsoleFormat::print_storage_status(out, Storage::status());
         return;
     }
+    if (command == "diagnostics" && !has_first) {
+        const auto diagnostic = Storage::io_diagnostics();
+        const auto &io = diagnostic.first;
+        out.printf("[STORAGE][IO] errors=%lu first=%s\n",
+                   static_cast<unsigned long>(diagnostic.errors),
+                   io.valid ? "captured" : "none");
+
+        if (io.valid) {
+            out.printf("[STORAGE][IO] ms=%lu op=%s errno=%d bytes=%u/%u path=%s\n",
+                       static_cast<unsigned long>(io.occurred_ms), io.operation,
+                       io.error, static_cast<unsigned>(io.actual),
+                       static_cast<unsigned>(io.requested), io.path);
+        }
+
+        const auto &spi = diagnostic.spi;
+        out.printf("[STORAGE][SPI] first=%s\n", spi.valid ? "captured" : "none");
+        if (spi.valid) {
+            out.printf("[STORAGE][SPI] ms=%lu op=%s drive=%u sector=%lu count=%lu "
+                       "cmd=%u arg=0x%08lx phase=%s response=%d result=%d elapsed_ms=%lu\n",
+                       static_cast<unsigned long>(spi.occurred_ms),
+                       spi.write ? "write" : "read", spi.drive,
+                       static_cast<unsigned long>(spi.sector),
+                       static_cast<unsigned long>(spi.count), spi.command,
+                       static_cast<unsigned long>(spi.argument), spi.phase,
+                       spi.response, spi.disk_result,
+                       static_cast<unsigned long>(spi.elapsed_ms));
+        }
+        return;
+    }
     if (command == "usb") {
         if (has_second || (has_first && first != "status" &&
                            first != "on" && first != "off")) {
@@ -411,7 +441,7 @@ void StorageConsoleCommands::execute_storage(
         command != "rename") {
         print_unknown_command(
             out, "STORAGE",
-            "storage status, mount, usb [status|on|off], pwd, ls [PATH], cd PATH, "
+            "storage status, diagnostics, mount, usb [status|on|off], pwd, ls [PATH], cd PATH, "
             "mkdir PATH, rm PATH, rename PATH NEW_NAME");
         return;
     }
