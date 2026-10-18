@@ -1,0 +1,118 @@
+--- a/sd_diskio.cpp
++++ b/sd_diskio.cpp
+@@ -16,6 +16,7 @@
+ #define ARDUINO_CORE_BUILD
+ 
+ #include "sd_diskio.h"
++#include "storage_io_diagnostics.h"
+ #include "esp_system.h"
+ #include "esp32-hal-periman.h"
+ 
+@@ -106,6 +107,7 @@
+   } while (resp == 0x00 && (millis() - start) < (unsigned int)timeout);
+ 
+   if (!resp) {
++    aircannect::Storage::spi_io_fault("busy_timeout", 0);
+     log_w("Wait Failed");
+   }
+   return (resp > 0x00);
+@@ -162,6 +164,7 @@
+     }
+     cmdPacket[6] = 0xFF;
+ 
++    aircannect::Storage::spi_io_command(cmd, arg);
+     card->spi->writeBytes((uint8_t *)cmdPacket, (cmd == STOP_TRANSMISSION) ? 7 : 6);
+ 
+     for (int i = 0; i < 9; i++) {
+@@ -171,6 +174,9 @@
+       }
+     }
+ 
++    if (token > 1) {
++      aircannect::Storage::spi_io_fault("command", token);
++    }
+     if (token == 0xFF) {
+       log_w("no token received");
+       sdDeselectCard(pdrv);
+@@ -190,6 +196,9 @@
+ 
+     if (cmd == SEND_STATUS && resp) {
+       *resp = card->spi->transfer(0xFF);
++      if (*resp) {
++        aircannect::Storage::spi_io_fault("card_status", *resp);
++      }
+     } else if ((cmd == SEND_IF_COND || cmd == READ_OCR) && resp) {
+       *resp = card->spi->transfer32(0xFFFFFFFF);
+     }
+@@ -214,12 +223,17 @@
+   } while (token == 0xFF && (millis() - start) < 500);
+ 
+   if (token != 0xFE) {
++    aircannect::Storage::spi_io_fault("read_token", token);
+     return false;
+   }
+ 
+   card->spi->transferBytes(NULL, (uint8_t *)buffer, length);
+   crc = card->spi->transfer16(0xFFFF);
+-  return (!card->supports_crc || crc == CRC16(buffer, length));
++  bool valid = !card->supports_crc || crc == CRC16(buffer, length);
++  if (!valid) {
++    aircannect::Storage::spi_io_fault("read_crc", crc);
++  }
++  return valid;
+ }
+ 
+ char sdWriteBytes(uint8_t pdrv, const char *buffer, char token) {
+@@ -232,7 +246,11 @@
+   card->spi->write(token);
+   card->spi->writeBytes((uint8_t *)buffer, 512);
+   card->spi->write16(crc);
+-  return (card->spi->transfer(0xFF) & 0x1F);
++  char response = card->spi->transfer(0xFF) & 0x1F;
++  if (response != 0x05) {
++    aircannect::Storage::spi_io_fault("write_token", response);
++  }
++  return response;
+ }
+ 
+ /*
+@@ -647,8 +665,10 @@
+ }
+ 
+ DRESULT ff_sd_read(uint8_t pdrv, uint8_t *buffer, DWORD sector, UINT count) {
++  aircannect::Storage::spi_io_begin(pdrv, sector, count, false);
+   ardu_sdcard_t *card = s_cards[pdrv];
+   if (card->status & STA_NOINIT) {
++    aircannect::Storage::spi_io_end(RES_NOTRDY);
+     return RES_NOTRDY;
+   }
+   DRESULT res = RES_OK;
+@@ -660,16 +680,20 @@
+   } else {
+     res = sdReadSector(pdrv, (char *)buffer, sector) ? RES_OK : RES_ERROR;
+   }
++  aircannect::Storage::spi_io_end(res);
+   return res;
+ }
+ 
+ DRESULT ff_sd_write(uint8_t pdrv, const uint8_t *buffer, DWORD sector, UINT count) {
++  aircannect::Storage::spi_io_begin(pdrv, sector, count, true);
+   ardu_sdcard_t *card = s_cards[pdrv];
+   if (card->status & STA_NOINIT) {
++    aircannect::Storage::spi_io_end(RES_NOTRDY);
+     return RES_NOTRDY;
+   }
+ 
+   if (card->status & STA_PROTECT) {
++    aircannect::Storage::spi_io_end(RES_WRPRT);
+     return RES_WRPRT;
+   }
+   DRESULT res = RES_OK;
+@@ -681,6 +705,7 @@
+   } else {
+     res = sdWriteSector(pdrv, (const char *)buffer, sector) ? RES_OK : RES_ERROR;
+   }
++  aircannect::Storage::spi_io_end(res);
+   return res;
+ }
+ 
