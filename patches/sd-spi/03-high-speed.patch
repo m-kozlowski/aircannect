@@ -1,0 +1,63 @@
+--- a/sd_diskio.cpp
++++ b/sd_diskio.cpp
+@@ -18,6 +18,10 @@
+ #include "sd_diskio.h"
+ #include "storage_io_diagnostics.h"
+ #include "esp_system.h"
++#include "board_storage.h"
++#if CONFIG_IDF_TARGET_ESP32S3 && AC_STORAGE_SPI_SD_ENABLED && AC_SPI_SD_MISO_GPIO >= 0
++#include "soc/gpio_struct.h"
++#endif
+ #include "esp32-hal-periman.h"
+ 
+ extern "C" {
+@@ -463,9 +467,19 @@
+   ardu_sdcard_t *card;
+   explicit AcquireSPI(ardu_sdcard_t *card) : card(card) {
+     card->spi->beginTransaction(SPISettings(card->frequency, MSBFIRST, SPI_MODE0));
++
++#if CONFIG_IDF_TARGET_ESP32S3 && AC_STORAGE_SPI_SD_ENABLED && AC_SPI_SD_MISO_GPIO >= 0
++    // Falling-edge APB synchronization fixes MISO sampling at 40 MHz.
++    GPIO.pin[AC_SPI_SD_MISO_GPIO].sync1_bypass = card->frequency == 40000000 ? 1 : 0;
++#endif
+   }
+   AcquireSPI(ardu_sdcard_t *card, int frequency) : card(card) {
+     card->spi->beginTransaction(SPISettings(frequency, MSBFIRST, SPI_MODE0));
++
++#if CONFIG_IDF_TARGET_ESP32S3 && AC_STORAGE_SPI_SD_ENABLED && AC_SPI_SD_MISO_GPIO >= 0
++    // Initialization runs at 400 kHz and must not retain the 40 MHz setting.
++    GPIO.pin[AC_SPI_SD_MISO_GPIO].sync1_bypass = frequency == 40000000 ? 1 : 0;
++#endif
+   }
+   ~AcquireSPI() {
+     card->spi->endTransaction();
+@@ -641,9 +655,27 @@
+   // Step 7: Get card capacity and finalize initialization
+   card->sectors = sdGetSectorsCount(pdrv);
+ 
+-  // Limit frequency to 25MHz for compatibility (SD spec maximum for non-UHS cards)
+-  if (card->frequency > 25000000) {
++  // Only use 40 MHz after the card confirms High Speed in CMD6 status.
++  if (card->frequency == 40000000 && card->type != CARD_MMC) {
++    char status[64] = {};
++    if (!sdSelectCard(pdrv)) {
++      goto unknown_card;
++    }
++
++    const bool switched = !sdCommand(pdrv, SEND_SWITCH_FUNC, 0x80FFFFF1, NULL)
++                          && sdReadBytes(pdrv, status, sizeof(status));
++
++    // Complete the switch with eight more clocks before raising SCK.
++    card->spi->transfer(0xFF);
++    sdDeselectCard(pdrv);
++
++    if (!switched || (status[16] & 0x0F) != 1) {
++      log_e("SD High Speed switch failed");
++      goto unknown_card;
++    }
++  } else if (card->frequency > 25000000) {
++    // Keep the upstream default-speed limit for other requests and MMC.
+     card->frequency = 25000000;
+   }
+ 
+   // Mark card as initialized
