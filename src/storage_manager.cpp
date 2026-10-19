@@ -17,6 +17,7 @@
 #include "soc/soc_caps.h"
 #if SOC_SDMMC_HOST_SUPPORTED
 #include <SD_MMC.h>
+#include <driver/sdmmc_host.h>
 #endif
 #endif
 
@@ -107,8 +108,7 @@ void set_state(StorageType type,
     owner_status.state = state;
     owner_status.mounted = state == StorageState::Mounted;
     if (!owner_status.mounted) {
-        owner_status.frequency_hz = 0;
-        owner_status.frequency_reason[0] = '\0';
+        owner_status.actual_hz = 0;
     }
 
     copy_cstr(owner_status.last_error, sizeof(owner_status.last_error), error);
@@ -159,6 +159,7 @@ bool mount_sdmmc() {
     owner_status.configured = true;
     owner_status.type = StorageType::SdMmc;
     owner_status.width = AC_SDMMC_WIDTH;
+    owner_status.requested_hz = AC_SDMMC_FREQ_KHZ * 1000;
 #if !SOC_SDMMC_HOST_SUPPORTED
     set_state(StorageType::SdMmc, StorageState::Error,
               "SDMMC host not supported by this chip");
@@ -205,6 +206,15 @@ bool mount_sdmmc() {
         return false;
     }
 
+    // Arduino SD_MMC uses slot 1 on esp32-s3. Read its configured dividers.
+    int real_freq_khz = 0;
+    const esp_err_t clock_result =
+        sdmmc_host_get_real_freq(SDMMC_HOST_SLOT_1, &real_freq_khz);
+
+    if (clock_result == ESP_OK && real_freq_khz > 0) {
+        owner_status.actual_hz = static_cast<uint32_t>(real_freq_khz) * 1000;
+    }
+
     update_sdmmc_capacity();
     set_state(StorageType::SdMmc, StorageState::Mounted);
     return true;
@@ -219,6 +229,7 @@ bool mount_spi_sd() {
     owner_status.configured = true;
     owner_status.type = StorageType::SpiSd;
     owner_status.width = 1;
+    owner_status.requested_hz = AC_SPI_SD_FREQ_HZ;
     if (AC_SPI_SD_CS_GPIO < 0 || AC_SPI_SD_SCK_GPIO < 0 ||
         AC_SPI_SD_MISO_GPIO < 0 || AC_SPI_SD_MOSI_GPIO < 0) {
         set_state(StorageType::SpiSd, StorageState::Error,
@@ -284,27 +295,24 @@ bool mount_storage() {
     release_write_handles();
     reset_status();
 
+    bool mounted_now = false;
 #if AC_STORAGE_SDMMC_ENABLED
-    if (mount_sdmmc()) {
-        Log::logf(CAT_STORAGE, LOG_INFO,
-                  "mounted type=%s card=%s mount=%s\n",
-                  type_name(owner_status.type), owner_status.card_type,
-                  owner_status.mount_point);
-        return true;
-    }
+    mounted_now = mount_sdmmc();
 #endif
 #if AC_STORAGE_SPI_SD_ENABLED
-    if (mount_spi_sd()) {
+    if (!mounted_now) mounted_now = mount_spi_sd();
+#endif
+
+    if (mounted_now) {
         Log::logf(CAT_STORAGE, LOG_INFO,
                   "mounted type=%s card=%s mount=%s "
-                  "frequency_hz=%lu frequency_reason=%s\n",
+                  "requested_hz=%lu actual_hz=%lu\n",
                   type_name(owner_status.type), owner_status.card_type,
                   owner_status.mount_point,
-                  static_cast<unsigned long>(owner_status.frequency_hz),
-                  owner_status.frequency_reason);
+                  static_cast<unsigned long>(owner_status.requested_hz),
+                  static_cast<unsigned long>(owner_status.actual_hz));
         return true;
     }
-#endif
 
     if (!owner_status.configured) {
         set_state(StorageType::None, StorageState::Disabled,
@@ -325,18 +333,17 @@ void spi_init_event(uint32_t requested_hz, uint32_t attempt_hz,
                     uint32_t actual_hz, bool selected, const char *reason) {
     const int saved_errno = errno;
 
-    owner_status.frequency_hz = selected ? actual_hz : 0;
-    copy_cstr(owner_status.frequency_reason, sizeof(owner_status.frequency_reason),
-              selected ? reason : nullptr);
+    owner_status.requested_hz = requested_hz;
+    owner_status.actual_hz = selected ? actual_hz : 0;
 
     Log::logf_without_file(
         CAT_STORAGE, selected ? LOG_INFO : LOG_WARN,
         "SPI SD init requested_hz=%lu attempt_hz=%lu actual_hz=%lu "
-        "result=%s reason=%s\n",
+        "result=%s%s%s\n",
         static_cast<unsigned long>(requested_hz),
         static_cast<unsigned long>(attempt_hz),
         static_cast<unsigned long>(actual_hz), selected ? "selected" : "failed",
-        reason);
+        selected ? "" : " error=", selected ? "" : reason);
 
     errno = saved_errno;
 }

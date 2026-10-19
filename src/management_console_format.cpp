@@ -513,10 +513,10 @@ void print_storage_status(Print &out, const StorageStatus &s) {
     out.print(s.card_type);
     out.print(" width=");
     out.print(s.width);
-    out.print(" frequency_hz=");
-    out.print(static_cast<unsigned long>(s.frequency_hz));
-    out.print(" frequency_reason=");
-    out.print(s.frequency_reason[0] ? s.frequency_reason : "--");
+    out.print(" requested_hz=");
+    out.print(static_cast<unsigned long>(s.requested_hz));
+    out.print(" actual_hz=");
+    out.print(static_cast<unsigned long>(s.actual_hz));
     out.print(" max_open=");
     out.print(s.max_open_files);
     out.print(" mount=");
