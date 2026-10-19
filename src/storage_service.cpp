@@ -3150,7 +3150,8 @@ void publish_activity(const ActivitySnapshot &activity,
     storage_therapy_active.store(activity.therapy_active,
                                  std::memory_order_release);
     capacity_update_allowed.store(!activity.therapy_active &&
-                                  !activity.realtime_stream_active);
+                                  !activity.realtime_stream_active &&
+                                  !activity.ota_install_active);
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
     // Report and export jobs build their own inventories through the scan

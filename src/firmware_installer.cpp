@@ -2,10 +2,12 @@
 #include "storage_usb.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
 #include <esp_err.h>
+#include <esp_freertos_hooks.h>
 #include <miniz.h>
 
 #include "debug_log.h"
@@ -19,6 +21,13 @@ namespace {
 static constexpr size_t kWriteChunkBytes = 4096;
 static constexpr size_t kEraseChunkBytes = 64 * 1024;
 static constexpr uint32_t kPreparedTtlMs = 60000;
+
+std::atomic<uint32_t> idle0_generation{0};
+
+bool observe_idle0() {
+    idle0_generation.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 
 }  // namespace
 
@@ -416,6 +425,21 @@ bool FirmwareInstaller::erase_partition_step() {
         return false;
     }
 
+    // The SDK's inter-erase yield does not guarantee IDLE0 gets CPU time.
+    // Keep the hook for the process lifetime; it never refers to an installer.
+    static const esp_err_t idle_hook_result =
+        esp_register_freertos_idle_hook_for_cpu(observe_idle0, 0);
+
+    if (idle_hook_result != ESP_OK) {
+        abort("ota_idle_hook_failed");
+        return false;
+    }
+
+    if (erase_offset_ != 0 &&
+        idle0_generation.load(std::memory_order_relaxed) == erase_idle_generation_) {
+        return false;
+    }
+
     if (erase_offset_ == 0) {
         // Keep SDK admission and rollback handling, then release the temporary
         // writer while preparation erases the area in bounded steps.
@@ -441,6 +465,7 @@ bool FirmwareInstaller::erase_partition_step() {
         return false;
     }
 
+    erase_idle_generation_ = idle0_generation.load(std::memory_order_relaxed);
     erase_offset_ += chunk;
     return erase_offset_ == erase_size_;
 }
@@ -872,6 +897,7 @@ bool FirmwareInstaller::finish() {
     prepared_wire_size_ = 0;
     erase_size_ = 0;
     erase_offset_ = 0;
+    erase_idle_generation_ = 0;
     prepared_encoding_ = OtaUploadEncoding::Auto;
     prepared_at_ms_ = 0;
     prepare_started_ms_ = 0;
@@ -1149,6 +1175,7 @@ void FirmwareInstaller::clear_install_state_locked() {
     prepared_wire_size_ = 0;
     erase_size_ = 0;
     erase_offset_ = 0;
+    erase_idle_generation_ = 0;
     prepared_encoding_ = OtaUploadEncoding::Auto;
     prepared_at_ms_ = 0;
     prepare_started_ms_ = 0;

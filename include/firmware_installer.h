@@ -134,6 +134,7 @@ private:
     size_t prepared_wire_size_ = 0;
     size_t erase_size_ = 0;
     size_t erase_offset_ = 0;
+    uint32_t erase_idle_generation_ = 0;
     uint32_t prepared_at_ms_ = 0;
     uint32_t prepare_started_ms_ = 0;
     uint32_t write_last_activity_ms_ = 0;

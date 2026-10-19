@@ -1979,10 +1979,6 @@ struct ReportTask::Runtime {
         if (period_running) {
             out.operation = ReportTaskOperation::Building;
             out.sleep_day = period_key.end;
-            if (activity.ota_install_active) {
-                out.condition = ReportTaskCondition::Waiting;
-                out.wait_reason = ReportTaskWaitReason::Ota;
-            }
             return out;
         }
         if (catalog_store.active()) {
@@ -3122,7 +3118,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (runtime.catalog_load_pending &&
+    if (!runtime.activity.ota_install_active && runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
         const OperationAdmission admitted =
@@ -3467,7 +3463,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
-    if (!runtime.activity.ota_install_active && runtime.period_running) {
+    if (runtime.period_running) {
         worked = runtime.period_service.poll() || worked;
         if (!runtime.period_completed) runtime.period_completed = runtime.period_service.take_completed();
         if (runtime.period_completed && runtime.lock(0)) {
