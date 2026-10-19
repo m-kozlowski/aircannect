@@ -43,6 +43,13 @@ static constexpr size_t FILE_LOG_LINE_MAX =
 using SyslogQueue = FixedQueue<LogRecord, AC_SYSLOG_QUEUE_DEPTH>;
 
 SyslogQueue *syslog_queue = nullptr;
+constexpr uint8_t SYSLOG_MAX_ATTEMPTS = 5;
+constexpr uint32_t SYSLOG_RETRY_BASE_MS = 250;
+uint32_t syslog_generation = 0;
+uint32_t syslog_retry_started_ms = 0;
+uint32_t syslog_retry_delay_ms = 0;
+uint8_t syslog_attempts = 0;
+
 Log::Stats log_stats;
 IPAddress syslog_ip;
 String syslog_host_text;
@@ -255,27 +262,30 @@ void unlock_log() {
     }
 }
 
-void send_syslog_record(const LogRecord &record) {
+bool send_syslog_record(const LogRecord &record, IPAddress address,
+                        uint16_t port, const char *hostname) {
     char payload[AC_LOG_LINE_MAX + 96];
     const int facility_local0 = 16;
     const int pri = facility_local0 * 8 + syslog_severity(record.level);
     snprintf(payload, sizeof(payload),
              "<%d>1 - %s aircannect - - - - %s",
              pri,
-             syslog_hostname,
+             hostname,
              record.text);
 
-    if (!syslog_udp.beginPacket(syslog_ip, syslog_port_value)) {
-        log_stats.syslog_errors++;
-        return;
+    if (!syslog_udp.beginPacket(address, port)) {
+        syslog_udp.stop();
+        return false;
     }
-    syslog_udp.write(reinterpret_cast<const uint8_t *>(payload),
-                     strlen(payload));
-    if (!syslog_udp.endPacket()) {
-        log_stats.syslog_errors++;
-        return;
+
+    const size_t length = strlen(payload);
+    if (syslog_udp.write(reinterpret_cast<const uint8_t *>(payload), length) !=
+            length || !syslog_udp.endPacket()) {
+        syslog_udp.stop();
+        return false;
     }
-    log_stats.syslog_sent++;
+
+    return true;
 }
 
 void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size) {
@@ -487,6 +497,9 @@ void configure_syslog(bool enabled,
                       const String &hostname) {
     lock_log();
     syslog_enabled_value = false;
+    ++syslog_generation;
+    syslog_attempts = 0;
+    syslog_retry_delay_ms = 0;
     release_syslog_queue();
     syslog_host_text = "";
     syslog_port_value = port ? port : AC_SYSLOG_PORT;
@@ -530,16 +543,63 @@ void configure_filelog(bool enabled) {
 }
 
 void poll(bool network_available) {
-    if (!syslog_enabled_value || !network_available) return;
+    if (!network_available) return;
+
     for (size_t i = 0; i < AC_SYSLOG_SEND_BUDGET; ++i) {
         LogRecord record;
+        IPAddress address;
+        uint16_t port = 0;
+        uint32_t generation = 0;
+        char hostname[sizeof(syslog_hostname)];
+
         lock_log();
+        const bool retry_waiting = syslog_retry_delay_ms != 0 &&
+            static_cast<uint32_t>(millis() - syslog_retry_started_ms) <
+                syslog_retry_delay_ms;
         const bool have_record = syslog_enabled_value &&
-                                 syslog_queue &&
-                                 syslog_queue->pop(record);
+                                 !retry_waiting && syslog_queue &&
+                                 syslog_queue->peek(record);
+        if (have_record) {
+            address = syslog_ip;
+            port = syslog_port_value;
+            generation = syslog_generation;
+            memcpy(hostname, syslog_hostname, sizeof(hostname));
+        }
         unlock_log();
         if (!have_record) return;
-        send_syslog_record(record);
+
+        const bool sent = send_syslog_record(record, address, port, hostname);
+
+        lock_log();
+        if (sent) ++log_stats.syslog_sent;
+        else ++log_stats.syslog_errors;
+
+        // Configuration can replace the queue while UDP runs without the lock.
+        if (generation != syslog_generation) {
+            unlock_log();
+            return;
+        }
+
+        if (sent) {
+            syslog_queue->pop(record);
+            syslog_attempts = 0;
+            syslog_retry_delay_ms = 0;
+        } else {
+            ++syslog_attempts;
+            syslog_retry_started_ms = millis();
+            if (syslog_attempts >= SYSLOG_MAX_ATTEMPTS) {
+                syslog_queue->pop(record);
+                ++log_stats.syslog_drops;
+                syslog_attempts = 0;
+            }
+
+            // Back off even after dropping a record, rather than drain failures.
+            syslog_retry_delay_ms = SYSLOG_RETRY_BASE_MS <<
+                (syslog_attempts ? syslog_attempts - 1 : 0);
+        }
+        unlock_log();
+
+        if (!sent) return;
     }
 }
 

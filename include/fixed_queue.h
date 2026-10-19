@@ -41,6 +41,12 @@ public:
         return true;
     }
 
+    bool peek(T &value) const {
+        if (empty()) return false;
+        value = items_[head_];
+        return true;
+    }
+
     bool pop(T &value) {
         if (empty()) return false;
         value = std::move(items_[head_]);
