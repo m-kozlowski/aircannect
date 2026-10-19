@@ -64,6 +64,12 @@
       const wrapper = AirCANnect.ui.wifiSignal(
         rssi, "WiFi: " + connection);
       wrapper.classList.remove("value");
+      wrapper.title = "WiFi: " + connection + "\nSignal: " +
+        AirCANnect.format.rssi(rssi);
+      if (staConnected && data.wifi_ip && data.wifi_ip !== "0.0.0.0") {
+        wrapper.title += "\nSTA IP: " + data.wifi_ip;
+      }
+      wrapper.querySelector(".wifi-bars").title = wrapper.title;
       element.appendChild(wrapper);
     }
 
@@ -865,6 +871,11 @@
       loadOximetrySensors();
     });
     AirCANnect.snapshots.subscribe("status", applyStatusSnapshot, false);
+    AirCANnect.snapshots.subscribe("ota", (data) => {
+      const built = document.getElementById("built");
+      if (built) built.title = data.release_target ?
+        "Build target: " + data.release_target : "";
+    }, true);
     AirCANnect.events.subscribe("status", () => {});
     AirCANnect.events.subscribe("oximetry", (data) => {
       oxiSensorData = data;
