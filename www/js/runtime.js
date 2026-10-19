@@ -771,7 +771,7 @@
           pad2,
           rssi: formatRssi,
         }),
-        http: Object.freeze({request, requestBody, requestOk, postJson, upload}),
+        http: Object.freeze({request, requestBody, requestOk, postJson, upload, responseError}),
         pages: Object.freeze({
           active: activePageId,
           define: definePages,

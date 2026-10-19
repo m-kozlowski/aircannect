@@ -4306,8 +4306,12 @@
           }, bytes: JSON.stringify(reportSummary).length * 2}]);
         } else if (response && response.status !== 304) {
           const text = await response.text();
-          cached = response.status === 503 && text.includes("storage_usb");
-          if (!cached) throw new Error(text || "report summary failed");
+          const error = AirCANnect.http.responseError(text, response.status);
+          if (error === "storage_unavailable") {
+            throw new Error("Storage unavailable: SD card is not mounted.");
+          }
+          cached = response.status === 503 && error === "storage_usb";
+          if (!cached) throw new Error(error);
         }
         if (!reportSummary) throw new Error("Report index unavailable; no browser copy");
         if (cached) AirCANnect.ui.message(

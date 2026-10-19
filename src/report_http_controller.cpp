@@ -468,6 +468,11 @@ bool report_task_available(AsyncWebServerRequest *request,
         send_json_error(request, 503, "report_unavailable");
         return false;
     }
+    if (!report_task.storage_available()) {
+        send_json_error(request, 503, "storage_unavailable");
+        return false;
+    }
+
     if (!status.task_started) {
         send_preparing(request);
         return false;

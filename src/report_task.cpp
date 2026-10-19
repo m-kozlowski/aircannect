@@ -2598,6 +2598,11 @@ bool ReportTask::storage_quiesced() const {
     return !runtime_ || runtime_->storage_paused.load();
 }
 
+bool ReportTask::storage_available() const {
+    return runtime_ && runtime_->storage_status &&
+           runtime_->storage_status->mounted();
+}
+
 OperationAdmission ReportTask::request_rebuild(
     SleepDayId first_day, SleepDayId last_day, uint32_t generation) {
     if (!runtime_ || !runtime_->initialized || generation == 0 ||

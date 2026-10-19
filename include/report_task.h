@@ -238,6 +238,7 @@ public:
                StorageDeletePort *delete_port = nullptr);
     void set_storage_suspended(bool suspended);
     bool storage_quiesced() const;
+    bool storage_available() const;
     void notify_storage_completion();
 
     OperationAdmission request_night(
