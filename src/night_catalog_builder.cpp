@@ -2198,12 +2198,14 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
     if (removed_file_count > 0 && !removed_files) return {};
 
     int32_t adjustment = 0;
+    bool retained_clock = false;
     for (size_t i = 0; i < removed_file_count; ++i) {
         const auto &file = removed_files[i];
         const char *old_path = source.path(file);
         if (old_path && strcmp(old_path, path) == 0 &&
             file.identity == replacement.info.content_identity) {
             adjustment = file.time_adjust_ms;
+            retained_clock = true;
             break;
         }
     }
@@ -2213,13 +2215,22 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
     if (!adjust_time(replacement.info.day_start_ms, adjustment, day_start) ||
         !adjust_time(replacement.info.day_end_ms, adjustment, day_end) ||
         source_night->day_start_ms != day_start ||
-        source_night->day_end_ms != day_end ||
-        (source_night->timezone_offset_valid &&
-         (!replacement.info.timezone_offset_valid ||
-          static_cast<int64_t>(source_night->timezone_offset_minutes) * 60000 !=
-              static_cast<int64_t>(replacement.info.timezone_offset_minutes) *
-                  60000 - adjustment))) {
+        source_night->day_end_ms != day_end) {
         return {};
+    }
+
+    if (source_night->timezone_offset_valid) {
+        if (replacement.info.timezone_offset_valid) {
+            if (static_cast<int64_t>(source_night->timezone_offset_minutes) * 60000 !=
+                static_cast<int64_t>(replacement.info.timezone_offset_minutes) *
+                    60000 - adjustment) {
+                return {};
+            }
+        } else if (!retained_clock) {
+            // Missing legacy timezone metadata does not revoke a saved
+            // transform, but cannot establish one for an unknown artifact.
+            return {};
+        }
     }
 
     size_t source_session_count = 0;

@@ -215,16 +215,19 @@ bool resolve_legacy_session_clock(EdfReportSessionDescriptor &session,
             continue;
         }
 
+        // The end is start + record duration, not a second wall-clock reading.
+        const int64_t duration_ms =
+            file.local_header_end_ms - file.local_header_start_ms;
+
         if (!night_catalog_resolve_local_time(clock,
                                               sleep_day,
                                               file.local_header_start_ms,
                                               file.header_start_ms) ||
-            !night_catalog_resolve_local_time(clock,
-                                              sleep_day,
-                                              file.local_header_end_ms,
-                                              file.header_end_ms)) {
+            file.header_start_ms > INT64_MAX - duration_ms) {
             return false;
         }
+
+        file.header_end_ms = file.header_start_ms + duration_ms;
         resolved = true;
     }
 
