@@ -82,7 +82,7 @@ static constexpr size_t AC_PROVISION_LINE_MAX = 256;
 #endif
 
 #ifndef AC_SPI_SD_FREQ_HZ
-#define AC_SPI_SD_FREQ_HZ 10000000
+#define AC_SPI_SD_FREQ_HZ 40000000
 #endif
 
 #ifndef AC_STORAGE_HAS_SDCARD
