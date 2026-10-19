@@ -104,10 +104,14 @@ public:
     const ReportSignalTileBuildProgress &tile_progress() const { return tiles_; }
 
     // Closes signal files first; metadata is published only after success.
+    // For partial rebuilds, every previously present sample of protected_signals
+    // must still be present on the same grid in the new generation.
     OperationAdmission start(
         std::shared_ptr<ReportSignalStoreBundle> bundle,
         uint32_t operation_generation,
-        StorageAtomicWriteLane lane);
+        StorageAtomicWriteLane lane,
+        const ReportSignalStoreMetadata &previous = {},
+        uint32_t protected_signals = 0);
 
     // Replace only accepted metadata; signal, event and checkpoint files stay intact.
     OperationAdmission start_metadata(
@@ -133,6 +137,10 @@ private:
         PrepareTiles,
         SubmitFinish,
         WaitFinish,
+        SelectPreservedBlock,
+        SubmitPreservedRead,
+        WaitPreservedRead,
+        ComparePreservedSamples,
         SubmitEvents,
         WaitEvents,
         SubmitCheckpoint,
@@ -162,6 +170,13 @@ private:
     bool current_path(char *path, size_t path_size) const;
     bool submit_current();
     bool finish_current();
+
+    // Partial rebuild publication guard
+    struct Preservation;
+    bool select_preserved_block();
+    bool submit_preserved_read();
+    bool finish_preserved_read();
+    bool compare_preserved_samples();
 
     // Operation lifetime
     void fail(const char *error);
@@ -201,6 +216,9 @@ private:
     std::shared_ptr<ReportSignalStoreBundle> bundle_;
     ReportSignalStoreMetadata published_metadata_;
     OperationTicket write_ticket_;
+
+    // Allocated in PSRAM only while checking a partial rebuild.
+    Preservation *preservation_ = nullptr;
 
     // Operation lifetime
     uint32_t operation_generation_ = 0;

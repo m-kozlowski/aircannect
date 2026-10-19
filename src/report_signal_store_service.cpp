@@ -20,6 +20,20 @@ bool publishing_state(ReportSignalStoreState state) {
 
 }  // namespace
 
+struct ReportSignalStoreService::Preservation {
+    static constexpr size_t ReadBytes = 4096;
+    ReportSignalStoreMetadata previous;
+    uint32_t signals = 0;
+    size_t track_index = 0;
+    size_t slot = 0;
+    size_t offset = 0;
+    size_t length = 0;
+    size_t side = 0;
+    ReportSignalStoreTrack tracks[2];
+    ReportSignalStorePlaneRange ranges[2];
+    uint8_t present[ReadBytes / sizeof(int16_t) / 8] = {};
+};
+
 bool ReportSignalStoreStatus::active() const {
     return publishing_state(state);
 }
@@ -186,13 +200,32 @@ OperationAdmission ReportSignalStoreService::finish_tiles(
 OperationAdmission ReportSignalStoreService::start(
     std::shared_ptr<ReportSignalStoreBundle> bundle,
     uint32_t operation_generation,
-    StorageAtomicWriteLane lane) {
+    StorageAtomicWriteLane lane,
+    const ReportSignalStoreMetadata &previous,
+    uint32_t protected_signals) {
     if (phase_ != Phase::Idle) return OperationAdmission::Busy;
     if (!write_port_ || !bundle ||
         operation_generation == 0) {
         copy_cstr(status_.error, sizeof(status_.error),
                   "report_signal_store_publish_invalid");
         return OperationAdmission::Rejected;
+    }
+
+    if (previous.metadata && protected_signals) {
+        if (!read_port_ || previous.view.night.generation == bundle->generation) {
+            copy_cstr(status_.error, sizeof(status_.error),
+                      "report_preservation_generation_invalid");
+            return OperationAdmission::Rejected;
+        }
+
+        preservation_ = LargeObject::create<Preservation>();
+        if (!preservation_) {
+            copy_cstr(status_.error, sizeof(status_.error),
+                      "report_preservation_allocation_failed");
+            return OperationAdmission::Rejected;
+        }
+        preservation_->previous = previous;
+        preservation_->signals = protected_signals;
     }
 
     bundle_ = std::move(bundle);
@@ -203,7 +236,8 @@ OperationAdmission ReportSignalStoreService::start(
     status_.sleep_day = bundle_->sleep_day;
     status_.signal_count = bundle_->signal_count();
     status_.signal_index = status_.signal_count;
-    phase_ = range_write_port_ ? Phase::SubmitFinish : Phase::SubmitEvents;
+    phase_ = range_write_port_ ? Phase::SubmitFinish :
+        preservation_ ? Phase::SelectPreservedBlock : Phase::SubmitEvents;
     status_.state = ReportSignalStoreState::PublishingEvents;
     return OperationAdmission::Accepted;
 }
@@ -496,7 +530,170 @@ bool ReportSignalStoreService::finish_writes() {
     if (completion.outcome.disposition != OperationDisposition::Succeeded) {
         fail(completion.error[0] ? completion.error : "report_signal_store_close_failed");
     } else {
+        phase_ = preservation_ ? Phase::SelectPreservedBlock : Phase::SubmitEvents;
+    }
+    return true;
+}
+
+bool ReportSignalStoreService::select_preserved_block() {
+    auto &check = *preservation_;
+    if (check.track_index == check.previous.view.night.track_count) {
+        LargeObject::destroy(preservation_);
+        preservation_ = nullptr;
         phase_ = Phase::SubmitEvents;
+        return true;
+    }
+
+    if (!check.tracks[0].sample_interval_ms) {
+        check.previous.view.track(check.track_index, check.tracks[0]);
+        const auto &old = check.tracks[0];
+        if (!old.valid_sample_count ||
+            !(check.signals & report_signal_bit(old.signal))) {
+            ++check.track_index;
+            check.tracks[0] = {};
+            return true;
+        }
+
+        bool matched = false;
+        for (size_t i = 0; i < bundle_->metadata_view.night.track_count; ++i) {
+            bundle_->metadata_view.track(i, check.tracks[1]);
+            const auto &next = check.tracks[1];
+            if (next.signal == old.signal &&
+                next.sample_interval_ms == old.sample_interval_ms &&
+                next.grid_phase_ms == old.grid_phase_ms &&
+                next.first_valid_sample_ms <= old.first_valid_sample_ms &&
+                next.last_valid_sample_ms >= old.last_valid_sample_ms &&
+                next.valid_sample_count >= old.valid_sample_count) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            fail("report_source_changed_incomplete");
+            return true;
+        }
+    }
+
+    const auto &old = check.tracks[0];
+    if (check.slot == old.block_slot_count) {
+        ++check.track_index;
+        check.slot = 0;
+        check.tracks[0] = {};
+        return true;
+    }
+    if (!(old.present_blocks[check.slot / 8] & (1u << (check.slot % 8)))) {
+        ++check.slot;
+        return true;
+    }
+
+    const int64_t start = old.first_block_start_ms +
+        static_cast<int64_t>(check.slot) * REPORT_SIGNAL_STORE_BLOCK_MS;
+    for (size_t side = 0; side < 2; ++side) {
+        if (!ReportSignalStoreFileCodec::plane_range(
+                check.tracks[side], start, 1, ReportSignalStoreLevel::Raw,
+                check.ranges[side])) {
+            fail("report_source_changed_incomplete");
+            return true;
+        }
+    }
+    if (check.ranges[1].length != check.ranges[0].length) {
+        fail("report_source_changed_incomplete");
+        return true;
+    }
+
+    check.offset = 0;
+    check.side = 0;
+    phase_ = Phase::SubmitPreservedRead;
+    return true;
+}
+
+bool ReportSignalStoreService::submit_preserved_read() {
+    auto &check = *preservation_;
+    char path[AC_STORAGE_PATH_MAX] = {};
+    if (!report_signal_store_signal_path(
+            check.tracks[check.side], ReportSignalStoreLevel::Raw,
+            path, sizeof(path))) {
+        fail("report_preservation_path_invalid");
+        return true;
+    }
+
+    check.length = std::min(Preservation::ReadBytes,
+                            check.ranges[0].length - check.offset);
+    StorageReadCommand command;
+    command.path = path;
+    command.offset = check.ranges[check.side].offset + check.offset;
+    command.length = check.length;
+    command.generation = operation_generation_;
+    command.lane = lane_ == StorageAtomicWriteLane::Foreground
+        ? StorageReadLane::Foreground : StorageReadLane::Maintenance;
+
+    const auto submission = read_port_->request_read(command);
+    if (submission.admission == OperationAdmission::Busy) return false;
+    if (!submission.accepted()) {
+        fail("report_preservation_read_rejected");
+        return true;
+    }
+    read_ticket_ = submission.ticket;
+    phase_ = Phase::WaitPreservedRead;
+    return true;
+}
+
+bool ReportSignalStoreService::finish_preserved_read() {
+    StorageReadCompletion completion;
+    if (!read_port_->take_completion(read_ticket_, completion)) return false;
+    read_ticket_ = {};
+
+    auto &check = *preservation_;
+    prepared_ = completion.prepared;
+    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+        !completion.prepared.valid() || completion.prepared.length != check.length) {
+        fail(completion.error[0] ? completion.error : "report_preservation_read_failed");
+        return true;
+    }
+
+    phase_ = Phase::ComparePreservedSamples;
+    return true;
+}
+
+bool ReportSignalStoreService::compare_preserved_samples() {
+    auto &check = *preservation_;
+    const auto bytes = read_port_->view_prepared(prepared_);
+    if (bytes.state == PreparedByteReadState::Retry) return false;
+
+    if (!bytes.valid() || bytes.length != check.length) {
+        fail("report_preservation_read_incomplete");
+        return true;
+    }
+
+    // Retain only a presence bitmap, not another storage slot or RAW buffer.
+    for (size_t cell = 0; cell < check.length / sizeof(int16_t); ++cell) {
+        const int16_t raw = static_cast<int16_t>(
+            LittleEndian::get_le16(bytes.data + cell * sizeof(int16_t)));
+        const uint8_t bit = 1u << (cell % 8);
+        if (check.side == 0) {
+            if (raw != check.tracks[0].missing_value) check.present[cell / 8] |= bit;
+            else check.present[cell / 8] &= ~bit;
+        } else if ((check.present[cell / 8] & bit) &&
+                   raw == check.tracks[1].missing_value) {
+            fail("report_source_changed_incomplete");
+            return true;
+        }
+    }
+
+    read_port_->release_prepared(prepared_);
+    prepared_ = {};
+    if (check.side == 0) {
+        check.side = 1;
+        phase_ = Phase::SubmitPreservedRead;
+        return true;
+    }
+    check.offset += check.length;
+    check.side = 0;
+    if (check.offset == check.ranges[0].length) {
+        ++check.slot;
+        phase_ = Phase::SelectPreservedBlock;
+    } else {
+        phase_ = Phase::SubmitPreservedRead;
     }
     return true;
 }
@@ -698,6 +895,14 @@ bool ReportSignalStoreService::poll() {
         case Phase::SubmitFinish:
         case Phase::WaitFinish:
             return finish_writes();
+        case Phase::SelectPreservedBlock:
+            return select_preserved_block();
+        case Phase::SubmitPreservedRead:
+            return submit_preserved_read();
+        case Phase::WaitPreservedRead:
+            return finish_preserved_read();
+        case Phase::ComparePreservedSamples:
+            return compare_preserved_samples();
         case Phase::SubmitEvents:
         case Phase::SubmitCheckpoint:
         case Phase::SubmitHistogram:
@@ -741,6 +946,11 @@ void ReportSignalStoreService::cancel() {
 
 void ReportSignalStoreService::release_io() {
     tile_writer_.reset();
+
+    if (preservation_) {
+        LargeObject::destroy(preservation_);
+        preservation_ = nullptr;
+    }
 
     if (read_ticket_.valid() && read_port_) {
         (void)read_port_->abandon(read_ticket_);

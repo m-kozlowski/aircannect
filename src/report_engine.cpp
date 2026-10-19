@@ -87,6 +87,24 @@ uint32_t increment_generation(uint32_t generation) {
     return generation == 0 ? 1 : generation;
 }
 
+bool loses_populated_source(const ReportSignalStoreNightView &previous,
+                            const ReportReadPlan &plan) {
+    if (previous.night.available_event_mask & plan.missing_event_mask()) return true;
+
+    uint32_t selected = 0;
+    for (size_t i = 0; i < plan.session_count(); ++i) {
+        selected |= plan.session(i)->selected_signal_mask;
+    }
+    for (size_t i = 0; i < previous.night.track_count; ++i) {
+        ReportSignalStoreTrack track;
+        previous.track(i, track);
+        if (track.valid_sample_count && !(selected & report_signal_bit(track.signal))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 bool ReportEngineCompletion::retained_for_missing_sources() const {
@@ -694,20 +712,9 @@ bool ReportEngine::start_build(
     }
 
     if (retained_metadata_.metadata && !previous_metadata_.metadata) {
-        const auto &previous = retained_metadata_.view;
-        const uint32_t missing = active_plan_->missing_required_signal_mask() |
-            active_plan_->missing_optional_signal_mask();
-        bool lost_source =
-            (previous.night.available_event_mask & active_plan_->missing_event_mask()) != 0;
-        for (size_t i = 0; !lost_source && i < previous.night.track_count; ++i) {
-            ReportSignalStoreTrack track;
-            previous.track(i, track);
-            lost_source = track.valid_sample_count &&
-                (missing & report_signal_bit(track.signal));
-        }
-        if (lost_source) {
-            // Local recovery has already run. Keep the published generation
-            // when its input has disappeared, rather than replacing it with less data.
+        if (loses_populated_source(retained_metadata_.view, *active_plan_)) {
+            // Partial coverage is checked sample by sample before publication;
+            // a completely absent source cannot preserve a populated signal.
             return retain_incomplete_report();
         }
     }
@@ -877,15 +884,8 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
 
         if (resumed.status == ReportPlanStatus::InvalidCatalog) {
             // Source layout or historical coverage changed, not a tail append.
-            const uint32_t missing = active_plan_->missing_required_signal_mask() |
-                active_plan_->missing_optional_signal_mask();
-            for (size_t i = 0; i < previous.night.track_count; ++i) {
-                ReportSignalStoreTrack track;
-                previous.track(i, track);
-                if (track.valid_sample_count &&
-                    (missing & report_signal_bit(track.signal))) {
-                    return retain_incomplete_report();
-                }
+            if (loses_populated_source(previous, *active_plan_)) {
+                return retain_incomplete_report();
             }
 
             previous_metadata_ = {};
@@ -999,10 +999,15 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
             return true;
         }
 
+        const uint32_t protected_signals = previous_metadata_.metadata ? 0 :
+            active_plan_->missing_required_signal_mask() |
+                active_plan_->missing_optional_signal_mask();
+
         const OperationAdmission admitted = store_.start(
             std::move(bundle),
             active_request_.ticket.generation,
-            write_lane(active_request_.priority));
+            write_lane(active_request_.priority),
+            retained_metadata_, protected_signals);
         if (admitted != OperationAdmission::Accepted) {
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
@@ -1077,6 +1082,12 @@ bool ReportEngine::retain_incomplete_report() {
 
 bool ReportEngine::finish_publication() {
     const ReportSignalStoreStatus status = store_.status();
+    if (status.state == ReportSignalStoreState::Failed &&
+        strcmp(status.error, "report_source_changed_incomplete") == 0) {
+        store_.reset();
+        return retain_incomplete_report();
+    }
+
     if (status.state == ReportSignalStoreState::Ready) {
         auto metadata = store_.take_published_metadata();
         if (!metadata.metadata) {
