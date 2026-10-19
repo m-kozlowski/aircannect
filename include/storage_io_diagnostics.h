@@ -49,7 +49,8 @@ uint32_t io_error_count();
 
 // Arduino SD diskio hooks.
 #if AC_STORAGE_SPI_SD_ENABLED
-// Mount-only events, emitted with the SPI transaction released.
+// Mount-owner-only events, emitted with the SPI transaction released.
+// Storage publishes the selected clock after mounting, never from this hook.
 void spi_init_event(uint32_t requested_hz, uint32_t attempt_hz,
                     uint32_t actual_hz, bool selected, const char *reason);
 

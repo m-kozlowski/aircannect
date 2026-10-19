@@ -38,22 +38,6 @@ IoDiagnostics io_diagnostics() {
 }
 
 #if AC_STORAGE_SPI_SD_ENABLED
-void spi_init_event(uint32_t requested_hz, uint32_t attempt_hz,
-                    uint32_t actual_hz, bool selected, const char *reason) {
-    const int saved_errno = errno;
-
-    Log::logf_without_file(
-        CAT_STORAGE, selected ? LOG_INFO : LOG_WARN,
-        "SPI SD init requested_hz=%lu attempt_hz=%lu actual_hz=%lu "
-        "result=%s reason=%s\n",
-        static_cast<unsigned long>(requested_hz),
-        static_cast<unsigned long>(attempt_hz),
-        static_cast<unsigned long>(actual_hz), selected ? "selected" : "failed",
-        reason);
-
-    errno = saved_errno;
-}
-
 void spi_io_begin(uint8_t drive, uint32_t sector, uint32_t count, bool write) {
     spi_active = !spi_ready.load(std::memory_order_relaxed);
     if (!spi_active) return;

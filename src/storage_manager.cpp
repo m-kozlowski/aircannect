@@ -106,6 +106,11 @@ void set_state(StorageType type,
     owner_status.type = type;
     owner_status.state = state;
     owner_status.mounted = state == StorageState::Mounted;
+    if (!owner_status.mounted) {
+        owner_status.frequency_hz = 0;
+        owner_status.frequency_reason[0] = '\0';
+    }
+
     copy_cstr(owner_status.last_error, sizeof(owner_status.last_error), error);
     owner_status.last_checked_ms = millis();
 }
@@ -291,9 +296,12 @@ bool mount_storage() {
 #if AC_STORAGE_SPI_SD_ENABLED
     if (mount_spi_sd()) {
         Log::logf(CAT_STORAGE, LOG_INFO,
-                  "mounted type=%s card=%s mount=%s\n",
+                  "mounted type=%s card=%s mount=%s "
+                  "frequency_hz=%lu frequency_reason=%s\n",
                   type_name(owner_status.type), owner_status.card_type,
-                  owner_status.mount_point);
+                  owner_status.mount_point,
+                  static_cast<unsigned long>(owner_status.frequency_hz),
+                  owner_status.frequency_reason);
         return true;
     }
 #endif
@@ -311,6 +319,28 @@ bool mount_storage() {
 }
 
 }  // namespace
+
+#if AC_STORAGE_SPI_SD_ENABLED
+void spi_init_event(uint32_t requested_hz, uint32_t attempt_hz,
+                    uint32_t actual_hz, bool selected, const char *reason) {
+    const int saved_errno = errno;
+
+    owner_status.frequency_hz = selected ? actual_hz : 0;
+    copy_cstr(owner_status.frequency_reason, sizeof(owner_status.frequency_reason),
+              selected ? reason : nullptr);
+
+    Log::logf_without_file(
+        CAT_STORAGE, selected ? LOG_INFO : LOG_WARN,
+        "SPI SD init requested_hz=%lu attempt_hz=%lu actual_hz=%lu "
+        "result=%s reason=%s\n",
+        static_cast<unsigned long>(requested_hz),
+        static_cast<unsigned long>(attempt_hz),
+        static_cast<unsigned long>(actual_hz), selected ? "selected" : "failed",
+        reason);
+
+    errno = saved_errno;
+}
+#endif
 
 void begin() {
     if (initialized) return;

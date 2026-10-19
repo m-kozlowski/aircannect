@@ -30,6 +30,9 @@ struct StorageStatus {
     uint32_t last_checked_ms = 0;
     uint8_t max_open_files = 0;
     uint8_t width = 0;
+    // Confirmed SPI transfer clock; zero/empty when unavailable.
+    uint32_t frequency_hz = 0;
+    char frequency_reason[48] = {};
     char mount_point[16] = {};
     char card_type[16] = {};
     char last_error[96] = {};
