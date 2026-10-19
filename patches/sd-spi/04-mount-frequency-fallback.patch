@@ -1,0 +1,161 @@
+--- a/sd_diskio.cpp
++++ b/sd_diskio.cpp
+@@ -68,8 +68,10 @@
+   sdcard_type_t type;
+   unsigned long sectors;
+   bool supports_crc;
+   int status;
++  const char *init_error;
++  bool init_retryable;
+ } ardu_sdcard_t;
+ 
+ static ardu_sdcard_t *s_cards[FF_VOLUMES] = {NULL};
+ 
+@@ -528,8 +530,11 @@
+   if (!(card->status & STA_NOINIT)) {
+     return card->status;
+   }
+ 
++  card->init_error = "card_init_failed";
++  card->init_retryable = true;
++
+   // Lock the SPI bus and set it to a low frequency (400kHz) for initialization
+   // Low frequency is required during initialization for reliable communication
+   AcquireSPI card_locked(card, 400000);
+ 
+@@ -553,8 +558,10 @@
+     log_w("GO_IDLE_STATE failed");
+     goto unknown_card;
+   }
+   sdDeselectCard(pdrv);
++  // CMD0 restores default functions within eight clocks, including after HS.
++  card->spi->transfer(0xFF);
+ 
+   // Step 3: Configure CRC checking
+   // Enable CRC for data transfers in SPI mode (required for reliable communication)
+   token = sdTransaction(pdrv, CRC_ON_OFF, 1, NULL);
+@@ -658,19 +665,29 @@
+   // Only use 40 MHz after the card confirms High Speed in CMD6 status.
+   if (card->frequency == 40000000 && card->type != CARD_MMC) {
+     char status[64] = {};
+     if (!sdSelectCard(pdrv)) {
++      card->init_error = "high_speed_select_failed";
+       goto unknown_card;
+     }
+ 
+-    const bool switched = !sdCommand(pdrv, SEND_SWITCH_FUNC, 0x80FFFFF1, NULL)
+-                          && sdReadBytes(pdrv, status, sizeof(status));
++    const uint8_t response = sdCommand(pdrv, SEND_SWITCH_FUNC, 0x80FFFFF1, NULL);
++    const bool switched = response == 0 && sdReadBytes(pdrv, status, sizeof(status));
+ 
+     // Complete the switch with eight more clocks before raising SCK.
+     card->spi->transfer(0xFF);
+     sdDeselectCard(pdrv);
+ 
+     if (!switched || (status[16] & 0x0F) != 1) {
++      if (response == 0 && !switched) {
++        // A lost/corrupt switch status leaves the selected function uncertain.
++        card->init_error = "high_speed_status_failed_power_cycle";
++        card->init_retryable = false;
++      } else if (response == 4 || (switched && (status[16] & 0x0F) == 0x0F)) {
++        card->init_error = "high_speed_unsupported";
++      } else {
++        card->init_error = "high_speed_switch_failed";
++      }
+       log_e("SD High Speed switch failed");
+       goto unknown_card;
+     }
+   } else if (card->frequency > 25000000) {
+@@ -678,8 +695,9 @@
+     card->frequency = 25000000;
+   }
+ 
+   // Mark card as initialized
++  card->init_error = NULL;
+   card->status &= ~STA_NOINIT;
+   return card->status;
+ 
+ unknown_card:
+@@ -813,8 +831,10 @@
+ 
+   card->supports_crc = true;
+   card->type = CARD_NONE;
+   card->status = STA_NOINIT;
++  card->init_error = NULL;
++  card->init_retryable = true;
+ 
+   pinMode(card->ssPin, OUTPUT);
+   digitalWrite(card->ssPin, HIGH);
+   perimanSetPinBusExtraType(card->ssPin, "SD_SS");
+@@ -863,9 +883,51 @@
+     log_e("esp_vfs_fat_register failed 0x(%x)", err);
+     return false;
+   }
+ 
+-  FRESULT res = f_mount(fs, drv, 1);
++  const uint32_t requested_hz = card->frequency;
++  uint32_t actual_hz = 0;
++  const char *selected_reason = NULL;
++  FRESULT res;
++
++  for (;;) {
++    const uint32_t attempt_hz = card->frequency;
++    actual_hz = 0;
++    res = f_mount(fs, drv, 1);
++
++    if (!(card->status & STA_NOINIT)) {
++      AcquireSPI lock(card);
++      actual_hz = spiClockDivToFrequency(card->spi->bus(), card->spi->getClockDivider());
++      if (res == FR_OK) {
++        card->sectors = sdGetSectorsCount(pdrv);
++        if (!card->sectors) res = FR_DISK_ERR;
++      }
++    }
++
++    if (res == FR_OK) break;
++
++    const char *reason = card->init_error ? card->init_error
++                         : res == FR_DISK_ERR ? "mount_read_failed"
++                         : res == FR_NOT_READY ? "card_not_ready" : "filesystem_mount_failed";
++
++    aircannect::Storage::spi_init_event(requested_hz, attempt_hz, actual_hz, false, reason);
++
++    const uint32_t effective_hz = actual_hz ? actual_hz : card->frequency;
++    const uint32_t next_hz = effective_hz > 20000000 ? 20000000
++                            : effective_hz > 10000000 ? 10000000 : 0;
++
++    if (!card->init_retryable || !next_hz || (res != FR_DISK_ERR && res != FR_NOT_READY)) break;
++
++    // No files are open yet. Force the next mount through CMD0 at 400 kHz.
++    f_mount(NULL, drv, 0);
++    card->status = STA_NOINIT;
++    card->type = CARD_NONE;
++    card->sectors = 0;
++    card->supports_crc = true;
++    card->frequency = next_hz;
++    selected_reason = reason;
++  }
++
+   if (res != FR_OK) {
+     log_e("f_mount failed: %s", fferr2str[res]);
+     if (res == 13 && format_if_empty) {
+       BYTE *work = (BYTE *)malloc(sizeof(BYTE) * FF_MAX_SS);
+@@ -892,10 +954,16 @@
+       esp_vfs_fat_unregister_path(path);
+       return false;
+     }
+   }
+-  AcquireSPI lock(card);
+-  card->sectors = sdGetSectorsCount(pdrv);
++  if (!selected_reason) {
++    selected_reason = actual_hz < requested_hz ? "clock_limit" : "requested";
++  }
++
++  aircannect::Storage::spi_init_event(
++    requested_hz, card->frequency, actual_hz, true, selected_reason
++  );
++
+   return true;
+ }
+ 
+ uint32_t sdcard_num_sectors(uint8_t pdrv) {
