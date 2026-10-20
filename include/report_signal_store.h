@@ -171,6 +171,8 @@ struct ReportSignalStoreNight {
     uint64_t closed_therapy_duration_ms = 0;
     uint32_t generation = 0;
     uint32_t flags = 0;
+    // Optional completion for this metadata's generation and source revision.
+    uint16_t compression_version = 0;
     int32_t timezone_offset_minutes = 0;
     uint8_t available_event_mask = 0;
     uint8_t source_flags = 0;
@@ -272,6 +274,9 @@ public:
     static ReportSignalStoreMetadata reject_revision(
         const ReportSignalStoreMetadata &saved,
         SourceRevision revision);
+    static ReportSignalStoreMetadata with_compression_version(
+        const ReportSignalStoreMetadata &saved,
+        uint16_t version);
 };
 
 struct ReportSignalStoreEventFileData {

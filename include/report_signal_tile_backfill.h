@@ -4,18 +4,21 @@
 
 #include "report_signal_store.h"
 #include "report_signal_store_catalog.h"
+#include "report_signal_store_service.h"
 #include "report_signal_tile_writer.h"
 
 namespace aircannect {
 
 // Fills the persisted HTTP tiles for one already materialized night. The
 // writer checks each tile header before reading and compressing its source
-// range, so a resumed pass only does missing or stale work.
+// range, so a resumed pass only does missing or stale work. Completion is
+// published atomically in night metadata only after all tracks succeed.
 class ReportSignalTileBackfill {
 public:
     ~ReportSignalTileBackfill();
 
-    void begin(StorageReadPort &read, StorageRangeWritePort &write);
+    void begin(StorageReadPort &read, StorageRangeWritePort &write,
+               StorageAtomicWritePort &metadata_write);
     bool start(const ReportSignalStoreMetadata &metadata,
                uint32_t generation);
     bool poll();
@@ -25,6 +28,7 @@ public:
     bool succeeded() const { return succeeded_; }
     const char *error() const { return error_; }
     SleepDayId sleep_day() const { return night_.night.sleep_day; }
+    ReportSignalStoreMetadata take_published_metadata();
 
 private:
     static constexpr size_t LevelCount = 3;
@@ -35,6 +39,7 @@ private:
     void remember_error(const char *error);
 
     ReportSignalTileWriter writer_;
+    ReportSignalStoreService publication_;
     std::shared_ptr<const LargeByteBuffer> metadata_;
     ReportSignalStoreNightView night_;
     ReportSignalStoreTrack track_;

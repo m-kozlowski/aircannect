@@ -8,6 +8,8 @@ namespace aircannect {
 // Slow raw signals and overview LOD cover the whole track; detail tiles remain
 // UTC-aligned. Neither policy changes the underlying raw layout.
 struct ReportSignalTile {
+    // Bump when existing reports need their transport tiles prepared again.
+    static constexpr uint16_t CompressionVersion = 1;
     static constexpr size_t IdentityBytes =
         28 + REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES;
     static constexpr size_t HeaderBytes = IdentityBytes + 4;

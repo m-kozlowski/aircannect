@@ -9,9 +9,11 @@ namespace aircannect {
 ReportSignalTileBackfill::~ReportSignalTileBackfill() { reset(); }
 
 void ReportSignalTileBackfill::begin(StorageReadPort &read,
-                                     StorageRangeWritePort &write) {
+                                     StorageRangeWritePort &write,
+                                     StorageAtomicWritePort &metadata_write) {
     reset();
     writer_.begin(read, write);
+    publication_.begin(metadata_write);
 }
 
 bool ReportSignalTileBackfill::start(
@@ -89,13 +91,35 @@ bool ReportSignalTileBackfill::start_next_level() {
         return true;
     }
 
-    active_ = false;
-    metadata_.reset();
+    auto completed = ReportSignalStoreNightCodec::with_compression_version(
+        {metadata_, night_}, ReportSignalTile::CompressionVersion);
+
+    if (!completed.metadata ||
+        publication_.start_metadata(std::move(completed), generation_,
+                                    StorageAtomicWriteLane::Maintenance) !=
+            OperationAdmission::Accepted) {
+        succeeded_ = false;
+        remember_error("report_tile_completion_start_failed");
+        active_ = false;
+        metadata_.reset();
+    }
     return true;
 }
 
 bool ReportSignalTileBackfill::poll() {
     if (!active_) return false;
+
+    if (publication_.status().state != ReportSignalStoreState::Idle) {
+        const bool worked = publication_.poll();
+        if (publication_.status().terminal()) {
+            succeeded_ = publication_.status().state == ReportSignalStoreState::Ready;
+            if (!succeeded_) remember_error(publication_.status().error);
+            active_ = false;
+            metadata_.reset();
+            return true;
+        }
+        return worked;
+    }
 
     if (writer_.active()) {
         const bool worked = writer_.poll();
@@ -114,6 +138,7 @@ bool ReportSignalTileBackfill::poll() {
 
 void ReportSignalTileBackfill::reset() {
     writer_.reset();
+    publication_.reset();
     metadata_.reset();
     night_ = {};
     track_ = {};
@@ -123,6 +148,10 @@ void ReportSignalTileBackfill::reset() {
     active_ = false;
     succeeded_ = true;
     error_[0] = '\0';
+}
+
+ReportSignalStoreMetadata ReportSignalTileBackfill::take_published_metadata() {
+    return publication_.take_published_metadata();
 }
 
 }  // namespace aircannect

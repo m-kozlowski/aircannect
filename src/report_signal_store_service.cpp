@@ -887,6 +887,7 @@ bool ReportSignalStoreService::poll() {
         case Phase::PrepareTiles: {
             const bool worked = tile_writer_.poll();
             if (!tile_writer_.active()) {
+                tiles_.succeeded = tiles_.succeeded && tile_writer_.succeeded();
                 tiles_.next_slot[static_cast<size_t>(level_)] = tile_writer_.next_slot();
                 advance_level();
             }

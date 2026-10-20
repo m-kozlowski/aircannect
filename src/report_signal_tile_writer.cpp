@@ -198,7 +198,7 @@ bool ReportSignalTileWriter::poll() {
                 release_read();
                 if (completion.outcome.disposition ==
                     OperationDisposition::Cancelled) {
-                    advance();
+                    advance(false, "report_signal_tile_read_cancelled");
                 } else if (checking_ &&
                            completion.outcome.disposition ==
                                OperationDisposition::Failed &&
@@ -315,7 +315,7 @@ bool ReportSignalTileWriter::poll() {
     if (!write_->take_completion(write_ticket_, completion)) return false;
     write_ticket_ = {};
     if (completion.outcome.disposition == OperationDisposition::Cancelled) {
-        advance();
+        advance(false, "report_signal_tile_write_cancelled");
     } else if (completion.outcome.disposition !=
                    OperationDisposition::Succeeded) {
         advance(false,

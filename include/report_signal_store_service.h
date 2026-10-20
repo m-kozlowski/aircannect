@@ -37,6 +37,7 @@ struct ReportSignalTileBuildProgress {
     // RAW, 1 s, 10 s. SIZE_MAX starts at the first changed block.
     size_t next_slot[3] = {SIZE_MAX, SIZE_MAX, SIZE_MAX};
     size_t closed_before_slot = SIZE_MAX;
+    bool succeeded = true;
 };
 
 class ReportSignalStoreService {

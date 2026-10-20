@@ -643,6 +643,19 @@ struct ReportTask::Runtime {
         }
     }
 
+    void accept_store_metadata(const ReportSignalStoreMetadata &metadata) {
+        auto next = store_catalog
+            ? ReportSignalStoreCatalogBuilder::upsert(*store_catalog, metadata)
+            : ReportSignalStoreCatalogBuilder::build(&metadata, 1);
+
+        if (next) {
+            accept_store_catalog(std::move(next));
+        } else {
+            record_failure("publish_metadata", "report_store_catalog_alloc_failed",
+                           metadata.view.night.sleep_day);
+        }
+    }
+
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
                         uint32_t generation,
                         bool discover_stored_nights = true) {
@@ -1544,6 +1557,11 @@ struct ReportTask::Runtime {
             store_catalog->ready(night->sleep_day, night->source_revision)) {
             const ReportSignalStoreCatalogRecord *stored =
                 store_catalog->find(night->sleep_day);
+            if (stored && stored->view.night.compression_version ==
+                              ReportSignalTile::CompressionVersion) {
+                ++idle_cursor;
+                return true;
+            }
             if (!stored || !stored->metadata ||
                 !signal_tile_backfill.start(
                     {stored->metadata, stored->view}, idle_generation)) {
@@ -1596,6 +1614,9 @@ struct ReportTask::Runtime {
         }
 
         const bool succeeded = signal_tile_backfill.succeeded();
+        auto metadata = signal_tile_backfill.take_published_metadata();
+        if (metadata.metadata) accept_store_metadata(metadata);
+
         signal_tile_backfill_started = false;
         ++idle_cursor;
         if (!succeeded) {
@@ -1828,18 +1849,7 @@ struct ReportTask::Runtime {
         ReportSignalStoreCatalogInput published_input =
             engine.take_published();
         if (published_input.metadata) {
-            std::shared_ptr<const ReportSignalStoreCatalog> next =
-                store_catalog
-                    ? ReportSignalStoreCatalogBuilder::upsert(
-                          *store_catalog, published_input)
-                    : ReportSignalStoreCatalogBuilder::build(
-                          &published_input, 1);
-            if (next) {
-                accept_store_catalog(std::move(next));
-            } else {
-                record_failure("publish_metadata", "report_store_catalog_alloc_failed",
-                               published_input.view.night.sleep_day);
-            }
+            accept_store_metadata(published_input);
             worked = true;
         }
 
@@ -2545,7 +2555,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port);
     }
-    runtime_->signal_tile_backfill.begin(read_port, range_write_port);
+    runtime_->signal_tile_backfill.begin(read_port, range_write_port, write_port);
     runtime_->engine.begin(read_port, write_port, spool_port, range_write_port);
     runtime_->store_catalog = ReportSignalStoreCatalogBuilder::build(
         nullptr, 0);

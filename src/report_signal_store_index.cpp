@@ -310,6 +310,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSignalStoreNightCodec::encode(
     put_le32(bytes + 88, night.missing_optional_signal_mask);
     bytes[92] = night.requested_event_mask;
     bytes[93] = night.missing_event_mask;
+    put_le16(bytes + 94, night.compression_version);
 
     const ReportNightMetrics &metrics = night.metrics;
     put_le32(bytes + 96, metrics.valid_mask);
@@ -451,6 +452,7 @@ bool ReportSignalStoreNightCodec::decode(
     night.missing_optional_signal_mask = get_le32(bytes + 88);
     night.requested_event_mask = bytes[92];
     night.missing_event_mask = bytes[93];
+    night.compression_version = get_le16(bytes + 94);
 
     ReportNightMetrics &metrics = night.metrics;
     metrics.valid_mask = get_le32(bytes + 96);
@@ -542,6 +544,25 @@ bool ReportSignalStoreNightCodec::decode(
         }
     }
     return true;
+}
+
+ReportSignalStoreMetadata ReportSignalStoreNightCodec::with_compression_version(
+    const ReportSignalStoreMetadata &saved,
+    uint16_t version) {
+    auto bytes = LargeByteBuffer::allocate(saved.metadata->size());
+    if (!bytes) return {};
+
+    memcpy(bytes->data(), saved.metadata->data(), bytes->size());
+    put_le16(bytes->data() + 94, version);
+
+    auto view = saved.view;
+    view.night.compression_version = version;
+    view.session_records = bytes->data() +
+        (saved.view.session_records - saved.metadata->data());
+    view.track_records = bytes->data() +
+        (saved.view.track_records - saved.metadata->data());
+
+    return {LargeByteBuffer::freeze(std::move(bytes)), view};
 }
 
 ReportSignalStoreMetadata ReportSignalStoreNightCodec::reject_revision(

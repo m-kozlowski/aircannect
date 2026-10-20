@@ -171,6 +171,7 @@ struct ReportSignalStoreBuilder::Runtime {
     int64_t closed_before_ms = 0;
     uint8_t checkpoint_slot = 1;
     ReportBuildCheckpointInput previous_checkpoint;
+    bool previous_compression_complete = true;
     bool active = false;
     std::shared_ptr<ReportSignalStoreBundle> completed;
     EdfSignalScale scales[static_cast<size_t>(ReportSignalId::Count)];
@@ -219,6 +220,7 @@ struct ReportSignalStoreBuilder::Runtime {
         closed_before_ms = 0;
         checkpoint_slot = 1;
         previous_checkpoint = {};
+        previous_compression_complete = true;
 
         request = {};
         plan = nullptr;
@@ -518,6 +520,10 @@ bool ReportSignalStoreBuilder::begin_build(
     const auto &previous_night = previous.view;
     const auto &checkpoint = checkpoint_input.view;
     const auto &checkpoint_bytes = checkpoint_input.bytes;
+
+    runtime_->previous_compression_complete = !previous.metadata ||
+        previous_night.night.compression_version ==
+            ReportSignalTile::CompressionVersion;
 
     runtime_->checkpoint_slot = previous_night.night.checkpoint_slot == 1
         ? 2 : 1;
@@ -1370,6 +1376,16 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     night.day_end_ms = runtime_->plan->night().day_end_ms;
     night.closed_therapy_duration_ms = duration_ms;
     night.generation = bundle->generation;
+
+    bool compression_complete = runtime_->previous_compression_complete;
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        compression_complete = compression_complete &&
+            runtime_->tracks[i].tiles.succeeded;
+    }
+
+    night.compression_version = compression_complete
+        ? ReportSignalTile::CompressionVersion : 0;
+
     night.flags = runtime_->plan->night().metrics.valid_mask != 0
         ? static_cast<uint32_t>(
               REPORT_SIGNAL_STORE_NIGHT_SUMMARY_AVAILABLE)
