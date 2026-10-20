@@ -59,6 +59,7 @@ public:
     std::shared_ptr<const LargeByteBuffer> release_notes() const;
 
     bool active() const;
+    bool manual_check_active() const;
     UpdateCheckerStatus status() const;
     OtaUpdateNotification notification() const;
 
@@ -110,6 +111,7 @@ private:
     uint32_t task_generation_ = 0;
     char *check_url_ = nullptr;
     TaskHandle_t task_ = nullptr;
+    bool task_manual_ = false;
     bool task_stack_external_ = false;
     OwnedArtifact available_artifact_;
     std::shared_ptr<const LargeByteBuffer> release_notes_;

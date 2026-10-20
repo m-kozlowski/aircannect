@@ -11,6 +11,7 @@ struct ActivitySnapshot {
     bool realtime_stream_active = false;
     bool foreground_report_demand = false;
     bool ota_install_active = false;
+    bool manual_update_check_active = false;
     bool export_work_claimed = false;
     bool as11_rpc_available = true;
     bool supports_as11_spools = true;

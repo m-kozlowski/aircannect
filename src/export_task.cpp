@@ -378,11 +378,13 @@ bool ExportTask::publish_work_claim() {
     }
     const bool ready_pending = pending && network_ready_ && !runtime_blocked_;
 
-    if (active || ready_pending) {
-        work_reservation_.fetch_or(ExportDemand);
-    } else {
-        work_reservation_.fetch_and(static_cast<uint8_t>(~ExportDemand));
-    }
+    uint8_t current = work_reservation_.load();
+    uint8_t next;
+    do {
+        next = static_cast<uint8_t>(current & ~(ExportDemand | EndpointActive));
+        if (active || ready_pending) next |= ExportDemand;
+        if (active) next |= EndpointActive;
+    } while (!work_reservation_.compare_exchange_weak(current, next));
     unlock_inputs();
     return true;
 }
@@ -452,9 +454,17 @@ bool ExportTask::endpoint_work_claimed() const {
     return (work_reservation_.load() & ExportDemand) != 0;
 }
 
-bool ExportTask::try_begin_update_check() {
-    uint8_t idle = 0;
-    return work_reservation_.compare_exchange_strong(idle, UpdateCheck);
+bool ExportTask::try_begin_update_check(bool manual) {
+    uint8_t current = work_reservation_.load();
+    const uint8_t blocked = EndpointStep | EndpointActive | UpdateCheck |
+                            (manual ? 0 : ExportDemand);
+    while ((current & blocked) == 0) {
+        if (work_reservation_.compare_exchange_weak(
+                current, static_cast<uint8_t>(current | UpdateCheck))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void ExportTask::end_update_check() {

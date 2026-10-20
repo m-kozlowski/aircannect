@@ -419,6 +419,7 @@ struct ReportTask::Runtime {
 
     bool capture_storage_ready() const {
         if (!storage_status || activity.ota_install_active ||
+            activity.manual_update_check_active ||
             activity.export_work_claimed) return false;
 
         const StorageWorkloadSnapshot workload =
@@ -885,6 +886,7 @@ struct ReportTask::Runtime {
         return activity.therapy_active || activity.realtime_stream_active ||
                activity.foreground_report_demand ||
                activity.ota_install_active || activity.export_work_claimed ||
+               activity.manual_update_check_active ||
                engine.status().foreground_active || period_running;
     }
 
@@ -925,22 +927,26 @@ struct ReportTask::Runtime {
         const bool therapy_ended =
             activity.therapy_active && !next.therapy_active;
         const bool became_blocked =
-            !background_suspended &&
-            (next.therapy_active || next.realtime_stream_active ||
-             next.foreground_report_demand || next.ota_install_active ||
-             next.export_work_claimed);
+            (!background_suspended &&
+             (next.therapy_active || next.realtime_stream_active ||
+              next.foreground_report_demand || next.ota_install_active ||
+              next.manual_update_check_active || next.export_work_claimed)) ||
+            (!activity.manual_update_check_active &&
+             next.manual_update_check_active);
         const bool rpc_became_available =
             !activity.as11_rpc_available && next.as11_rpc_available;
         const bool spool_support_changed =
             activity.supports_as11_spools != next.supports_as11_spools;
 
-        if (therapy_ended || next.ota_install_active || next.export_work_claimed) {
+        if (therapy_ended || next.ota_install_active ||
+            next.manual_update_check_active || next.export_work_claimed) {
             capture_input.reset();
             capture_checked_revision = 0;
         }
 
         if (capture_build.valid() &&
-            (next.ota_install_active || next.export_work_claimed)) {
+            (next.ota_install_active || next.manual_update_check_active ||
+             next.export_work_claimed)) {
             (void)engine.cancel_background();
             capture_build = {};
             capture_attempt_progress.reset();
@@ -950,6 +956,7 @@ struct ReportTask::Runtime {
         activity = next;
         if (capture_sources_pending &&
             (!next.therapy_active || next.ota_install_active ||
+             next.manual_update_check_active ||
              next.export_work_claimed)) {
             capture_sources.cancel();
             capture_sources_pending = false;
@@ -958,7 +965,8 @@ struct ReportTask::Runtime {
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
             activity.foreground_report_demand ||
-            activity.ota_install_active || activity.export_work_claimed;
+            activity.ota_install_active || activity.manual_update_check_active ||
+            activity.export_work_claimed;
 
         if (therapy_ended || spool_support_changed) invalidate_spool_availability();
         if (rpc_became_available) reset_background_pass();
@@ -1960,7 +1968,9 @@ struct ReportTask::Runtime {
         if (activity.foreground_report_demand) {
             return ReportTaskWaitReason::ForegroundRequest;
         }
-        if (activity.ota_install_active) return ReportTaskWaitReason::Ota;
+        if (activity.ota_install_active || activity.manual_update_check_active) {
+            return ReportTaskWaitReason::Ota;
+        }
         if (activity.export_work_claimed) return ReportTaskWaitReason::Export;
         if (!activity.as11_rpc_available) {
             return ReportTaskWaitReason::As11Unavailable;
@@ -3123,7 +3133,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.activity.ota_install_active && runtime.catalog_load_pending &&
+    const bool catalog_load_allowed =
+        !runtime.activity.ota_install_active &&
+        (!runtime.activity.manual_update_check_active ||
+         runtime.activity.foreground_report_demand);
+
+    if (catalog_load_allowed && runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
         const OperationAdmission admitted =
@@ -3155,7 +3170,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = runtime.store_catalog_loader.poll() || worked;
     }
     worked = runtime.observe_store_catalog_load(now_ms) || worked;
-    if (!runtime.activity.ota_install_active && !runtime.catalog_load_pending &&
+    if (catalog_load_allowed && !runtime.catalog_load_pending &&
         runtime.store_purpose != CatalogStorePurpose::Load) {
         worked = runtime.start_store_catalog_load(now_ms) || worked;
     }

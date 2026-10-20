@@ -106,8 +106,9 @@ public:
     void cancel_maintenance(ExportEndpoint endpoint);
     bool cancel_post_therapy();
 
-    // Update checks yield to export demand; release only after task cleanup.
-    bool try_begin_update_check();
+    // Scheduled checks yield to exports; manual checks precede queued work.
+    // Release the reservation only after checker-task cleanup.
+    bool try_begin_update_check(bool manual = false);
     void end_update_check();
 
     // copied status
@@ -125,6 +126,7 @@ private:
         ExportDemand = 1,
         EndpointStep = 2,
         UpdateCheck = 4,
+        EndpointActive = 8,
     };
 
     struct Command {

@@ -573,6 +573,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      bool realtime_stream_active,
                                      bool export_work_claimed,
                                      bool ota_install_active,
+                                     bool manual_update_check_active,
                                      bool ota_storage_upload_active,
                                      bool therapy_active,
                                      bool as11_rpc_available) {
@@ -587,6 +588,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
         storage_activity.realtime_stream_active != realtime_stream_active ||
         storage_activity.export_work_claimed != export_work_claimed ||
         storage_activity.ota_install_active != ota_install_active ||
+        storage_activity.manual_update_check_active != manual_update_check_active ||
         ota_storage_upload_active_published != ota_storage_upload_active ||
         storage_activity.therapy_active != therapy_active ||
         storage_activity.as11_rpc_available != as11_rpc_available ||
@@ -597,6 +599,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.realtime_stream_active = realtime_stream_active;
     storage_activity.export_work_claimed = export_work_claimed;
     storage_activity.ota_install_active = ota_install_active;
+    storage_activity.manual_update_check_active = manual_update_check_active;
     storage_activity.therapy_active = therapy_active;
     storage_activity.as11_rpc_available = as11_rpc_available;
     storage_activity.supports_as11_spools = supports_as11_spools;
@@ -1753,9 +1756,7 @@ void loop() {
             As11TherapyState::Running;
     const ReportTaskControlSnapshot report_status =
         report_task.control_snapshot();
-    const bool update_check_allowed =
-        !export_coordinator.endpoint_work_claimed() &&
-        !report_status.foreground_active;
+    const bool update_check_allowed = !report_status.foreground_active;
 
     update_checker.poll(runtime_network,
                         update_check_allowed &&
@@ -1789,6 +1790,7 @@ void loop() {
                              stream_activity_active,
                              export_work_claimed,
                              storage_ota_active,
+                             update_checker.manual_check_active(),
                              ota_storage_upload_active,
                              therapy_active,
                              as11_rpc_available);

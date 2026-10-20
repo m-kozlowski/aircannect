@@ -44,6 +44,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
                          bool install_active,
                          bool therapy_active) {
     bool start = false;
+    bool manual = false;
     bool log_heap_deferred = false;
     const uint32_t now = millis();
 
@@ -118,6 +119,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         deadline_due(now, heap_retry_at_ms_);
     start = status_.pending && schedule_ready && check_allowed &&
         !therapy_active && !task_ && heap_retry_ready;
+    manual = manual_requested_;
     unlock();
 
     if (!start) return;
@@ -134,7 +136,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         heap_retry_at_ms_ = 0;
         unlock();
     }
-    if (exports_->try_begin_update_check()) {
+    if (exports_->try_begin_update_check(manual)) {
         if (!start_check()) exports_->end_update_check();
     }
 }
@@ -229,6 +231,14 @@ bool UpdateChecker::active() const {
     return result;
 }
 
+bool UpdateChecker::manual_check_active() const {
+    if (!lock()) return false;
+
+    const bool result = task_ && task_manual_;
+    unlock();
+    return result;
+}
+
 UpdateCheckerStatus UpdateChecker::status() const {
     if (!lock()) return UpdateCheckerStatus();
     UpdateCheckerStatus copy = status_;
@@ -284,6 +294,7 @@ bool UpdateChecker::start_check() {
 
     check_url_ = owned_url;
     task_generation_ = config_generation_;
+    task_manual_ = manual_requested_;
     cancel_requested_ = false;
     export_preempted_ = false;
     therapy_preempted_ = false;
@@ -356,6 +367,7 @@ void UpdateChecker::reap_task_locked() {
         vTaskDelete(task_);
     }
     task_ = nullptr;
+    task_manual_ = false;
     status_.active = false;
     cancel_requested_ = false;
     exports_->end_update_check();
@@ -592,7 +604,9 @@ void UpdateChecker::clear_release_locked() {
 bool UpdateChecker::cancelled(uint32_t generation) {
     if (!lock()) return true;
 
-    if (exports_->endpoint_work_claimed()) export_preempted_ = true;
+    if (!manual_requested_ && exports_->endpoint_work_claimed()) {
+        export_preempted_ = true;
+    }
     const bool result = cancel_requested_ || export_preempted_ ||
                         therapy_preempted_ ||
                         generation != config_generation_;

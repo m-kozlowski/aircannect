@@ -3142,9 +3142,11 @@ void publish_activity(const ActivitySnapshot &activity,
                       bool ota_storage_upload_active) {
     read_retention_allowed.store(
         !activity.therapy_active && !activity.ota_install_active &&
+        !activity.manual_update_check_active &&
         !activity.export_work_claimed, std::memory_order_release);
     range_write_service.set_retention_allowed(
         !activity.therapy_active && !activity.ota_install_active &&
+        !activity.manual_update_check_active &&
         !activity.export_work_claimed);
 
     storage_therapy_active.store(activity.therapy_active,
@@ -3164,6 +3166,7 @@ void publish_activity(const ActivitySnapshot &activity,
     overview_scan_allowed.store(!scan_paused, std::memory_order_release);
     const bool maintenance_paused =
         scan_paused || activity.foreground_report_demand ||
+        activity.manual_update_check_active ||
         activity.export_work_claimed;
     const bool upload_paused =
         activity.therapy_active ||
