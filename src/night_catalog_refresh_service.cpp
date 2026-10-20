@@ -1070,6 +1070,16 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
     }
 
     if (accepted) {
+        if (file.inventory.kind == EdfInventoryFileKind::Brp ||
+            file.inventory.kind == EdfInventoryFileKind::Pld ||
+            file.inventory.kind == EdfInventoryFileKind::Sa2) {
+            if (file.file_size == file.header_size) {
+                ++status.empty_numeric_files;
+            } else {
+                ++status.recorded_numeric_files;
+            }
+        }
+
         ParsedEdfLayouts &parsed =
             runtime.parsed_edf_files[runtime.parsed_edf_file_count++];
         copy_cstr(parsed.path, sizeof(parsed.path), file.path);
@@ -2204,6 +2214,26 @@ bool NightCatalogRefreshService::poll() {
                     return true;
                 }
                 if (!runtime_->building_catalog->find(runtime_->target.sleep_day)) {
+                    // A new, finalized short capture can contain only headers.
+                    // Never classify loss of an existing night's sources this way.
+                    bool finalized_capture = false;
+                    for (size_t i = 0; i < runtime_->session_metadata_count; ++i) {
+                        const auto &entry = runtime_->session_metadata[i];
+                        finalized_capture |= entry.decoded && entry.metadata.finalized &&
+                            entry.metadata.canonical_sleep_day == runtime_->target.sleep_day;
+                    }
+
+                    if (runtime_->building_catalog->size() == 0 &&
+                        !runtime_->previous_catalog->find(runtime_->target.sleep_day) &&
+                        finalized_capture && status_.empty_numeric_files > 0 &&
+                        status_.recorded_numeric_files == 0 &&
+                        status_.files_skipped == 0 && !status_.warning[0]) {
+                        reset_transient();
+                        runtime_->phase = NightCatalogRefreshRuntime::Phase::Idle;
+                        status_.state = NightCatalogRefreshState::NoCompleteRecords;
+                        return true;
+                    }
+
                     fail(runtime_->building_catalog->size() == 0
                              ? "night_catalog_target_empty"
                              : "night_catalog_target_day_mismatch");

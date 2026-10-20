@@ -23,6 +23,7 @@ enum class NightCatalogRefreshState : uint8_t {
     Building,
     Cancelling,
     Ready,
+    NoCompleteRecords,
     Error,
 };
 
@@ -34,6 +35,8 @@ struct NightCatalogRefreshStatus {
     uint32_t files_skipped = 0;
     uint32_t sessions = 0;
     uint32_t str_records = 0;
+    uint32_t empty_numeric_files = 0;
+    uint32_t recorded_numeric_files = 0;
     bool retryable = false;
     char current_path[AC_STORAGE_PATH_MAX] = {};
     char warning[AC_STORAGE_ERROR_MAX] = {};

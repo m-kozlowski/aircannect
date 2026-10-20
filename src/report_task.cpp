@@ -3204,15 +3204,33 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         const NightCatalogRefreshStatus status =
             runtime.catalog_refresh.status();
         if (status.state == NightCatalogRefreshState::Ready ||
+            status.state == NightCatalogRefreshState::NoCompleteRecords ||
             status.state == NightCatalogRefreshState::Error) {
             const char *rebuild_error = nullptr;
             if (runtime.refresh_rebuild) {
-                rebuild_error = status.error[0] ? status.error : status.warning[0]
+                rebuild_error = status.state == NightCatalogRefreshState::NoCompleteRecords
+                    ? "night_catalog_no_complete_records"
+                    : status.error[0] ? status.error : status.warning[0]
                     ? status.warning : runtime.rebuild_source_error(*runtime.catalog_refresh.snapshot());
             }
 
             if (rebuild_error) {
                 runtime.fail_rebuild(rebuild_error);
+            } else if (status.state == NightCatalogRefreshState::NoCompleteRecords) {
+#ifdef ARDUINO
+                char day[9] = {};
+                runtime.refresh_target.sleep_day.format_yyyymmdd(day, sizeof(day));
+                Log::logf(CAT_REPORT, LOG_INFO,
+                          "refresh skipped night=%s reason=no_complete_records\n", day);
+#endif
+
+                if (runtime.refresh_source_change) {
+                    runtime.consume_source_change_coverage(
+                        runtime.refresh_source_change_covered);
+                }
+                runtime.catalog_refresh_retry_at_ms = 0;
+                runtime.catalog_refresh_retry_attempt = 0;
+                runtime.catalog_refresh_logged_error[0] = '\0';
             } else if (status.state == NightCatalogRefreshState::Ready) {
                 publish_catalog(runtime.catalog_refresh.snapshot(),
                                 runtime.refresh_generation);
