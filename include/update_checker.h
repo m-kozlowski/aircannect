@@ -50,7 +50,8 @@ public:
     void poll(const NetworkSnapshot &network,
               bool check_allowed,
               bool install_active,
-              bool therapy_active);
+              bool therapy_active,
+              const char *blocked_reason = "runtime_busy");
     void mark_config_dirty();
 
     bool request_check(bool install_active);
@@ -89,8 +90,13 @@ private:
     void clear_release_locked();
     bool cancelled(uint32_t generation);
     static bool continue_callback(void *ctx);
+    static void trace_callback(void *ctx, const char *stage);
     bool lock(TickType_t timeout = portMAX_DELAY) const;
     void unlock() const;
+
+    // Diagnostic timing only; scheduling and cancellation remain independent.
+    void begin_trace(const char *source);
+    void trace_phase(const char *phase);
 
     const AppConfigData *config_ = nullptr;
     ExportTask *exports_ = nullptr;
@@ -115,6 +121,12 @@ private:
     bool task_stack_external_ = false;
     OwnedArtifact available_artifact_;
     std::shared_ptr<const LargeByteBuffer> release_notes_;
+
+    uint32_t trace_id_ = 0;
+    uint32_t trace_started_ms_ = 0;
+    uint32_t trace_phase_ms_ = 0;
+    uint32_t trace_logged_ms_ = 0;
+    const char *trace_phase_ = "idle";
 };
 
 }  // namespace aircannect

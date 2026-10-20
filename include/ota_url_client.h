@@ -24,6 +24,7 @@ struct OtaUrlError {
 using OtaUrlWriteCallback =
     bool (*)(void *ctx, size_t offset, const uint8_t *data, size_t len);
 using OtaUrlContinueCallback = bool (*)(void *ctx);
+using OtaUrlTraceCallback = void (*)(void *ctx, const char *stage);
 
 bool ota_url_supported(const char *url);
 
@@ -46,6 +47,7 @@ bool ota_url_fetch(const char *url,
                    size_t &length,
                    OtaUrlError &error,
                    OtaUrlContinueCallback continue_callback = nullptr,
-                   void *callback_ctx = nullptr);
+                   void *callback_ctx = nullptr,
+                   OtaUrlTraceCallback trace_callback = nullptr);
 
 }  // namespace aircannect

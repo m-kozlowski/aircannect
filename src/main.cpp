@@ -1762,7 +1762,10 @@ void loop() {
                         update_check_allowed &&
                             !resmed_ota_transport_active,
                         firmware_installer.active(),
-                        therapy_active);
+                        therapy_active,
+                        resmed_ota_transport_active ? "waiting_resmed_ota" :
+                        report_status.foreground_active ? "waiting_report" :
+                        "runtime_busy");
     firmware_installer.poll(esp_reboot_allowed, therapy_active);
 
     drain_can_rx();

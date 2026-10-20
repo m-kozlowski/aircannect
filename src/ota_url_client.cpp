@@ -35,6 +35,13 @@ struct OtaUrlFetchContext {
     OtaUrlContinueCallback continue_callback = nullptr;
     void *callback_ctx = nullptr;
     OtaUrlError *error = nullptr;
+    OtaUrlTraceCallback trace_callback = nullptr;
+    bool header_seen = false;
+    bool data_seen = false;
+
+    void trace(const char *stage) {
+        if (trace_callback) trace_callback(callback_ctx, stage);
+    }
 };
 
 void clear_error(OtaUrlError &error) {
@@ -176,6 +183,29 @@ esp_err_t fetch_event(esp_http_client_event_t *event) {
     OtaUrlFetchContext &ctx =
         *static_cast<OtaUrlFetchContext *>(event->user_data);
 
+    switch (event->event_id) {
+        case HTTP_EVENT_ON_CONNECTED:
+            ctx.header_seen = ctx.data_seen = false;
+            ctx.trace("http_connected");
+            break;
+        case HTTP_EVENT_HEADERS_SENT: ctx.trace("http_request_sent"); break;
+        case HTTP_EVENT_ON_HEADER:
+            if (!ctx.header_seen) ctx.trace("http_first_header");
+            ctx.header_seen = true;
+            break;
+        case HTTP_EVENT_ON_DATA:
+            if (!ctx.data_seen && event->data_len > 0) {
+                ctx.trace("http_first_data");
+                ctx.data_seen = true;
+            }
+            break;
+        case HTTP_EVENT_ON_FINISH: ctx.trace("http_response_finished"); break;
+        case HTTP_EVENT_DISCONNECTED: ctx.trace("http_disconnected"); break;
+        case HTTP_EVENT_REDIRECT: ctx.trace("http_redirect"); break;
+        case HTTP_EVENT_ERROR: ctx.trace("http_error"); break;
+        default: break;
+    }
+
     if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
         return ESP_OK;
     }
@@ -210,6 +240,7 @@ esp_err_t fetch_event(esp_http_client_event_t *event) {
 
     memcpy(ctx.buffer + ctx.offset, event->data, len);
     ctx.offset += len;
+    if (ctx.offset == ctx.expected_size) ctx.trace("http_body_received");
     return ESP_OK;
 }
 
@@ -358,7 +389,8 @@ bool ota_url_fetch(const char *url,
                    size_t &length,
                    OtaUrlError &error,
                    OtaUrlContinueCallback continue_callback,
-                   void *callback_ctx) {
+                   void *callback_ctx,
+                   OtaUrlTraceCallback trace_callback) {
     length = 0;
     clear_error(error);
     if (!ota_url_supported(url) || !buffer || capacity == 0) {
@@ -376,7 +408,9 @@ bool ota_url_fetch(const char *url,
     context.continue_callback = continue_callback;
     context.callback_ctx = callback_ctx;
     context.error = &error;
+    context.trace_callback = trace_callback;
 
+    context.trace("http_client_init");
     esp_http_client_handle_t client =
         create_client(url, HTTP_METHOD_GET, fetch_event, &context);
     if (!client) {
@@ -384,37 +418,31 @@ bool ota_url_fetch(const char *url,
         return false;
     }
 
+    context.trace("http_connecting");
     const esp_err_t result = esp_http_client_perform(client);
+    context.trace("http_perform_returned");
     const int status = esp_http_client_get_status_code(client);
     error.http_status = status;
 
     if (!error.code[0] && !operation_allowed(continue_callback, callback_ctx)) {
         set_error_code(error, "url_cancelled");
     }
-    if (error.code[0]) {
-        esp_http_client_cleanup(client);
-        return false;
-    }
-
-    if (result != ESP_OK) {
+    if (!error.code[0] && result != ESP_OK) {
         capture_transport_error(client, result, error);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-    if (status != 200) {
+    } else if (!error.code[0] && status != 200) {
         set_http_error(error, status);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-    if (!context.size_checked || context.offset != context.expected_size) {
+    } else if (!error.code[0] &&
+               (!context.size_checked || context.offset != context.expected_size)) {
         set_error_code(error, "url_incomplete_response");
-        esp_http_client_cleanup(client);
-        return false;
     }
 
-    length = context.offset;
+    const bool success = !error.code[0];
+    if (success) length = context.offset;
+
+    context.trace("http_cleanup_begin");
     esp_http_client_cleanup(client);
-    return true;
+    context.trace("http_cleanup_end");
+    return success;
 }
 
 }  // namespace aircannect

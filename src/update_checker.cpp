@@ -42,7 +42,8 @@ void UpdateChecker::begin(const AppConfigData &config, ExportTask &exports) {
 void UpdateChecker::poll(const NetworkSnapshot &network,
                          bool check_allowed,
                          bool install_active,
-                         bool therapy_active) {
+                         bool therapy_active,
+                         const char *blocked_reason) {
     bool start = false;
     bool manual = false;
     bool log_heap_deferred = false;
@@ -51,6 +52,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     if (!lock()) return;
 
     reap_task_locked();
+    if (status_.active) trace_phase(trace_phase_);
 
     if (config_dirty_) {
         status_.enabled = config_ && config_->update_url.length() > 0 &&
@@ -83,6 +85,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     }
 
     if (!network.ipv4_ready) {
+        if (status_.pending) trace_phase("waiting_network");
         network_online_ = false;
         network_since_ms_ = 0;
         if (task_) cancel_requested_ = true;
@@ -91,6 +94,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     }
 
     if (install_active) {
+        if (status_.pending) trace_phase("waiting_install");
         if (task_) cancel_requested_ = true;
         unlock();
         return;
@@ -111,6 +115,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     if (!status_.pending && !status_.active && !task_ &&
         (first_check_due || periodic_check_due)) {
         status_.pending = true;
+        begin_trace(first_check_due ? "startup" : "periodic");
     }
 
     const bool schedule_ready = manual_requested_ || network_settled;
@@ -120,11 +125,19 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     start = status_.pending && schedule_ready && check_allowed &&
         !therapy_active && !task_ && heap_retry_ready;
     manual = manual_requested_;
+    if (status_.pending && !start) {
+        trace_phase(therapy_active ? "waiting_therapy" :
+                    !check_allowed ? blocked_reason :
+                    !schedule_ready ? "waiting_network_settle" :
+                    !heap_retry_ready ? "waiting_tls_heap" :
+                    "waiting_task_cleanup");
+    }
     unlock();
 
     if (!start) return;
 
     if (!tls_heap_available(log_heap_deferred)) {
+        trace_phase("waiting_tls_heap");
         if (lock()) {
             heap_retry_at_ms_ = millis() + UPDATE_HEAP_RETRY_MS;
             unlock();
@@ -138,6 +151,8 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     }
     if (exports_->try_begin_update_check(manual)) {
         if (!start_check()) exports_->end_update_check();
+    } else {
+        trace_phase("waiting_export_reservation");
     }
 }
 
@@ -176,6 +191,7 @@ bool UpdateChecker::request_check(bool install_active) {
     manual_requested_ = true;
     status_.pending = true;
     status_.error = "";
+    begin_trace("manual");
     unlock();
     return true;
 }
@@ -269,6 +285,7 @@ bool UpdateChecker::start_check() {
     char *owned_url = static_cast<char *>(
         Memory::alloc_large(url_len + 1, false));
     if (!owned_url) {
+        trace_phase("failed_url_allocation");
         if (lock()) {
             status_.pending = false;
             status_.attempted = true;
@@ -301,6 +318,7 @@ bool UpdateChecker::start_check() {
     status_.pending = false;
     status_.active = true;
     status_.error = "";
+    trace_phase("task_dispatch");
 
     BaseType_t result = pdFAIL;
     task_stack_external_ = Memory::psram_available();
@@ -317,6 +335,7 @@ bool UpdateChecker::start_check() {
             AC_OTA_URL_TASK_CORE);
     }
     if (result != pdPASS) {
+        trace_phase("failed_task_allocation");
         check_url_ = nullptr;
         task_ = nullptr;
         manual_requested_ = false;
@@ -374,6 +393,7 @@ void UpdateChecker::reap_task_locked() {
 }
 
 void UpdateChecker::run_task() {
+    trace_phase("worker_started");
     char *url = nullptr;
     uint32_t generation = 0;
     if (lock()) {
@@ -401,9 +421,10 @@ void UpdateChecker::run_task() {
 
     size_t manifest_len = 0;
     OtaUrlError transport_error;
+    trace_phase("manifest_fetch");
     if (!ota_url_fetch(url, manifest_buffer, AC_OTA_MANIFEST_MAX_BYTES,
                        manifest_len, transport_error, continue_callback,
-                       &context)) {
+                       &context, trace_callback)) {
         const bool retry_soon =
             transport_error.http_status == 0 ||
             transport_error.http_status == 408 ||
@@ -416,6 +437,7 @@ void UpdateChecker::run_task() {
         return;
     }
     manifest_buffer[manifest_len] = '\0';
+    trace_phase("manifest_parse");
 
     OtaReleaseManifest manifest;
     char manifest_error[AC_OTA_RELEASE_ERROR_MAX] = {};
@@ -460,6 +482,7 @@ void UpdateChecker::run_task() {
 
     std::shared_ptr<const LargeByteBuffer> release_notes;
     if (update_available && manifest.release_notes_url[0]) {
+        trace_phase("release_notes_fetch");
         char *resolved_url = reinterpret_cast<char *>(manifest_buffer);
         if (ota_resolve_release_artifact_url(
                 url, manifest.release_notes_url, resolved_url,
@@ -470,7 +493,7 @@ void UpdateChecker::run_task() {
             OtaUrlError notes_error;
             if (notes && ota_url_fetch(
                     resolved_url, notes->data(), notes->size(), notes_length,
-                    notes_error, continue_callback, &context) &&
+                    notes_error, continue_callback, &context, trace_callback) &&
                 notes_length > 0 && notes->truncate(notes_length)) {
                 release_notes = LargeByteBuffer::freeze(std::move(notes));
             } else if (!cancelled(generation)) {
@@ -494,6 +517,7 @@ void UpdateChecker::run_task() {
     }
 
     Memory::free(manifest_buffer);
+    trace_phase("publish");
     finish_task(url, generation, &manifest, update_available, artifact,
                 std::move(release_notes), nullptr, false);
 }
@@ -560,11 +584,14 @@ void UpdateChecker::finish_task(
     if (!publish) return;
 
     if (deferred_reason) {
+        trace_phase(strcmp(deferred_reason, "therapy active") == 0
+                        ? "deferred_therapy" : "deferred_export");
         Log::logf(CAT_OTA, LOG_DEBUG,
                   "firmware update check deferred: %s\n", deferred_reason);
         return;
     }
 
+    trace_phase(error && *error ? "failed" : "finished");
     if (manifest && (!error || !*error)) {
         if (update_available) {
             Log::logf(CAT_OTA, LOG_INFO,
@@ -618,6 +645,38 @@ bool UpdateChecker::continue_callback(void *ctx) {
     UpdateCheckContext *context = static_cast<UpdateCheckContext *>(ctx);
     return context && context->checker &&
            !context->checker->cancelled(context->generation);
+}
+
+void UpdateChecker::trace_callback(void *ctx, const char *stage) {
+    auto *context = static_cast<UpdateCheckContext *>(ctx);
+    context->checker->trace_phase(stage);
+}
+
+void UpdateChecker::begin_trace(const char *source) {
+    if (++trace_id_ == 0) ++trace_id_;
+    trace_started_ms_ = trace_phase_ms_ = trace_logged_ms_ = millis();
+    trace_phase_ = "queued";
+    Log::logf(CAT_OTA, LOG_DEBUG, "update check id=%lu queued source=%s\n",
+              static_cast<unsigned long>(trace_id_), source);
+}
+
+void UpdateChecker::trace_phase(const char *phase) {
+    if (Log::get_cat_level(CAT_OTA) < LOG_DEBUG) return;
+
+    if (!lock()) return;
+    const uint32_t now = millis();
+    const bool changed = strcmp(trace_phase_, phase) != 0;
+    if (changed || static_cast<uint32_t>(now - trace_logged_ms_) >= 30000) {
+        Log::logf(CAT_OTA, LOG_DEBUG,
+                  "update check id=%lu stage=%s previous=%s stage_ms=%lu elapsed_ms=%lu\n",
+                  static_cast<unsigned long>(trace_id_), phase, trace_phase_,
+                  static_cast<unsigned long>(now - trace_phase_ms_),
+                  static_cast<unsigned long>(now - trace_started_ms_));
+        if (changed) trace_phase_ms_ = now;
+        trace_logged_ms_ = now;
+        trace_phase_ = phase;
+    }
+    unlock();
 }
 
 bool UpdateChecker::lock(TickType_t timeout) const {
