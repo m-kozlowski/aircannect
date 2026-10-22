@@ -56,6 +56,7 @@ public:
     void set_source_change_callback(ReportSourceChangeCallback callback,
                                     void *context);
 
+    // Two unset days select every record available in the fetched Summary.
     OperationAdmission request(SleepDayId start_day,
                                SleepDayId end_day,
                                uint32_t generation);

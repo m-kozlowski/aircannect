@@ -161,7 +161,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "edf") {
         out.println("[HELP edf]");
-        out.println("  edf str refresh YYYYMMDD [YYYYMMDD]");
+        out.println("  edf str refresh [YYYYMMDD [YYYYMMDD]]");
+        out.println("      no dates: all available nights");
         out.println("                            refresh Summary fields in existing STR records");
         out.println("  edf history YYYYMMDD [YYYYMMDD]");
         out.println("                            import AirMini history and STR for an inclusive range");

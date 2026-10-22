@@ -66,8 +66,8 @@ bool count_summary_record(void *opaque, const ReportSummaryRecord &record) {
 
     int32_t day = 0;
     if (!report_summary_sleep_day_epoch_days(record, day) ||
-        day < context->start_day.epoch_days() ||
-        day > context->end_day.epoch_days()) {
+        (context->start_day.valid() && day < context->start_day.epoch_days()) ||
+        (context->end_day.valid() && day > context->end_day.epoch_days())) {
         return true;
     }
 
@@ -95,8 +95,8 @@ bool fill_summary_record(void *opaque, const ReportSummaryRecord &record) {
 
     int32_t day = 0;
     if (!report_summary_sleep_day_epoch_days(record, day) ||
-        day < context->start_day.epoch_days() ||
-        day > context->end_day.epoch_days()) {
+        (context->start_day.valid() && day < context->start_day.epoch_days()) ||
+        (context->end_day.valid() && day > context->end_day.epoch_days())) {
         return true;
     }
     if (day < 0 || day > INT16_MAX) {
@@ -166,9 +166,11 @@ void EdfStrSummaryRefresh::set_source_change_callback(
 OperationAdmission EdfStrSummaryRefresh::request(SleepDayId start_day,
                                                  SleepDayId end_day,
                                                  uint32_t generation) {
-    if (!spool_port_ || !start_day.valid() || !end_day.valid() ||
-        end_day < start_day || start_day.epoch_days() < 0 ||
-        end_day.epoch_days() > INT16_MAX || generation == 0) {
+    const bool all_days = !start_day.valid() && !end_day.valid();
+    if (!spool_port_ || generation == 0 ||
+        (!all_days && (!start_day.valid() || !end_day.valid() ||
+                      end_day < start_day || start_day.epoch_days() < 0 ||
+                      end_day.epoch_days() > INT16_MAX))) {
         return OperationAdmission::Rejected;
     }
     if (status_.active() || source_change_pending_) {
@@ -177,6 +179,7 @@ OperationAdmission EdfStrSummaryRefresh::request(SleepDayId start_day,
 
     clear_work();
     status_ = {};
+    pending_source_change_ = {};
     status_.generation = generation;
     status_.start_day = start_day;
     status_.end_day = end_day;
@@ -373,6 +376,11 @@ void EdfStrSummaryRefresh::update_next_record() {
     if (changed) {
         patch_crc(record);
         status_.updated++;
+        if (!status_.start_day.valid()) {
+            SleepDayId changed_day;
+            SleepDayId::from_epoch_days(day, changed_day);
+            pending_source_change_.merge({changed_day, changed_day, 0});
+        }
     } else {
         status_.unchanged++;
     }
@@ -505,7 +513,7 @@ void EdfStrSummaryRefresh::poll() {
         }
         if (result == StorageFileClientResult::Ready) {
             source_change_pending_ = status_.updated != 0;
-            if (source_change_pending_) {
+            if (source_change_pending_ && status_.start_day.valid()) {
                 pending_source_change_ = {
                     status_.start_day,
                     status_.end_day,

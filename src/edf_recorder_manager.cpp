@@ -128,6 +128,10 @@ void log_str_refresh_result(const EdfStrSummaryRefreshStatus &status) {
     char end[9] = {};
     format_sleep_day(status.start_day, start);
     format_sleep_day(status.end_day, end);
+    if (!status.start_day.valid() && !status.end_day.valid()) {
+        snprintf(start, sizeof(start), "all");
+        snprintf(end, sizeof(end), "all");
+    }
 
     if (status.state == EdfStrSummaryRefreshState::Complete) {
         Log::logf(CAT_EDF,
@@ -351,6 +355,10 @@ OperationAdmission EdfRecorderManager::request_str_summary_refresh(
     char end[9] = {};
     format_sleep_day(start_day, start);
     format_sleep_day(end_day, end);
+    if (!start_day.valid() && !end_day.valid()) {
+        snprintf(start, sizeof(start), "all");
+        snprintf(end, sizeof(end), "all");
+    }
     Log::logf(CAT_EDF,
               LOG_INFO,
               "STR refresh started start=%s end=%s",

@@ -162,6 +162,7 @@ public:
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }
+    // Two unset days refresh all available Summary days.
     OperationAdmission request_str_summary_refresh(
         SleepDayId start_day,
         SleepDayId end_day,

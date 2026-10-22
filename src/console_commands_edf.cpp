@@ -290,14 +290,15 @@ bool EdfConsoleCommands::execute(const String &command,
     rest.toLowerCase();
 
     const bool history = rest == "history" || rest.startsWith("history ");
-    if (history || rest.startsWith("str refresh")) {
+    const bool all_days = rest == "str refresh";
+    if (history || all_days || rest.startsWith("str refresh ")) {
         SleepDayId start_day;
         SleepDayId end_day;
-        if (!parse_edf_range(rest.substring(history ? 7 : 11),
+        if (!all_days && !parse_edf_range(rest.substring(history ? 7 : 11),
                              start_day, end_day)) {
             out.println(history
                 ? "[EDF] usage: edf history YYYYMMDD [YYYYMMDD]"
-                : "[EDF] usage: edf str refresh YYYYMMDD [YYYYMMDD]");
+                : "[EDF] usage: edf str refresh [YYYYMMDD [YYYYMMDD]]");
             return true;
         }
 
@@ -321,6 +322,11 @@ bool EdfConsoleCommands::execute(const String &command,
         refresh_session_id_ = session.id;
         refresh_wait_generation_ = refresh_generation_;
         history_request_ = history;
+        if (all_days) {
+            out.println("[EDF] STR refresh started: all available nights");
+            return true;
+        }
+
         print_refresh_range(out,
                             history ? "[EDF] history started "
                                     : "[EDF] STR refresh started ",
@@ -332,7 +338,7 @@ bool EdfConsoleCommands::execute(const String &command,
     print_unknown_command(
         out,
         "EDF",
-        "edf str refresh YYYYMMDD [YYYYMMDD], edf history YYYYMMDD [YYYYMMDD]");
+        "edf str refresh [YYYYMMDD [YYYYMMDD]], edf history YYYYMMDD [YYYYMMDD]");
     return true;
 }
 
