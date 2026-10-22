@@ -2601,7 +2601,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_store.begin(read_port, write_port);
     runtime_->capture_sources.begin(read_port);
     runtime_->summary_acquisition.begin(spool_port);
-    runtime_->summary_archive.begin(read_port, range_write_port, write_port);
+    runtime_->summary_archive.begin(read_port, range_write_port, write_port, scan_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
     runtime_->period_service.begin(read_port, write_port);
@@ -3086,11 +3086,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         const auto &archive = runtime.summary_archive.status();
         if (archive_active && !archive.active) {
             Log::logf(CAT_REPORT, archive.error[0] ? LOG_WARN : LOG_INFO,
-                      "Summary archive sequence=%llu records=%u changed=%u removed=%u error=%s",
+                      "Summary archive segment=%lu sequence=%llu records=%u "
+                      "changed=%u removed=%u recovery=%s error=%s",
+                      static_cast<unsigned long>(archive.segment),
                       static_cast<unsigned long long>(archive.sequence),
                       static_cast<unsigned>(archive.records),
                       static_cast<unsigned>(archive.changed),
                       static_cast<unsigned>(archive.removed),
+                      archive.recovery_reason[0] ? archive.recovery_reason : "--",
                       archive.error[0] ? archive.error : "--");
         }
 #else

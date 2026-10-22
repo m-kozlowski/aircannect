@@ -39,10 +39,13 @@ using BlobMap = ArchiveMap<Digest, Blob>;
 
 constexpr size_t HEADER = 32;
 constexpr size_t HEAD = 24;
+constexpr size_t SEGMENT_HEAD = HEAD + AC_STORAGE_ERROR_MAX;
 constexpr size_t CHUNK = 16384;
 constexpr size_t MAX_FRAME = AC_REPORT_MAX_PAYLOAD_BYTES * 2;
 constexpr char FRAME_MAGIC[] = "ACSUM001";
 constexpr char HEAD_MAGIC[] = "ACSUMHD1";
+constexpr char SEGMENT_HEAD_MAGIC[] = "ACSUMHD2";
+constexpr char ARCHIVE_ROOT[] = "/aircannect/as11/summary";
 
 Digest digest(const void *data, size_t length) {
     Digest out{};
@@ -99,12 +102,13 @@ void encode_clock(JsonObject target, const SummaryClockObservation &clock) {
 
 struct SummaryArchive::Impl {
     enum class Phase {
-        Idle, Head, CheckNew, Initialize, Header, Body, Prepare, Write, Commit, Failed
+        Idle, Discover, Head, CheckNew, Initialize, Header, Body, Prepare, Write, Commit, Failed
     };
 
     StorageReadPort *read = nullptr;
     StorageRangeWritePort *range = nullptr;
     StorageAtomicWritePort *atomic = nullptr;
+    StorageScanPort *scan = nullptr;
     StorageBoundedFileLoader head_loader;
     OperationTicket ticket;
     StoragePreparedRead prepared;
@@ -115,7 +119,10 @@ struct SummaryArchive::Impl {
 
     SummaryObservation observation;
     std::string serial;
+    std::string base_path;
     std::string path;
+    uint32_t segment = 0;
+    char recovery_reason[AC_STORAGE_ERROR_MAX] = {};
 
     DayMap mapping;
     DayMap next;
@@ -144,7 +151,8 @@ struct SummaryArchive::Impl {
         prepared = {};
         prepared_used = 0;
         if (ticket.valid()) {
-            if (phase == Phase::Write) range->abandon(ticket);
+            if (phase == Phase::Discover) scan->abandon(ticket);
+            else if (phase == Phase::Write) range->abandon(ticket);
             else if (phase == Phase::Commit || phase == Phase::Initialize) atomic->abandon(ticket);
             else read->abandon(ticket);
         }
@@ -153,8 +161,8 @@ struct SummaryArchive::Impl {
     }
 
     bool fail(const char *error) {
-        cancel();
         copy_cstr(status.error, sizeof(status.error), error);
+        cancel();
         status.active = false;
         phase = Phase::Failed;
         loaded = false;
@@ -180,6 +188,66 @@ struct SummaryArchive::Impl {
         added.clear();
     }
 
+    bool continue_segment(const char *reason) {
+        if (segment == UINT32_MAX) return fail("summary_archive_segment_limit");
+
+        cancel();
+        input.clear();
+        mapping.clear();
+        blobs.clear();
+        sequence = end = cursor = replay_sequence = 0;
+        loaded = false;
+
+        ++segment;
+        path = base_path + "." + std::to_string(segment);
+        copy_cstr(recovery_reason, sizeof(recovery_reason), reason);
+        status.segment = segment;
+        status.sequence = status.committed_bytes = 0;
+        status.records = 0;
+        copy_cstr(status.recovery_reason, sizeof(status.recovery_reason), reason);
+        phase = Phase::Head;
+        return true;
+    }
+
+    bool discover() {
+        if (!ticket.valid()) {
+            const StorageScanRoot root{ARCHIVE_ROOT, false};
+            const StorageScanCommand command{&root, 1, false, generation};
+            const auto submitted = scan->request_scan(command);
+            if (submitted.admission == OperationAdmission::Busy) return false;
+            if (!submitted.accepted()) return fail("summary_archive_scan_rejected");
+            ticket = submitted.ticket;
+            return true;
+        }
+
+        StorageScanCompletion completion;
+        if (!scan->take_completion(ticket, completion)) return false;
+        ticket = {};
+        if (completion.outcome.disposition != OperationDisposition::Succeeded || !completion.snapshot)
+            return fail("summary_archive_scan_failed");
+
+        const std::string prefix = base_path + ".";
+        for (size_t i = 0; i < completion.snapshot->size(); ++i) {
+            StorageScanEntryView entry;
+            if (!completion.snapshot->entry(i, entry) || entry.directory) continue;
+            const std::string name = entry.path;
+            if (name.compare(0, prefix.size(), prefix) != 0) continue;
+            const auto dot = name.rfind('.');
+            const auto extension = name.substr(dot);
+            if (dot < prefix.size() || (extension != ".head" && extension != ".journal")) continue;
+
+            const auto number = name.substr(prefix.size(), dot - prefix.size());
+            uint32_t candidate = 0;
+            if (parse_uint32_decimal(number.c_str(), candidate) &&
+                number == std::to_string(candidate)) segment = std::max(segment, candidate);
+        }
+
+        path = base_path + (segment ? "." + std::to_string(segment) : "");
+        status.segment = segment;
+        phase = Phase::Head;
+        return true;
+    }
+
     bool start(SummaryObservation value) {
         if (!read || status.active || (!value.payload && !value.empty_payload) ||
             value.device_serial.empty()) return false;
@@ -188,7 +256,9 @@ struct SummaryArchive::Impl {
         if (!loaded || serial != value.device_serial) {
             forget();
             serial = value.device_serial;
-            path = "/aircannect/as11/summary/" + hex(digest(serial.data(), serial.size()));
+            base_path = std::string(ARCHIVE_ROOT) + "/" + hex(digest(serial.data(), serial.size()));
+            segment = 0;
+            recovery_reason[0] = '\0';
             sequence = end = cursor = replay_sequence = 0;
         }
 
@@ -198,14 +268,17 @@ struct SummaryArchive::Impl {
         status.sequence = sequence;
         status.committed_bytes = end;
         status.records = mapping.size();
+        status.segment = segment;
+        copy_cstr(status.recovery_reason, sizeof(status.recovery_reason), recovery_reason);
         if (++generation == 0) ++generation;
-        phase = loaded ? Phase::Prepare : Phase::Head;
+        phase = loaded ? Phase::Prepare : Phase::Discover;
         return true;
     }
 
     bool load_head() {
+        const size_t head_size = segment ? SEGMENT_HEAD : HEAD;
         if (head_loader.status().state == StorageBoundedFileLoadState::Idle) {
-            if (head_loader.start((path + ".head").c_str(), HEAD, generation,
+            if (head_loader.start((path + ".head").c_str(), head_size, generation,
                                   StorageReadLane::Maintenance) != OperationAdmission::Accepted) return false;
         }
         const bool worked = head_loader.poll();
@@ -216,17 +289,31 @@ struct SummaryArchive::Impl {
             phase = Phase::CheckNew;
             return true;
         }
-        if (state != StorageBoundedFileLoadState::Ready) return fail(head_loader.status().error);
+        if (state != StorageBoundedFileLoadState::Ready) {
+            if (strcmp(head_loader.status().error, "storage_file_size_invalid") == 0)
+                return continue_segment("summary_archive_head_invalid");
+            return fail(head_loader.status().error);
+        }
 
+        const auto file_size = head_loader.status().file_size;
         auto bytes = head_loader.take_completed();
         head_loader.reset();
-        if (!bytes || bytes->size() != HEAD || memcmp(bytes->data(), HEAD_MAGIC, 8))
-            return fail("summary_archive_head_invalid");
+        if (!bytes || bytes->size() != head_size || file_size != head_size ||
+            memcmp(bytes->data(), segment ? SEGMENT_HEAD_MAGIC : HEAD_MAGIC, 8))
+            return continue_segment("summary_archive_head_invalid");
+
+        if (segment) {
+            const char *reason = reinterpret_cast<const char *>(bytes->data() + HEAD);
+            if (!reason[0] || !memchr(reason, '\0', AC_STORAGE_ERROR_MAX))
+                return continue_segment("summary_archive_head_invalid");
+            copy_cstr(recovery_reason, sizeof(recovery_reason), reason);
+            copy_cstr(status.recovery_reason, sizeof(status.recovery_reason), reason);
+        }
 
         end = LittleEndian::get_le64(bytes->data() + 8);
         sequence = LittleEndian::get_le64(bytes->data() + 16);
         if ((end == 0) != (sequence == 0) || end > UINT32_MAX || (end && end < HEADER))
-            return fail("summary_archive_head_invalid");
+            return continue_segment("summary_archive_head_invalid");
         if (!end) {
             loaded = true;
             phase = Phase::Prepare;
@@ -243,8 +330,11 @@ struct SummaryArchive::Impl {
         }
         const bool worked = head_loader.poll();
         if (head_loader.status().active()) return worked;
-        if (head_loader.status().state != StorageBoundedFileLoadState::Missing)
-            return fail("summary_archive_missing_head");
+        const auto state = head_loader.status().state;
+        if (state == StorageBoundedFileLoadState::Ready ||
+            strcmp(head_loader.status().error, "storage_file_size_invalid") == 0)
+            return continue_segment("summary_archive_missing_head");
+        if (state != StorageBoundedFileLoadState::Missing) return fail(head_loader.status().error);
 
         head_loader.reset();
         phase = Phase::Initialize;
@@ -273,6 +363,10 @@ struct SummaryArchive::Impl {
             ticket = {};
             prepared = completion.prepared;
             prepared_used = 0;
+            if (strcmp(completion.error, "read_not_found") == 0 ||
+                strcmp(completion.error, "read_offset_out_of_range") == 0 ||
+                (completion.outcome.disposition == OperationDisposition::Succeeded && completion.file_size < end))
+                return continue_segment("summary_archive_journal_truncated");
             if (completion.outcome.disposition != OperationDisposition::Succeeded || !prepared.valid())
                 return fail("summary_archive_read_failed");
             if (prepared.length != requested_bytes) return fail("summary_archive_read_short");
@@ -302,7 +396,7 @@ struct SummaryArchive::Impl {
                 frame_size > end - cursor || raw_size > frame_size - HEADER ||
                 LittleEndian::get_le32(p + 16) != frame_size - HEADER - raw_size ||
                 LittleEndian::get_le64(p + 24) != replay_sequence + 1)
-                return fail("summary_archive_frame_invalid");
+                return continue_segment("summary_archive_frame_invalid");
             phase = Phase::Body;
             return true;
         }
@@ -311,11 +405,13 @@ struct SummaryArchive::Impl {
         LargeJsonAllocator allocator;
         JsonDocument doc(&allocator);
         const auto *raw = input.data() + HEADER;
-        if (deserializeJson(doc, raw + raw_size, frame_size - HEADER - raw_size) ||
+        const auto decoded = deserializeJson(doc, raw + raw_size, frame_size - HEADER - raw_size);
+        if (decoded == DeserializationError::NoMemory) return fail("summary_archive_memory");
+        if (decoded ||
             doc["device"].as<std::string>() != serial ||
             doc["base"].as<uint64_t>() != replay_sequence ||
             !doc["new"].is<JsonArray>() || !doc["put"].is<JsonArray>() ||
-            !doc["remove"].is<JsonArray>()) return fail("summary_archive_metadata_invalid");
+            !doc["remove"].is<JsonArray>()) return continue_segment("summary_archive_metadata_invalid");
 
         for (JsonArrayConst item : doc["new"].as<JsonArrayConst>()) {
             Digest key;
@@ -323,28 +419,28 @@ struct SummaryArchive::Impl {
             const size_t size = item[2].as<size_t>();
             if (item.size() != 3 || !decode_digest(item[0], key) || offset > raw_size ||
                 size > raw_size - offset || digest(raw + offset, size) != key)
-                return fail("summary_archive_record_invalid");
+                return continue_segment("summary_archive_record_invalid");
             blobs.emplace(key, Blob{cursor + HEADER + offset, static_cast<uint32_t>(size)});
         }
         for (JsonVariantConst day : doc["remove"].as<JsonArrayConst>()) {
-            if (!day.is<int32_t>()) return fail("summary_archive_day_invalid");
+            if (!day.is<int32_t>()) return continue_segment("summary_archive_day_invalid");
             mapping.erase(day.as<int32_t>());
         }
         for (JsonArrayConst item : doc["put"].as<JsonArrayConst>()) {
             Digest key;
             if (item.size() != 2 || !item[0].is<int32_t>() || !decode_digest(item[1], key) ||
-                blobs.find(key) == blobs.end()) return fail("summary_archive_reference_invalid");
+                blobs.find(key) == blobs.end()) return continue_segment("summary_archive_reference_invalid");
             mapping[item[0].as<int32_t>()] = key;
         }
         Digest expected;
         if (!decode_digest(doc["mapping"], expected) || mapping_digest(mapping) != expected)
-            return fail("summary_archive_mapping_invalid");
+            return continue_segment("summary_archive_mapping_invalid");
 
         cursor += frame_size;
         ++replay_sequence;
         input.clear();
         if (cursor == end) {
-            if (replay_sequence != sequence) return fail("summary_archive_sequence_invalid");
+            if (replay_sequence != sequence) return continue_segment("summary_archive_sequence_invalid");
             read->release_handle();
             loaded = true;
             status.sequence = sequence;
@@ -352,7 +448,7 @@ struct SummaryArchive::Impl {
             status.records = mapping.size();
             phase = Phase::Prepare;
         } else {
-            if (end - cursor < HEADER) return fail("summary_archive_truncated_header");
+            if (end - cursor < HEADER) return continue_segment("summary_archive_truncated_header");
             phase = Phase::Header;
         }
         return true;
@@ -362,6 +458,8 @@ struct SummaryArchive::Impl {
         LargeJsonAllocator allocator;
         JsonDocument doc(&allocator);
         doc["base"] = sequence;
+        doc["segment"] = segment;
+        if (segment && !sequence) doc["recovery_reason"] = recovery_reason;
         doc["device"] = serial;
         doc["firmware"] = observation.firmware;
         doc["device_firmware"] = observation.device_firmware;
@@ -480,9 +578,10 @@ struct SummaryArchive::Impl {
     bool commit() {
         const bool initialize = phase == Phase::Initialize;
         if (!ticket.valid()) {
-            auto bytes = LargeByteBuffer::allocate(HEAD);
+            auto bytes = LargeByteBuffer::allocate(segment ? SEGMENT_HEAD : HEAD);
             if (!bytes) return fail("summary_archive_memory");
-            memcpy(bytes->data(), HEAD_MAGIC, 8);
+            memcpy(bytes->data(), segment ? SEGMENT_HEAD_MAGIC : HEAD_MAGIC, 8);
+            if (segment) memcpy(bytes->data() + HEAD, recovery_reason, AC_STORAGE_ERROR_MAX);
             LittleEndian::put_le64(bytes->data() + 8, initialize ? 0 : end + output->size());
             LittleEndian::put_le64(bytes->data() + 16, initialize ? 0 : sequence + 1);
             StorageAtomicWriteCommand command;
@@ -537,11 +636,12 @@ SummaryArchive::~SummaryArchive() {
 }
 
 void SummaryArchive::begin(StorageReadPort &read, StorageRangeWritePort &range,
-                           StorageAtomicWritePort &atomic) {
+                           StorageAtomicWritePort &atomic, StorageScanPort &scan) {
     if (!impl_) return;
     impl_->read = &read;
     impl_->range = &range;
     impl_->atomic = &atomic;
+    impl_->scan = &scan;
     impl_->head_loader.begin(read);
 }
 
@@ -560,6 +660,7 @@ bool SummaryArchive::poll() {
     if (!impl_) return false;
     try {
         switch (impl_->phase) {
+            case Impl::Phase::Discover: return impl_->discover();
             case Impl::Phase::Head: return impl_->load_head();
             case Impl::Phase::CheckNew: return impl_->check_new();
             case Impl::Phase::Header:
@@ -580,7 +681,7 @@ void SummaryArchive::forget_media() {
 }
 
 const SummaryArchiveStatus &SummaryArchive::status() const {
-    static const SummaryArchiveStatus unavailable{false, 0, 0, 0, 0, 0, "summary_archive_memory"};
+    static const SummaryArchiveStatus unavailable{false, 0, 0, 0, 0, 0, 0, "summary_archive_memory"};
     return impl_ ? impl_->status : unavailable;
 }
 

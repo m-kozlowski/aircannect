@@ -7,6 +7,7 @@
 #include "storage_atomic_write_port.h"
 #include "storage_range_write_port.h"
 #include "storage_read_port.h"
+#include "storage_scan_port.h"
 #include "summary_fetch_reason.h"
 
 namespace aircannect {
@@ -47,12 +48,14 @@ struct SummaryObservation {
 
 struct SummaryArchiveStatus {
     bool active = false;
+    uint32_t segment = 0;
     uint64_t sequence = 0;
     uint64_t committed_bytes = 0;
     size_t records = 0;
     size_t changed = 0;
     size_t removed = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
+    char recovery_reason[AC_STORAGE_ERROR_MAX] = {};
 };
 
 // Source archive, independent of report generations and their cleanup.
@@ -65,7 +68,7 @@ public:
     SummaryArchive &operator=(const SummaryArchive &) = delete;
 
     void begin(StorageReadPort &read, StorageRangeWritePort &range,
-               StorageAtomicWritePort &atomic);
+               StorageAtomicWritePort &atomic, StorageScanPort &scan);
     bool start(SummaryObservation observation);
     bool poll();
     void forget_media();
