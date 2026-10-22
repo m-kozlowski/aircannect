@@ -143,12 +143,14 @@ OperationAdmission ReportFallbackAcquisitionService::start(
     status_.sleep_day = plan_->key().sleep_day;
     if (!prepare()) return OperationAdmission::Rejected;
 
-    status_.state = ReportFallbackAcquisitionState::Preserving;
+    status_.state = ReportFallbackAcquisitionState::CheckingDestination;
     return OperationAdmission::Accepted;
 }
 
 bool ReportFallbackAcquisitionService::poll() {
     switch (status_.state) {
+        case ReportFallbackAcquisitionState::CheckingDestination:
+            return poll_destination();
         case ReportFallbackAcquisitionState::Preserving:
             return poll_preservation();
         case ReportFallbackAcquisitionState::Fetching:
@@ -232,6 +234,11 @@ bool ReportFallbackAcquisitionService::prepare() {
     if (!build_targets()) return false;
 
     const NightCatalogRecord &night = plan_->night();
+    if (night.unresolved_history ||
+        (night.source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) {
+        fail("fallback_path_time_conflict");
+        return false;
+    }
     size_t fallback_count = 0;
     const auto *fallbacks = plan_->catalog().fallback_files(night, fallback_count);
     uint64_t previous_identity = 0;
@@ -264,6 +271,65 @@ bool ReportFallbackAcquisitionService::prepare() {
 
     event_records_.set_max_size(MAX_EVENT_BYTES);
     status_.sources_total = static_cast<uint32_t>(target_count_);
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::poll_destination() {
+    if (!read_ticket_.valid() && !preserve_prepared_.valid()) {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        report_fallback_artifact_path(status_.sleep_day, path, sizeof(path));
+        StorageReadCommand command;
+        command.path = path;
+        command.length = ReportFallbackArtifactCodec::HeaderBytes;
+        command.generation = generation_;
+        command.lane = read_lane_;
+        const auto submitted = read_port_->request_read(command);
+        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (!submitted.accepted()) {
+            fail("fallback_destination_read_rejected");
+            return true;
+        }
+        read_ticket_ = submitted.ticket;
+        return true;
+    }
+
+    if (read_ticket_.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port_->take_completion(read_ticket_, completion)) return false;
+        read_ticket_ = {};
+        if (completion.outcome.disposition != OperationDisposition::Succeeded) {
+            if (completion.prepared.valid()) read_port_->release_prepared(completion.prepared);
+            if (strcmp(completion.error, "read_not_found") == 0) {
+                status_.state = ReportFallbackAcquisitionState::Preserving;
+            } else {
+                fail(completion.error[0] ? completion.error : "fallback_destination_read_failed");
+            }
+            return true;
+        }
+        preserve_prepared_ = completion.prepared;
+    }
+
+    const auto view = read_port_->view_prepared(preserve_prepared_);
+    if (view.state == PreparedByteReadState::Retry) return false;
+    ReportFallbackArtifactInfo info;
+    const bool accepted = view.valid() &&
+        ReportFallbackArtifactCodec::inspect_header(view.data, view.length, info);
+    read_port_->release_prepared(preserve_prepared_);
+    preserve_prepared_ = {};
+
+    bool known = false;
+    size_t count = 0;
+    const auto *files = plan_->catalog().fallback_files(plan_->night(), count);
+    for (size_t i = 0; accepted && i < count; ++i) {
+        if (files[i].identity == info.content_identity) known = true;
+    }
+    if (!accepted || info.legacy_day_conflict || info.canonical_clock ||
+        info.sleep_day != status_.sleep_day || !known) {
+        fail("fallback_path_time_conflict");
+        return true;
+    }
+
+    status_.state = ReportFallbackAcquisitionState::Preserving;
     return true;
 }
 

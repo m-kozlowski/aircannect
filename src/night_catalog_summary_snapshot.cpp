@@ -238,6 +238,7 @@ bool copy_catalog_record(const NightCatalog &catalog,
     target.timezone_offset_minutes = source.timezone_offset_minutes;
     target.timezone_offset_valid = source.timezone_offset_valid;
     target.expired = expired;
+    target.time_conflict = source.unresolved_history;
     copy_summary_metrics(source.metrics, target.metrics);
 
     if (session_count > 0) {
@@ -339,7 +340,10 @@ bool NightCatalogSummarySnapshot::append_parsed_record(
     if (!parse || !parse->records) return false;
 
     MaterializedRecord record;
-    if (!materialize_record(source, record)) return true;
+    if (!materialize_record(source, record)) {
+        ++parse->rejected;
+        return true;
+    }
 
     try {
         parse->records->push_back(record);
@@ -522,12 +526,13 @@ NightCatalogSummarySnapshot::parse(const ReportSpoolResult &result,
     MaterializedRecords materialized;
     ParseContext parse;
     parse.records = &materialized;
+    size_t rejected = 0;
     if (!report_parse_summary_spool(
             result,
             NightCatalogSummarySnapshot::append_parsed_record,
             &parse,
             error,
-            error_size)) {
+            error_size, &rejected)) {
         if (parse.allocation_failed) {
             set_error(error, error_size, "summary_snapshot_alloc_failed");
         }
@@ -542,6 +547,7 @@ NightCatalogSummarySnapshot::parse(const ReportSpoolResult &result,
         return {};
     }
 
+    snapshot->rejected_records_ = rejected + parse.rejected;
     set_error(error, error_size, "");
     return snapshot;
 }
@@ -709,6 +715,25 @@ NightCatalogSummarySnapshot::preserve_expired_history(
             memcpy(snapshot->sessions_ + next_session,
                    source.sessions,
                    source.session_count * sizeof(NightCatalogTimeRange));
+
+            const auto *previous = previous_catalog.find(source.sleep_day);
+            if (previous && !previous->unresolved_history &&
+                expirable_summary_history(*previous)) {
+                const int64_t adjustment = previous->day_start_ms - source.day_start_ms;
+                // Retain the saved projection; only Summary's local coordinates
+                // are projected here, never measured signal or event times.
+                if (adjustment > -86400000LL && adjustment < 86400000LL) {
+                    target.day_start_ms = previous->day_start_ms;
+                    target.day_end_ms = previous->day_end_ms;
+                    target.timezone_offset_minutes = previous->timezone_offset_minutes;
+                    target.timezone_offset_valid = previous->timezone_offset_valid;
+                    for (size_t j = 0; j < source.session_count; ++j) {
+                        auto &session = snapshot->sessions_[next_session + j];
+                        session.start_ms += adjustment;
+                        session.end_ms += adjustment;
+                    }
+                }
+            }
             next_session += source.session_count;
         }
     }

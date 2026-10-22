@@ -93,7 +93,8 @@ bool report_parse_summary_records(const uint8_t *data,
                                   ReportSummaryRecordCallback callback,
                                   void *context,
                                   char *error,
-                                  size_t error_len);
+                                  size_t error_len,
+                                  size_t *rejected_records = nullptr);
 bool report_summary_field_value(const ReportSummaryRecord &record,
                                 ReportSummaryField field,
                                 uint32_t &out);

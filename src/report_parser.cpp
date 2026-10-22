@@ -31,7 +31,8 @@ bool report_parse_summary_spool(const ReportSpoolResult &result,
                                 ReportSummaryRecordCallback callback,
                                 void *context,
                                 char *error,
-                                size_t error_len) {
+                                size_t error_len,
+                                size_t *rejected_records) {
     if (!report_validate_spool_for_source(result,
                                           ReportSourceId::Summary,
                                           error,
@@ -43,7 +44,8 @@ bool report_parse_summary_spool(const ReportSpoolResult &result,
                                         callback,
                                         context,
                                         error,
-                                        error_len);
+                                        error_len,
+                                        rejected_records);
 }
 
 }  // namespace aircannect

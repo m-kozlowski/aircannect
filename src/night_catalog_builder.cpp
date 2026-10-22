@@ -47,6 +47,8 @@ struct BuildNight {
     bool summary_metrics_valid = false;
     bool timezone_offset_valid = false;
     bool summary_expired = false;
+    bool time_conflict = false;
+    bool unresolved_history = false;
 };
 
 struct BuildSession {
@@ -626,11 +628,20 @@ bool fallback_input_valid(const NightCatalogFallbackInput &source) {
     return fallback_payload_valid(source);
 }
 
-bool resolve_fallback_adjustment(
+enum class FallbackMatch { Independent, Summary, Conflict };
+
+FallbackMatch resolve_summary_projection(
     const NightCatalogFallbackInput &fallback,
     const NightCatalogSummaryInput &summary,
-    int32_t &adjustment_ms) {
-    adjustment_ms = 0;
+    int64_t &summary_adjustment_ms) {
+    summary_adjustment_ms = 0;
+
+    if (fallback.time_conflict || summary.time_conflict ||
+        (fallback.source_timezone_offset_valid &&
+         (fallback.source_timezone_offset_minutes < -720 ||
+          fallback.source_timezone_offset_minutes > 840))) {
+        return FallbackMatch::Conflict;
+    }
 
     int64_t start_adjustment = 0;
     if (fallback.source_timezone_offset_valid &&
@@ -648,11 +659,11 @@ bool resolve_fallback_adjustment(
                            fallback.day_end_ms,
                            end_adjustment) ||
             start_adjustment != end_adjustment) {
-            return false;
+            return FallbackMatch::Independent;
         }
     }
-    if (start_adjustment < INT32_MIN || start_adjustment > INT32_MAX) {
-        return false;
+    if (start_adjustment <= -86400000LL || start_adjustment >= 86400000LL) {
+        return FallbackMatch::Conflict;
     }
 
     int64_t adjusted_day_start = 0;
@@ -665,32 +676,12 @@ bool resolve_fallback_adjustment(
                      adjusted_day_end) ||
         adjusted_day_start != summary.day_start_ms ||
         adjusted_day_end != summary.day_end_ms) {
-        return false;
+        return FallbackMatch::Independent;
     }
 
-    for (size_t i = 0; i < fallback.session_count; ++i) {
-        NightCatalogTimeRange adjusted;
-        if (!adjust_range(fallback.sessions[i],
-                          start_adjustment,
-                          adjusted) ||
-            adjusted.start_ms < summary.day_start_ms ||
-            adjusted.end_ms > summary.day_end_ms) {
-            return false;
-        }
-    }
-    for (size_t i = 0; i < fallback.section_count; ++i) {
-        NightCatalogTimeRange adjusted;
-        if (!adjust_range(fallback.sections[i].coverage,
-                          start_adjustment,
-                          adjusted) ||
-            adjusted.start_ms < summary.day_start_ms ||
-            adjusted.end_ms > summary.day_end_ms) {
-            return false;
-        }
-    }
-
-    adjustment_ms = static_cast<int32_t>(start_adjustment);
-    return true;
+    // Summary is a projection of local offsets. Recorded samples are not.
+    summary_adjustment_ms = fallback.time_adjust_ms - start_adjustment;
+    return FallbackMatch::Summary;
 }
 
 bool ingest_fallback(const NightCatalogBuildInput &input,
@@ -701,6 +692,11 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
     const NightCatalogFallbackInput &source = input.fallback_records[index];
 
     BuildNight *night = find_night(nights, source.sleep_day);
+    if (source.time_conflict) {
+        if (night) night->time_conflict = true;
+        ++invalid_fallback_records;
+        return true;
+    }
     if (night && night->has_edf && !source.retain_with_edf) return true;
 
     if (!fallback_input_valid(source) || (night && night->has_fallback)) {
@@ -709,16 +705,27 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
     }
 
     const NightCatalogSummaryInput *summary = find_summary(input, source.sleep_day);
-    int32_t adjustment_ms = source.time_adjust_ms;
+    const int32_t adjustment_ms = source.time_adjust_ms;
     // EDF already owns this night's clock and sessions. Keep the saved
     // fallback transform even when Summary is present during a full scan.
-    const bool use_summary_axis =
-        !source.coordinates_are_resolved && !(night && night->has_edf) && summary &&
-        resolve_fallback_adjustment(source, *summary, adjustment_ms);
+    int64_t summary_adjustment_ms = 0;
+    const auto match = !source.coordinates_are_resolved &&
+            !(night && night->has_edf) && summary
+        ? resolve_summary_projection(source, *summary, summary_adjustment_ms)
+        : FallbackMatch::Independent;
+
+    if (match == FallbackMatch::Conflict ||
+        (match == FallbackMatch::Independent && summary &&
+         !source.coordinates_are_resolved && !(night && night->has_edf))) {
+        if (night) night->time_conflict = true;
+        ++invalid_fallback_records;
+        return true;
+    }
+    const bool use_summary_axis = match == FallbackMatch::Summary;
 
     int64_t fallback_day_start_ms = source.day_start_ms;
     int64_t fallback_day_end_ms = source.day_end_ms;
-    if (!source.coordinates_are_resolved && !use_summary_axis &&
+    if (!source.coordinates_are_resolved &&
         (!adjust_time(source.day_start_ms, adjustment_ms, fallback_day_start_ms) ||
          !adjust_time(source.day_end_ms, adjustment_ms, fallback_day_end_ms) ||
          !valid_boundary(fallback_day_start_ms, fallback_day_end_ms))) {
@@ -735,10 +742,25 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
             return false;
         }
         night->fallback_joins_summary = true;
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            auto &session = sessions.data()[i];
+            if (session.owner == night->owner && session.origin == SessionOrigin::Summary &&
+                !adjust_range(session.range, summary_adjustment_ms, session.range)) {
+                return false;
+            }
+        }
+        night->day_start_ms = fallback_day_start_ms;
+        night->day_end_ms = fallback_day_end_ms;
+        night->timezone_offset_valid = summary->timezone_offset_valid &&
+            summary_adjustment_ms % 60000 == 0;
+        night->timezone_offset_minutes = summary->timezone_offset_minutes -
+            summary_adjustment_ms / 60000;
     } else if (night->has_edf) {
         if (night->day_start_ms != fallback_day_start_ms ||
             night->day_end_ms != fallback_day_end_ms) {
-            return false;
+            night->time_conflict = true;
+            ++invalid_fallback_records;
+            return true;
         }
     } else {
         night->day_start_ms = fallback_day_start_ms;
@@ -783,9 +805,12 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
             return false;
         }
 
-        if (use_summary_axis && night->summary_metrics_valid &&
-            !summary_has_session(*summary, session)) {
-            night->summary_metrics_valid = false;
+        if (use_summary_axis && night->summary_metrics_valid) {
+            NightCatalogTimeRange projected;
+            if (!adjust_range(session, -summary_adjustment_ms, projected) ||
+                !summary_has_session(*summary, projected)) {
+                night->summary_metrics_valid = false;
+            }
         }
     }
 
@@ -924,6 +949,8 @@ bool ingest_summary(const NightCatalogBuildInput &input,
     night->has_summary = true;
     night->summary_metrics_valid = matched_session_count == 0;
     night->summary_expired = source.expired;
+    night->time_conflict = source.time_conflict;
+    night->unresolved_history = source.time_conflict;
     return true;
 }
 
@@ -1306,11 +1333,13 @@ struct NightCatalogBuilder::Runtime {
             static_cast<uint32_t>(next_fallback_file);
         record.timezone_offset_minutes = source.timezone_offset_minutes;
         record.timezone_offset_valid = source.timezone_offset_valid;
+        record.unresolved_history = source.unresolved_history;
         if (source.has_edf) record.source_flags |= NIGHT_CATALOG_SOURCE_EDF;
         if (source.active_capture) {
             record.source_flags |= NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE;
         }
         if (source.has_str) record.source_flags |= NIGHT_CATALOG_SOURCE_STR;
+        if (source.time_conflict) record.source_flags |= NIGHT_CATALOG_SOURCE_TIME_CONFLICT;
         if (source.has_fallback) {
             record.source_flags |= NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
         }
@@ -2182,7 +2211,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
     const char *path,
     const ReportFallbackArtifactView &replacement,
     int64_t last_write_ms) {
-    if (!path || !path[0]) return {};
+    if (!path || !path[0] || replacement.info.legacy_day_conflict) return {};
 
     const size_t path_length = strlen(path);
     if (path_length > UINT16_MAX) return {};

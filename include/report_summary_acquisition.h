@@ -21,6 +21,7 @@ struct ReportSummaryAcquisitionStatus {
         ReportSummaryAcquisitionState::Idle;
     uint32_t generation = 0;
     size_t records = 0;
+    size_t rejected_records = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 

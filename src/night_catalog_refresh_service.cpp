@@ -1453,6 +1453,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
     out.coordinates_are_resolved = info.canonical_clock;
     out.retain_with_edf = info.canonical_clock;
     out.local_history = info.canonical_clock;
+    out.time_conflict = info.legacy_day_conflict;
     const NightCatalog *previous_catalog = runtime.previous_fallback
         ? runtime.previous_fallback.get()
         : runtime.previous_catalog.get();
@@ -2183,6 +2184,11 @@ bool NightCatalogRefreshService::poll() {
             }
 
             const auto *rebuilt = runtime_->building_catalog->find(previous->sleep_day);
+            if (rebuilt && (rebuilt->source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) {
+                // The source is present but quarantined, not lost. Its file
+                // remains protected; retaining it here would undo isolation.
+                return true;
+            }
             if (rebuilt &&
                 (rebuilt->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) {
                 return true;

@@ -1,6 +1,7 @@
 #include "night_catalog_store_service.h"
 
 #include <string.h>
+#include <stdio.h>
 #include <utility>
 
 #include "large_byte_buffer.h"
@@ -38,6 +39,10 @@ struct NightCatalogStoreRuntime {
     std::shared_ptr<const NightCatalog> saving;
     std::shared_ptr<const NightCatalog> index;
     size_t next_record = 0;
+    size_t history_record = 0;
+    NightCatalogStoreService history_loader;
+    SleepDayId history_sources_day;
+    bool history_sources_requested = false;
     bool writing_index = false;
 };
 
@@ -94,6 +99,10 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->saving.reset();
     runtime_->index.reset();
     runtime_->next_record = 0;
+    runtime_->history_record = 0;
+    runtime_->history_loader.forget_media();
+    runtime_->history_sources_day = {};
+    runtime_->history_sources_requested = false;
     runtime_->writing_index = false;
 }
 
@@ -414,6 +423,76 @@ bool NightCatalogStoreService::poll() {
         case NightCatalogStoreRuntime::Phase::PrepareWrite: {
             if (!runtime_->saving) {
                 fail("night_catalog_save_not_ready");
+                return true;
+            }
+
+            // Archive the old interpretation before any sources or index
+            // replacement. Revision-specific names make restart idempotent.
+            if (runtime_->history_sources_day.valid()) {
+                auto &loader = runtime_->history_loader;
+                if (!runtime_->history_sources_requested) {
+                    loader.begin(*read_port_);
+                    const auto admitted = loader.request_load_night(
+                        runtime_->history_sources_day, status_.generation);
+                    if (admitted == OperationAdmission::Busy) return false;
+                    if (admitted != OperationAdmission::Accepted) {
+                        fail("night_catalog_history_sources_read_rejected");
+                        return true;
+                    }
+                    runtime_->history_sources_requested = true;
+                    return true;
+                }
+
+                const bool worked = loader.poll();
+                if (loader.active()) return worked;
+                if (loader.status().state != NightCatalogStoreState::Ready) {
+                    if (strcmp(loader.status().error, "read_not_found") != 0) {
+                        fail("night_catalog_history_sources_unavailable");
+                        return true;
+                    }
+                    runtime_->history_sources_day = {};
+                    runtime_->history_sources_requested = false;
+                    return true;
+                }
+
+                const auto sources = loader.take_snapshot();
+                runtime_->encoded = sources ? NightCatalogFileCodec::encode(*sources) : nullptr;
+                if (!runtime_->encoded) {
+                    fail("night_catalog_history_sources_encode_failed");
+                    return true;
+                }
+                const auto &old = *sources->record(0);
+                char day[9] = {};
+                old.sleep_day.format_yyyymmdd(day, sizeof(day));
+                snprintf(runtime_->path, sizeof(runtime_->path),
+                         "/aircannect/report/v9/history/%s-%016llx.sources.bin", day,
+                         static_cast<unsigned long long>(old.source_revision.value()));
+                runtime_->history_sources_day = {};
+                runtime_->history_sources_requested = false;
+                status_.bytes += runtime_->encoded->size();
+                runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
+                return true;
+            }
+
+            while (stored_ && runtime_->history_record < stored_->size()) {
+                const auto &old = *stored_->record(runtime_->history_record++);
+                if (!old.unresolved_history) continue;
+                if (old.sources_external) runtime_->history_sources_day = old.sleep_day;
+
+                auto history = NightCatalogBuilder::select_night(*stored_, old.sleep_day);
+                runtime_->encoded = history ? NightCatalogFileCodec::encode(*history) : nullptr;
+                if (!runtime_->encoded) {
+                    fail("night_catalog_history_preserve_failed");
+                    return true;
+                }
+
+                char day[9] = {};
+                old.sleep_day.format_yyyymmdd(day, sizeof(day));
+                snprintf(runtime_->path, sizeof(runtime_->path),
+                         "/aircannect/report/v9/history/%s-%016llx.bin", day,
+                         static_cast<unsigned long long>(old.source_revision.value()));
+                status_.bytes += runtime_->encoded->size();
+                runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
                 return true;
             }
 

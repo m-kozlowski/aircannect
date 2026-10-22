@@ -66,6 +66,7 @@ enum NightCatalogSourceFlag : uint8_t {
     NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED = 1u << 4,
     NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE = 1u << 5,
     NIGHT_CATALOG_SOURCE_LOCAL_HISTORY = 1u << 6,
+    NIGHT_CATALOG_SOURCE_TIME_CONFLICT = 1u << 7,
 };
 
 struct NightCatalogTimeRange {
@@ -186,6 +187,7 @@ struct NightCatalogRecord {
     uint8_t source_flags = 0;
     // Source tables are unloaded, not known to be absent.
     bool sources_external = false;
+    bool unresolved_history = false;
     uint64_t summary_identity = 0;
     int32_t timezone_offset_minutes = 0;
     bool timezone_offset_valid = false;

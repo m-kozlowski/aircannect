@@ -23,6 +23,7 @@ public:
         const NightCatalogSummarySnapshot &) = delete;
 
     size_t size() const { return record_count_; }
+    size_t rejected_records() const { return rejected_records_; }
     const NightCatalogSummaryInput *records() const { return records_; }
 
     static std::shared_ptr<const NightCatalogSummarySnapshot> build(
@@ -69,6 +70,7 @@ private:
     struct ParseContext {
         MaterializedRecords *records = nullptr;
         bool allocation_failed = false;
+        size_t rejected = 0;
     };
 
     NightCatalogSummarySnapshot() = default;
@@ -87,6 +89,7 @@ private:
     NightCatalogTimeRange *sessions_ = nullptr;
     size_t record_count_ = 0;
     size_t session_count_ = 0;
+    size_t rejected_records_ = 0;
 };
 
 }  // namespace aircannect

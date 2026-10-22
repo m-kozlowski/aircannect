@@ -55,6 +55,7 @@ struct ReportFallbackArtifactInfo {
     bool timezone_offset_valid = false;
     // Already mapped through capture provenance; never rebase using Summary.
     bool canonical_clock = false;
+    bool legacy_day_conflict = false;
 };
 
 struct ReportFallbackArtifactView {
@@ -69,7 +70,8 @@ struct ReportFallbackArtifactView {
 class ReportFallbackArtifactCodec {
 public:
     static constexpr uint16_t LegacyVersion = 5;
-    static constexpr uint16_t Version = 6;
+    static constexpr uint16_t SourceClockVersion = 6;
+    static constexpr uint16_t Version = 8;
     static constexpr uint16_t CanonicalClockVersion = 7;
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t SessionBytes = 16;

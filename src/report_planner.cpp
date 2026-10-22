@@ -1906,7 +1906,9 @@ ReportPlanResult ReportPlanner::build(
     plan->requested_event_mask_ = request.event_mask;
     plan->fallback_acquisition_allowed_ =
         (night->source_flags & (NIGHT_CATALOG_SOURCE_EDF |
-                                NIGHT_CATALOG_SOURCE_LOCAL_HISTORY)) == 0;
+                                NIGHT_CATALOG_SOURCE_LOCAL_HISTORY |
+                                NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) == 0 &&
+        !night->unresolved_history;
     size_t fallback_read_capacity = 0;
     size_t decoder_capacity = 0;
     if (!fill_sessions(request,

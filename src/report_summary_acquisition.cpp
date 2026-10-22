@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -78,6 +82,14 @@ bool ReportSummaryAcquisition::poll() {
     snapshot_ = std::move(parsed);
     status_.state = ReportSummaryAcquisitionState::Ready;
     status_.records = snapshot_->size();
+    status_.rejected_records = snapshot_->rejected_records();
+#ifdef ARDUINO
+    if (status_.rejected_records) {
+        Log::logf(CAT_REPORT, LOG_WARN, "Summary rejected records=%u accepted=%u",
+                  static_cast<unsigned>(status_.rejected_records),
+                  static_cast<unsigned>(status_.records));
+    }
+#endif
     status_.error[0] = '\0';
     return true;
 }

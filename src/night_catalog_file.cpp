@@ -39,6 +39,9 @@ constexpr uint8_t FILE_MAGIC_V15[8] = {
 constexpr uint8_t FILE_MAGIC_V16[8] = {
     'A', 'C', 'N', 'C', 'A', 'T', '1', '6',
 };
+constexpr uint8_t FILE_MAGIC_V17[8] = {
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '7',
+};
 
 constexpr size_t RECORD_BYTES_V11 = 120;
 constexpr size_t RECORD_BYTES = 272 + ReportDailyStatistics::WireBytes;
@@ -56,7 +59,8 @@ constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
                                  NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
                                  NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED |
                                  NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE |
-                                 NIGHT_CATALOG_SOURCE_LOCAL_HISTORY;
+                                 NIGHT_CATALOG_SOURCE_LOCAL_HISTORY |
+                                 NIGHT_CATALOG_SOURCE_TIME_CONFLICT;
 constexpr uint32_t METRIC_FLAGS =
     (1u << static_cast<uint8_t>(NightCatalogMetric::Count)) - 1u;
 constexpr int32_t TIMEZONE_OFFSET_MISSING = INT32_MIN;
@@ -514,6 +518,7 @@ void encode_record(uint8_t *out, const NightCatalogRecord &record) {
     put_le32(out, static_cast<uint32_t>(record.sleep_day.epoch_days()));
     out[4] = record.source_flags;
     out[5] = record.sources_external ? 1 : 0;
+    out[6] = record.unresolved_history ? 1 : 0;
     put_le64(out + 8, record.source_revision.value());
     put_le64(out + 16, static_cast<uint64_t>(record.day_start_ms));
     put_le64(out + 24, static_cast<uint64_t>(record.day_end_ms));
@@ -558,6 +563,7 @@ bool decode_record(const uint8_t *in,
         in[5] > ((version >= 13)
             ? 1
             : 0) ||
+        (version >= 17 && in[6] > 1) ||
         !timezone_offset_valid(timezone_minutes != TIMEZONE_OFFSET_MISSING,
                                timezone_minutes)) {
         return false;
@@ -584,6 +590,15 @@ bool decode_record(const uint8_t *in,
     record.timezone_offset_minutes = record.timezone_offset_valid
         ? timezone_minutes
         : 0;
+    record.unresolved_history = version >= 17 ? in[6] != 0 :
+        record.timezone_offset_valid && timezone_minutes >= 720 &&
+        (record.source_flags & (NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
+                                NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK)) &&
+        !(record.source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                  NIGHT_CATALOG_SOURCE_LOCAL_HISTORY));
+    if (record.unresolved_history) {
+        record.source_flags |= NIGHT_CATALOG_SOURCE_TIME_CONFLICT;
+    }
     if (legacy) decode_metrics_v11(in + 64, record.metrics);
     else decode_metrics(in + 64, record.metrics);
     if (version >= 15 && !record.settings.decode(in + 176)) return false;
@@ -806,9 +821,10 @@ bool parse_header(const uint8_t *header,
         : version == 12 ? FILE_MAGIC_V12
         : version == 13 ? FILE_MAGIC_V13
         : version == 14 ? FILE_MAGIC_V14
-        : version == 15 ? FILE_MAGIC_V15 : FILE_MAGIC_V16;
+        : version == 15 ? FILE_MAGIC_V15
+        : version == 16 ? FILE_MAGIC_V16 : FILE_MAGIC_V17;
 
-    if ((!legacy && version != 12 && version != 13 && version != 14 && version != 15 &&
+    if ((!legacy && version != 12 && version != 13 && version != 14 && version != 15 && version != 16 &&
          version != NightCatalogFileCodec::Version) ||
         memcmp(header, magic, sizeof(FILE_MAGIC_V11)) != 0 ||
         get_le16(header + 12) != record_bytes ||
@@ -920,8 +936,15 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         const NightCatalogTimeRange *record_sessions =
             catalog.sessions(record, session_count);
         for (size_t j = 0; j < session_count; ++j) {
+            auto range = record_sessions[j];
+            if ((record.source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) &&
+                !(record.source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                         NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK))) {
+                range.start_ms -= record.day_start_ms;
+                range.end_ms -= record.day_start_ms;
+            }
             encode_range(sessions + next_session++ * RANGE_BYTES,
-                         record_sessions[j]);
+                         range);
         }
 
         size_t mask_count = 0;
@@ -999,7 +1022,7 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         return {};
     }
 
-    memcpy(header, FILE_MAGIC_V16, sizeof(FILE_MAGIC_V16));
+    memcpy(header, FILE_MAGIC_V17, sizeof(FILE_MAGIC_V17));
     put_le16(header + 8, Version);
     put_le16(header + 10, HeaderBytes);
     put_le16(header + 12, RECORD_BYTES);
@@ -1076,6 +1099,26 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
     }
     for (size_t i = 0; i < info.session_count; ++i) {
         catalog->sessions_[i] = decode_range(sessions + i * RANGE_BYTES);
+    }
+    if (info.version >= 17) {
+        for (size_t i = 0; i < info.record_count; ++i) {
+            const auto &record = catalog->records_[i];
+            if (record.session_offset > info.session_count ||
+                record.session_count > info.session_count - record.session_offset) return {};
+
+            if (!(record.source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) ||
+                (record.source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                        NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK))) continue;
+
+            for (size_t j = 0; j < record.session_count; ++j) {
+                auto &range = catalog->sessions_[record.session_offset + j];
+                if (record.day_start_ms <= 0 || range.start_ms < 0 ||
+                    range.end_ms <= range.start_ms ||
+                    range.end_ms > INT64_MAX - record.day_start_ms) return {};
+                range.start_ms += record.day_start_ms;
+                range.end_ms += record.day_start_ms;
+            }
+        }
     }
     for (size_t i = 0; i < info.mask_window_count; ++i) {
         catalog->mask_windows_[i] = decode_range(masks + i * RANGE_BYTES);

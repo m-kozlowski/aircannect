@@ -38,7 +38,8 @@ bool report_parse_summary_spool(const ReportSpoolResult &result,
                                 ReportSummaryRecordCallback callback,
                                 void *context,
                                 char *error,
-                                size_t error_len);
+                                size_t error_len,
+                                size_t *rejected_records = nullptr);
 bool report_parse_event_spool(const ReportSpoolResult &result,
                               ReportSourceId source,
                               ReportParsedChunkCallback callback,

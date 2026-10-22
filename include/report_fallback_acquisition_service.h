@@ -18,6 +18,7 @@ namespace aircannect {
 
 enum class ReportFallbackAcquisitionState : uint8_t {
     Idle,
+    CheckingDestination,
     Preserving,
     Fetching,
     Publishing,
@@ -41,7 +42,8 @@ struct ReportFallbackAcquisitionStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool active() const {
-        return state == ReportFallbackAcquisitionState::Preserving ||
+        return state == ReportFallbackAcquisitionState::CheckingDestination ||
+               state == ReportFallbackAcquisitionState::Preserving ||
                state == ReportFallbackAcquisitionState::Fetching ||
                state == ReportFallbackAcquisitionState::Publishing ||
                state == ReportFallbackAcquisitionState::Cancelling;
@@ -127,6 +129,7 @@ private:
         const ReportParsedChunk &chunk);
 
     bool prepare();
+    bool poll_destination();
     bool build_targets();
     bool prepare_indexes();
     bool finalize_series_coverage_index();

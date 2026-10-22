@@ -30,6 +30,9 @@ constexpr uint8_t FILE_MAGIC_V6[8] = {
 constexpr uint8_t FILE_MAGIC_V7[8] = {
     'A', 'C', 'F', 'B', 'A', 'C', 'K', '7',
 };
+constexpr uint8_t FILE_MAGIC_V8[8] = {
+    'A', 'C', 'F', 'B', 'A', 'C', 'K', '8',
+};
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
 constexpr size_t TIMEZONE_OFFSET = 28;
 constexpr size_t IDENTITY_OFFSET = 56;
@@ -272,6 +275,7 @@ bool ReportFallbackArtifactCodec::inspect_header(
     info = {};
     if (!header || header_length < HeaderBytes ||
         (get_le16(header + 8) != LegacyVersion &&
+         get_le16(header + 8) != SourceClockVersion &&
          get_le16(header + 8) != Version &&
          get_le16(header + 8) != CanonicalClockVersion)) {
         return false;
@@ -280,7 +284,8 @@ bool ReportFallbackArtifactCodec::inspect_header(
     const uint16_t version = get_le16(header + 8);
     const uint8_t *magic = version == LegacyVersion
         ? FILE_MAGIC_V5
-        : (version == CanonicalClockVersion ? FILE_MAGIC_V7 : FILE_MAGIC_V6);
+        : version == SourceClockVersion ? FILE_MAGIC_V6
+        : version == CanonicalClockVersion ? FILE_MAGIC_V7 : FILE_MAGIC_V8;
     if (memcmp(header, magic, sizeof(FILE_MAGIC_V5)) != 0 ||
         get_le16(header + 10) != HeaderBytes ||
         get_le16(header + 12) != SessionBytes ||
@@ -344,6 +349,8 @@ bool ReportFallbackArtifactCodec::inspect_header(
     info.total_bytes = total_bytes;
     info.timezone_offset_minutes = timezone_minutes;
     info.timezone_offset_valid = timezone_valid;
+    info.legacy_day_conflict = version <= SourceClockVersion &&
+        info.timezone_offset_valid && timezone_minutes >= 720;
     return true;
 }
 
@@ -723,7 +730,7 @@ ReportFallbackArtifactBuilder::finish() {
         put_le64(record + 32, old_offset - payload_shift);
     }
 
-    memcpy(header, canonical_clock_ ? FILE_MAGIC_V7 : FILE_MAGIC_V6,
+    memcpy(header, canonical_clock_ ? FILE_MAGIC_V7 : FILE_MAGIC_V8,
            sizeof(FILE_MAGIC_V6));
     put_le16(header + 8, canonical_clock_
         ? ReportFallbackArtifactCodec::CanonicalClockVersion

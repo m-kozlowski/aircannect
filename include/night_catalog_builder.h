@@ -86,6 +86,7 @@ struct NightCatalogSummaryInput {
     int32_t timezone_offset_minutes = 0;
     bool timezone_offset_valid = false;
     bool expired = false;
+    bool time_conflict = false;
 };
 
 struct NightCatalogFallbackSectionInput {
@@ -123,6 +124,7 @@ struct NightCatalogFallbackInput {
     bool coordinates_are_resolved = false;
     bool retain_with_edf = false;
     bool local_history = false;
+    bool time_conflict = false;
 };
 
 struct NightCatalogBuildInput {

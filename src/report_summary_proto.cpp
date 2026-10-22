@@ -326,9 +326,13 @@ bool parse_summary_record(const uint8_t *record,
 bool emit_summary_record(const uint8_t *record,
                          size_t len,
                          ReportSummaryRecordCallback callback,
-                         void *context) {
+                         void *context,
+                         size_t *rejected_records) {
     ReportSummaryRecord parsed;
-    if (!parse_summary_record(record, len, parsed)) return true;
+    if (!parse_summary_record(record, len, parsed)) {
+        if (rejected_records) ++*rejected_records;
+        return true;
+    }
 
     return callback ? callback(context, parsed) : true;
 }
@@ -409,7 +413,9 @@ bool report_parse_summary_records(const uint8_t *data,
                                   ReportSummaryRecordCallback callback,
                                   void *context,
                                   char *error,
-                                  size_t error_len) {
+                                  size_t error_len,
+                                  size_t *rejected_records) {
+    if (rejected_records) *rejected_records = 0;
     if (!data || !len) {
         set_error(error, error_len, "empty_summary");
         return false;
@@ -426,7 +432,7 @@ bool report_parse_summary_records(const uint8_t *data,
             if (!emit_summary_record(field.data,
                                      field.len,
                                      callback,
-                                     context)) {
+                                     context, rejected_records)) {
                 set_error(error, error_len, "summary_record_rejected");
                 return false;
             }
@@ -434,7 +440,7 @@ bool report_parse_summary_records(const uint8_t *data,
         return true;
     }
 
-    if (emit_summary_record(data, len, callback, context)) return true;
+    if (emit_summary_record(data, len, callback, context, rejected_records)) return true;
 
     set_error(error, error_len, "summary_record_rejected");
     return false;
