@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "memory_manager.h"
+#include "storage_scan_port.h"
 
 namespace aircannect {
 namespace {
@@ -189,6 +190,27 @@ bool report_signal_store_track_valid(
     }
 
     return present == track.present_block_count;
+}
+
+// Accept only a direct generation directory from the storage inventory.
+bool report_signal_store_generation_directory(const StorageScanEntryView &entry,
+                                              const char *base, uint32_t &generation) {
+    if (!entry.directory || !entry.path) return false;
+    const size_t length = strlen(base);
+    if (strncmp(entry.path, base, length) != 0 ||
+        entry.path[length] != '/') return false;
+    const char *name = entry.path + length + 1;
+    if (strlen(name) != 9 || name[0] != 'g') return false;
+
+    generation = 0;
+    for (size_t i = 1; i < 9; ++i) {
+        const char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+        generation = (generation << 4) | (c <= '9' ? c - '0' : c - 'a' + 10);
+    }
+    return generation != 0;
 }
 
 bool report_signal_store_night_path(SleepDayId sleep_day,

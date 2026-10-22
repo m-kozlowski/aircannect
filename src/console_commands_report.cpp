@@ -31,26 +31,8 @@ const char *report_operation_name(ReportTaskOperation operation) {
         case ReportTaskOperation::Building: return "building";
         case ReportTaskOperation::Publishing: return "publishing";
         case ReportTaskOperation::SavingCatalog: return "saving_catalog";
+        case ReportTaskOperation::RepairingDates: return "repairing_dates";
         case ReportTaskOperation::None:
-        default: return "--";
-    }
-}
-
-const char *report_wait_reason_name(ReportTaskWaitReason reason) {
-    switch (reason) {
-        case ReportTaskWaitReason::Startup: return "startup";
-        case ReportTaskWaitReason::Queue: return "queue";
-        case ReportTaskWaitReason::Catalog: return "catalog";
-        case ReportTaskWaitReason::Retry: return "retry";
-        case ReportTaskWaitReason::Therapy: return "therapy";
-        case ReportTaskWaitReason::RealtimeStream: return "stream";
-        case ReportTaskWaitReason::ForegroundRequest:
-            return "foreground_request";
-        case ReportTaskWaitReason::Ota: return "ota";
-        case ReportTaskWaitReason::Export: return "export";
-        case ReportTaskWaitReason::As11Unavailable:
-            return "as11_unavailable";
-        case ReportTaskWaitReason::None:
         default: return "--";
     }
 }
@@ -246,25 +228,31 @@ bool ReportConsoleCommands::execute(const String &command,
     if (rest == "repair_dates" || rest == "repair_dates preview" ||
         rest == "repair_dates apply") {
         if (rest != "repair_dates") {
-            const auto admission = report_.request_date_repair(rest == "repair_dates apply");
+            if (repair_wait_generation_) {
+                out.println("[REPORT dates] command still running");
+                return true;
+            }
+
+            ++request_generation_;
+            if (!request_generation_) ++request_generation_;
+
+            const auto admission = report_.request_date_repair(
+                rest == "repair_dates apply", request_generation_);
+
+            if (admission == OperationAdmission::Accepted) {
+                repair_session_id_ = session.id;
+                repair_wait_generation_ = request_generation_;
+                repair_last_output_ms_ = millis();
+            }
             out.println(admission == OperationAdmission::Accepted
                 ? "[REPORT dates] requested" : "[REPORT dates] request rejected or busy");
             return true;
         }
         ReportTaskDiagnosticSnapshot diagnostic;
-        if (!report_.diagnostic_snapshot(diagnostic)) {
+        if (!report_.diagnostic_snapshot(diagnostic) ||
+            !print_date_repair(out, diagnostic)) {
             out.println("[REPORT dates] status temporarily unavailable");
-            return true;
         }
-        const auto &status = diagnostic.date_repair;
-        static const char *const states[] = {"idle", "checking_journal", "scanning", "planning",
-            "preview", "saving_plan", "backing_up", "installing", "complete", "failed"};
-        out.printf("[REPORT dates] state=%s candidates=%lu restored=%lu archived=%lu files=%lu error=%s\n",
-            states[static_cast<unsigned>(status.state)], static_cast<unsigned long>(status.candidates),
-            static_cast<unsigned long>(status.restored), static_cast<unsigned long>(status.archived),
-            static_cast<unsigned long>(status.completed_files), status.error[0] ? status.error : "--");
-        const auto preview = report_.date_repair_preview();
-        if (preview) out.write(preview->data(), preview->size());
         return true;
     }
     if (!rest.length() || rest == "status") {
@@ -376,9 +364,59 @@ bool ReportConsoleCommands::execute(const String &command,
     return true;
 }
 
+bool ReportConsoleCommands::print_date_repair(
+    Print &out, const ReportTaskDiagnosticSnapshot &diagnostic) {
+    if (diagnostic.date_repair_request_rejected) {
+        out.println("[REPORT dates] failed error=date_repair_not_ready; run preview again");
+        return true;
+    }
+
+    const auto &status = diagnostic.date_repair;
+    const auto preview = status.state == ReportDateRepairState::Preview
+        ? report_.date_repair_preview() : nullptr;
+    if (status.state == ReportDateRepairState::Preview && status.candidates && !preview) return false;
+
+    out.printf("[REPORT dates] state=%s wait=%s scanned=%lu inspected=%lu "
+               "candidates=%lu restored=%lu archived=%lu files=%lu error=%s\n",
+        report_date_repair_state_name(status.state), report_wait_reason_name(diagnostic.date_repair_wait_reason),
+        static_cast<unsigned long>(status.scanned_files), static_cast<unsigned long>(status.inspected_files),
+        static_cast<unsigned long>(status.candidates),
+        static_cast<unsigned long>(status.restored), static_cast<unsigned long>(status.archived),
+        static_cast<unsigned long>(status.completed_files), status.error[0] ? status.error : "--");
+
+    if (status.state == ReportDateRepairState::Preview) {
+        if (preview) out.write(preview->data(), preview->size());
+        if (!status.candidates) out.println("[REPORT dates] no dates to repair");
+    }
+    return true;
+}
+
 void ReportConsoleCommands::poll_pending(
     Print &out,
     ConsoleCommandSession &session) {
+    if (repair_session_id_ && session.id == repair_session_id_) {
+        ReportTaskDiagnosticSnapshot diagnostic;
+        if (report_.diagnostic_snapshot(diagnostic) &&
+            diagnostic.date_repair_request_generation == repair_wait_generation_) {
+            const auto state = diagnostic.date_repair.state;
+            const bool complete = diagnostic.date_repair_request_rejected ||
+                state == ReportDateRepairState::Preview ||
+                state == ReportDateRepairState::Complete ||
+                state == ReportDateRepairState::Failed;
+            const uint32_t now = millis();
+
+            if (complete || now - repair_last_output_ms_ >= 5000) {
+                if (print_date_repair(out, diagnostic)) {
+                    repair_last_output_ms_ = now;
+                    if (complete) {
+                        repair_session_id_ = 0;
+                        repair_wait_generation_ = 0;
+                    }
+                }
+            }
+        }
+    }
+
     if (!request_session_id_ || session.id != request_session_id_) return;
 
     const ReportRebuildStatus status = report_.rebuild_status();
@@ -428,12 +466,18 @@ void ReportConsoleCommands::poll_pending(
 
 bool ReportConsoleCommands::pending_output(
     const ConsoleCommandSession &session) const {
-    return request_session_id_ && request_wait_generation_ &&
-        session.id == request_session_id_;
+    return (request_session_id_ && request_wait_generation_ &&
+            session.id == request_session_id_) ||
+           (repair_session_id_ && repair_wait_generation_ &&
+            session.id == repair_session_id_);
 }
 
 void ReportConsoleCommands::cancel_pending(
     ConsoleCommandSession &session) {
+    if (session.id == repair_session_id_) {
+        repair_session_id_ = 0;
+        repair_wait_generation_ = 0;
+    }
     if (session.id != request_session_id_) return;
 
     request_session_id_ = 0;

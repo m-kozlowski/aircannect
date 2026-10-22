@@ -32,6 +32,7 @@ public:
     bool take_completion(
         OperationTicket ticket,
         StorageScanCompletion &completion) override;
+    bool progress(OperationTicket ticket, size_t &entries) const override;
 
 private:
     struct Job;

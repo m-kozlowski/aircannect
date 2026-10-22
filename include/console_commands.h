@@ -33,6 +33,7 @@ class BleSensorSource;
 class OximetryHub;
 class PlxPeripheral;
 class ReportTask;
+struct ReportTaskDiagnosticSnapshot;
 class ResmedFirmwareRepository;
 class ResmedFirmwarePreparer;
 class ResmedOtaManager;
@@ -237,11 +238,17 @@ public:
     bool print_scoped_stats(const String &scope, Print &out) override;
 
 private:
+    bool print_date_repair(Print &out, const ReportTaskDiagnosticSnapshot &status);
+
     ReportTask &report_;
     uint32_t request_generation_ = 0;
     uint32_t request_session_id_ = 0;
     uint32_t request_wait_generation_ = 0;
     uint32_t request_completed_ = 0;
+
+    uint32_t repair_session_id_ = 0;
+    uint32_t repair_wait_generation_ = 0;
+    uint32_t repair_last_output_ms_ = 0;
 };
 
 class StorageConsoleCommands final : public ConsoleCommandGroup {

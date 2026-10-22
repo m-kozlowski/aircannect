@@ -39,6 +39,7 @@ enum class ReportTaskState : uint8_t {
     Queued,
     Building,
     Publishing,
+    RepairingDates,
 };
 
 enum class ReportTaskCondition : uint8_t {
@@ -58,6 +59,7 @@ enum class ReportTaskOperation : uint8_t {
     Building,
     Publishing,
     SavingCatalog,
+    RepairingDates,
 };
 
 enum class ReportTaskWaitReason : uint8_t {
@@ -72,7 +74,10 @@ enum class ReportTaskWaitReason : uint8_t {
     Ota,
     Export,
     As11Unavailable,
+    StorageUnavailable,
 };
+
+const char *report_wait_reason_name(ReportTaskWaitReason reason);
 
 struct ReportTaskOperationalSnapshot {
     ReportTaskCondition condition = ReportTaskCondition::Stopped;
@@ -112,6 +117,9 @@ struct ReportTaskDiagnosticSnapshot {
     SummaryArchiveStatus summary_archive;
     uint32_t summary_archive_drops = 0;
     ReportDateRepairStatus date_repair;
+    ReportTaskWaitReason date_repair_wait_reason = ReportTaskWaitReason::None;
+    uint32_t date_repair_request_generation = 0;
+    bool date_repair_request_rejected = false;
     bool task_started = false;
     ReportTaskState state = ReportTaskState::Stopped;
     size_t commands_queued = 0;
@@ -259,7 +267,7 @@ public:
                                        SleepDayId last_day,
                                        uint32_t generation);
     ReportRebuildStatus rebuild_status() const;
-    OperationAdmission request_date_repair(bool apply);
+    OperationAdmission request_date_repair(bool apply, uint32_t generation = 1);
     std::shared_ptr<const LargeByteBuffer> date_repair_preview() const;
     OperationAdmission request_period(ReportPeriodKey key);
     std::shared_ptr<const ReportPeriodResult> period_snapshot(ReportPeriodKey key) const;

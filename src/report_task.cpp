@@ -35,6 +35,25 @@
 #endif
 
 namespace aircannect {
+
+const char *report_wait_reason_name(ReportTaskWaitReason reason) {
+    switch (reason) {
+        case ReportTaskWaitReason::Startup: return "startup";
+        case ReportTaskWaitReason::Queue: return "queue";
+        case ReportTaskWaitReason::Catalog: return "catalog";
+        case ReportTaskWaitReason::Retry: return "retry";
+        case ReportTaskWaitReason::Therapy: return "therapy";
+        case ReportTaskWaitReason::RealtimeStream: return "stream";
+        case ReportTaskWaitReason::ForegroundRequest: return "foreground_request";
+        case ReportTaskWaitReason::Ota: return "ota";
+        case ReportTaskWaitReason::Export: return "export";
+        case ReportTaskWaitReason::As11Unavailable: return "as11_unavailable";
+        case ReportTaskWaitReason::StorageUnavailable: return "storage_unavailable";
+        case ReportTaskWaitReason::None:
+        default: return "--";
+    }
+}
+
 namespace {
 
 constexpr uint32_t CATALOG_STORE_GENERATION = 1;
@@ -1987,6 +2006,43 @@ struct ReportTask::Runtime {
         return true;
     }
 
+    ReportTaskWaitReason date_repair_wait_reason() const {
+        if (!storage_status || !storage_status->mounted()) return ReportTaskWaitReason::StorageUnavailable;
+        if (activity.therapy_active) return ReportTaskWaitReason::Therapy;
+        if (activity.realtime_stream_active) return ReportTaskWaitReason::RealtimeStream;
+        if (activity.ota_install_active || activity.manual_update_check_active) return ReportTaskWaitReason::Ota;
+        if (activity.export_work_claimed) return ReportTaskWaitReason::Export;
+        return ReportTaskWaitReason::None;
+    }
+
+    void log_date_repair() {
+#ifdef ARDUINO
+        const auto &status = date_repair.status();
+        if (!date_repair_request_generation && !status.durable) return;
+
+        const auto wait = date_repair.active() ? date_repair_wait_reason() : ReportTaskWaitReason::None;
+        const bool changed = date_log_generation != date_repair_request_generation ||
+            date_log_state != status.state || date_log_wait != wait;
+        if (!changed && (!date_repair.active() || last_step_ms - date_log_ms < 5000)) return;
+
+        Log::logf(CAT_REPORT, status.error[0] ? LOG_WARN : LOG_INFO,
+                  "date repair state=%s wait=%s scanned=%lu inspected=%lu "
+                  "candidates=%lu files=%lu restored=%lu archived=%lu error=%s",
+                  report_date_repair_state_name(status.state), report_wait_reason_name(wait),
+                  static_cast<unsigned long>(status.scanned_files),
+                  static_cast<unsigned long>(status.inspected_files),
+                  static_cast<unsigned long>(status.candidates),
+                  static_cast<unsigned long>(status.completed_files),
+                  static_cast<unsigned long>(status.restored),
+                  static_cast<unsigned long>(status.archived), status.error[0] ? status.error : "--");
+
+        date_log_generation = date_repair_request_generation;
+        date_log_state = status.state;
+        date_log_wait = wait;
+        date_log_ms = last_step_ms;
+#endif
+    }
+
     ReportTaskWaitReason activity_wait_reason() const {
         if (activity.therapy_active) return ReportTaskWaitReason::Therapy;
         if (activity.realtime_stream_active) {
@@ -2013,6 +2069,18 @@ struct ReportTask::Runtime {
         if (!initialized) return out;
 
         out.condition = ReportTaskCondition::Working;
+        if (date_repair.active()) {
+            out.operation = ReportTaskOperation::RepairingDates;
+            out.wait_reason = date_repair_wait_reason();
+            if (out.wait_reason != ReportTaskWaitReason::None) out.condition = ReportTaskCondition::Waiting;
+            return out;
+        }
+        if (date_repair.status().durable && date_repair.status().state == ReportDateRepairState::Failed) {
+            out.operation = ReportTaskOperation::RepairingDates;
+            out.condition = ReportTaskCondition::Failed;
+            copy_cstr(out.error, sizeof(out.error), date_repair.status().error);
+            return out;
+        }
         if (period_running) {
             out.operation = ReportTaskOperation::Building;
             out.sleep_day = period_key.end;
@@ -2139,6 +2207,10 @@ struct ReportTask::Runtime {
         out.summary_archive = summary_archive.status();
         out.summary_archive_drops = summary_archive_drops.load();
         out.date_repair = date_repair.status();
+        out.date_repair_wait_reason = date_repair.active()
+            ? date_repair_wait_reason() : ReportTaskWaitReason::None;
+        out.date_repair_request_generation = date_repair_request_generation;
+        out.date_repair_request_rejected = date_repair_request_rejected;
         out.task_started = task_started;
         out.catalog_nights = catalog ? catalog->size() : 0;
         out.materialized_nights = store_catalog ? store_catalog->size() : 0;
@@ -2191,6 +2263,7 @@ struct ReportTask::Runtime {
     }
 
     void publish_status() {
+        log_date_repair();
         if (!lock(0)) return;
         const size_t queued_commands = command_count;
         const uint32_t drops = command_drops;
@@ -2211,7 +2284,7 @@ struct ReportTask::Runtime {
         const ReportEngineStatus engine_status = engine.status();
         next.foreground_active = engine_status.foreground_active || period_running;
         next.background_active =
-            period_running || rebuild_catalog != nullptr || engine_status.queued > 0 ||
+            date_repair.active() || period_running || rebuild_catalog != nullptr || engine_status.queued > 0 ||
             engine_status.state != ReportEngineState::Idle ||
             store_catalog_loader.status().active() ||
             catalog_refresh.active() || summary_acquisition.active() ||
@@ -2223,6 +2296,8 @@ struct ReportTask::Runtime {
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
+        } else if (date_repair.active()) {
+            next.state = ReportTaskState::RepairingDates;
         } else if (catalog_load_pending ||
                    store_purpose == CatalogStorePurpose::Load ||
                    store_purpose == CatalogStorePurpose::RebuildLoad ||
@@ -2281,7 +2356,7 @@ struct ReportTask::Runtime {
 
     bool poll_storage_pause(uint32_t now_ms) {
         if (date_repair.active()) {
-            const bool worked = date_repair.poll();
+            const bool worked = date_repair.poll(date_repair_wait_reason() == ReportTaskWaitReason::None);
             publish_status();
             return worked;
         }
@@ -2401,7 +2476,15 @@ struct ReportTask::Runtime {
     ReportSignalStoreCatalogLoadService store_catalog_loader;
     ReportGenerationCleanup generation_cleanup;
     ReportDateRepairService date_repair;
+    uint32_t date_repair_request_generation = 0;
+    bool date_repair_request_rejected = false;
     bool date_repair_observed = false;
+#ifdef ARDUINO
+    uint32_t date_log_generation = 0;
+    uint32_t date_log_ms = 0;
+    ReportDateRepairState date_log_state = ReportDateRepairState::Idle;
+    ReportTaskWaitReason date_log_wait = ReportTaskWaitReason::None;
+#endif
     std::shared_ptr<const LargeByteBuffer> published_date_preview;
     // Preview identity checks must not pin retired report generations.
     std::weak_ptr<const NightCatalog> date_preview_catalog;
@@ -2692,11 +2775,11 @@ OperationAdmission ReportTask::request_rebuild(
     return runtime_->enqueue(command);
 }
 
-OperationAdmission ReportTask::request_date_repair(bool apply) {
-    if (!runtime_ || !runtime_->initialized) return OperationAdmission::Rejected;
+OperationAdmission ReportTask::request_date_repair(bool apply, uint32_t generation) {
+    if (!runtime_ || !runtime_->initialized || !generation) return OperationAdmission::Rejected;
     ReportTaskCommand command;
     command.kind = apply ? ReportTaskCommandKind::RepairDates : ReportTaskCommandKind::PreviewDates;
-    command.generation = 1;
+    command.generation = generation;
     return runtime_->enqueue(command);
 }
 
@@ -3106,12 +3189,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (runtime.date_repair.active() || (runtime.date_repair.status().durable &&
         runtime.date_repair.status().state == ReportDateRepairState::Failed)) {
         worked = runtime.generation_cleanup.poll(false, now_ms) || worked;
-        if (runtime.storage_status && runtime.storage_status->mounted() &&
-            !runtime.activity.therapy_active && !runtime.activity.ota_install_active &&
-            !runtime.activity.realtime_stream_active && !runtime.activity.export_work_claimed &&
-            !runtime.activity.manual_update_check_active) {
-            worked = runtime.date_repair.poll() || worked;
-        }
+        worked = runtime.date_repair.poll(
+            runtime.date_repair_wait_reason() == ReportTaskWaitReason::None) || worked;
         runtime.publish_status();
         return worked;
     }
@@ -3141,6 +3220,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 ? runtime.date_preview_catalog.lock() == runtime.catalog &&
                   runtime.date_preview_store.lock() == runtime.store_catalog && runtime.date_repair.apply()
                 : runtime.date_repair.start(runtime.catalog);
+
+            runtime.date_repair_request_generation = command.generation;
+            runtime.date_repair_request_rejected = !accepted;
+
             if (accepted && !apply) {
                 runtime.date_preview_catalog = runtime.catalog;
                 runtime.date_preview_store = runtime.store_catalog;

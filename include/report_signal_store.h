@@ -13,6 +13,7 @@
 namespace aircannect {
 
 class ReportSignalStoreService;
+struct StorageScanEntryView;
 
 static constexpr const char *REPORT_SIGNAL_STORE_ROOT =
     "/aircannect/report/v9/nights";
@@ -338,6 +339,9 @@ bool report_signal_store_night_path(SleepDayId sleep_day,
                                     char *out,
                                     size_t out_size,
                                     bool retained_history = false);
+bool report_signal_store_generation_directory(const StorageScanEntryView &entry,
+                                              const char *base,
+                                              uint32_t &generation);
 bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
                                      ReportSignalStoreLevel level,
                                      char *out,

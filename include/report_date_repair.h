@@ -12,8 +12,10 @@ namespace aircannect {
 
 enum class ReportDateRepairState : uint8_t {
     Idle, CheckingJournal, Scanning, Planning, Preview, SavingPlan,
-    BackingUp, Installing, Complete, Failed
+    BackingUp, Installing, Complete, Failed, ScanningFiles
 };
+
+const char *report_date_repair_state_name(ReportDateRepairState state);
 
 struct ReportDateRepairStatus {
     ReportDateRepairState state = ReportDateRepairState::Idle;
@@ -21,6 +23,8 @@ struct ReportDateRepairStatus {
     uint32_t restored = 0;
     uint32_t archived = 0;
     uint32_t completed_files = 0;
+    uint32_t scanned_files = 0;
+    uint32_t inspected_files = 0;
     bool durable = false;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
@@ -35,7 +39,8 @@ public:
                StorageRangeWritePort &, StorageScanPort &, StorageDeletePort &);
     bool start(std::shared_ptr<const NightCatalog> catalog);
     bool apply();
-    bool poll();
+    // A pause still consumes completed shared I/O; it never starts new I/O.
+    bool poll(bool allowed = true);
     bool active() const;
     const ReportDateRepairStatus &status() const;
     std::shared_ptr<const LargeByteBuffer> preview() const;

@@ -71,6 +71,11 @@ struct Candidate {
     ReportSignalStoreMetadata report;
     std::string report_path;
 };
+
+struct RepairFile {
+    std::string path;
+    uint64_t size = 0;
+};
 }
 
 struct ReportDateRepairService::Runtime {
@@ -85,6 +90,8 @@ struct ReportDateRepairService::Runtime {
     ReportDateRepairStatus status;
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const StorageScanSnapshot> scan;
+    Items<RepairFile> files;
+    Items<std::string> scan_roots;
     Items<Candidate> candidates;
     Items<SleepDayId> retained_sources;
     Items<Job> jobs;
@@ -98,6 +105,10 @@ struct ReportDateRepairService::Runtime {
     uint8_t save_stage = 0;
     std::shared_ptr<const LargeByteBuffer> completed_progress;
     size_t inspect_cursor = 0;
+    size_t scan_root_cursor = 0;
+    size_t scan_batch_begin = 0;
+    uint32_t scan_files_before_batch = 0;
+    uint32_t last_generation = 1;
     bool boot_plan = false;
     bool progress_pending = false;
     bool apply_requested = false;
@@ -107,6 +118,8 @@ struct ReportDateRepairService::Runtime {
 
     // Bounded asynchronous I/O
     OperationTicket scan_ticket, read_ticket, write_ticket, range_ticket;
+    StorageAtomicWriteCompletion completed_write;
+    StorageRangeWriteCompletion completed_range;
     StoragePreparedRead prepared;
     std::unique_ptr<LargeByteBuffer> reading;
     size_t read_position = 0;
@@ -134,6 +147,8 @@ struct ReportDateRepairService::Runtime {
         Items<SleepDayId>().swap(retained_sources);
         Items<Job>().swap(jobs);
         scan.reset();
+        Items<RepairFile>().swap(files);
+        Items<std::string>().swap(scan_roots);
         catalog.reset();
         plan.reset();
         return true;
@@ -211,7 +226,10 @@ struct ReportDateRepairService::Runtime {
         }
 
         StorageAtomicWriteCompletion completion;
-        if (!writes->take_completion(write_ticket, completion)) return false;
+        if (completed_write.ticket == write_ticket) {
+            completion = std::move(completed_write);
+            completed_write = {};
+        } else if (!writes->take_completion(write_ticket, completion)) return false;
 
         write_ticket = {};
         const auto expected = writing ? writing->size() : size;
@@ -292,6 +310,96 @@ struct ReportDateRepairService::Runtime {
             if (!value) return fail("date_repair_catalog_invalid"), false;
             accept_catalog(value, path);
         }
+        files.push_back({path, entry.size});
+        return true;
+    }
+
+    bool discover(bool allowed) {
+        const bool payloads = status.state == ReportDateRepairState::ScanningFiles;
+        if (scan_ticket.valid()) {
+            StorageScanCompletion completion;
+            if (!scans->take_completion(scan_ticket, completion)) {
+                size_t count = 0;
+                if (payloads && scans->progress(scan_ticket, count)) {
+                    status.scanned_files = scan_files_before_batch + count;
+                }
+                return false;
+            }
+
+            scan_ticket = {};
+            if (completion.outcome.disposition != OperationDisposition::Succeeded || !completion.snapshot) {
+                return fail("date_repair_scan_failed");
+            }
+            scan = std::move(completion.snapshot);
+            inspect_cursor = 0;
+            if (payloads) status.scanned_files = scan_files_before_batch + scan->size();
+            return true;
+        }
+        if (!allowed) return false;
+
+        if (scan && inspect_cursor < scan->size()) {
+            StorageScanEntryView entry;
+            scan->entry(inspect_cursor, entry);
+            const auto &base = scan_roots[scan_batch_begin + entry.root_index];
+
+            if (entry.directory) {
+                SleepDayId day;
+                const char *name = strrchr(entry.path, '/');
+                if (base == REPORT_SIGNAL_STORE_ROOT && name && SleepDayId::from_yyyymmdd(name + 1, day)) {
+                    scan_roots.emplace_back(entry.path);
+                } else {
+                    uint32_t generation = 0;
+                    if (report_signal_store_generation_directory(entry, base.c_str(), generation)) {
+                        last_generation = std::max(last_generation, generation);
+                    }
+                }
+            } else if (payloads) {
+                files.push_back({entry.path, entry.size});
+            } else {
+                if (!inspect(entry)) return false;
+                ++status.scanned_files;
+                ++status.inspected_files;
+            }
+
+            ++inspect_cursor;
+            return true;
+        }
+
+        scan.reset();
+        if (scan_root_cursor < scan_roots.size()) {
+            StorageScanRoot roots[AC_STORAGE_SCAN_ROOT_MAX];
+            const size_t count = std::min(AC_STORAGE_SCAN_ROOT_MAX, scan_roots.size() - scan_root_cursor);
+            for (size_t i = 0; i < count; ++i) roots[i] = {scan_roots[scan_root_cursor + i].c_str(), payloads};
+
+            const auto submitted = scans->request_scan({roots, count, !payloads, 1});
+            if (submitted.admission == OperationAdmission::Busy) return false;
+            if (!submitted.accepted()) return fail("date_repair_scan_rejected");
+
+            scan_ticket = submitted.ticket;
+            scan_batch_begin = scan_root_cursor;
+            scan_root_cursor += count;
+            scan_files_before_batch = status.scanned_files;
+            return true;
+        }
+
+        Items<std::string>().swap(scan_roots);
+        scan_root_cursor = 0;
+        if (payloads) {
+            status.state = ReportDateRepairState::Planning;
+        } else {
+            // Metadata has selected every protected generation. Healthy and
+            // unreferenced generations are never traversed, even on a collision.
+            for (const auto &item : candidates) {
+                for (const auto &root : item.report_roots) {
+                    const auto path = root.substr(0, root.size() - 1);
+                    if (std::find(scan_roots.begin(), scan_roots.end(), path) == scan_roots.end()) {
+                        scan_roots.push_back(path);
+                    }
+                }
+            }
+            status.candidates = candidates.size();
+            status.state = ReportDateRepairState::ScanningFiles;
+        }
         return true;
     }
 
@@ -337,6 +445,13 @@ struct ReportDateRepairService::Runtime {
     }
 
     bool plan_repairs() {
+        if (candidates.empty()) {
+            Items<RepairFile>().swap(files);
+            catalog.reset();
+            status.state = ReportDateRepairState::Preview;
+            return true;
+        }
+
         auto updated = catalog;
         std::string text;
 
@@ -348,16 +463,8 @@ struct ReportDateRepairService::Runtime {
             if (!updated) return fail("date_repair_catalog_alloc");
         }
 
-        uint32_t generation = 1;
-        StorageScanEntryView entry;
-        for (size_t i = 0; i < scan->size(); ++i) {
-            scan->entry(i, entry);
-            const char *g = strstr(entry.path, "/g");
-            unsigned value = 0;
-            if (g && sscanf(g, "/g%8x/", &value) == 1) generation = std::max(generation, uint32_t(value));
-        }
-        if (generation == UINT32_MAX) return fail("date_repair_generation_exhausted");
-        ++generation;
+        if (last_generation == UINT32_MAX) return fail("date_repair_generation_exhausted");
+        const uint32_t generation = last_generation + 1;
 
         for (auto &item : candidates) {
             const auto old = source_catalog(item);
@@ -400,9 +507,8 @@ struct ReportDateRepairService::Runtime {
                     char base[AC_STORAGE_PATH_MAX];
                     snprintf(base, sizeof(base), "%s/%s/g%08x/", REPORT_SIGNAL_STORE_ROOT,
                              from, item.report.view.night.generation);
-                    for (size_t i = 0; i < scan->size(); ++i) {
-                        scan->entry(i, entry);
-                        if (!entry.directory && strncmp(entry.path, base, strlen(base)) == 0) add(entry.path, "", entry.size);
+                    for (const auto &entry : files) {
+                        if (entry.path.compare(0, strlen(base), base) == 0) add(entry.path, "", entry.size);
                     }
                 }
                 ++status.archived;
@@ -424,10 +530,9 @@ struct ReportDateRepairService::Runtime {
                          from, item.report.view.night.generation);
                 snprintf(new_base, sizeof(new_base), "%s/%s/g%08x/", REPORT_SIGNAL_STORE_ROOT, to, generation);
 
-                for (size_t i = 0; i < scan->size(); ++i) {
-                    scan->entry(i, entry);
-                    if (entry.directory || strncmp(entry.path, old_base, strlen(old_base)) != 0) continue;
-                    const std::string suffix(entry.path + strlen(old_base));
+                for (const auto &entry : files) {
+                    if (entry.path.compare(0, strlen(old_base), old_base) != 0) continue;
+                    const std::string suffix = entry.path.substr(strlen(old_base));
                     add(entry.path, std::string(new_base) + suffix, entry.size);
                     auto &job = jobs.back();
                     job.repair_day = day;
@@ -460,15 +565,12 @@ struct ReportDateRepairService::Runtime {
         // Preserve every accepted copy, including metadata not selected for
         // restoration and the generations it protects, before retiring pins.
         for (const auto &item : candidates) {
-            for (size_t i = 0; i < scan->size(); ++i) {
-                scan->entry(i, entry);
-                if (entry.directory) continue;
-
+            for (const auto &entry : files) {
                 bool original = std::find(item.active_paths.begin(), item.active_paths.end(),
                                           entry.path) != item.active_paths.end();
 
                 for (const auto &root : item.report_roots) {
-                    if (strncmp(entry.path, root.c_str(), root.size()) == 0) original = true;
+                    if (entry.path.compare(0, root.size(), root) == 0) original = true;
                 }
                 if (!original) continue;
 
@@ -500,6 +602,7 @@ struct ReportDateRepairService::Runtime {
         add(NIGHT_CATALOG_STORE_PATH, NIGHT_CATALOG_STORE_PATH, bytes->size(), bytes);
         description = LargeByteBuffer::copy_and_freeze(reinterpret_cast<const uint8_t *>(text.data()), text.size());
         status.candidates = candidates.size();
+        Items<RepairFile>().swap(files);
         planned = true;
         return true;
     }
@@ -706,7 +809,10 @@ struct ReportDateRepairService::Runtime {
                 return false;
             }
             StorageRangeWriteCompletion completion;
-            if (!ranges->take_completion(range_ticket, completion)) return false;
+            if (completed_range.ticket == range_ticket) {
+                completion = std::move(completed_range);
+                completed_range = {};
+            } else if (!ranges->take_completion(range_ticket, completion)) return false;
             range_ticket = {};
             loaded.reset();
             if (completion.outcome.disposition != OperationDisposition::Succeeded ||
@@ -723,8 +829,25 @@ struct ReportDateRepairService::Runtime {
         return true;
     }
 
-    bool poll() {
+    bool poll(bool allowed) {
         using State = ReportDateRepairState;
+        const bool discovering = status.state == State::Scanning || status.state == State::ScanningFiles;
+
+        if (!allowed) {
+            // Free shared completion slots without advancing the transaction.
+            // Export may need these same ports before it can release its claim.
+            bool consumed = false;
+            if (write_ticket.valid() && !completed_write.ticket.valid()) {
+                consumed = writes->take_completion(write_ticket, completed_write);
+            }
+            if (range_ticket.valid() && !completed_range.ticket.valid()) {
+                consumed = ranges->take_completion(range_ticket, completed_range) || consumed;
+            }
+            if (!discovering || !scan_ticket.valid()) return consumed;
+        }
+
+        if (discovering) return discover(allowed);
+
         if (status.state == State::CheckingJournal) {
             if (!read(boot_plan ? batch_root(batch) + "/plan.bin" : PROGRESS,
                       boot_plan ? MAX_PLAN : 20)) return false;
@@ -753,33 +876,8 @@ struct ReportDateRepairService::Runtime {
             boot_plan = true;
             return true;
         }
-        if (status.state == State::Scanning) {
-            if (!scan_ticket.valid()) {
-                const StorageScanRoot roots[] = {{"/aircannect/report/v9/nights", true},
-                    {"/aircannect/report/v9/history", true}, {REPORT_FALLBACK_ARTIFACT_ROOT, true}};
-                const auto submitted = scans->request_scan({roots, 3, false, 1});
-                if (submitted.admission == OperationAdmission::Busy) return false;
-                if (!submitted.accepted()) return fail("date_repair_scan_rejected");
-                scan_ticket = submitted.ticket;
-                return true;
-            }
-            StorageScanCompletion completion;
-            if (!scans->take_completion(scan_ticket, completion)) return false;
-            scan_ticket = {};
-            if (completion.outcome.disposition != OperationDisposition::Succeeded || !completion.snapshot) return fail("date_repair_scan_failed");
-            scan = completion.snapshot;
-            status.state = State::Planning;
-            return true;
-        }
         if (status.state == State::Planning) {
             if (planned) return prepare_copy_headers();
-            if (inspect_cursor < scan->size()) {
-                StorageScanEntryView entry;
-                scan->entry(inspect_cursor, entry);
-                if (!entry.directory && !inspect(entry)) return false;
-                ++inspect_cursor;
-                return true;
-            }
             return plan_repairs();
         }
         if (status.state == State::SavingPlan) {
@@ -860,6 +958,12 @@ bool ReportDateRepairService::start(std::shared_ptr<const NightCatalog> catalog)
     r.jobs.clear();
     r.description.reset();
     r.retained_sources.clear();
+    r.files.clear();
+    r.scan.reset();
+    r.scan_roots = {REPORT_SIGNAL_STORE_ROOT, "/aircannect/report/v9/history", REPORT_FALLBACK_ARTIFACT_ROOT};
+    r.scan_root_cursor = 0;
+    r.scan_batch_begin = 0;
+    r.last_generation = 1;
     r.cursor = r.inspect_cursor = 0;
     r.patch_cursor = 0;
     r.planned = false;
@@ -883,8 +987,8 @@ bool ReportDateRepairService::apply() {
     return true;
 }
 
-bool ReportDateRepairService::poll() {
-    try { return runtime_->poll(); }
+bool ReportDateRepairService::poll(bool allowed) {
+    try { return runtime_->poll(allowed); }
     catch (const std::bad_alloc &) { return runtime_->fail("date_repair_alloc"); }
 }
 
@@ -897,8 +1001,17 @@ bool ReportDateRepairService::active() const {
 const ReportDateRepairStatus &ReportDateRepairService::status() const { return runtime_->status; }
 std::shared_ptr<const LargeByteBuffer> ReportDateRepairService::preview() const { return runtime_->description; }
 
+const char *report_date_repair_state_name(ReportDateRepairState state) {
+    static const char *const names[] = {"idle", "checking_journal", "scanning_metadata", "planning",
+        "preview", "saving_plan", "backing_up", "installing", "complete", "failed", "scanning_files"};
+    const auto index = static_cast<unsigned>(state);
+    return index < sizeof(names) / sizeof(names[0]) ? names[index] : "unknown";
+}
+
 void ReportDateRepairService::cancel() {
     auto &r = *runtime_;
+    r.completed_write = {};
+    r.completed_range = {};
     if (r.read_ticket.valid()) r.reads->abandon(r.read_ticket);
     if (r.prepared.valid()) r.reads->release_prepared(r.prepared);
     if (r.write_ticket.valid()) r.writes->abandon(r.write_ticket);

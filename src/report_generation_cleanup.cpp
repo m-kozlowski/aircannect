@@ -8,30 +8,6 @@
 #endif
 
 namespace aircannect {
-namespace {
-
-// Accept only a direct generation directory from the storage inventory.
-bool generation_directory(const StorageScanEntryView &entry,
-                          const char *base, uint32_t &generation) {
-    if (!entry.directory || !entry.path) return false;
-    const size_t length = strlen(base);
-    if (strncmp(entry.path, base, length) != 0 ||
-        entry.path[length] != '/') return false;
-    const char *name = entry.path + length + 1;
-    if (strlen(name) != 9 || name[0] != 'g') return false;
-
-    generation = 0;
-    for (size_t i = 1; i < 9; ++i) {
-        const char c = name[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-            return false;
-        }
-        generation = (generation << 4) | (c <= '9' ? c - '0' : c - 'a' + 10);
-    }
-    return generation != 0;
-}
-
-}  // namespace
 
 ReportGenerationCleanup::~ReportGenerationCleanup() {
     if (delete_id_) deletes_->cancel(delete_id_);
@@ -219,7 +195,7 @@ bool ReportGenerationCleanup::poll(bool allowed, uint32_t now_ms) {
         StorageScanEntryView entry;
         uint32_t generation = 0;
         if (!entries_->entry(entry_cursor_, entry) ||
-            !generation_directory(entry, base_path_, generation)) {
+            !report_signal_store_generation_directory(entry, base_path_, generation)) {
             ++entry_cursor_;
             return true;
         }

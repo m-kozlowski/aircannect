@@ -87,6 +87,7 @@ public:
     virtual bool take_completion(
         OperationTicket ticket,
         StorageScanCompletion &completion) = 0;
+    virtual bool progress(OperationTicket, size_t &) const { return false; }
 };
 
 }  // namespace aircannect

@@ -208,6 +208,19 @@ bool StorageScanService::take_completion(
     return true;
 }
 
+bool StorageScanService::progress(OperationTicket ticket, size_t &entries) const {
+    if (!ticket.valid() || !lock(0)) return false;
+
+    const auto *snapshot = job_ && job_->active && job_->ticket == ticket
+        ? job_->snapshot.get()
+        : completion_ready_ && completion_.ticket == ticket
+            ? completion_.snapshot.get() : nullptr;
+    if (snapshot) entries = snapshot->size();
+    const bool found = snapshot != nullptr;
+    unlock();
+    return found;
+}
+
 bool StorageScanService::reserve_entries_locked(size_t needed) {
     StorageScanSnapshot &snapshot = *job_->snapshot;
     if (needed <= snapshot.entry_capacity_) return true;
