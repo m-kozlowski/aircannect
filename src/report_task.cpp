@@ -2396,8 +2396,9 @@ struct ReportTask::Runtime {
     ReportDateRepairService date_repair;
     bool date_repair_observed = false;
     std::shared_ptr<const LargeByteBuffer> published_date_preview;
-    std::shared_ptr<const NightCatalog> date_preview_catalog;
-    std::shared_ptr<const ReportSignalStoreCatalog> date_preview_store;
+    // Preview identity checks must not pin retired report generations.
+    std::weak_ptr<const NightCatalog> date_preview_catalog;
+    std::weak_ptr<const ReportSignalStoreCatalog> date_preview_store;
     ReportPeriodService period_service;
     ReportPeriodKey period_key;
     bool period_running = false;
@@ -3057,8 +3058,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             command.kind == ReportTaskCommandKind::RepairDates) {
             const bool apply = command.kind == ReportTaskCommandKind::RepairDates;
             const bool accepted = apply
-                ? runtime.date_preview_catalog == runtime.catalog &&
-                  runtime.date_preview_store == runtime.store_catalog && runtime.date_repair.apply()
+                ? runtime.date_preview_catalog.lock() == runtime.catalog &&
+                  runtime.date_preview_store.lock() == runtime.store_catalog && runtime.date_repair.apply()
                 : runtime.date_repair.start(runtime.catalog);
             if (accepted && !apply) {
                 runtime.date_preview_catalog = runtime.catalog;
