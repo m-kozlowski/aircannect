@@ -253,10 +253,16 @@ bool parse_summary_record(const uint8_t *record,
             case 3:
                 out.end_ms = field.value;
                 break;
-            case 4:
+            case 4: {
+                // Summary encodes the current _TZO in minutes as sint64.
+                const int64_t minutes = static_cast<int64_t>(field.value >> 1) ^
+                    -static_cast<int64_t>(field.value & 1);
+                if (minutes < -720 || minutes > 840) return false;
+
                 out.has_tz_offset_min = true;
-                out.tz_offset_min = static_cast<int32_t>(field.value);
+                out.tz_offset_min = static_cast<int32_t>(minutes);
                 break;
+            }
             case 5:
                 out.duration_min = static_cast<uint32_t>(field.value);
                 break;
