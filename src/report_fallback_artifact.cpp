@@ -354,6 +354,24 @@ bool ReportFallbackArtifactCodec::inspect_header(
     return true;
 }
 
+std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::repair_date(
+    const uint8_t *bytes, size_t length, const ReportFallbackArtifactInfo &accepted) {
+    SleepDayId day;
+    if (!accepted.legacy_day_conflict || accepted.timezone_offset_minutes > 1199 ||
+        length < HeaderBytes || !SleepDayId::from_epoch_days(
+            accepted.sleep_day.epoch_days() - 1, day)) return {};
+
+    auto output = LargeByteBuffer::allocate(length);
+    if (!output) return {};
+    memcpy(output->data(), bytes, length);
+    memcpy(output->data(), FILE_MAGIC_V8, sizeof(FILE_MAGIC_V8));
+    put_le16(output->data() + 8, Version);
+    put_le32(output->data() + 16, day.epoch_days());
+    put_le32(output->data() + TIMEZONE_OFFSET,
+             encode_timezone_offset(true, accepted.timezone_offset_minutes - 1440));
+    return LargeByteBuffer::freeze(std::move(output));
+}
+
 bool ReportFallbackArtifactCodec::decode_metadata(
     const uint8_t *metadata,
     size_t metadata_length,

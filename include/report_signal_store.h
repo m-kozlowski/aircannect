@@ -254,6 +254,9 @@ private:
 
 class ReportSignalStoreNightCodec {
 public:
+    static ReportSignalStoreMetadata repair_date(
+        const ReportSignalStoreMetadata &saved, SleepDayId day,
+        SourceRevision revision, uint32_t generation);
     static constexpr size_t MaxBytes = 64 * 1024;
     static constexpr uint16_t Version = 6;
     static constexpr size_t ExtraStatisticsOffset = 520;
@@ -306,6 +309,9 @@ struct ReportSignalStoreEventFileView {
 
 class ReportSignalStoreEventCodec {
 public:
+    static std::shared_ptr<const LargeByteBuffer> repair_identity(
+        const ReportSignalStoreEventFileView &accepted, SleepDayId day,
+        SourceRevision revision, uint32_t generation);
     static constexpr uint16_t Version = 1;
     static constexpr size_t HeaderBytes = 96;
     static constexpr size_t BlockDirectoryBytes = 8;

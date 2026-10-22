@@ -60,6 +60,9 @@ struct ReportBuildCheckpointInput {
 
 class ReportBuildCheckpointCodec {
 public:
+    static std::shared_ptr<const LargeByteBuffer> repair_identity(
+        const ReportBuildCheckpointInput &accepted, SleepDayId day,
+        SourceRevision revision, uint32_t generation);
     static constexpr uint16_t Version = 1;
     static constexpr size_t HeaderBytes = 52;
     static constexpr size_t TrackBytes = 32;

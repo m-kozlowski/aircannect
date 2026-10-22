@@ -268,6 +268,27 @@ bool ReportBuildCheckpointCodec::decode(
     return true;
 }
 
+std::shared_ptr<const LargeByteBuffer> ReportBuildCheckpointCodec::repair_identity(
+    const ReportBuildCheckpointInput &accepted, SleepDayId day,
+    SourceRevision revision, uint32_t generation) {
+    if (!accepted.bytes || !day.valid() || !revision.valid() || !generation) return {};
+    auto bytes = LargeByteBuffer::allocate(accepted.bytes->size());
+    if (!bytes) return {};
+    memcpy(bytes->data(), accepted.bytes->data(), bytes->size());
+    put_le32(bytes->data() + 8, day.epoch_days());
+    put_le32(bytes->data() + 12, generation);
+    put_le64(bytes->data() + 16, revision.value());
+
+    if (accepted.view.events_size) {
+        ReportSignalStoreEventFileView events;
+        if (!ReportSignalStoreEventCodec::inspect(accepted.view.events, accepted.view.events_size, events)) return {};
+        const auto header = ReportSignalStoreEventCodec::repair_identity(events, day, revision, generation);
+        if (!header) return {};
+        memcpy(bytes->data() + (accepted.view.events - accepted.bytes->data()), header->data(), header->size());
+    }
+    return LargeByteBuffer::freeze(std::move(bytes));
+}
+
 bool report_build_checkpoint_path(SleepDayId sleep_day,
                                   uint32_t generation,
                                   uint8_t slot,

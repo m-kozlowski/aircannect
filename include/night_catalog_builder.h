@@ -156,7 +156,7 @@ struct NightCatalogBuildStatus {
 };
 
 class NightCatalogBuilder {
-    enum class Projection { Index, Night, Upsert };
+    enum class Projection { Index, Night, Upsert, WithoutNight };
 
 public:
     NightCatalogBuilder() = default;
@@ -188,6 +188,12 @@ public:
     static std::shared_ptr<const NightCatalog> select_night(
         const NightCatalog &catalog,
         SleepDayId sleep_day);
+
+    // Explicit repair of a classified legacy AS11 night; UTC stays unchanged.
+    static std::shared_ptr<const NightCatalog> repair_date(
+        const NightCatalog &catalog, SleepDayId old_day);
+    static std::shared_ptr<const NightCatalog> without_night(
+        const NightCatalog &catalog, SleepDayId day);
 
     // Replace only sleep_day; other days in replacement are ignored.
     static std::shared_ptr<const NightCatalog> upsert_night(

@@ -574,6 +574,36 @@ ReportSignalStoreMetadata ReportSignalStoreNightCodec::with_compression_version(
     return {LargeByteBuffer::freeze(std::move(bytes)), view};
 }
 
+ReportSignalStoreMetadata ReportSignalStoreNightCodec::repair_date(
+    const ReportSignalStoreMetadata &saved, SleepDayId day,
+    SourceRevision revision, uint32_t generation) {
+    if (!saved.metadata || !(saved.view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED) ||
+        saved.view.night.timezone_offset_minutes < 720 ||
+        saved.view.night.timezone_offset_minutes > 1199 ||
+        day.epoch_days() != saved.view.night.sleep_day.epoch_days() - 1 ||
+        !revision.valid() || !generation) return {};
+
+    auto upgraded = reject_revision(saved, {});
+    if (!upgraded.metadata) return {};
+    auto bytes = LargeByteBuffer::allocate(upgraded.metadata->size());
+    if (!bytes) return {};
+    memcpy(bytes->data(), upgraded.metadata->data(), bytes->size());
+    auto view = upgraded.view;
+    view.night.sleep_day = day;
+    view.night.source_revision = revision;
+    view.night.generation = generation;
+    view.night.timezone_offset_minutes -= 1440;
+    view.night.flags &= ~REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED;
+    put_le32(bytes->data() + 16, day.epoch_days());
+    put_le32(bytes->data() + 20, generation);
+    put_le64(bytes->data() + 24, revision.value());
+    put_le32(bytes->data() + 56, view.night.flags);
+    put_le32(bytes->data() + 60, view.night.timezone_offset_minutes);
+    view.session_records = bytes->data() + HeaderBytes;
+    view.track_records = view.session_records + view.night.session_count * SessionBytes;
+    return {LargeByteBuffer::freeze(std::move(bytes)), view};
+}
+
 ReportSignalStoreMetadata ReportSignalStoreNightCodec::reject_revision(
     const ReportSignalStoreMetadata &saved,
     SourceRevision revision) {
@@ -610,6 +640,18 @@ ReportSignalStoreMetadata::ReportSignalStoreMetadata(
                      bytes->data(), bytes->size(), view)) {
         metadata = std::move(bytes);
     }
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportSignalStoreEventCodec::repair_identity(
+    const ReportSignalStoreEventFileView &accepted, SleepDayId day,
+    SourceRevision revision, uint32_t generation) {
+    auto bytes = LargeByteBuffer::allocate(HeaderBytes);
+    if (!bytes || !day.valid() || !revision.valid() || !generation) return {};
+    memcpy(bytes->data(), accepted.bytes, HeaderBytes);
+    put_le32(bytes->data() + 16, day.epoch_days());
+    put_le32(bytes->data() + 20, generation);
+    put_le64(bytes->data() + 24, revision.value());
+    return LargeByteBuffer::freeze(std::move(bytes));
 }
 
 ReportSignalStoreMetadata::ReportSignalStoreMetadata(

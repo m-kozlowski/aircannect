@@ -11,6 +11,7 @@
 #include "report_records.h"
 #include "report_fallback_artifact.h"
 #include "report_fallback_payload_layout.h"
+#include "storage_path.h"
 
 namespace aircannect {
 namespace {
@@ -1575,6 +1576,9 @@ struct NightCatalogBuilder::ProjectionRuntime {
         }
 
         const auto *base = source.record(source_index);
+        if (projection == Projection::WithoutNight && base && base->sleep_day == sleep_day) {
+            base = source.record(++source_index);
+        }
         if (day_index < day_count && (!base || !(days[day_index] < base->sleep_day))) {
             const SleepDayId day = days[day_index];
             if ((day_index > 0 && !(day < days[day_index - 1])) || !replacement ||
@@ -2164,6 +2168,42 @@ NightCatalogBuilder::select_night(const NightCatalog &source, SleepDayId sleep_d
     if (!source.find(sleep_day)) return {};
 
     return project(source, Projection::Night, sleep_day);
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::without_night(
+    const NightCatalog &catalog, SleepDayId day) {
+    return project(catalog, Projection::WithoutNight, day);
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::repair_date(
+    const NightCatalog &catalog, SleepDayId old_day) {
+    auto selected = select_night(catalog, old_day);
+    if (!selected || selected->size() != 1) return {};
+
+    auto repaired = std::const_pointer_cast<NightCatalog>(selected);
+    auto &record = repaired->records_[0];
+    if (!record.unresolved_history || !record.timezone_offset_valid ||
+        record.timezone_offset_minutes < 720 || record.timezone_offset_minutes > 1199 ||
+        (record.source_flags & (NIGHT_CATALOG_SOURCE_EDF | NIGHT_CATALOG_SOURCE_LOCAL_HISTORY)) ||
+        !SleepDayId::from_epoch_days(old_day.epoch_days() - 1, record.sleep_day)) return {};
+
+    record.timezone_offset_minutes -= 1440;
+    record.unresolved_history = false;
+    record.source_flags &= ~NIGHT_CATALOG_SOURCE_TIME_CONFLICT;
+    if ((record.source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
+        record.sources_external = false;
+    }
+
+    char path[AC_STORAGE_PATH_MAX] = {};
+    if (!report_fallback_artifact_path(record.sleep_day, path, sizeof(path))) return {};
+    for (size_t i = 0; i < repaired->fallback_file_count_; ++i) {
+        auto &file = repaired->fallback_files_[i];
+        if (strlen(path) != file.path_length) return {};
+        memcpy(repaired->paths_ + file.path_offset, path, file.path_length + 1);
+    }
+
+    record.source_revision = SourceRevision(calculate_revision(*repaired, record));
+    return repaired;
 }
 
 std::shared_ptr<const NightCatalog> NightCatalogBuilder::upsert_night(

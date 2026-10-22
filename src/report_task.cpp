@@ -49,6 +49,8 @@ enum class ReportTaskCommandKind : uint8_t {
     MaterializeNight,
     Rebuild,
     Period,
+    PreviewDates,
+    RepairDates,
 };
 
 struct ReportTaskCommand {
@@ -347,6 +349,16 @@ struct ReportTask::Runtime {
 
         size_t selected = SIZE_MAX;
         for (size_t i = 0; i < command_count; ++i) {
+            if (commands[i].kind == ReportTaskCommandKind::PreviewDates ||
+                commands[i].kind == ReportTaskCommandKind::RepairDates) {
+                if (!catalog || local_background_work_blocked() ||
+                    catalog_load_pending || store_catalog_load_pending ||
+                    catalog_store.active() || pending_catalog_save ||
+                    catalog_refresh.active() || store_catalog_loader.status().active() ||
+                    capture_sources.active() || period_running || rebuild.active ||
+                    engine.status().state != ReportEngineState::Idle || engine.status().queued ||
+                    signal_tile_backfill_started || generation_cleanup.deleting()) continue;
+            }
             if (commands[i].kind == ReportTaskCommandKind::Period &&
                 (period_running || !catalog || store_catalog_load_pending ||
                  store_catalog_loader.status().active() || activity.ota_install_active)) continue;
@@ -2124,6 +2136,7 @@ struct ReportTask::Runtime {
         const auto &store_status = store_catalog_loader.status();
 
         ReportTaskDiagnosticSnapshot out;
+        out.date_repair = date_repair.status();
         out.task_started = task_started;
         out.catalog_nights = catalog ? catalog->size() : 0;
         out.materialized_nights = store_catalog ? store_catalog->size() : 0;
@@ -2259,11 +2272,20 @@ struct ReportTask::Runtime {
         control = next;
         published_operational = next_operational;
         published_diagnostic = next_diagnostic;
+        published_date_preview = date_repair.preview();
         published_completion = engine_status.last_completion;
         unlock();
     }
 
     bool poll_storage_pause(uint32_t now_ms) {
+        if (date_repair.active()) {
+            const bool worked = date_repair.poll();
+            publish_status();
+            return worked;
+        }
+        if (date_repair.status().durable && date_repair.status().state == ReportDateRepairState::Failed) {
+            return false;
+        }
         if (!storage_pause_started) {
             if (!lock(0)) return true;
 
@@ -2371,6 +2393,11 @@ struct ReportTask::Runtime {
     NightCatalogStoreService capture_sources;
     ReportSignalStoreCatalogLoadService store_catalog_loader;
     ReportGenerationCleanup generation_cleanup;
+    ReportDateRepairService date_repair;
+    bool date_repair_observed = false;
+    std::shared_ptr<const LargeByteBuffer> published_date_preview;
+    std::shared_ptr<const NightCatalog> date_preview_catalog;
+    std::shared_ptr<const ReportSignalStoreCatalog> date_preview_store;
     ReportPeriodService period_service;
     ReportPeriodKey period_key;
     bool period_running = false;
@@ -2565,6 +2592,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->period_service.begin(read_port, write_port);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port);
+        runtime_->date_repair.begin(read_port, write_port, range_write_port, scan_port, *delete_port);
     }
     runtime_->signal_tile_backfill.begin(read_port, range_write_port, write_port);
     runtime_->engine.begin(read_port, write_port, spool_port, range_write_port);
@@ -2647,6 +2675,21 @@ OperationAdmission ReportTask::request_rebuild(
     command.last_day = last_day;
     command.generation = generation;
     return runtime_->enqueue(command);
+}
+
+OperationAdmission ReportTask::request_date_repair(bool apply) {
+    if (!runtime_ || !runtime_->initialized) return OperationAdmission::Rejected;
+    ReportTaskCommand command;
+    command.kind = apply ? ReportTaskCommandKind::RepairDates : ReportTaskCommandKind::PreviewDates;
+    command.generation = 1;
+    return runtime_->enqueue(command);
+}
+
+std::shared_ptr<const LargeByteBuffer> ReportTask::date_repair_preview() const {
+    if (!runtime_ || !runtime_->lock(0)) return {};
+    auto preview = runtime_->published_date_preview;
+    runtime_->unlock();
+    return preview;
 }
 
 ReportRebuildStatus ReportTask::rebuild_status() const {
@@ -2977,13 +3020,54 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
     worked = runtime.apply_pending_activity() || worked;
+    // A committed repair journal owns report files across reboot. No catalog
+    // refresh, build, or cleanup may run between its individual publications.
+    if (runtime.date_repair.active() || (runtime.date_repair.status().durable &&
+        runtime.date_repair.status().state == ReportDateRepairState::Failed)) {
+        worked = runtime.generation_cleanup.poll(false, now_ms) || worked;
+        if (runtime.storage_status && runtime.storage_status->mounted() &&
+            !runtime.activity.therapy_active && !runtime.activity.ota_install_active &&
+            !runtime.activity.realtime_stream_active && !runtime.activity.export_work_claimed &&
+            !runtime.activity.manual_update_check_active) {
+            worked = runtime.date_repair.poll() || worked;
+        }
+        runtime.publish_status();
+        return worked;
+    }
+    if (runtime.date_repair.status().state == ReportDateRepairState::Complete &&
+        !runtime.date_repair_observed) {
+        runtime.date_repair_observed = true;
+        runtime.date_preview_catalog.reset();
+        runtime.date_preview_store.reset();
+        runtime.catalog_store.forget_media();
+        runtime.catalog_load_pending = true;
+        runtime.store_catalog_load_pending = true;
+        runtime.store_catalog_loader.reset();
+        for (auto &entry : runtime.period_cache) entry.reset();
+        runtime.period_service.clear_cache();
+        runtime.schedule_reconcile(now_ms, false);
+    }
     worked = runtime.apply_capture_session() || worked;
     const bool startup_allowed = runtime.startup_idle_allowed(now_ms);
     const bool local_blocked = runtime.local_background_work_blocked();
 
     ReportTaskCommand command;
     if (runtime.pop(command)) {
-        if (command.kind == ReportTaskCommandKind::Period) {
+        if (command.kind == ReportTaskCommandKind::PreviewDates ||
+            command.kind == ReportTaskCommandKind::RepairDates) {
+            const bool apply = command.kind == ReportTaskCommandKind::RepairDates;
+            const bool accepted = apply
+                ? runtime.date_preview_catalog == runtime.catalog &&
+                  runtime.date_preview_store == runtime.store_catalog && runtime.date_repair.apply()
+                : runtime.date_repair.start(runtime.catalog);
+            if (accepted && !apply) {
+                runtime.date_preview_catalog = runtime.catalog;
+                runtime.date_preview_store = runtime.store_catalog;
+            }
+            if (!accepted) runtime.record_failure("repair_dates", "date_repair_not_ready", {});
+            runtime.publish_status();
+            return true;
+        } else if (command.kind == ReportTaskCommandKind::Period) {
             const auto revision = report_period_revision(
                 runtime.period_key, *runtime.catalog, runtime.store_catalog.get());
             if (!runtime.period_service.start(runtime.period_key, runtime.catalog, runtime.store_catalog, revision)) {

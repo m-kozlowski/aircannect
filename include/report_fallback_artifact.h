@@ -83,6 +83,9 @@ public:
         MaxSections * SectionBytes;
     static constexpr size_t MaxFileBytes = 4 * 1024 * 1024;
 
+    static std::shared_ptr<const LargeByteBuffer> repair_date(
+        const uint8_t *bytes, size_t length, const ReportFallbackArtifactInfo &accepted);
+
     static bool inspect_header(const uint8_t *header,
                                size_t header_length,
                                ReportFallbackArtifactInfo &info);

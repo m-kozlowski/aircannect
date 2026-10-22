@@ -11,6 +11,7 @@
 #include "night_catalog_store_service.h"
 #include "report_catalog_json.h"
 #include "report_period.h"
+#include "report_date_repair.h"
 #include "report_engine.h"
 #include "report_signal_store.h"
 #include "report_signal_store_catalog.h"
@@ -107,6 +108,7 @@ struct ReportTaskFailure {
 };
 
 struct ReportTaskDiagnosticSnapshot {
+    ReportDateRepairStatus date_repair;
     bool task_started = false;
     ReportTaskState state = ReportTaskState::Stopped;
     size_t commands_queued = 0;
@@ -254,6 +256,8 @@ public:
                                        SleepDayId last_day,
                                        uint32_t generation);
     ReportRebuildStatus rebuild_status() const;
+    OperationAdmission request_date_repair(bool apply);
+    std::shared_ptr<const LargeByteBuffer> date_repair_preview() const;
     OperationAdmission request_period(ReportPeriodKey key);
     std::shared_ptr<const ReportPeriodResult> period_snapshot(ReportPeriodKey key) const;
     std::shared_ptr<const ReportPeriodResult> period_completion(uint32_t &serial) const;
