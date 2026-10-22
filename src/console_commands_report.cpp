@@ -230,6 +230,30 @@ bool ReportConsoleCommands::execute(const String &command,
     String rest = rest_arg;
     rest.trim();
     rest.toLowerCase();
+    if (rest == "repair_dates" || rest == "repair_dates preview" ||
+        rest == "repair_dates apply") {
+        if (rest != "repair_dates") {
+            const auto admission = report_.request_date_repair(rest == "repair_dates apply");
+            out.println(admission == OperationAdmission::Accepted
+                ? "[REPORT dates] requested" : "[REPORT dates] request rejected or busy");
+            return true;
+        }
+        ReportTaskDiagnosticSnapshot diagnostic;
+        if (!report_.diagnostic_snapshot(diagnostic)) {
+            out.println("[REPORT dates] status temporarily unavailable");
+            return true;
+        }
+        const auto &status = diagnostic.date_repair;
+        static const char *const states[] = {"idle", "checking_journal", "scanning", "planning",
+            "preview", "saving_plan", "backing_up", "installing", "complete", "failed"};
+        out.printf("[REPORT dates] state=%s candidates=%lu restored=%lu archived=%lu files=%lu error=%s\n",
+            states[static_cast<unsigned>(status.state)], static_cast<unsigned long>(status.candidates),
+            static_cast<unsigned long>(status.restored), static_cast<unsigned long>(status.archived),
+            static_cast<unsigned long>(status.completed_files), status.error[0] ? status.error : "--");
+        const auto preview = report_.date_repair_preview();
+        if (preview) out.write(preview->data(), preview->size());
+        return true;
+    }
     if (!rest.length() || rest == "status") {
         print_report_status(out, report_);
         return true;
@@ -271,7 +295,7 @@ bool ReportConsoleCommands::execute(const String &command,
         print_unknown_command(
             out, "REPORT",
             "report, report status, report list [latest|YYYYMMDD], "
-            "report rebuild latest|YYYYMMDD [YYYYMMDD]");
+            "report rebuild latest|YYYYMMDD [YYYYMMDD], report repair_dates [preview|apply]");
         return true;
     }
 
