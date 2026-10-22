@@ -100,15 +100,20 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
              static_cast<unsigned long>(generation));
     json += number;
     json += ",\"nights\":[";
+    bool first = true;
     for (size_t i = 0; i < catalog.size(); ++i) {
         const NightCatalogRecord *night = catalog.record(i);
-        if (!night) continue;
+        if (!night || night->unresolved_history) continue;
 
-        if (i) json += ',';
+        if (!first) json += ',';
+        first = false;
         char day[9] = {};
         night->sleep_day.format_yyyymmdd(day, sizeof(day));
         const ReportSignalStoreCatalogRecord *stored = store
             ? store->find(night->sleep_day) : nullptr;
+        if (stored && (stored->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
+            stored = nullptr;
+        }
         const bool materialized = stored &&
             stored->source_revision == night->source_revision;
 
@@ -135,6 +140,8 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
         json += number;
         json += ",\"materialized\":";
         json += materialized ? "true" : "false";
+        json += ",\"time_conflict\":";
+        json += (night->source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT) ? "true" : "false";
         json += ",\"active\":";
         json += (night->source_flags & NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE)
             ? "true" : "false";

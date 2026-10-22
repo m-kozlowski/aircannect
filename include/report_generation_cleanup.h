@@ -54,6 +54,8 @@ private:
     size_t night_cursor_ = 0;
     SleepDayId day_;
     uint32_t disk_generation_ = 0;
+    uint32_t pinned_generation_ = 0;
+    bool pin_checked_ = false;
     char base_path_[AC_STORAGE_PATH_MAX] = {};
 
     // Current scan and deletion

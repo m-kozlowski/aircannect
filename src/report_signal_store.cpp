@@ -193,15 +193,17 @@ bool report_signal_store_track_valid(
 
 bool report_signal_store_night_path(SleepDayId sleep_day,
                                     char *out,
-                                    size_t out_size) {
+                                    size_t out_size,
+                                    bool retained_history) {
     char day[9] = {};
     if (!out || !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
 
     const int written = snprintf(out,
                                  out_size,
-                                 "%s/%s/night.meta",
+                                 "%s/%s/%s",
                                  REPORT_SIGNAL_STORE_ROOT,
-                                 day);
+                                 day,
+                                 retained_history ? "clock-conflict.meta" : "night.meta");
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 

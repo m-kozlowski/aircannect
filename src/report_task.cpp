@@ -1546,6 +1546,11 @@ struct ReportTask::Runtime {
         }
 
         const NightCatalogRecord *night = catalog->record(idle_cursor);
+        if (night && night->unresolved_history) {
+            ++idle_cursor;
+            record_failure("build_background", "report_history_time_unresolved", night->sleep_day);
+            return true;
+        }
         if (!night || !night->sleep_day.valid() ||
             !night->source_revision.valid()) {
             ++idle_cursor;
@@ -2152,6 +2157,12 @@ struct ReportTask::Runtime {
         out.catalog_files_seen = catalog_status.files_seen;
         out.catalog_files_indexed = catalog_status.files_indexed;
         out.catalog_sessions = catalog_status.sessions;
+        out.summary_rejected_records = summary_acquisition.status().rejected_records;
+        for (size_t i = 0; catalog && i < catalog->size(); ++i) {
+            const auto &night = *catalog->record(i);
+            if (night.source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT) ++out.time_conflict_nights;
+            if (night.unresolved_history) ++out.unresolved_history_nights;
+        }
         copy_cstr(out.catalog_error, sizeof(out.catalog_error), catalog_status.error);
 
         out.store_catalog_state = store_status.state;
@@ -2809,10 +2820,15 @@ ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
         return out;
     }
     out.source_revision = source->source_revision;
+    if (source->unresolved_history) {
+        out.state = ReportStoreQueryState::HistoryTimeUnresolved;
+        return out;
+    }
 
     const ReportSignalStoreCatalogRecord *stored = state->store_catalog
         ? state->store_catalog->find(sleep_day) : nullptr;
-    if (!stored || !stored->metadata) {
+    if (!stored || !stored->metadata ||
+        (stored->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
         out.state = ReportStoreQueryState::StorePending;
         return out;
     }

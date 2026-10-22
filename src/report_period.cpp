@@ -170,6 +170,10 @@ struct ReportPeriodService::Runtime {
     void accept_metadata(SleepDayId day) {
         saved = store ? store->find(day) : nullptr;
         const auto *source = catalog->find(day);
+        if (saved && (saved->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
+            saved = nullptr;
+        }
+        if (source && source->unresolved_history) source = nullptr;
         ReportNightMetrics m;
         const auto *night = saved ? &saved->view.night : nullptr;
         if (night) m = night->metrics;

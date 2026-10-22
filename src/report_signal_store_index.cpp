@@ -24,7 +24,8 @@ constexpr uint8_t EVENT_MAGIC[8] = {
 };
 constexpr uint32_t KNOWN_NIGHT_FLAGS =
     REPORT_SIGNAL_STORE_NIGHT_SUMMARY_AVAILABLE |
-    REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION;
+    REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION |
+    REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED;
 constexpr size_t EVENT_BITMAP_OFFSET = 48;
 
 void put_i32(uint8_t *out, int32_t value) {
@@ -391,6 +392,7 @@ bool ReportSignalStoreNightCodec::decode(
     if (!((version == 2 && header_bytes == 224) ||
           (version == 3 && header_bytes == 232) ||
           (version == 4 && header_bytes == 520) ||
+          (version == 5 && header_bytes == HeaderBytes) ||
           (version == Version && header_bytes == HeaderBytes)) ||
         length < header_bytes) {
         return false;
@@ -444,6 +446,13 @@ bool ReportSignalStoreNightCodec::decode(
     night.track_count = get_le16(bytes + 66);
     night.available_event_mask = bytes[68];
     night.source_flags = bytes[69];
+    if (version < 6 && night.timezone_offset_minutes >= 720 &&
+        (night.source_flags & (NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
+                               NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK)) &&
+        !(night.source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                NIGHT_CATALOG_SOURCE_LOCAL_HISTORY))) {
+        night.flags |= REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED;
+    }
     night.checkpoint_slot = bytes[70];
     if (night.checkpoint_slot > 2) return false;
     night.event_count = get_le32(bytes + 72);
@@ -583,6 +592,7 @@ ReportSignalStoreMetadata ReportSignalStoreNightCodec::reject_revision(
     put_le16(bytes + 10, HeaderBytes);
     put_le32(bytes + 12, static_cast<uint32_t>(total_bytes));
     put_le64(bytes + 224, revision.value());
+    put_le32(bytes + 56, view.night.flags);
     encode_night_details(bytes, view.night);
     memcpy(bytes + HeaderBytes, view.session_records, records_size);
 

@@ -526,6 +526,9 @@ bool handle_query_state(AsyncWebServerRequest *request,
         case ReportStoreQueryState::NightMissing:
             send_json_error(request, 404, "no_such_night");
             return false;
+        case ReportStoreQueryState::HistoryTimeUnresolved:
+            send_json_error(request, 409, "report_history_time_unresolved");
+            return false;
         case ReportStoreQueryState::StorePending:
             return begin_missing_night(
                 request, report_task, sleep_day, generation);

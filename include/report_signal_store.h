@@ -159,6 +159,7 @@ public:
 enum ReportSignalStoreNightFlag : uint32_t {
     REPORT_SIGNAL_STORE_NIGHT_SUMMARY_AVAILABLE = 1u << 0,
     REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION = 1u << 1,
+    REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED = 1u << 2,
 };
 
 struct ReportSignalStoreNight {
@@ -254,7 +255,7 @@ private:
 class ReportSignalStoreNightCodec {
 public:
     static constexpr size_t MaxBytes = 64 * 1024;
-    static constexpr uint16_t Version = 5;
+    static constexpr uint16_t Version = 6;
     static constexpr size_t ExtraStatisticsOffset = 520;
     static constexpr size_t LeakDurationOffset = ExtraStatisticsOffset +
         (ReportCalculatedMetrics::Count - 8) * 24;
@@ -329,7 +330,8 @@ public:
 
 bool report_signal_store_night_path(SleepDayId sleep_day,
                                     char *out,
-                                    size_t out_size);
+                                    size_t out_size,
+                                    bool retained_history = false);
 bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
                                      ReportSignalStoreLevel level,
                                      char *out,

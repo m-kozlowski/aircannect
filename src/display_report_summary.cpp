@@ -11,7 +11,7 @@ const NightCatalogRecord *latest_record(const NightCatalog &catalog) {
     const NightCatalogRecord *latest = nullptr;
     for (size_t i = 0; i < catalog.size(); ++i) {
         const NightCatalogRecord *record = catalog.record(i);
-        if (!record || !record->sleep_day.valid()) continue;
+        if (!record || record->unresolved_history || !record->sleep_day.valid()) continue;
         if (!latest || latest->sleep_day < record->sleep_day) {
             latest = record;
         }
@@ -78,7 +78,7 @@ DisplayReportSummary build_display_report_summary(
     uint32_t leak_95_minutes = 0;
     for (size_t i = 0; i < catalog.size(); ++i) {
         const NightCatalogRecord *record = catalog.record(i);
-        if (!record || !record->sleep_day.valid() ||
+        if (!record || record->unresolved_history || !record->sleep_day.valid() ||
             record->sleep_day.epoch_days() < first_day ||
             latest->sleep_day < record->sleep_day) {
             continue;

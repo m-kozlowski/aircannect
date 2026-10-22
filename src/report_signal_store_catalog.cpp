@@ -78,7 +78,8 @@ bool ReportSignalStoreCatalog::ready(
     SleepDayId sleep_day,
     SourceRevision source_revision) const {
     const ReportSignalStoreCatalogRecord *record = find(sleep_day);
-    return record && record->source_revision == source_revision;
+    return record && record->source_revision == source_revision &&
+        !(record->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED);
 }
 
 std::shared_ptr<const ReportSignalStoreCatalog>

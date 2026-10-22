@@ -2931,7 +2931,7 @@
       if (!((version === 2 && headerBytes === 224) ||
             (version === 3 && headerBytes === 232) ||
             (version === 4 && headerBytes === 520) ||
-            (version === 5 && headerBytes === 888)) ||
+            ((version === 5 || version === 6) && headerBytes === 888)) ||
           buffer.byteLength < headerBytes) {
         return invalid;
       }
@@ -3033,6 +3033,12 @@
       const missingEventMask = view.getUint8(93);
       const availableEventMask = view.getUint8(68);
       const sourceFlags = view.getUint8(69);
+      // Reject ambiguous old browser copies as well as flagged server data.
+      if ((view.getUint32(56, true) & 4) ||
+          (version < 6 && view.getInt32(60, true) >= 720 &&
+           (sourceFlags & (4 | 8)) && !(sourceFlags & (1 | 64)))) {
+        return {valid: false, error: "report_history_time_unresolved"};
+      }
       const metricValid = view.getUint32(96, true);
       const metricStr = view.getUint32(100, true);
       const metricSummary = view.getUint32(104, true);

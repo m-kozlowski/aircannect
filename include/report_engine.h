@@ -94,6 +94,7 @@ private:
     enum class ActivePhase : uint8_t {
         Idle,
         LoadingMetadata,
+        ProtectingHistory,
         LoadingSources,
         LoadingFallbackMetadata,
         LoadingCheckpoint,
@@ -107,6 +108,7 @@ private:
     bool start_next(uint32_t now_ms);
     bool start_request(ReportArtifactRequest request, uint32_t now_ms);
     bool finish_metadata_load(uint32_t now_ms);
+    bool protect_history(uint32_t now_ms);
     bool start_known_request(const ReportSignalStoreCatalogRecord *stored,
                              uint32_t now_ms);
     bool finish_sources_load(uint32_t now_ms);
@@ -136,6 +138,9 @@ private:
     ReportSignalStoreService store_;
 
     StorageBoundedFileLoader metadata_loader_;
+    StorageAtomicWritePort *history_writes_ = nullptr;
+    OperationTicket history_write_;
+    bool history_missing_ = false;
     ReportSignalStoreMetadata previous_metadata_;
     ReportSignalStoreMetadata retained_metadata_;
     ReportBuildCheckpointInput previous_checkpoint_;

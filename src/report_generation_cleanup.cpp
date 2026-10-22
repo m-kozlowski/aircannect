@@ -108,7 +108,8 @@ bool ReportGenerationCleanup::protected_generation(uint32_t generation) const {
         const auto *record = catalog.find(day_);
         return record && record->generation == generation;
     };
-    if (generation == disk_generation_ || (catalog_ && protects(*catalog_))) {
+    if (generation == disk_generation_ || generation == pinned_generation_ ||
+        (catalog_ && protects(*catalog_))) {
         return true;
     }
     for (const auto &weak : retired_) {
@@ -128,6 +129,8 @@ bool ReportGenerationCleanup::discard_scan() {
     entry_cursor_ = 0;
     metadata_.reset();
     disk_generation_ = 0;
+    pinned_generation_ = 0;
+    pin_checked_ = false;
     day_ = {};
     waiting_for_readers_ = false;
     return true;
@@ -157,6 +160,8 @@ void ReportGenerationCleanup::finish_night(const char *error) {
     entries_.reset();
     entry_cursor_ = 0;
     disk_generation_ = 0;
+    pinned_generation_ = 0;
+    pin_checked_ = false;
     day_ = {};
     waiting_for_readers_ = false;
     if (night_cursor_ < pending_.size()) ++night_cursor_;
@@ -220,7 +225,7 @@ bool ReportGenerationCleanup::poll(bool allowed, uint32_t now_ms) {
         }
         if (protected_generation(generation)) {
             const auto *current = catalog_->find(day_);
-            if (generation != disk_generation_ &&
+            if (generation != disk_generation_ && generation != pinned_generation_ &&
                 (!current || current->generation != generation)) {
                 waiting_for_readers_ = true;
             }
@@ -248,16 +253,35 @@ bool ReportGenerationCleanup::poll(bool allowed, uint32_t now_ms) {
 
     if (metadata_.status().active()) return metadata_.poll();
     if (metadata_.status().terminal()) {
+        const bool pin = disk_generation_ != 0;
+        const bool missing = metadata_.status().state == StorageBoundedFileLoadState::Missing;
         auto bytes = metadata_.take_completed();
         ReportSignalStoreNightView view;
-        if (!bytes || !ReportSignalStoreNightCodec::decode(
-                bytes->data(), bytes->size(), view) || view.night.sleep_day != day_) {
+        const bool valid = bytes && ReportSignalStoreNightCodec::decode(
+            bytes->data(), bytes->size(), view) && view.night.sleep_day == day_;
+        if (!valid && !(pin && missing)) {
             finish_night(metadata_.status().error[0]
                 ? metadata_.status().error : "metadata_unavailable_or_invalid");
             return true;
         }
-        disk_generation_ = view.night.generation;
+        if (pin) {
+            pinned_generation_ = valid ? view.night.generation : 0;
+            pin_checked_ = true;
+        } else {
+            disk_generation_ = view.night.generation;
+        }
         metadata_.reset();
+    }
+
+    if (disk_generation_ && !pin_checked_) {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        report_signal_store_night_path(day_, path, sizeof(path), true);
+        if (metadata_.start(path, ReportSignalStoreNightCodec::MaxBytes,
+                            operation_generation_, StorageReadLane::Maintenance) ==
+            OperationAdmission::Rejected) {
+            finish_night("history_metadata_read_rejected");
+        }
+        return true;
     }
 
     if (disk_generation_) {

@@ -139,6 +139,12 @@ void print_report_stats(Print &out, const ReportTask &task) {
     out.print(static_cast<unsigned long>(status.catalog_files_seen));
     out.print(" sessions=");
     out.print(static_cast<unsigned long>(status.catalog_sessions));
+    out.print(" time_conflicts=");
+    out.print(static_cast<unsigned long>(status.time_conflict_nights));
+    out.print(" unresolved_history=");
+    out.print(static_cast<unsigned long>(status.unresolved_history_nights));
+    out.print(" summary_rejected=");
+    out.print(static_cast<unsigned long>(status.summary_rejected_records));
     out.print(" generation=");
     out.print(static_cast<unsigned long>(status.catalog_generation));
     out.print('/');

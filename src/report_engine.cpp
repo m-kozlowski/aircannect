@@ -125,6 +125,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
     store_.begin(read_port, range_write_port, write_port);
     builder_.begin(store_);
     metadata_loader_.begin(read_port);
+    history_writes_ = &write_port;
     sources_loader_.begin(read_port);
 }
 
@@ -279,6 +280,9 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
     if (phase_ == ActivePhase::Idle) return worked;
 
     switch (phase_) {
+        case ActivePhase::ProtectingHistory:
+            worked = protect_history(now_ms) || worked;
+            break;
         case ActivePhase::LoadingMetadata:
             worked = metadata_loader_.poll() || worked;
             if (metadata_loader_.status().terminal()) {
@@ -357,6 +361,7 @@ ReportEngineStatus ReportEngine::status() const {
     out.last_completion = last_completion_;
 
     switch (phase_) {
+        case ActivePhase::ProtectingHistory:
         case ActivePhase::LoadingMetadata:
         case ActivePhase::LoadingSources:
         case ActivePhase::LoadingFallbackMetadata:
@@ -503,6 +508,30 @@ bool ReportEngine::finish_metadata_load(uint32_t now_ms) {
 bool ReportEngine::start_known_request(
     const ReportSignalStoreCatalogRecord *stored,
     uint32_t now_ms) {
+    const auto *source = catalog_->find(active_request_.artifact.sleep_day);
+    if (source && source->unresolved_history) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, "report_history_time_unresolved");
+        return true;
+    }
+
+    if (stored && (stored->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
+        active_store_generation_ = increment_generation(stored->generation);
+        retained_metadata_ = {stored->metadata, stored->view};
+        metadata_loader_.reset();
+        char path[AC_STORAGE_PATH_MAX] = {};
+        report_signal_store_night_path(stored->sleep_day, path, sizeof(path), true);
+        if (metadata_loader_.start(path, ReportSignalStoreNightCodec::MaxBytes,
+                                  active_store_generation_, StorageReadLane::Report) !=
+            OperationAdmission::Accepted) {
+            complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                            ReportExecutorError::None, "report_history_read_rejected");
+        } else {
+            phase_ = ActivePhase::ProtectingHistory;
+        }
+        return true;
+    }
+
     if (!active_request_.force_rebuild && stored &&
         stored->source_revision == active_request_.artifact.source_revision) {
         const uint32_t generation = stored->generation;
@@ -524,7 +553,6 @@ bool ReportEngine::start_known_request(
         return retain_incomplete_report();
     }
 
-    const auto *source = catalog_->find(active_request_.artifact.sleep_day);
     // A fallback-only report can also have an append checkpoint. Keep its
     // partial historical coverage when EDF adds a later session to the night.
     const bool edf_append = source && stored &&
@@ -534,6 +562,64 @@ bool ReportEngine::start_known_request(
     previous_metadata_ = !active_request_.force_rebuild && edf_append
         ? retained_metadata_ : ReportSignalStoreMetadata{};
     if (previous_metadata_.metadata) active_store_generation_ = stored->generation;
+    return start_build(now_ms);
+}
+
+bool ReportEngine::protect_history(uint32_t now_ms) {
+    if (metadata_loader_.status().active()) return metadata_loader_.poll();
+
+    const auto fail = [&](const char *error) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, error);
+        return true;
+    };
+
+    if (!history_missing_ && !history_write_.valid()) {
+        const auto state = metadata_loader_.status().state;
+        if (state == StorageBoundedFileLoadState::Ready) {
+            const auto bytes = metadata_loader_.take_completed();
+            const auto &original = retained_metadata_.metadata;
+            if (!bytes || bytes->size() != original->size() ||
+                memcmp(bytes->data(), original->data(), bytes->size()) != 0) {
+                return fail("report_history_already_contains_other_data");
+            }
+        } else if (state == StorageBoundedFileLoadState::Missing) {
+            history_missing_ = true;
+        } else {
+            return fail("report_history_read_failed");
+        }
+        metadata_loader_.reset();
+    }
+
+    if (history_missing_ && !history_write_.valid()) {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        report_signal_store_night_path(active_request_.artifact.sleep_day,
+                                      path, sizeof(path), true);
+        StorageAtomicWriteCommand command;
+        command.path = path;
+        command.bytes = retained_metadata_.metadata;
+        command.generation = active_store_generation_;
+        command.lane = StorageAtomicWriteLane::Foreground;
+        const auto submitted = history_writes_->request_write(command);
+        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (!submitted.accepted()) return fail("report_history_write_rejected");
+        history_write_ = submitted.ticket;
+        return true;
+    }
+
+    if (history_write_.valid()) {
+        StorageAtomicWriteCompletion completion;
+        if (!history_writes_->take_completion(history_write_, completion)) return false;
+        history_write_ = {};
+        if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+            completion.bytes_written != retained_metadata_.metadata->size()) {
+            return fail("report_history_write_failed");
+        }
+    }
+
+    history_missing_ = false;
+    retained_metadata_ = {};
+    published_ = {};
     return start_build(now_ms);
 }
 
@@ -646,7 +732,8 @@ bool ReportEngine::start_build(
     }
 
     const auto *source_night = sources->find(active_request_.artifact.sleep_day);
-    if (!(source_night->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
+    if (!(source_night->source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                       NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) &&
         !fallback_checked_) {
         char path[AC_STORAGE_PATH_MAX] = {};
         metadata_loader_.reset();
@@ -1137,6 +1224,13 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
 
 void ReportEngine::cancel_active_work() {
     switch (phase_) {
+        case ActivePhase::ProtectingHistory:
+            if (history_write_.valid()) history_writes_->abandon(history_write_);
+            history_write_ = {};
+            metadata_loader_.cancel();
+            complete_active(OperationOutcome::cancelled(), ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            break;
         case ActivePhase::LoadingSources:
             sources_loader_.cancel();
             complete_active(OperationOutcome::cancelled(),
@@ -1194,6 +1288,9 @@ void ReportEngine::complete_active(OperationOutcome outcome,
 }
 
 void ReportEngine::reset_active() {
+    if (history_write_.valid()) history_writes_->abandon(history_write_);
+    history_write_ = {};
+    history_missing_ = false;
     metadata_loader_.reset();
     (void)sources_loader_.take_snapshot();
     sources_loader_.cancel();

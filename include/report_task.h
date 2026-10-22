@@ -145,6 +145,9 @@ struct ReportTaskDiagnosticSnapshot {
     uint32_t catalog_files_seen = 0;
     uint32_t catalog_files_indexed = 0;
     uint32_t catalog_sessions = 0;
+    uint32_t time_conflict_nights = 0;
+    uint32_t unresolved_history_nights = 0;
+    uint32_t summary_rejected_records = 0;
     char catalog_error[AC_STORAGE_ERROR_MAX] = {};
 
     ReportSignalStoreCatalogLoadState store_catalog_state =
@@ -159,6 +162,7 @@ enum class ReportStoreQueryState : uint8_t {
     Unavailable,
     CatalogPending,
     NightMissing,
+    HistoryTimeUnresolved,
     StorePending,
     TrackMissing,
     InvalidRange,
