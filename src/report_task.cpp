@@ -2136,6 +2136,8 @@ struct ReportTask::Runtime {
         const auto &store_status = store_catalog_loader.status();
 
         ReportTaskDiagnosticSnapshot out;
+        out.summary_archive = summary_archive.status();
+        out.summary_archive_drops = summary_archive_drops.load();
         out.date_repair = date_repair.status();
         out.task_started = task_started;
         out.catalog_nights = catalog ? catalog->size() : 0;
@@ -2298,6 +2300,9 @@ struct ReportTask::Runtime {
             period_latest.reset();
             period_completed.reset();
             for (auto &failure : failures) failure = {};
+            summary_archive_drops += pending_summary_count;
+            pending_summary_count = 0;
+            for (auto &observation : pending_summary) observation = {};
             unlock();
 
 #pragma GCC diagnostic push
@@ -2314,6 +2319,8 @@ struct ReportTask::Runtime {
             catalog_store.forget_media();
             capture_sources.forget_media();
             summary_acquisition.cancel();
+            if (summary_archive.status().active) ++summary_archive_drops;
+            summary_archive.forget_media();
             spool_availability_probe.cancel();
             signal_tile_backfill.reset();
             store_catalog_loader.cancel();
@@ -2488,6 +2495,12 @@ struct ReportTask::Runtime {
 
     StorageStatusPort *storage_status = nullptr;
 
+    SummaryArchive summary_archive;
+    SummaryObservation pending_summary[2];
+    size_t pending_summary_count = 0;
+    std::atomic<uint32_t> summary_archive_drops{0};
+    bool summary_media_available = false;
+
     bool store_catalog_load_pending = false;
     uint32_t store_catalog_load_generation = 0;
     uint32_t store_catalog_load_retry_at_ms = 0;
@@ -2588,6 +2601,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_store.begin(read_port, write_port);
     runtime_->capture_sources.begin(read_port);
     runtime_->summary_acquisition.begin(spool_port);
+    runtime_->summary_archive.begin(read_port, range_write_port, write_port);
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
     runtime_->period_service.begin(read_port, write_port);
@@ -2785,6 +2799,25 @@ void ReportTask::publish_activity(const ActivitySnapshot &activity) {
 
 void ReportTask::publish_capture_session(const EdfSessionMetadata &metadata) {
     if (runtime_) runtime_->publish_capture_session(metadata);
+}
+
+bool ReportTask::publish_summary_observation(SummaryObservation observation) {
+    if (!runtime_ || !runtime_->initialized) return false;
+    if ((!observation.payload && !observation.empty_payload) || observation.device_serial.empty() ||
+        runtime_->storage_suspend_requested.load() || !runtime_->lock(0)) {
+        ++runtime_->summary_archive_drops;
+        return false;
+    }
+
+    if (runtime_->pending_summary_count == 2) {
+        runtime_->unlock();
+        ++runtime_->summary_archive_drops;
+        return false;
+    }
+    runtime_->pending_summary[runtime_->pending_summary_count++] = std::move(observation);
+    runtime_->unlock();
+    runtime_->wake();
+    return true;
 }
 
 ReportTaskControlSnapshot ReportTask::control_snapshot() const {
@@ -3021,6 +3054,50 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
     worked = runtime.apply_pending_activity() || worked;
+
+    const bool summary_media_available = runtime.storage_status && runtime.storage_status->mounted();
+    if (runtime.summary_media_available && !summary_media_available) {
+        if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
+        runtime.summary_archive.forget_media();
+    }
+    runtime.summary_media_available = summary_media_available;
+
+    // Source preservation runs on this worker, never on RPC/main-loop dispatch.
+    // Leave archive work pending during realtime, OTA and unavailable storage.
+    if (summary_media_available &&
+        !runtime.activity.therapy_active && !runtime.activity.realtime_stream_active &&
+        !runtime.activity.ota_install_active) {
+        if (!runtime.summary_archive.status().active && runtime.lock(0)) {
+            SummaryObservation observation;
+            if (runtime.pending_summary_count) {
+                observation = std::move(runtime.pending_summary[0]);
+                runtime.pending_summary[0] = std::move(runtime.pending_summary[1]);
+                runtime.pending_summary[1] = {};
+                --runtime.pending_summary_count;
+            }
+            runtime.unlock();
+            if (!observation.device_serial.empty() &&
+                !runtime.summary_archive.start(std::move(observation)))
+                ++runtime.summary_archive_drops;
+        }
+        const bool archive_active = runtime.summary_archive.status().active;
+        worked = runtime.summary_archive.poll() || worked;
+#ifdef ARDUINO
+        const auto &archive = runtime.summary_archive.status();
+        if (archive_active && !archive.active) {
+            Log::logf(CAT_REPORT, archive.error[0] ? LOG_WARN : LOG_INFO,
+                      "Summary archive sequence=%llu records=%u changed=%u removed=%u error=%s",
+                      static_cast<unsigned long long>(archive.sequence),
+                      static_cast<unsigned>(archive.records),
+                      static_cast<unsigned>(archive.changed),
+                      static_cast<unsigned>(archive.removed),
+                      archive.error[0] ? archive.error : "--");
+        }
+#else
+        (void)archive_active;
+#endif
+    }
+
     // A committed repair journal owns report files across reboot. No catalog
     // refresh, build, or cleanup may run between its individual publications.
     if (runtime.date_repair.active() || (runtime.date_repair.status().durable &&
@@ -3311,7 +3388,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         } else {
             const OperationAdmission admitted =
                 runtime.summary_acquisition.request(
-                    runtime.pending_refresh.generation);
+                    runtime.pending_refresh.generation,
+                    runtime.pending_refresh.post_therapy ? SummaryFetchReason::PostTherapy
+                                                         : SummaryFetchReason::Catalog);
             if (admitted == OperationAdmission::Accepted) {
                 runtime.pending_refresh.summary_attempted = true;
             } else if (admitted == OperationAdmission::Rejected) {

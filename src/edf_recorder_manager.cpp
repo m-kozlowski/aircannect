@@ -2199,6 +2199,7 @@ bool EdfRecorderManager::submit_str_summary_fetch(uint32_t now_ms) {
 
     ReportSpoolFetchCommand command;
     command.source = ReportSourceId::Summary;
+    command.summary_reason = SummaryFetchReason::PostTherapy;
     command.from_ms = str_summary_.from_ms;
     command.generation = str_summary_.next_generation();
 

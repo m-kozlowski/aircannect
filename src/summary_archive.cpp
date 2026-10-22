@@ -108,6 +108,8 @@ struct SummaryArchive::Impl {
     StorageBoundedFileLoader head_loader;
     OperationTicket ticket;
     StoragePreparedRead prepared;
+    size_t prepared_used = 0;
+    size_t requested_bytes = 0;
     Phase phase = Phase::Idle;
     SummaryArchiveStatus status;
 
@@ -140,12 +142,14 @@ struct SummaryArchive::Impl {
         head_loader.reset();
         if (prepared.valid()) read->release_prepared(prepared);
         prepared = {};
+        prepared_used = 0;
         if (ticket.valid()) {
             if (phase == Phase::Write) range->abandon(ticket);
             else if (phase == Phase::Commit || phase == Phase::Initialize) atomic->abandon(ticket);
             else read->abandon(ticket);
         }
         ticket = {};
+        if (read && (phase == Phase::Header || phase == Phase::Body)) read->release_handle();
     }
 
     bool fail(const char *error) {
@@ -252,12 +256,14 @@ struct SummaryArchive::Impl {
             StorageReadCommand command;
             command.path = path + ".journal";
             command.offset = cursor + input.size();
-            command.length = std::min(CHUNK, wanted - input.size());
+            command.length = std::min<uint64_t>(CHUNK, end - command.offset);
             command.generation = generation;
             command.lane = StorageReadLane::Maintenance;
+            command.retain_handle = true;
             const auto submitted = read->request_read(command);
             if (submitted.admission == OperationAdmission::Busy) return false;
             if (!submitted.accepted()) return fail("summary_archive_read_rejected");
+            requested_bytes = command.length;
             ticket = submitted.ticket;
             return true;
         }
@@ -266,16 +272,23 @@ struct SummaryArchive::Impl {
             if (!read->take_completion(ticket, completion)) return false;
             ticket = {};
             prepared = completion.prepared;
+            prepared_used = 0;
             if (completion.outcome.disposition != OperationDisposition::Succeeded || !prepared.valid())
                 return fail("summary_archive_read_failed");
+            if (prepared.length != requested_bytes) return fail("summary_archive_read_short");
         }
         const auto view = read->view_prepared(prepared);
         if (view.state == PreparedByteReadState::Retry) return false;
-        const size_t expected = std::min(CHUNK, wanted - input.size());
-        if (!view.valid() || view.length != expected || !input.append(view.data, view.length))
+
+        if (!view.valid() || view.length != requested_bytes || prepared_used > view.length)
             return fail("summary_archive_read_short");
-        read->release_prepared(prepared);
-        prepared = {};
+        const size_t bytes = std::min(view.length - prepared_used, wanted - input.size());
+        if (!input.append(view.data + prepared_used, bytes)) return fail("summary_archive_memory");
+        prepared_used += bytes;
+        if (prepared_used == view.length) {
+            read->release_prepared(prepared);
+            prepared = {};
+        }
         return true;
     }
 
@@ -309,7 +322,7 @@ struct SummaryArchive::Impl {
             const size_t offset = item[1].as<size_t>();
             const size_t size = item[2].as<size_t>();
             if (item.size() != 3 || !decode_digest(item[0], key) || offset > raw_size ||
-                !size || size > raw_size - offset || digest(raw + offset, size) != key)
+                size > raw_size - offset || digest(raw + offset, size) != key)
                 return fail("summary_archive_record_invalid");
             blobs.emplace(key, Blob{cursor + HEADER + offset, static_cast<uint32_t>(size)});
         }
@@ -332,6 +345,7 @@ struct SummaryArchive::Impl {
         input.clear();
         if (cursor == end) {
             if (replay_sequence != sequence) return fail("summary_archive_sequence_invalid");
+            read->release_handle();
             loaded = true;
             status.sequence = sequence;
             status.committed_bytes = end;

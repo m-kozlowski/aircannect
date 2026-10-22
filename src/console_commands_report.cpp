@@ -150,6 +150,17 @@ void print_report_stats(Print &out, const ReportTask &task) {
     out.print('/');
     out.println(static_cast<unsigned long>(
         status.durable_catalog_generation));
+
+    const auto &archive = status.summary_archive;
+    out.printf("[Summary archive] active=%s sequence=%llu records=%u "
+               "changed=%u removed=%u dropped=%lu error=%s\n",
+               archive.active ? "yes" : "no",
+               static_cast<unsigned long long>(archive.sequence),
+               static_cast<unsigned>(archive.records),
+               static_cast<unsigned>(archive.changed),
+               static_cast<unsigned>(archive.removed),
+               static_cast<unsigned long>(status.summary_archive_drops),
+               archive.error[0] ? archive.error : "--");
 }
 
 bool parse_report_sleep_day(String value, SleepDayId &sleep_day) {

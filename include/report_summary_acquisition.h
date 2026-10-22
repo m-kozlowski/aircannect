@@ -29,7 +29,8 @@ class ReportSummaryAcquisition {
 public:
     void begin(ReportSpoolPort &spool_port);
 
-    OperationAdmission request(uint32_t generation);
+    OperationAdmission request(uint32_t generation,
+                               SummaryFetchReason reason = SummaryFetchReason::Catalog);
     bool poll();
     void cancel();
 

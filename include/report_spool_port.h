@@ -6,6 +6,7 @@
 #include "report_sources.h"
 #include "report_spool_types.h"
 #include "storage_path.h"
+#include "summary_fetch_reason.h"
 
 namespace aircannect {
 
@@ -23,6 +24,7 @@ struct ReportSpoolFetchCommand {
     ReportSourceId source = ReportSourceId::Summary;
     int64_t from_ms = 0;
     uint32_t generation = 0;
+    SummaryFetchReason summary_reason = SummaryFetchReason::Unspecified;
 
     bool valid() const {
         return from_ms > 0 && generation != 0;

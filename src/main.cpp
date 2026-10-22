@@ -4,6 +4,8 @@
 
 #include <new>
 #include <string.h>
+#include <sys/time.h>
+#include <esp_random.h>
 
 #include "as11_ble_recovery.h"
 #include "as11_ble_rpc_link.h"
@@ -32,6 +34,7 @@
 #include "display_snapshot.h"
 #include "display_telemetry_adapter.h"
 #include "edf_recorder_manager.h"
+#include "edf_time.h"
 #include "event_broker.h"
 #include "export_coordinator.h"
 #include "export_endpoint_config.h"
@@ -424,6 +427,69 @@ static void route_history_notification(void *context,
     (void)now_ms;
     static_cast<EdfRecorderManager *>(context)->enqueue_history_notification(
         payload);
+}
+
+static SummaryClockObservation observe_summary_clock() {
+    SummaryClockObservation out;
+    timeval now{};
+    gettimeofday(&now, nullptr);
+    out.utc_ms = static_cast<int64_t>(now.tv_sec) * 1000 + now.tv_usec / 1000;
+    out.uptime_ms = millis();
+    out.utc_valid = time_sync_service.esp_clock_valid();
+    out.ntp_synced = time_sync_service.ntp_synced();
+    out.clock_source = time_sync_service.esp_clock_source_name();
+    out.timezone = config_service.data().timezone.c_str();
+    out.timezone_offset_valid = out.utc_valid &&
+        edf_configured_timezone_offset_minutes(out.utc_ms, out.timezone_offset_min);
+
+    const auto &device = as11_device_service.state();
+    if (device.clock_valid()) {
+        out.device_time = device.device_datetime();
+        out.device_sample_age_ms = out.uptime_ms - device.clock_sample_ms();
+    }
+    out.device_offset_valid = device.clock_offset_valid();
+    out.device_minus_utc_ms = device.clock_offset_ms();
+    out.device_timezone_valid = device.timezone_offset_valid();
+    out.device_timezone_min = device.timezone_offset_minutes();
+    return out;
+}
+
+static void observe_summary_transfer(void *, const ReportSpoolFetchCommand &command,
+                                     const ReportSpoolResult *result) {
+    static SummaryObservation observation;
+    static const uint32_t boot_id = esp_random();
+    if (!result) {
+        observation = {};
+        observation.device_serial = as11_device_service.state().serial_number();
+        observation.firmware = aircannect_version();
+        observation.device_firmware = as11_device_service.state().software_identifier();
+        observation.boot_id = boot_id;
+        observation.reason = command.summary_reason;
+        observation.from_ms = command.from_ms;
+        observation.started = observe_summary_clock();
+
+        if (command.summary_reason == SummaryFetchReason::PostTherapy) {
+            const auto &session = session_manager.status();
+            observation.session_id = session.session_id;
+            observation.session_start = session.start_device_time;
+            observation.session_end = session.end_device_time;
+        }
+        return;
+    }
+
+    observation.finished = observe_summary_clock();
+    if (observation.device_serial != as11_device_service.state().serial_number())
+        observation.device_serial.clear();
+
+    observation.empty_payload = result->payload.size() == 0;
+    observation.payload = LargeByteBuffer::copy_and_freeze(
+        result->payload.data(), result->payload.size());
+
+    if (!report_task.publish_summary_observation(std::move(observation))) {
+        Log::logf(CAT_REPORT, LOG_WARN,
+                  "Summary archive observation not queued (identity, memory or storage admission)");
+    }
+    observation = {};
 }
 
 static OperationAdmission route_report_source_change(
@@ -1393,6 +1459,7 @@ void setup() {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
+    report_spool_service.set_summary_observer(observe_summary_transfer, nullptr);
     if (!StorageService::set_report_source_change_callback(
             route_report_source_change, &report_task)) {
         Log::logf(CAT_REPORT, LOG_ERROR,

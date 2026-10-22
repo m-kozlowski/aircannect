@@ -183,6 +183,7 @@ OperationAdmission EdfStrSummaryRefresh::request(SleepDayId start_day,
 
     ReportSpoolFetchCommand command;
     command.source = ReportSourceId::Summary;
+    command.summary_reason = SummaryFetchReason::ManualStr;
     command.from_ms = SUMMARY_FROM_MS;
     command.generation = generation;
 

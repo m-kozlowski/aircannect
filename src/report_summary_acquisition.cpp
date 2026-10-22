@@ -23,7 +23,8 @@ void ReportSummaryAcquisition::begin(ReportSpoolPort &spool_port) {
     spool_port_ = &spool_port;
 }
 
-OperationAdmission ReportSummaryAcquisition::request(uint32_t generation) {
+OperationAdmission ReportSummaryAcquisition::request(uint32_t generation,
+                                                     SummaryFetchReason reason) {
     if (!spool_port_ || generation == 0) return OperationAdmission::Rejected;
     if (active()) return OperationAdmission::Busy;
 
@@ -31,6 +32,7 @@ OperationAdmission ReportSummaryAcquisition::request(uint32_t generation) {
     command.source = ReportSourceId::Summary;
     command.from_ms = SUMMARY_FROM_MS;
     command.generation = generation;
+    command.summary_reason = reason;
 
     const OperationSubmission submission = spool_port_->request_fetch(command);
     if (!submission.accepted()) return submission.admission;

@@ -18,6 +18,7 @@
 #include "report_signal_store_catalog_service.h"
 #include "report_source_change.h"
 #include "report_summary_acquisition.h"
+#include "summary_archive.h"
 #include "runtime_snapshots.h"
 
 namespace aircannect {
@@ -108,6 +109,8 @@ struct ReportTaskFailure {
 };
 
 struct ReportTaskDiagnosticSnapshot {
+    SummaryArchiveStatus summary_archive;
+    uint32_t summary_archive_drops = 0;
     ReportDateRepairStatus date_repair;
     bool task_started = false;
     ReportTaskState state = ReportTaskState::Stopped;
@@ -272,6 +275,7 @@ public:
         const ReportSourceChange &change);
     void publish_activity(const ActivitySnapshot &activity);
     void publish_capture_session(const EdfSessionMetadata &metadata);
+    bool publish_summary_observation(SummaryObservation observation);
 
     ReportTaskControlSnapshot control_snapshot() const;
     // Nonblocking reads; leave out unchanged if publication is busy.

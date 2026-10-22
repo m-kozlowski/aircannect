@@ -41,6 +41,15 @@ public:
               ResmedDeviceModel model = ResmedDeviceModel::AirSense11);
     bool active() const;
 
+    // Called on the RPC owner before transfer and after a complete Summary.
+    // A null result marks transfer start. Observers must not perform I/O.
+    using SummaryObserver = void (*)(void *, const ReportSpoolFetchCommand &,
+                                     const ReportSpoolResult *);
+    void set_summary_observer(SummaryObserver observer, void *context) {
+        summary_observer_ = observer;
+        summary_context_ = context;
+    }
+
 private:
     bool lock(uint32_t timeout_ms = 10) const;
     void unlock() const;
@@ -68,6 +77,11 @@ private:
     bool round_ready_ = false;
     bool completion_ready_ = false;
     bool initialized_ = false;
+
+    SummaryObserver summary_observer_ = nullptr;
+    void *summary_context_ = nullptr;
+    ReportSpoolFetchCommand observed_command_;
+    bool observing_summary_ = false;
 
 #ifdef ARDUINO
     mutable SemaphoreHandle_t mutex_ = nullptr;

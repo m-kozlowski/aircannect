@@ -158,6 +158,7 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
     ReportSpoolFetchCommand command;
     OperationTicket ticket;
     if (take_queued(command, ticket)) {
+        observing_summary_ = false;
         if (model != ResmedDeviceModel::AirSense11) {
             publish_completion(ticket, OperationOutcome::failed(), nullptr,
                                "device_spools_unsupported");
@@ -218,6 +219,13 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
                                "spool_start_failed");
             return true;
         }
+        observing_summary_ = summary_observer_ &&
+            command.kind == ReportSpoolFetchKind::ReportSource &&
+            command.source == ReportSourceId::Summary;
+        if (observing_summary_) {
+            observed_command_ = command;
+            summary_observer_(summary_context_, command, nullptr);
+        }
     }
 
     if (!runtime_.active() && !runtime_.complete() && !runtime_.failed()) {
@@ -233,6 +241,10 @@ bool ReportSpoolService::poll(bool normal_rpc_available,
     if (runtime_.complete()) {
         ReportSpoolResult result;
         runtime_.move_result_to(result);
+        if (observing_summary_ && result.complete && result.sha_ok && !result.truncated) {
+            summary_observer_(summary_context_, observed_command_, &result);
+            observing_summary_ = false;
+        }
         OperationTicket completed;
         if (lock()) {
             completed = active_ticket_;
