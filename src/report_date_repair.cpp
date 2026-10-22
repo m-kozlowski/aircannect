@@ -20,7 +20,6 @@ namespace aircannect {
 namespace {
 using namespace LittleEndian;
 constexpr const char *ROOT = "/aircannect/report/date-repair";
-constexpr const char *PLAN = "/aircannect/report/date-repair/plan.bin";
 constexpr const char *PROGRESS = "/aircannect/report/date-repair/progress.bin";
 constexpr size_t CHUNK = 16384;
 constexpr size_t MAX_PLAN = 4 * 1024 * 1024;
@@ -28,9 +27,17 @@ constexpr size_t JOB_HEADER = 24 + 2 * AC_STORAGE_PATH_MAX;
 
 template<class T> using Items = std::vector<T, LargeAllocator<T>>;
 
-std::string numbered(const char *group, size_t index) {
+std::string batch_root(uint32_t batch) {
+    if (!batch) return ROOT;
+
     char path[AC_STORAGE_PATH_MAX];
-    snprintf(path, sizeof(path), "%s/%s/%08u.bin", ROOT, group,
+    snprintf(path, sizeof(path), "%s/b%08x", ROOT, batch);
+    return path;
+}
+
+std::string numbered(uint32_t batch, const char *group, size_t index) {
+    char path[AC_STORAGE_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s/%08u.bin", batch_root(batch).c_str(), group,
              static_cast<unsigned>(index));
     return path;
 }
@@ -56,7 +63,8 @@ struct Job {
 struct Candidate {
     SleepDayId day;
     std::shared_ptr<const NightCatalog> catalog;
-    std::string catalog_path;
+    Items<std::string> active_paths;
+    Items<std::string> report_roots;
     std::shared_ptr<const LargeByteBuffer> fallback;
     ReportFallbackArtifactView fallback_view;
     std::string fallback_path;
@@ -86,6 +94,9 @@ struct ReportDateRepairService::Runtime {
     // Discovery and durable transaction cursor
     size_t cursor = 0;
     uint32_t journal_jobs = 0;
+    uint32_t batch = 0;
+    uint8_t save_stage = 0;
+    std::shared_ptr<const LargeByteBuffer> completed_progress;
     size_t inspect_cursor = 0;
     bool boot_plan = false;
     bool progress_pending = false;
@@ -222,9 +233,10 @@ struct ReportDateRepairService::Runtime {
             const auto &record = *value->record(i);
             if (!record.unresolved_history) continue;
             auto &item = candidate(record.sleep_day);
+            if (!path.empty()) item.active_paths.push_back(path);
+
             if (!item.catalog || !record.sources_external) {
                 item.catalog = NightCatalogBuilder::select_night(*value, record.sleep_day);
-                item.catalog_path = path;
             }
         }
     }
@@ -252,6 +264,7 @@ struct ReportDateRepairService::Runtime {
                 item.fallback = bytes;
                 item.fallback_view = view;
                 item.fallback_path = path;
+                item.active_paths.push_back(path);
             } else {
                 retained_sources.push_back(view.info.sleep_day);
             }
@@ -260,6 +273,11 @@ struct ReportDateRepairService::Runtime {
             if (!saved.metadata) return fail("date_repair_metadata_invalid"), false;
             if (saved.view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED) {
                 auto &item = candidate(saved.view.night.sleep_day);
+                item.active_paths.push_back(path);
+                char generation[16];
+                snprintf(generation, sizeof(generation), "/g%08x/", saved.view.night.generation);
+                item.report_roots.push_back(path.substr(0, path.find_last_of('/')) + generation);
+
                 if (!item.report.metadata || ends(path, "/clock-conflict.meta")) {
                     item.report = saved;
                     item.report_path = path;
@@ -342,7 +360,6 @@ struct ReportDateRepairService::Runtime {
         ++generation;
 
         for (auto &item : candidates) {
-            if (!item.catalog_path.empty()) add(item.catalog_path, "", 0);
             const auto old = source_catalog(item);
             auto repaired = old ? NightCatalogBuilder::repair_date(*old, item.day) : nullptr;
             if (!repaired) return fail("date_repair_source_unresolved");
@@ -440,15 +457,38 @@ struct ReportDateRepairService::Runtime {
             ++status.restored;
         }
 
-        // All original fallback bytes are backed up before any replacement.
-        // Remove only old paths that are not also destinations in this batch.
+        // Preserve every accepted copy, including metadata not selected for
+        // restoration and the generations it protects, before retiring pins.
         for (const auto &item : candidates) {
-            if (item.fallback_path.empty()) continue;
-            bool replaced = false;
-            for (const auto &job : jobs) if (job.target == item.fallback_path) replaced = true;
-            if (!replaced) {
+            for (size_t i = 0; i < scan->size(); ++i) {
+                scan->entry(i, entry);
+                if (entry.directory) continue;
+
+                bool original = std::find(item.active_paths.begin(), item.active_paths.end(),
+                                          entry.path) != item.active_paths.end();
+
+                for (const auto &root : item.report_roots) {
+                    if (strncmp(entry.path, root.c_str(), root.size()) == 0) original = true;
+                }
+                if (!original) continue;
+
+                const bool saved = std::any_of(jobs.begin(), jobs.end(),
+                    [&](const Job &job) { return job.source == entry.path; });
+
+                if (!saved) add(entry.path, "", entry.size);
+            }
+        }
+
+        // Active discovery must not find repaired history again. A path used
+        // as a destination in this same chain already receives corrected data.
+        for (const auto &item : candidates) {
+            for (const auto &path : item.active_paths) {
+                const bool replaced = std::any_of(jobs.begin(), jobs.end(),
+                    [&](const Job &job) { return job.target == path; });
+
+                if (replaced) continue;
                 Job remove;
-                remove.target = item.fallback_path;
+                remove.target = path;
                 remove.remove = true;
                 jobs.push_back(std::move(remove));
             }
@@ -588,18 +628,22 @@ struct ReportDateRepairService::Runtime {
     }
 
     bool save_progress(uint32_t phase) {
-        auto bytes = LargeByteBuffer::allocate(16);
+        auto bytes = LargeByteBuffer::allocate(20);
         if (!bytes) return fail("date_repair_progress_alloc"), false;
         memcpy(bytes->data(), "ACDR", 4);
         put_le32(bytes->data() + 4, phase);
         put_le32(bytes->data() + 8, cursor);
         put_le32(bytes->data() + 12, jobs.size());
-        return write(PROGRESS, LargeByteBuffer::freeze(std::move(bytes)));
+        put_le32(bytes->data() + 16, batch);
+        const auto progress = LargeByteBuffer::freeze(std::move(bytes));
+        if (!write(PROGRESS, progress)) return false;
+        if (phase == 2) completed_progress = progress;
+        return true;
     }
 
     bool copy_job(bool backup) {
         const auto &job = jobs[cursor];
-        const std::string archived = numbered("originals", cursor);
+        const std::string archived = numbered(batch, "originals", cursor);
         const std::string target = backup ? archived : job.target;
         if ((backup && job.source.empty()) || (!backup && job.target.empty())) return true;
         if (!backup && job.remove) {
@@ -624,7 +668,7 @@ struct ReportDateRepairService::Runtime {
         }
 
         const auto prefix = backup ? nullptr : job.prefix;
-        const std::string staged = numbered("pending", cursor);
+        const std::string staged = numbered(batch, "pending", cursor);
         if (copy_phase == CopyPhase::Read) {
             if (prefix && copy_offset < prefix->size()) {
                 const size_t count = std::min(CHUNK, prefix->size() - static_cast<size_t>(copy_offset));
@@ -682,7 +726,8 @@ struct ReportDateRepairService::Runtime {
     bool poll() {
         using State = ReportDateRepairState;
         if (status.state == State::CheckingJournal) {
-            if (!read(boot_plan ? PLAN : PROGRESS, boot_plan ? MAX_PLAN : 16)) return false;
+            if (!read(boot_plan ? batch_root(batch) + "/plan.bin" : PROGRESS,
+                      boot_plan ? MAX_PLAN : 20)) return false;
             if (boot_plan) {
                 if (missing || !decode_plan()) return fail("date_repair_plan_unavailable");
                 status.state = apply_requested ? State::Installing : State::BackingUp;
@@ -691,12 +736,14 @@ struct ReportDateRepairService::Runtime {
             journal_checked = true;
             if (missing) { missing = false; status.state = State::Idle; return true; }
             status.durable = true;
-            if (!loaded || loaded->size() != 16 || file_size != 16 ||
+            if (!loaded || (file_size != 16 && file_size != 20) || loaded->size() != file_size ||
                 memcmp(loaded->data(), "ACDR", 4)) return fail("date_repair_progress_invalid");
             const auto phase = get_le32(loaded->data() + 4);
             cursor = get_le32(loaded->data() + 8);
             journal_jobs = get_le32(loaded->data() + 12);
+            batch = file_size == 20 ? get_le32(loaded->data() + 16) : 0;
             status.completed_files = cursor;
+            if (phase == 2) completed_progress = loaded;
             loaded.reset();
             if (cursor > journal_jobs || (phase == 2 && cursor != journal_jobs)) return fail("date_repair_progress_cursor");
             if (phase == 2) return complete();
@@ -736,12 +783,22 @@ struct ReportDateRepairService::Runtime {
             return plan_repairs();
         }
         if (status.state == State::SavingPlan) {
-            if (!progress_pending) {
-                if (!write(PLAN, plan)) return false;
-                progress_pending = true;
+            // The old active journal remains authoritative until the new plan
+            // is durable. No original bytes are copied before this switch.
+            if (save_stage == 0) {
+                if (completed_progress) {
+                    const uint32_t previous_batch = completed_progress->size() == 20
+                        ? get_le32(completed_progress->data() + 16) : 0;
+                    if (!write(batch_root(previous_batch) + "/complete.bin", completed_progress)) return false;
+                }
+                save_stage = 1;
             }
-            if (!save_progress(0)) return false;
+            if (save_stage == 1) {
+                if (!write(batch_root(batch) + "/plan.bin", plan)) return false;
+                save_stage = 2;
+            }
             status.durable = true;
+            if (!save_progress(0)) return false;
             progress_pending = false;
             status.state = State::BackingUp;
             return true;
@@ -790,7 +847,7 @@ void ReportDateRepairService::begin(StorageReadPort &reads, StorageAtomicWritePo
 
 bool ReportDateRepairService::start(std::shared_ptr<const NightCatalog> catalog) {
     auto &r = *runtime_;
-    if (!catalog || active() || r.status.durable || r.status.state == ReportDateRepairState::Complete ||
+    if (!catalog || active() || (r.status.durable && r.status.state != ReportDateRepairState::Complete) ||
         !r.journal_checked || !r.deletes) return false;
 
     cancel();
@@ -806,6 +863,9 @@ bool ReportDateRepairService::start(std::shared_ptr<const NightCatalog> catalog)
     r.cursor = r.inspect_cursor = 0;
     r.patch_cursor = 0;
     r.planned = false;
+    r.progress_pending = false;
+    r.copy_offset = 0;
+    r.copy_phase = Runtime::CopyPhase::Read;
     r.status = {};
     r.accept_catalog(r.catalog);
     r.status.state = ReportDateRepairState::Scanning;
@@ -814,7 +874,10 @@ bool ReportDateRepairService::start(std::shared_ptr<const NightCatalog> catalog)
 
 bool ReportDateRepairService::apply() {
     auto &r = *runtime_;
-    if (r.status.state != ReportDateRepairState::Preview || !r.status.candidates || !r.encode_plan()) return false;
+    if (r.status.state != ReportDateRepairState::Preview || !r.status.candidates ||
+        r.batch == UINT32_MAX || !r.encode_plan()) return false;
+    ++r.batch;
+    r.save_stage = 0;
     r.cursor = 0;
     r.status.state = ReportDateRepairState::SavingPlan;
     return true;

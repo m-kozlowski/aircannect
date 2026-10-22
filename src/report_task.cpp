@@ -3064,6 +3064,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.date_preview_catalog = runtime.catalog;
                 runtime.date_preview_store = runtime.store_catalog;
             }
+            if (accepted && apply) runtime.date_repair_observed = false;
             if (!accepted) runtime.record_failure("repair_dates", "date_repair_not_ready", {});
             runtime.publish_status();
             return true;
