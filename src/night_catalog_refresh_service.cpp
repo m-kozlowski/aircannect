@@ -2143,15 +2143,16 @@ bool NightCatalogRefreshService::poll() {
                 return true;
             }
 
-            if (status.invalid_fallback_records > 0) {
+            const size_t excluded = status.invalid_fallback_records + status.isolated_fallback_records;
+            if (excluded > 0) {
                 const uint32_t skipped = static_cast<uint32_t>(std::min(
-                    status.invalid_fallback_records, static_cast<size_t>(UINT32_MAX)));
+                    excluded, static_cast<size_t>(UINT32_MAX)));
                 status_.files_skipped += skipped;
                 status_.files_indexed = status_.files_indexed > skipped
                                             ? status_.files_indexed - skipped
                                             : 0;
-                set_warning(status_, "night_catalog_fallback_invalid");
             }
+            if (status.invalid_fallback_records > 0) set_warning(status_, "night_catalog_fallback_invalid");
 
             runtime_->builder.reset();
             runtime_->build_cursor = 0;

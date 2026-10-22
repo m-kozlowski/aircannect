@@ -689,13 +689,14 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
                      LargeScratchArray<BuildNight> &nights,
                      LargeScratchArray<BuildSession> &sessions,
                      LargeScratchArray<BuildFallback> &fallbacks,
-                     size_t &invalid_fallback_records, size_t index) {
+                     size_t &invalid_fallback_records,
+                     size_t &isolated_fallback_records, size_t index) {
     const NightCatalogFallbackInput &source = input.fallback_records[index];
 
     BuildNight *night = find_night(nights, source.sleep_day);
     if (source.time_conflict) {
         if (night) night->time_conflict = true;
-        ++invalid_fallback_records;
+        ++isolated_fallback_records;
         return true;
     }
     if (night && night->has_edf && !source.retain_with_edf) return true;
@@ -2051,7 +2052,8 @@ bool NightCatalogBuilder::poll() {
         case Phase::Fallback:
             if (r.cursor < input.fallback_record_count) {
                 ingested(ingest_fallback(input, r.nights, r.sessions, r.fallbacks,
-                                         status_.invalid_fallback_records, r.cursor),
+                                         status_.invalid_fallback_records,
+                                         status_.isolated_fallback_records, r.cursor),
                          "night_catalog_fallback_input_invalid");
             } else {
                 r.advance(Phase::SortNights);

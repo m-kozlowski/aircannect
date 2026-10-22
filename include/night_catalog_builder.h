@@ -149,6 +149,7 @@ struct NightCatalogBuildStatus {
     NightCatalogBuildFailure failure = NightCatalogBuildFailure::None;
     const char *detail = "";
     size_t invalid_fallback_records = 0;
+    size_t isolated_fallback_records = 0;
 
     bool retryable() const {
         return failure == NightCatalogBuildFailure::AllocationFailed;
