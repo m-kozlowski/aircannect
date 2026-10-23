@@ -107,7 +107,7 @@ public:
     bool cancel_post_therapy();
 
     // Scheduled checks yield to exports; manual checks precede queued work.
-    // Release the reservation only after checker-task cleanup.
+    // Release on admission/start failure, otherwise after checker-task cleanup.
     bool try_begin_update_check(bool manual = false);
     void end_update_check();
 

@@ -139,7 +139,13 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
 
     if (!start) return;
 
+    if (!exports_->try_begin_update_check(manual)) {
+        trace_phase("waiting_export_reservation");
+        return;
+    }
+
     if (!tls_heap_available(log_heap_deferred)) {
+        exports_->end_update_check();
         trace_phase("waiting_tls_heap");
         if (lock()) {
             heap_retry_at_ms_ = millis() + UPDATE_HEAP_RETRY_MS;
@@ -152,11 +158,7 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
         heap_retry_at_ms_ = 0;
         unlock();
     }
-    if (exports_->try_begin_update_check(manual)) {
-        if (!start_check()) exports_->end_update_check();
-    } else {
-        trace_phase("waiting_export_reservation");
-    }
+    if (!start_check()) exports_->end_update_check();
 }
 
 void UpdateChecker::mark_config_dirty() {
