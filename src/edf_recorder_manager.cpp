@@ -2186,6 +2186,7 @@ bool EdfRecorderManager::begin_str_summary_wait(
     str_summary_.session_start_ms =
         static_cast<uint64_t>(session_start_ms);
     str_summary_.session_end_ms = static_cast<uint64_t>(session_end_ms);
+    str_summary_.timezone_offset_minutes = session_timezone_offset_minutes_;
     str_summary_.notification_generation =
         str_summary_stop_session_id_ == session.session_id
             ? str_summary_stop_notification_generation_
@@ -2272,6 +2273,7 @@ void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
                 str_summary_.sleep_day,
                 str_summary_.session_start_ms,
                 str_summary_.session_end_ms,
+                str_summary_.timezone_offset_minutes,
                 str_,
                 applied);
             completion.clear();

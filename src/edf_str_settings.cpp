@@ -469,11 +469,20 @@ struct SummarySpoolApplyContext {
     uint16_t sleep_day = 0;
     uint64_t session_start_ms = 0;
     uint64_t session_end_ms = 0;
+    int32_t session_timezone_offset_minutes = 0;
     EdfStrSessionAccumulator *session = nullptr;
     EdfStrSummaryApplyResult *result = nullptr;
 };
 
-bool summary_timestamp_within(uint64_t lhs, uint64_t rhs) {
+bool summary_timestamp_within(uint64_t lhs, uint64_t rhs, int64_t adjustment_ms) {
+    if (adjustment_ms >= 0) {
+        if (lhs > UINT64_MAX - static_cast<uint64_t>(adjustment_ms)) return false;
+        lhs += static_cast<uint64_t>(adjustment_ms);
+    } else {
+        if (lhs < static_cast<uint64_t>(-adjustment_ms)) return false;
+        lhs -= static_cast<uint64_t>(-adjustment_ms);
+    }
+
     return lhs >= rhs
         ? lhs - rhs <= EDF_STR_SUMMARY_SESSION_TOLERANCE_MS
         : rhs - lhs <= EDF_STR_SUMMARY_SESSION_TOLERANCE_MS;
@@ -481,7 +490,14 @@ bool summary_timestamp_within(uint64_t lhs, uint64_t rhs) {
 
 bool summary_record_contains_session(const ReportSummaryRecord &record,
                                      uint64_t session_start_ms,
-                                     uint64_t session_end_ms) {
+                                     uint64_t session_end_ms,
+                                     int32_t session_timezone_offset_minutes) {
+    // Compare local times using each source's own offset. Only the temporary
+    // Summary projection changes; recorded times and clock correction do not.
+    const int64_t adjustment_ms =
+        (static_cast<int64_t>(record.tz_offset_min) -
+         session_timezone_offset_minutes) * 60000LL;
+
     for (uint32_t i = 0; i < record.session_interval_count; ++i) {
         const ReportSummarySession &candidate = record.sessions[i];
         const uint64_t duration_ms =
@@ -492,8 +508,10 @@ bool summary_record_contains_session(const ReportSummaryRecord &record,
         }
 
         const uint64_t candidate_end_ms = candidate.start_ms + duration_ms;
-        if (summary_timestamp_within(candidate.start_ms, session_start_ms) &&
-            summary_timestamp_within(candidate_end_ms, session_end_ms)) {
+        if (summary_timestamp_within(candidate.start_ms, session_start_ms,
+                                     adjustment_ms) &&
+            summary_timestamp_within(candidate_end_ms, session_end_ms,
+                                     adjustment_ms)) {
             return true;
         }
     }
@@ -514,7 +532,8 @@ bool apply_summary_spool_record(void *opaque,
         sleep_day != context->sleep_day ||
         !summary_record_contains_session(record,
                                          context->session_start_ms,
-                                         context->session_end_ms)) {
+                                         context->session_end_ms,
+                                         context->session_timezone_offset_minutes)) {
         return true;
     }
 
@@ -783,6 +802,7 @@ bool edf_str_apply_summary_spool(const ReportSpoolResult &spool,
                                  uint16_t sleep_day,
                                  uint64_t session_start_ms,
                                  uint64_t session_end_ms,
+                                 int32_t session_timezone_offset_minutes,
                                  EdfStrSessionAccumulator &session,
                                  EdfStrSummaryApplyResult &result) {
     result = {};
@@ -791,6 +811,7 @@ bool edf_str_apply_summary_spool(const ReportSpoolResult &spool,
     context.sleep_day = sleep_day;
     context.session_start_ms = session_start_ms;
     context.session_end_ms = session_end_ms;
+    context.session_timezone_offset_minutes = session_timezone_offset_minutes;
     context.session = &session;
     context.result = &result;
 

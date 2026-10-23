@@ -227,6 +227,7 @@ private:
             from_ms = 0;
             session_start_ms = 0;
             session_end_ms = 0;
+            timezone_offset_minutes = 0;
             notification_generation = 0;
             fetch_notification_generation = 0;
             retry_at_ms = 0;
@@ -240,6 +241,7 @@ private:
         int64_t from_ms = 0;
         uint64_t session_start_ms = 0;
         uint64_t session_end_ms = 0;
+        int32_t timezone_offset_minutes = 0;
         uint32_t notification_generation = 0;
         uint32_t fetch_notification_generation = 0;
         uint32_t retry_at_ms = 0;
