@@ -1,5 +1,7 @@
 #include "irq_block_probe.h"
 
+#if AC_IRQ_BLOCK_PROBE_ENABLED
+
 #include <Arduino.h>
 #include <esp_attr.h>
 #include <esp_debug_helpers.h>
@@ -200,3 +202,5 @@ void irq_block_probe_poll() {
         }
     }
 }
+
+#endif
