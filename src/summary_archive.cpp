@@ -72,8 +72,14 @@ bool decode_digest(JsonVariantConst value, Digest &out) {
 
 Digest mapping_digest(const DayMap &mapping) {
     ReportSpoolBuffer bytes;
+    constexpr size_t ROW_SIZE = 36;
+    if (mapping.size() > bytes.max_size() / ROW_SIZE ||
+        !bytes.reserve_capacity(mapping.size() * ROW_SIZE)) {
+        throw std::bad_alloc();
+    }
+
     for (const auto &entry : mapping) {
-        uint8_t row[36];
+        uint8_t row[ROW_SIZE];
         LittleEndian::put_le32(row, static_cast<uint32_t>(entry.first));
         memcpy(row + 4, entry.second.data(), entry.second.size());
         if (!bytes.append(row, sizeof(row))) throw std::bad_alloc();
@@ -397,6 +403,9 @@ struct SummaryArchive::Impl {
                 LittleEndian::get_le32(p + 16) != frame_size - HEADER - raw_size ||
                 LittleEndian::get_le64(p + 24) != replay_sequence + 1)
                 return continue_segment("summary_archive_frame_invalid");
+
+            if (!input.reserve_capacity(frame_size)) return fail("summary_archive_memory");
+
             phase = Phase::Body;
             return true;
         }
