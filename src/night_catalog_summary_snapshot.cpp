@@ -40,20 +40,19 @@ uint64_t hash_value(uint64_t hash, const T &value) {
     return hash_bytes(hash, &value, sizeof(value));
 }
 
-uint64_t summary_identity(const ReportSummaryRecord &record) {
+uint64_t summary_identity(const ReportSummaryRecord &record, SleepDayId sleep_day) {
     uint64_t hash = FNV_OFFSET;
-    hash = hash_value(hash, record.start_ms);
-    hash = hash_value(hash, record.end_ms);
+    hash = hash_value(hash, sleep_day.epoch_days());
+    hash = hash_value(hash, record.end_ms - record.start_ms);
     hash = hash_value(hash, record.duration_min);
-    hash = hash_value(hash, record.has_tz_offset_min);
-    hash = hash_value(hash, record.tz_offset_min);
     hash = hash_value(hash, record.session_count);
     hash = hash_value(hash, record.session_interval_count);
 
     const size_t session_count = std::min<size_t>(
         record.session_interval_count, AC_REPORT_SUMMARY_SESSION_MAX);
     for (size_t i = 0; i < session_count; ++i) {
-        hash = hash_value(hash, record.sessions[i].start_ms);
+        // AS11 reprojects UTC on every fetch; the local position is unchanged.
+        hash = hash_value(hash, record.sessions[i].start_ms - record.start_ms);
         hash = hash_value(hash, record.sessions[i].duration_min);
     }
 
@@ -309,7 +308,7 @@ bool NightCatalogSummarySnapshot::materialize_record(
     target.sleep_day = sleep_day;
     target.day_start_ms = static_cast<int64_t>(source.start_ms);
     target.day_end_ms = static_cast<int64_t>(source.end_ms);
-    target.identity = summary_identity(source);
+    target.identity = summary_identity(source, sleep_day);
     target.timezone_offset_minutes = axis_timezone_offset;
     fill_metrics(source, target.metrics);
 
@@ -715,27 +714,27 @@ NightCatalogSummarySnapshot::preserve_expired_history(
             memcpy(snapshot->sessions_ + next_session,
                    source.sessions,
                    source.session_count * sizeof(NightCatalogTimeRange));
+        }
 
-            const auto *previous = previous_catalog.find(source.sleep_day);
-            if (previous && !previous->unresolved_history &&
-                expirable_summary_history(*previous)) {
-                const int64_t adjustment = previous->day_start_ms - source.day_start_ms;
-                // Retain the saved projection; only Summary's local coordinates
-                // are projected here, never measured signal or event times.
-                if (adjustment > -86400000LL && adjustment < 86400000LL) {
-                    target.day_start_ms = previous->day_start_ms;
-                    target.day_end_ms = previous->day_end_ms;
-                    target.timezone_offset_minutes = previous->timezone_offset_minutes;
-                    target.timezone_offset_valid = previous->timezone_offset_valid;
-                    for (size_t j = 0; j < source.session_count; ++j) {
-                        auto &session = snapshot->sessions_[next_session + j];
-                        session.start_ms += adjustment;
-                        session.end_ms += adjustment;
-                    }
+        const auto *previous = previous_catalog.find(source.sleep_day);
+        if (previous && !previous->unresolved_history &&
+            expirable_summary_history(*previous)) {
+            const int64_t adjustment = previous->day_start_ms - source.day_start_ms;
+            // Retain the saved projection, including days without sessions.
+            // Only Summary coordinates move, never measured signal/event times.
+            if (adjustment > -86400000LL && adjustment < 86400000LL) {
+                target.day_start_ms = previous->day_start_ms;
+                target.day_end_ms = previous->day_end_ms;
+                target.timezone_offset_minutes = previous->timezone_offset_minutes;
+                target.timezone_offset_valid = previous->timezone_offset_valid;
+                for (size_t j = 0; j < source.session_count; ++j) {
+                    auto &session = snapshot->sessions_[next_session + j];
+                    session.start_ms += adjustment;
+                    session.end_ms += adjustment;
                 }
             }
-            next_session += source.session_count;
         }
+        next_session += source.session_count;
     }
 
     for (size_t i = 0; i < previous_catalog.size(); ++i) {
