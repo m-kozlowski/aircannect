@@ -465,6 +465,7 @@
             pairing.dataset.as11BlePairing = "true";
             fields.appendChild(pairing);
           }
+          if (section.id === "vpn") renderWireguardImport(fields);
         });
         await loadAs11BlePairing(true);
       } catch (error) {
@@ -534,6 +535,176 @@
       });
     }
 
+    const wireguardKeyPattern = /^[A-Za-z0-9+/]{43}=$/;
+
+    function validWireguardAddress(value) {
+      const text = String(value || "").trim();
+      if (!text.length) return true;
+      const parts = text.split("/");
+      if (parts.length > 2 || (parts.length === 2 && parts[1] !== "32")) return false;
+      return parts[0].length > 0 && validIpv4(parts[0]);
+    }
+
+    function validWireguardEndpoint(value) {
+      const text = String(value || "").trim();
+      if (!text.length) return true;
+      const match = /^([^\s:\[\]]+)(?::(\d{1,5}))?$/.exec(text);
+      if (!match) return false;
+      return !match[2] || (Number(match[2]) >= 1 && Number(match[2]) <= 65535);
+    }
+
+    function validWireguardAllowedIps(value) {
+      return String(value || "").split(",").map((item) => item.trim())
+        .filter((item) => item.length).every((item) => {
+          const parts = item.split("/");
+          if (parts.length > 2 || !validIpv4(parts[0]) || !parts[0].length) return false;
+          return parts.length === 1 ||
+            (/^\d{1,2}$/.test(parts[1]) && Number(parts[1]) <= 32);
+        });
+    }
+
+    // Parses a wg-quick style .conf into config keys. Only IPv4 is used by
+    // the device, so IPv6 addresses and routes are dropped with a note.
+    function parseWireguardConf(text) {
+      const result = {values: {}, notes: []};
+      const peers = [];
+      let section = null;
+      let current = null;
+      const iface = {};
+
+      String(text || "").split(/\r?\n/).forEach((rawLine, index) => {
+        const line = rawLine.replace(/[#;].*$/, "").trim();
+        if (!line.length) return;
+        const header = /^\[(\w+)\]$/.exec(line);
+        if (header) {
+          section = header[1].toLowerCase();
+          if (section === "peer") {
+            current = {};
+            peers.push(current);
+          } else if (section !== "interface") {
+            throw new Error("line " + (index + 1) + ": unknown section [" + header[1] + "]");
+          }
+          return;
+        }
+        const eq = line.indexOf("=");
+        if (eq <= 0 || !section) {
+          throw new Error("line " + (index + 1) + " is not a key = value pair");
+        }
+        const key = line.slice(0, eq).trim().toLowerCase();
+        const value = line.slice(eq + 1).trim();
+        (section === "peer" ? current : iface)[key] = value;
+      });
+
+      if (!Object.prototype.hasOwnProperty.call(iface, "privatekey")) {
+        throw new Error("[Interface] PrivateKey is missing");
+      }
+      if (!iface.privatekey) {
+        throw new Error("[Interface] PrivateKey is empty; export the client " +
+          "config again with its private key");
+      }
+      if (peers.length !== 1) {
+        throw new Error("expected exactly one [Peer], found " + peers.length);
+      }
+      const peer = peers[0];
+      if (!peer.publickey) throw new Error("[Peer] PublicKey is missing");
+      if (!peer.endpoint) throw new Error("[Peer] Endpoint is missing");
+
+      const address = String(iface.address || "").split(",").map((item) => item.trim())
+        .find((item) => validIpv4(item.split("/")[0]) && item.split("/")[0].length);
+      if (!address) throw new Error("[Interface] Address has no IPv4 address");
+      const addressIp = address.split("/")[0];
+      if (address.includes("/") && address.split("/")[1] !== "32") {
+        result.notes.push("Address " + address + " used as " + addressIp + "/32");
+      }
+
+      const allowedAll = String(peer.allowedips || "0.0.0.0/0").split(",")
+        .map((item) => item.trim()).filter((item) => item.length);
+      const allowed = allowedAll.filter((item) => !item.includes(":"));
+      if (allowed.length !== allowedAll.length) result.notes.push("IPv6 routes ignored");
+      if (!allowed.length) throw new Error("[Peer] AllowedIPs has no IPv4 range");
+
+      if (iface.dns) result.notes.push("DNS ignored (uses the Wi-Fi network's DNS)");
+      ["mtu", "listenport", "table", "preup", "postup", "predown", "postdown"]
+        .forEach((key) => {
+          if (iface[key]) result.notes.push(key + " ignored");
+        });
+
+      result.values.wg_addr = addressIp;
+      result.values.wg_key = iface.privatekey;
+      result.values.wg_peer = peer.publickey;
+      result.values.wg_psk = peer.presharedkey || "";
+      result.values.wg_ep = peer.endpoint;
+      result.values.wg_allowed = allowed.join(",");
+      if (peer.persistentkeepalive) {
+        result.values.wg_ka = peer.persistentkeepalive;
+      }
+
+      const errors = [];
+      if (!wireguardKeyPattern.test(result.values.wg_key)) errors.push("PrivateKey");
+      if (!wireguardKeyPattern.test(result.values.wg_peer)) errors.push("PublicKey");
+      if (result.values.wg_psk && !wireguardKeyPattern.test(result.values.wg_psk)) {
+        errors.push("PresharedKey");
+      }
+      if (!validWireguardEndpoint(result.values.wg_ep)) errors.push("Endpoint");
+      if (!validWireguardAllowedIps(result.values.wg_allowed)) errors.push("AllowedIPs");
+      if (errors.length) throw new Error("invalid " + errors.join(", "));
+      return result;
+    }
+
+    function renderWireguardImport(root) {
+      const panel = document.createElement("div");
+      panel.className = "endpoint-config";
+
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".conf,text/plain";
+      input.hidden = true;
+      input.dataset.changeAction = "config.wireguard-import";
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn";
+      button.textContent = "Import .conf";
+      button.dataset.action = "config.wireguard-pick";
+
+      const status = document.createElement("small");
+      status.dataset.wireguardImportStatus = "true";
+      status.textContent = "Fills the fields below from a WireGuard client " +
+        "config. Review, set home networks and mode, then Save.";
+
+      panel.appendChild(input);
+      panel.appendChild(AirCANnect.ui.row("WireGuard config", button));
+      panel.appendChild(status);
+      root.insertBefore(panel, root.firstChild);
+    }
+
+    async function importWireguardConf(input) {
+      const file = input.files && input.files[0];
+      input.value = "";
+      if (!file) return;
+      const root = input.closest(".config-section-fields");
+      const status = root && root.querySelector("[data-wireguard-import-status]");
+      try {
+        if (file.size > 8192) throw new Error("file is too large for a WireGuard config");
+        const parsed = parseWireguardConf(await file.text());
+        Object.keys(parsed.values).forEach((key) => {
+          const control = root.querySelector('[data-key="' + key + '"]');
+          if (!control) return;
+          control.value = parsed.values[key];
+          control.dispatchEvent(new Event("input", {bubbles: true}));
+        });
+        const modeControl = root.querySelector('[data-key="wg_mode"]');
+        if (modeControl && modeControl.value === "off") modeControl.value = "away";
+        const text = "Imported " + file.name +
+          (parsed.notes.length ? " (" + parsed.notes.join("; ") + ")" : "") +
+          ". Review, then Save.";
+        if (status) status.textContent = text;
+        AirCANnect.ui.message("configMsg", text, true, true);
+      } catch (error) {
+        AirCANnect.ui.message("configMsg", "WireGuard import failed: " + error.message, false);
+      }
+    }
+
     function collectConfigChanges(root) {
       const changes = {};
       if (!root) return changes;
@@ -558,6 +729,12 @@
         }
       });
 
+      if (Object.prototype.hasOwnProperty.call(changes, "wg_mode")) {
+        const mode = changes.wg_mode;
+        delete changes.wg_mode;
+        changes.wg_mode = mode;
+      }
+
       root.querySelectorAll("[data-keybindings]").forEach((panel) => {
         const overrides = [];
         panel.querySelectorAll("select[data-button]").forEach((select) => {
@@ -576,6 +753,46 @@
       return changes;
     }
 
+    function validateWireguardChanges(changes, messageId) {
+      const has = (key) => Object.prototype.hasOwnProperty.call(changes, key);
+      if (!Object.keys(changes).some((key) => key.startsWith("wg_"))) return true;
+      const value = (key) => has(key) ? changes[key] : (configData ? configData[key] : "");
+      const secretSet = (key) => has(key) ?
+        String(changes[key] || "").length > 0 : !!(configData && configData[key + "_set"]);
+      const fail = (text) => {
+        AirCANnect.ui.message(messageId, text, false);
+        return false;
+      };
+
+      for (const key of ["wg_key", "wg_psk"]) {
+        if (has(key) && changes[key] && changes[key] !== "********" &&
+            !wireguardKeyPattern.test(changes[key])) {
+          return fail(key + " must be a 44-character WireGuard key");
+        }
+      }
+      if (has("wg_peer") && changes.wg_peer && !wireguardKeyPattern.test(changes.wg_peer)) {
+        return fail("wg_peer must be a 44-character WireGuard key");
+      }
+      if (!validWireguardAddress(value("wg_addr"))) {
+        return fail("wg_addr must be an IPv4 address");
+      }
+      if (!validWireguardEndpoint(value("wg_ep"))) {
+        return fail("wg_ep must be host:port");
+      }
+      if (!validWireguardAllowedIps(value("wg_allowed"))) {
+        return fail("wg_allowed must be IPv4 CIDRs separated by commas");
+      }
+      if (value("wg_mode") && value("wg_mode") !== "off") {
+        const missing = ["wg_addr", "wg_peer", "wg_ep", "wg_allowed"]
+          .filter((key) => !String(value(key) || "").trim().length);
+        if (!secretSet("wg_key")) missing.push("wg_key");
+        if (missing.length) {
+          return fail("Tunnel mode needs " + missing.join(", "));
+        }
+      }
+      return true;
+    }
+
     function validateConfigChanges(changes, messageId) {
       if (Object.prototype.hasOwnProperty.call(changes, "smb_ep") &&
           !validSmbEndpoint(changes.smb_ep)) {
@@ -592,6 +809,8 @@
         AirCANnect.ui.message(messageId, "shq_device must be numeric", false);
         return false;
       }
+
+      if (!validateWireguardChanges(changes, messageId)) return false;
 
       const syslogHost = Object.prototype.hasOwnProperty.call(changes, "syslog_host") ?
         changes.syslog_host : (configData ? configData.syslog_host : "");
@@ -1119,6 +1338,13 @@
       }
     });
     AirCANnect.actions.register("config.save", () => saveConfig());
+    AirCANnect.actions.register("config.wireguard-pick", (_event, element) => {
+      const panel = element.closest(".endpoint-config");
+      const input = panel && panel.querySelector('input[type="file"]');
+      if (input) input.click();
+    });
+    AirCANnect.actions.register("config.wireguard-import", (_event, element) =>
+      importWireguardConf(element));
     AirCANnect.actions.register(
       "config.endpoint-toggle", (_event, element) =>
         toggleEndpointConfig(element.dataset.value));

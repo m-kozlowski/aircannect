@@ -15,6 +15,7 @@
 #include "time_sync_service.h"
 #include "update_checker.h"
 #include "wifi_manager.h"
+#include "wireguard_service.h"
 
 namespace aircannect {
 
@@ -81,6 +82,7 @@ struct SystemStatusSnapshot {
     StorageStatus storage;
     EdfRecordingOverviewSnapshot edf;
     WifiStatusSnapshot wifi;
+    WireguardStatus vpn;
     bool ota_active = false;
     OtaUpdateNotification update;
     As11StatusSnapshot as11;

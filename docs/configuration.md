@@ -127,6 +127,30 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `smb_user` | SMB username | empty | SMB username. |
 | `smb_pass` | SMB password | empty | SMB password. |
 
+## VPN (WireGuard)
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `wg_mode` | `off`, `away`, `always` | `off` | `away` brings the tunnel up on any Wi-Fi network not listed in `wg_home`. |
+| `wg_home` | Comma-separated SSIDs | empty | Home networks where `away` leaves the tunnel down. |
+| `wg_addr` | IPv4 address, optional `/32` | empty | `[Interface] Address`. |
+| `wg_key` | 44-character base64 key | empty | `[Interface] PrivateKey`. |
+| `wg_peer` | 44-character base64 key | empty | `[Peer] PublicKey`. |
+| `wg_psk` | 44-character base64 key, or empty | empty | `[Peer] PresharedKey`. |
+| `wg_ep` | `host[:port]` | empty | `[Peer] Endpoint`. The port defaults to `51820`. |
+| `wg_ka` | `0` to `65535` seconds | `25` | Persistent keepalive. `0` disables it. |
+| `wg_allowed` | Comma-separated IPv4 CIDRs | `0.0.0.0/0` | `[Peer] AllowedIPs` accepted from the peer. |
+
+The Web UI's VPN section can import a wg-quick `.conf` file. It fills these
+fields in the browser for review; nothing is sent until Save. IPv6 addresses
+and routes, `DNS`, `MTU`, and hook commands are ignored.
+
+The tunnel waits for NTP time before its first handshake. Once the
+peer answers, all traffic outside the local Wi-Fi subnet routes through the
+tunnel; if the peer stops answering, the device falls back to the Wi-Fi
+gateway and retries with backoff. `/api/status` reports `vpn_state`,
+`vpn_default_route`, `vpn_handshake_age`, and `vpn_error`.
+
 ## SleepHQ Sync
 
 | Key | Values | Default | Description |

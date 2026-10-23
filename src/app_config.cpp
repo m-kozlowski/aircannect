@@ -298,6 +298,12 @@ bool assign_enum_field(AppConfigData &data,
             config_field_ref<DisplayOrientation>(data, field) = orientation;
             return true;
         }
+        case AppConfigFieldId::WireguardMode: {
+            WireguardMode mode = WireguardMode::Off;
+            if (!parse_wireguard_mode(value, mode)) return false;
+            config_field_ref<WireguardMode>(data, field) = mode;
+            return true;
+        }
         default:
             return false;
     }
@@ -682,6 +688,16 @@ bool AppConfig::normalize() {
         data_.smb_password = "";
         unchanged = false;
     }
+    normalize_wireguard_config(data_.wireguard);
+    if (wireguard_config_reject_reason(data_.wireguard)) {
+        // Keep the stored values for repair but never start a tunnel from
+        // a config that no longer validates.
+        data_.wireguard.mode = WireguardMode::Off;
+        if (wireguard_config_reject_reason(data_.wireguard)) {
+            data_.wireguard = defaults.wireguard;
+        }
+        unchanged = false;
+    }
     data_.sleephq_client_id.trim();
     data_.sleephq_client_secret.trim();
     data_.sleephq_team_id.trim();
@@ -998,6 +1014,43 @@ bool AppConfig::set_smb_credentials(const String &endpoint,
               data_.smb_user.length() ? 1u : 0u,
               data_.smb_password.length() ? 1u : 0u);
     return mark_dirty(AC_CONFIG_DIRTY_SMB_SYNC);
+}
+
+bool AppConfig::set_wireguard(const WireguardConfig &wireguard) {
+    WireguardConfig parsed = wireguard;
+    normalize_wireguard_config(parsed);
+    const char *reject_reason = wireguard_config_reject_reason(parsed);
+    if (reject_reason) {
+        Log::logf(CAT_CONFIG,
+                  LOG_WARN,
+                  "rejected wireguard config reason=%s mode=%s\n",
+                  reject_reason, wireguard_mode_name(parsed.mode));
+        return false;
+    }
+
+    const WireguardConfig &current = data_.wireguard;
+    if (current.mode == parsed.mode &&
+        current.home_ssids == parsed.home_ssids &&
+        current.address == parsed.address &&
+        current.private_key == parsed.private_key &&
+        current.peer_public_key == parsed.peer_public_key &&
+        current.preshared_key == parsed.preshared_key &&
+        current.endpoint == parsed.endpoint &&
+        current.keepalive_s == parsed.keepalive_s &&
+        current.allowed_ips == parsed.allowed_ips) {
+        return true;
+    }
+
+    data_.wireguard = parsed;
+    Log::logf(CAT_CONFIG,
+              LOG_INFO,
+              "updated wireguard config mode=%s endpoint=%s key_set=%u "
+              "psk_set=%u\n",
+              wireguard_mode_name(parsed.mode),
+              parsed.endpoint.length() ? parsed.endpoint.c_str() : "<empty>",
+              parsed.private_key.length() ? 1u : 0u,
+              parsed.preshared_key.length() ? 1u : 0u);
+    return mark_dirty(AC_CONFIG_DIRTY_VPN);
 }
 
 bool AppConfig::set_sleephq_credentials(const String &client_id,

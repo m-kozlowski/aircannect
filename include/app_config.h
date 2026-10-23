@@ -11,6 +11,7 @@
 #include "display_config.h"
 #include "oximetry_types.h"
 #include "softap_mode.h"
+#include "wireguard_config.h"
 
 namespace aircannect {
 
@@ -70,6 +71,8 @@ struct AppConfigData {
     String smb_endpoint;
     String smb_user;
     String smb_password;
+
+    WireguardConfig wireguard;
 
     String sleephq_client_id;
     String sleephq_client_secret;
@@ -141,6 +144,7 @@ private:
     bool set_smb_credentials(const String &endpoint,
                              const String &user,
                              const String &password);
+    bool set_wireguard(const WireguardConfig &wireguard);
     bool set_sleephq_credentials(const String &client_id,
                                  const String &client_secret,
                                  const String &team_id,

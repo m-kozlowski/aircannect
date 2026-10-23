@@ -55,7 +55,8 @@ size_t config_json_reserve(const char *section) {
         return CONFIG_JSON_RESERVE_LARGE_SECTION;
     }
     if (strcmp(section, "smb") == 0 ||
-        strcmp(section, "sleephq") == 0) {
+        strcmp(section, "sleephq") == 0 ||
+        strcmp(section, "vpn") == 0) {
         return CONFIG_JSON_RESERVE_SYNC_SECTION;
     }
     return CONFIG_JSON_RESERVE_SMALL_SECTION;

@@ -108,6 +108,12 @@ static constexpr AppConfigEnumValue DISPLAY_ORIENTATION_VALUES[] = {
     {"270", "270 degrees"},
 };
 
+static constexpr AppConfigEnumValue WIREGUARD_MODE_VALUES[] = {
+    {"off", "Off"},
+    {"away", "Away from home Wi-Fi"},
+    {"always", "Always"},
+};
+
 static constexpr AppConfigEnumValue LOG_LEVEL_VALUES[] = {
     {"ERROR", "Error"},
     {"WARN", "Warn"},
@@ -392,6 +398,51 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      "Turn off the backlight after inactivity; 0 disables the timeout.",
      nullptr, 0, -1, AC_CFG_OFFSET(display_timeout)},
 #endif
+
+    {"wg_mode", AppConfigFieldId::WireguardMode, AppConfigGroup::Vpn, 10,
+     AppConfigFieldType::Enum, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
+     "Tunnel mode",
+     "When to route traffic through WireGuard. Away keeps the tunnel down "
+     "on home Wi-Fi networks.",
+     WIREGUARD_MODE_VALUES,
+     sizeof(WIREGUARD_MODE_VALUES) / sizeof(WIREGUARD_MODE_VALUES[0]), -1,
+     AC_CFG_OFFSET(wireguard.mode)},
+    {"wg_home", AppConfigFieldId::WireguardHomeSsids, AppConfigGroup::Vpn,
+     20, AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
+     "Home Wi-Fi networks",
+     "Comma-separated SSIDs where Away mode leaves the tunnel down.",
+     nullptr, 0, -1, AC_CFG_OFFSET(wireguard.home_ssids)},
+    {"wg_addr", AppConfigFieldId::WireguardAddress, AppConfigGroup::Vpn, 30,
+     AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
+     "Tunnel address", "IPv4 [Interface] Address.", nullptr, 0, -1,
+     AC_CFG_OFFSET(wireguard.address)},
+    {"wg_key", AppConfigFieldId::WireguardPrivateKey, AppConfigGroup::Vpn,
+     40, AppConfigFieldType::Secret, SECRET_PROVISIONABLE,
+     AC_CONFIG_DIRTY_VPN, "Private key", "[Interface] PrivateKey.",
+     nullptr, 0, -1, AC_CFG_OFFSET(wireguard.private_key)},
+    {"wg_peer", AppConfigFieldId::WireguardPeerPublicKey,
+     AppConfigGroup::Vpn, 50, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_VPN, "Peer public key", "[Peer] PublicKey.", nullptr,
+     0, -1, AC_CFG_OFFSET(wireguard.peer_public_key)},
+    {"wg_psk", AppConfigFieldId::WireguardPresharedKey, AppConfigGroup::Vpn,
+     60, AppConfigFieldType::Secret, SECRET_PROVISIONABLE,
+     AC_CONFIG_DIRTY_VPN, "Preshared key",
+     "Optional [Peer] PresharedKey.", nullptr, 0, -1,
+     AC_CFG_OFFSET(wireguard.preshared_key)},
+    {"wg_ep", AppConfigFieldId::WireguardEndpoint, AppConfigGroup::Vpn, 70,
+     AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
+     "Endpoint", "[Peer] Endpoint as host:port.", nullptr, 0, -1,
+     AC_CFG_OFFSET(wireguard.endpoint)},
+    {"wg_ka", AppConfigFieldId::WireguardKeepalive, AppConfigGroup::Vpn, 80,
+     AppConfigFieldType::UInt16, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
+     "Keepalive (seconds)",
+     "Persistent keepalive interval. 0 disables it.", nullptr, 0, -1,
+     AC_CFG_OFFSET(wireguard.keepalive_s)},
+    {"wg_allowed", AppConfigFieldId::WireguardAllowedIps,
+     AppConfigGroup::Vpn, 90, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_VPN, "Allowed IPs",
+     "Comma-separated IPv4 CIDRs accepted from the peer.", nullptr, 0, -1,
+     AC_CFG_OFFSET(wireguard.allowed_ips)},
 };
 
 #undef AC_LOG_FIELD
@@ -451,6 +502,10 @@ bool raw_value(const AppConfigData &cfg,
                 case AppConfigFieldId::DisplayOrientation:
                     out = display_orientation_name(
                         config_field_ref<DisplayOrientation>(cfg, field));
+                    return true;
+                case AppConfigFieldId::WireguardMode:
+                    out = wireguard_mode_name(
+                        config_field_ref<WireguardMode>(cfg, field));
                     return true;
                 default:
                     return false;
@@ -665,6 +720,58 @@ bool AppConfigFieldWriter::set_value(
         case AppConfigFieldId::DisplayAutoRotate:
             if (!parse_bool_yesno(value, parsed_bool)) return false;
             return config.set_display_auto_rotate(parsed_bool);
+        case AppConfigFieldId::WireguardMode:
+        case AppConfigFieldId::WireguardHomeSsids:
+        case AppConfigFieldId::WireguardAddress:
+        case AppConfigFieldId::WireguardPrivateKey:
+        case AppConfigFieldId::WireguardPeerPublicKey:
+        case AppConfigFieldId::WireguardPresharedKey:
+        case AppConfigFieldId::WireguardEndpoint:
+        case AppConfigFieldId::WireguardKeepalive:
+        case AppConfigFieldId::WireguardAllowedIps: {
+            WireguardConfig wireguard = cfg.wireguard;
+            switch (field.id) {
+                case AppConfigFieldId::WireguardMode:
+                    if (!parse_wireguard_mode(value, wireguard.mode)) {
+                        return false;
+                    }
+                    break;
+                case AppConfigFieldId::WireguardHomeSsids:
+                    wireguard.home_ssids = value;
+                    break;
+                case AppConfigFieldId::WireguardAddress:
+                    wireguard.address = value;
+                    break;
+                case AppConfigFieldId::WireguardPrivateKey:
+                    wireguard.private_key = value;
+                    break;
+                case AppConfigFieldId::WireguardPeerPublicKey:
+                    wireguard.peer_public_key = value;
+                    break;
+                case AppConfigFieldId::WireguardPresharedKey:
+                    wireguard.preshared_key = value;
+                    break;
+                case AppConfigFieldId::WireguardEndpoint:
+                    wireguard.endpoint = value;
+                    break;
+                case AppConfigFieldId::WireguardKeepalive: {
+                    String parsed = value;
+                    parsed.trim();
+                    uint32_t keepalive_s = 0;
+                    if (!parse_uint32_decimal(parsed.c_str(), keepalive_s) ||
+                        keepalive_s > UINT16_MAX) {
+                        return false;
+                    }
+                    wireguard.keepalive_s =
+                        static_cast<uint16_t>(keepalive_s);
+                    break;
+                }
+                default:
+                    wireguard.allowed_ips = value;
+                    break;
+            }
+            return config.set_wireguard(wireguard);
+        }
     }
     return false;
 }
@@ -700,6 +807,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::SleepHq: return "sleephq";
         case AppConfigGroup::Keybindings: return "keybindings";
         case AppConfigGroup::Display: return "display";
+        case AppConfigGroup::Vpn: return "vpn";
         case AppConfigGroup::Count: break;
     }
     return "unknown";
@@ -720,6 +828,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::SleepHq: return "SleepHQ";
         case AppConfigGroup::Keybindings: return "Buttons";
         case AppConfigGroup::Display: return "Display";
+        case AppConfigGroup::Vpn: return "VPN (WireGuard)";
         case AppConfigGroup::Count: break;
     }
     return "Unknown";

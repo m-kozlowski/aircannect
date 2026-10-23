@@ -93,6 +93,7 @@
 #include "version.h"
 #include "web_ui.h"
 #include "wifi_manager.h"
+#include "wireguard_service.h"
 #include "wifi_http_controller.h"
 
 using namespace aircannect;
@@ -139,6 +140,7 @@ static As11BleRecovery as11_ble_recovery;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
+static WireguardService wireguard_service;
 static TcpBridge tcp_bridge(as11_service_manager);
 static TelnetConsole telnet_console;
 static ConfigService config_service;
@@ -976,6 +978,9 @@ static void apply_config_runtime_effects(void *,
                  AC_CONFIG_DIRTY_SLEEPHQ_SYNC)) {
         export_config_pending = true;
     }
+    if (dirty & AC_CONFIG_DIRTY_VPN) {
+        wireguard_service.configure(config.wireguard);
+    }
     if (dirty & (AC_CONFIG_DIRTY_HTTP_AUTH |
                  AC_CONFIG_DIRTY_AUTH_WHITELIST)) {
         web_ui.apply_auth_config(config);
@@ -1128,6 +1133,7 @@ static void refresh_status_presentations(uint32_t now_ms) {
         },
         drain_can_rx);
 
+    snapshot.vpn = wireguard_service.status();
     snapshot.as11.transport = rpc_link_selector.selected();
     if (snapshot.as11.transport == As11Transport::Ble) {
         const As11BleLinkStatus link = as11_ble_rpc_link.ble_status();
@@ -1586,6 +1592,7 @@ void setup() {
 
     sync_network_services();
 
+    wireguard_service.configure(config_service.data().wireguard);
     config_service.set_runtime_effects(apply_config_runtime_effects, nullptr);
     config_service.activate_runtime_effects(false);
 
@@ -1807,6 +1814,10 @@ void loop() {
     drain_can_rx();
 
     publish_runtime_network();
+
+    wireguard_service.poll(wifi_manager.sta_ipv4_online(),
+                           wifi_manager.sta_ssid(),
+                           time_sync_service.ntp_synced(), now_ms);
 
     sync_network_services();
     drain_can_rx();

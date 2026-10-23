@@ -72,6 +72,12 @@ bool build_status_json(LargeTextBuffer &json,
     json_add_string(json, "wifi_bssid", wifi.bssid);
     json_add_int(json, "wifi_profile", wifi.active_profile);
     json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
+    json_add_string(json, "vpn_mode", wireguard_mode_name(snap.vpn.mode));
+    json_add_string(json, "vpn_state",
+                    wireguard_state_name(snap.vpn.state));
+    json_add_bool(json, "vpn_default_route", snap.vpn.default_route);
+    json_add_int(json, "vpn_handshake_age", snap.vpn.handshake_age_s);
+    json_add_string(json, "vpn_error", snap.vpn.error);
     json_add_bool(json, "update_checking", snap.update.checking);
     json_add_bool(json, "update_available", snap.update.available);
     json_add_string(json, "update_version", snap.update.version);

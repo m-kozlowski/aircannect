@@ -31,6 +31,7 @@ enum class AppConfigGroup : uint8_t {
     SleepHq,
     Keybindings,
     Display,
+    Vpn,
     Count,
 };
 
@@ -79,6 +80,7 @@ enum AppConfigDirty : uint32_t {
     AC_CONFIG_DIRTY_DISPLAY = 1UL << 22,
     AC_CONFIG_DIRTY_ALERTS = 1UL << 23,
     AC_CONFIG_DIRTY_PSU_90W = 1UL << 24,
+    AC_CONFIG_DIRTY_VPN = 1UL << 25,
 };
 
 static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
@@ -94,7 +96,7 @@ static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
     AC_CONFIG_DIRTY_AS11_TRANSPORT | AC_CONFIG_DIRTY_AS11_OTA_KEY |
     AC_CONFIG_DIRTY_ONBOARDING | AC_CONFIG_DIRTY_KEYBINDINGS |
     AC_CONFIG_DIRTY_DISPLAY | AC_CONFIG_DIRTY_ALERTS |
-    AC_CONFIG_DIRTY_PSU_90W;
+    AC_CONFIG_DIRTY_PSU_90W | AC_CONFIG_DIRTY_VPN;
 
 enum class AppConfigFieldId : uint8_t {
     OnboardingComplete,
@@ -142,6 +144,15 @@ enum class AppConfigFieldId : uint8_t {
     DisplayOrientation,
     DisplayAutoRotate,
     DisplayTimeout,
+    WireguardMode,
+    WireguardHomeSsids,
+    WireguardAddress,
+    WireguardPrivateKey,
+    WireguardPeerPublicKey,
+    WireguardPresharedKey,
+    WireguardEndpoint,
+    WireguardKeepalive,
+    WireguardAllowedIps,
 };
 
 struct AppConfigEnumValue {
