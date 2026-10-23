@@ -169,16 +169,15 @@ void *realloc_large(void *ptr,
         return nullptr;
     }
 
-    if (psram_detected && detect_psram()) {
-        void *next = heap_caps_realloc(ptr,
-                                       size,
-                                       MALLOC_CAP_SPIRAM |
-                                           MALLOC_CAP_8BIT);
-        if (next) return next;
-    }
+    void *next = alloc_large(size, allow_internal_fallback);
+    if (!next) return nullptr;
 
-    if (!allow_internal_fallback) return nullptr;
-    return heap_caps_realloc(ptr, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // IDF's moving realloc copies under the heap spinlock. Keep the copy
+    // between separate allocation/free calls, with interrupts enabled.
+    const size_t previous_size = heap_caps_get_allocated_size(ptr);
+    memcpy(next, ptr, size < previous_size ? size : previous_size);
+    ::free(ptr);
+    return next;
 #else
     (void)allow_internal_fallback;
     return realloc(ptr, size);

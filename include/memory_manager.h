@@ -49,9 +49,13 @@ size_t buffer_budget(size_t normal_bytes, size_t small_psram_bytes);
 
 void *alloc_dma(size_t size);
 void *alloc_large(size_t size, bool allow_internal_fallback = true);
+
+// Preserves the old allocation on failure. On esp32, allocate/copy/free keeps
+// payload copies outside the heap lock; both allocations coexist briefly.
 void *realloc_large(void *ptr,
                     size_t size,
                     bool allow_internal_fallback = true);
+
 void *calloc_large(size_t count,
                    size_t size,
                    bool allow_internal_fallback = true);
