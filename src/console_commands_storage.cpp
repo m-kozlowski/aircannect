@@ -367,6 +367,16 @@ void StorageConsoleCommands::execute_storage(
     const bool has_second = parse_console_arg(rest, position, second);
     const bool has_extra = parse_console_arg(rest, position, extra);
 
+    if (command == "format") {
+        if (has_second || (has_first && first != "confirm")) {
+            out.println("[STORAGE] usage: storage format [confirm]");
+            return;
+        }
+
+        execute_reset_command(out, FactoryReset::Scope::Storage, has_first);
+        return;
+    }
+
     if (command == "status" && !has_first) {
         ConsoleFormat::print_storage_status(out, Storage::status());
         return;
@@ -441,7 +451,7 @@ void StorageConsoleCommands::execute_storage(
         command != "rename") {
         print_unknown_command(
             out, "STORAGE",
-            "storage status, diagnostics, mount, usb [status|on|off], pwd, ls [PATH], cd PATH, "
+            "storage status, diagnostics, mount, format [confirm], usb [status|on|off], pwd, ls [PATH], cd PATH, "
             "mkdir PATH, rm PATH, rename PATH NEW_NAME");
         return;
     }

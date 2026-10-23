@@ -366,15 +366,10 @@ void handle_config(Print &out,
         return;
     }
 
-    if (rest == "factory-reset" || rest == "factory reset") {
-        out.println(
-            "[CONFIG] factory reset: clearing app config and Wi-Fi credentials");
-        const ConfigTransactionResult transaction = config.reset();
-        wifi.clear_sta_config();
-        out.println(transaction.persisted
-                        ? "[CONFIG] factory reset complete"
-                        : "[CONFIG] factory reset persistence failed");
-        ConsoleFormat::print_wifi_status(out, wifi);
+    if (rest == "factory-reset" || rest == "factory reset" ||
+        rest == "factory-reset confirm" || rest == "factory reset confirm") {
+        execute_reset_command(out, FactoryReset::Scope::All,
+                              rest.endsWith(" confirm"));
         return;
     }
 
@@ -399,7 +394,7 @@ void handle_config(Print &out,
                           "config KEY [VALUE], config keybindings "
                           "[reset|BUTTON[+BUTTON] GESTURE "
                           "ACTION|default], reset, "
-                          "factory-reset");
+                          "factory-reset [confirm]");
 }
 
 }  // namespace

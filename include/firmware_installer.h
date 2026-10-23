@@ -55,6 +55,7 @@ struct PartitionOperationResult {
 
 class FirmwareInstaller {
 public:
+    using RebootPreparation = bool (*)(void *context);
     static constexpr uint32_t WriteIdleTimeoutSeconds = 60;
 
     void begin();
@@ -90,6 +91,7 @@ public:
 
     // Lifecycle and query
     void http_response_closed();
+    bool request_prepared_reboot(RebootPreparation prepare, void *context);
     void schedule_reboot(uint32_t delay_ms = 750);
     bool active() const;
     bool as11_quiesce_required() const;
@@ -125,6 +127,8 @@ private:
 
     uint32_t reboot_at_ms_ = 0;
     bool reboot_wait_logged_ = false;
+    RebootPreparation reboot_preparation_ = nullptr;
+    void *reboot_preparation_context_ = nullptr;
     uint32_t last_progress_log_percent_ = 255;
 
     esp_ota_handle_t ota_handle_ = 0;

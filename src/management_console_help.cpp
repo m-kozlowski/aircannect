@@ -50,7 +50,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config KEY                show one exact NVS key");
         out.println("  config KEY VALUE          set one exact NVS key");
         out.println("  config reset              reset app config, keep Wi-Fi profiles");
-        out.println("  config factory-reset      reset app config and Wi-Fi profiles");
+        out.println("  config factory-reset [confirm] erase SD, NVS and crash dumps; restart");
         out.println("  config keybindings        show button action bindings");
         out.println("  config keybindings reset  restore hardware defaults");
         out.println("  config keybindings BUTTON[+BUTTON] short|long ACTION|default");
@@ -125,6 +125,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP storage]");
         out.println("  storage status            show mounted storage state");
         out.println("  storage mount             mount storage if unavailable");
+        out.println("  storage format [confirm]  format entire SD as FAT32; restart");
         out.println("  storage usb [status|on|off] share SD over USB; unmount on host before off");
         out.println("  storage pwd               show the current directory");
         out.println("  storage ls [PATH]         list a directory");

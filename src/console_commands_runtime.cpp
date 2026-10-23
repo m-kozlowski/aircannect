@@ -322,6 +322,40 @@ void CoreDiagnosticsConsoleCommands::print_memory_detail(Print &out) {
     out.println(static_cast<unsigned long>(tls.frees));
 }
 
+void execute_reset_command(Print &out, FactoryReset::Scope scope, bool confirm) {
+    const bool all = scope == FactoryReset::Scope::All;
+    if (confirm) {
+        char error[96] = {};
+        if (!FactoryReset::request(scope, error, sizeof(error))) {
+            out.printf("[RESET] rejected error=%s\n", error);
+            return;
+        }
+
+        out.printf("[RESET] %s queued; keep power connected; restarting\n",
+                   all ? "factory reset" : "SD format");
+        return;
+    }
+
+    const FactoryReset::Status status = FactoryReset::status();
+    out.printf("[RESET] operation=%s state=%s error=%s\n",
+               status.scope == FactoryReset::Scope::All ? "factory_reset" : "storage_format",
+               FactoryReset::state_name(status.state),
+               status.error[0] ? status.error : "--");
+    if (status.state == FactoryReset::State::Succeeded ||
+        status.state == FactoryReset::State::Failed) {
+        out.printf("[RESET] sd_formatted=%s nvs_erased=%s crash_cleared=%s\n",
+                   status.sd_formatted ? "yes" : "no",
+                   status.nvs_erased ? "yes" : "no",
+                   status.crash_cleared ? "yes" : "no");
+    }
+
+    out.println(all
+        ? "[RESET] erases the entire SD card, NVS (including Wi-Fi and BLE pairing), and crash dumps"
+        : "[RESET] erases the entire SD card; configuration and pairing are preserved");
+    out.printf("[RESET] confirm with: %s confirm\n",
+               all ? "config factory-reset" : "storage format");
+}
+
 SystemConsoleCommands::SystemConsoleCommands(FirmwareInstaller &installer)
     : installer_(installer) {}
 

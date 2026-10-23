@@ -41,6 +41,7 @@
 #include "export_http_controller.h"
 #include "export_task.h"
 #include "firmware_installer.h"
+#include "factory_reset.h"
 #include "firmware_url_source.h"
 #include "http_route_module.h"
 #include "live_http_controller.h"
@@ -329,6 +330,17 @@ static bool restart_aircannect(void *, uint32_t) {
 
     firmware_installer.schedule_reboot(500);
     return true;
+}
+
+static const char *factory_reset_blocked() {
+    if (session_manager.status().state == SessionState::Active ||
+        as11_device_service.state().therapy_state() == As11TherapyState::Running ||
+        edf_recorder_manager.status().active) return "therapy_active";
+
+    if (local_poweroff_requested) return "poweroff_pending";
+    if (resmed_ota_manager.active()) return "resmed_ota_active";
+    if (as11_service_manager.exclusive_requested()) return "resmed_service_active";
+    return nullptr;
 }
 
 static bool trigger_export_sync(void *, uint32_t) {
@@ -1163,6 +1175,13 @@ void setup() {
     Memory::begin();
     Log::init();
     const bool crash_diagnostics_ready = crash_diagnostics.begin();
+
+    if (!FactoryReset::run_pending_on_boot(crash_diagnostics)) {
+        Serial.printf("[RESET] boot stopped error=%s\n", FactoryReset::status().error);
+        for (;;) delay(1000);
+    }
+
+    FactoryReset::begin(firmware_installer, factory_reset_blocked);
     Log::bind_file_log_sink(StorageService::file_log_port());
 
     const bool tls_allocator_ready = TlsMemory::begin();
@@ -1355,10 +1374,15 @@ void setup() {
                   "[INIT] ResMed firmware preparer failed to start\n");
     }
 
-    apply_storage_provisioning(config_service,
-                               wifi_manager,
-                               StorageService::read_port(),
-                               StorageService::path_port());
+    const FactoryReset::Status reset_status = FactoryReset::status();
+    if (reset_status.scope != FactoryReset::Scope::All ||
+        reset_status.state == FactoryReset::State::Idle) {
+        apply_storage_provisioning(config_service,
+                                   wifi_manager,
+                                   StorageService::read_port(),
+                                   StorageService::path_port());
+    }
+
     log_memory_profile_checkpoint("storage_services");
 
     // Device/session/report managers

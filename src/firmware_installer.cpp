@@ -96,7 +96,22 @@ void FirmwareInstaller::poll(bool reboot_allowed, bool therapy_active) {
     }
 
     if (reboot_due && reboot_allowed) {
+        const RebootPreparation prepare = reboot_preparation_;
+        void *context = reboot_preparation_context_;
         unlock();
+
+        if (prepare && !prepare(context)) {
+            if (lock()) {
+                reboot_preparation_ = nullptr;
+                reboot_preparation_context_ = nullptr;
+                reboot_at_ms_ = 0;
+                status_.reboot_pending = false;
+                set_error_locked("reboot_preparation_failed");
+                unlock();
+            }
+            return;
+        }
+
         Log::logf(CAT_OTA, LOG_INFO, "rebooting\n");
         delay(50);
         ESP.restart();
@@ -961,6 +976,24 @@ void FirmwareInstaller::http_response_closed() {
     }
 
     unlock();
+}
+
+bool FirmwareInstaller::request_prepared_reboot(RebootPreparation prepare,
+                                               void *context) {
+    if (!prepare || !lock()) return false;
+
+    if (source_blocked_locked()) {
+        unlock();
+        return false;
+    }
+    reboot_preparation_ = prepare;
+    reboot_preparation_context_ = context;
+    reboot_at_ms_ = millis() + 500;
+    if (!reboot_at_ms_) reboot_at_ms_ = 1;
+    reboot_wait_logged_ = false;
+    status_.reboot_pending = true;
+    unlock();
+    return true;
 }
 
 void FirmwareInstaller::schedule_reboot(uint32_t delay_ms) {

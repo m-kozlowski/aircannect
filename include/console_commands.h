@@ -2,6 +2,7 @@
 
 #include "board_net.h"
 #include "console_command_router.h"
+#include "factory_reset.h"
 #include "large_scratch_array.h"
 #include "sleep_day_id.h"
 #include "storage_browser_port.h"
@@ -12,6 +13,8 @@
 #include <memory>
 
 namespace aircannect {
+
+void execute_reset_command(Print &out, FactoryReset::Scope scope, bool confirm);
 
 static constexpr size_t AC_CONSOLE_COMMAND_SESSION_CAPACITY =
     AC_MAX_TELNET_CLIENTS + 2;

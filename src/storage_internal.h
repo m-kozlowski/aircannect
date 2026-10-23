@@ -11,6 +11,9 @@ namespace aircannect { struct StorageRangeWriteCommand; }
 
 namespace aircannect::Storage {
 
+// Explicitly confirmed format, called before begin() and any SD owner starts.
+bool format_card_on_boot(char *error, size_t size);
+
 // Storage task only, after all local filesystem users have closed their files.
 void unmount();
 
