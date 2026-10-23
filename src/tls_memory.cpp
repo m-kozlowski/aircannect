@@ -119,14 +119,16 @@ TlsMemoryStatus status() {
 }
 
 TlsMemoryAdmission admission() {
-    const MemoryStatus memory = Memory::status();
     const TlsMemoryStatus tls = status();
 
     TlsMemoryAdmission out;
     out.psram_allocator =
         tls.installed && tls.psram_enabled && tls.install_result == 0;
-    out.internal_free = memory.heap_free;
-    out.internal_largest = memory.heap_max_alloc;
+    out.internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+    out.internal_largest = heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
     out.minimum_free = out.psram_allocator
         ? TLS_MIN_INTERNAL_FREE_WITH_PSRAM
         : TLS_MIN_INTERNAL_FREE;

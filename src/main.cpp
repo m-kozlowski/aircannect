@@ -48,6 +48,7 @@
 #include "local_input_controller.h"
 #include "management_console.h"
 #include "memory_manager.h"
+#include "irq_block_probe.h"
 #include "ota_http_controller.h"
 #include "ble_runtime.h"
 #include "oximetry_hub.h"
@@ -1588,6 +1589,7 @@ void setup() {
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
     log_memory_profile_checkpoint("web");
+    irq_block_probe_begin();
 }
 
 static void poll_usb_storage() {
@@ -1627,6 +1629,8 @@ static void poll_usb_storage() {
 }
 
 void loop() {
+    irq_block_probe_poll();
+
     const uint32_t now_ms = millis();
     poll_usb_storage();
     crash_diagnostics.poll();
