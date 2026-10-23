@@ -67,7 +67,7 @@ void TimeSyncService::set_history_transfer_activity_callback(
     history_transfer_context_ = callback ? context : nullptr;
 }
 
-void TimeSyncService::poll() {
+void TimeSyncService::poll(bool automatic_push_allowed) {
     if (!app_config_ || !wifi_manager_ || !rpc_ || !device_) return;
 
     apply_timezone();
@@ -87,7 +87,7 @@ void TimeSyncService::poll() {
         note_ntp_sync(now_ms);
     }
     poll_resmed_pull(now_ms);
-    poll_resmed_push(now_ms);
+    poll_resmed_push(now_ms, automatic_push_allowed);
 }
 
 void TimeSyncService::force_ntp_sync() {
@@ -446,7 +446,8 @@ void TimeSyncService::poll_resmed_push_result(uint32_t now_ms) {
         : "esp_to_resmed_request_failed";
 }
 
-void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
+void TimeSyncService::poll_resmed_push(uint32_t now_ms,
+                                      bool automatic_push_allowed) {
     if (!app_config_ || !app_config_->resmed_time_sync_enabled) {
         next_resmed_push_ms_ = 0;
         return;
@@ -480,6 +481,8 @@ void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
             static_cast<int32_t>(TIME_SYNC_RETRY_MS)) {
         return;
     }
+
+    if (!automatic_push_allowed) return;
 
     last_resmed_push_attempt_ms_ = now_ms;
     if (request_push_esp_to_resmed(RpcSource::Scheduler)) {

@@ -1794,7 +1794,7 @@ void loop() {
 
     if (!resmed_ota_transport_active &&
         !as11_application_quiesce_requested) {
-        time_sync_service.poll();
+        time_sync_service.poll(session_manager.idle_for(now_ms, 10 * 1000));
     }
 
     drain_can_rx();
@@ -1836,7 +1836,8 @@ void loop() {
                         therapy_active,
                         resmed_ota_transport_active ? "waiting_resmed_ota" :
                         report_status.foreground_active ? "waiting_report" :
-                        "runtime_busy");
+                        "runtime_busy",
+                        session_manager.idle_for(now_ms, 60 * 1000));
     firmware_installer.poll(esp_reboot_allowed, therapy_active);
 
     drain_can_rx();

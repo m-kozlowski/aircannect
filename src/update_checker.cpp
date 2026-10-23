@@ -43,7 +43,8 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
                          bool check_allowed,
                          bool install_active,
                          bool therapy_active,
-                         const char *blocked_reason) {
+                         const char *blocked_reason,
+                         bool automatic_check_allowed) {
     bool start = false;
     bool manual = false;
     bool log_heap_deferred = false;
@@ -119,15 +120,17 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     }
 
     const bool schedule_ready = manual_requested_ || network_settled;
+    const bool automatic_ready = manual_requested_ || automatic_check_allowed;
     log_heap_deferred = heap_retry_at_ms_ == 0;
     const bool heap_retry_ready = heap_retry_at_ms_ == 0 ||
         deadline_due(now, heap_retry_at_ms_);
     start = status_.pending && schedule_ready && check_allowed &&
-        !therapy_active && !task_ && heap_retry_ready;
+        !therapy_active && !task_ && heap_retry_ready && automatic_ready;
     manual = manual_requested_;
     if (status_.pending && !start) {
         trace_phase(therapy_active ? "waiting_therapy" :
                     !check_allowed ? blocked_reason :
+                    !automatic_ready ? "waiting_post_therapy" :
                     !schedule_ready ? "waiting_network_settle" :
                     !heap_retry_ready ? "waiting_tls_heap" :
                     "waiting_task_cleanup");

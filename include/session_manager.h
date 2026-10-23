@@ -40,6 +40,12 @@ public:
     void note_device_boot(uint32_t now_ms);
 
     const SessionStatus &status() const { return status_; }
+    bool idle_for(uint32_t now_ms, uint32_t duration_ms) const {
+        return status_.state == SessionState::Idle &&
+               (status_.end_count == 0 ||
+                static_cast<uint32_t>(now_ms - status_.ended_ms) >= duration_ms);
+    }
+
     static const char *state_name(SessionState state);
 
 private:

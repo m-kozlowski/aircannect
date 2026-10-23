@@ -51,7 +51,8 @@ public:
               bool check_allowed,
               bool install_active,
               bool therapy_active,
-              const char *blocked_reason = "runtime_busy");
+              const char *blocked_reason = "runtime_busy",
+              bool automatic_check_allowed = true);
     void mark_config_dirty();
 
     bool request_check(bool install_active);

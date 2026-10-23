@@ -29,7 +29,7 @@ public:
                As11DeviceService &device);
     void set_history_transfer_activity_callback(ActivityCallback callback,
                                                 void *context);
-    void poll();
+    void poll(bool automatic_push_allowed);
 
     void force_ntp_sync();
     bool request_push_esp_to_resmed(RpcSource source);
@@ -64,7 +64,7 @@ private:
     bool resmed_pull_due(uint32_t now_ms) const;
     void poll_resmed_pull(uint32_t now_ms);
     void poll_resmed_push_result(uint32_t now_ms);
-    void poll_resmed_push(uint32_t now_ms);
+    void poll_resmed_push(uint32_t now_ms, bool automatic_push_allowed = true);
     bool therapy_running() const;
     bool history_transfer_active() const;
     bool resmed_push_readback_matches(const As11DeviceState &state) const;
