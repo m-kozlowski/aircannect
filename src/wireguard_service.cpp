@@ -212,15 +212,26 @@ bool WireguardService::continue_connect(uint32_t now_ms) {
         size_t cursor = 0;
         WireguardCidr cidr;
         bool malformed = false;
-        LwipCoreGuard guard;
-        while (next_wireguard_cidr(config_.allowed_ips, cursor, cidr,
-                                   malformed)) {
-            if (esp_wireguard_add_allowed_ip(&wg_ctx, cidr.ip,
-                                             cidr.netmask) != ESP_OK) {
-                Log::logf(CAT_WIFI, LOG_WARN,
-                          "[WG] allowed IP rejected: %s/%s\n", cidr.ip,
-                          cidr.netmask);
+        bool rejected = false;
+        {
+            LwipCoreGuard guard;
+            while (next_wireguard_cidr(config_.allowed_ips, cursor, cidr,
+                                       malformed)) {
+                if (esp_wireguard_add_allowed_ip(&wg_ctx, cidr.ip,
+                                                 cidr.netmask) != ESP_OK) {
+                    Log::logf(CAT_WIFI, LOG_WARN,
+                              "[WG] allowed IP rejected: %s/%s\n", cidr.ip,
+                              cidr.netmask);
+                    rejected = true;
+                }
             }
+        }
+        // A rejected entry still handshakes but silently drops that
+        // traffic, so fail visibly instead of reporting the tunnel as up.
+        if (rejected) {
+            stop("allowed IP rejected");
+            schedule_retry(now_ms, "allowed IP rejected");
+            return false;
         }
         peer_connected_ = true;
     }
