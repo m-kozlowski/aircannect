@@ -140,10 +140,12 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `wg_ep` | `host[:port]` | empty | `[Peer] Endpoint`. The port defaults to `51820`. |
 | `wg_ka` | `0` to `65535` seconds | `25` | Persistent keepalive. `0` disables it. |
 | `wg_allowed` | Comma-separated IPv4 CIDRs | `0.0.0.0/0` | `[Peer] AllowedIPs` accepted from the peer. |
+| `wg_dns` | IPv4 address, or empty | empty | `[Interface] DNS`, used while the tunnel holds the default route. Empty keeps the Wi-Fi network's DNS. |
 
 The Web UI's VPN section can import a wg-quick `.conf` file. It fills these
-fields in the browser for review; nothing is sent until Save. IPv6 addresses
-and routes, `DNS`, `MTU`, and hook commands are ignored.
+fields in the browser for review; nothing is sent until Save. Only the first
+IPv4 `DNS` server is kept; IPv6 addresses and routes, `MTU`, and hook commands
+are ignored. The WiFi page's profile list can also mark a network as home.
 
 The tunnel waits for NTP time before its first handshake. Once the
 peer answers, all traffic outside the local Wi-Fi subnet routes through the

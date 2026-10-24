@@ -28,9 +28,46 @@
         bssid && bssid !== "00:00:00:00:00:00" ? bssid : ""));
     }
 
+    // Mirrors AC_WIREGUARD_HOME_SSIDS_MAX in the firmware.
+    const HOME_SSIDS_MAX = 160;
+
+    function parseHomeSsids(value) {
+      return String(value || "").split(",").map((item) => item.trim())
+        .filter((item) => item.length);
+    }
+
+    // Without the VPN section the profiles still render, just without
+    // the home toggle.
+    async function loadHomeSsids() {
+      try {
+        const response = await AirCANnect.http.requestOk("/api/config/vpn");
+        const data = await response.json();
+        return parseHomeSsids(data.wg_home);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function homeButton(ssid, homeSsids) {
+      const isHome = homeSsids.includes(ssid);
+      const button = document.createElement("button");
+      button.className = isHome ? "btn primary" : "btn";
+      button.textContent = isHome ? "Home" : "Set as home";
+      button.title = isHome ?
+        "The VPN stays down on this network in Away mode. Click to unset." :
+        "Keep the VPN down on this network in Away mode.";
+      // wg_home is a comma-separated list.
+      button.disabled = ssid.includes(",");
+      button.onclick = () => setHomeSsid(ssid, !isHome, homeSsids);
+      return button;
+    }
+
     async function loadWifi() {
       try {
-        const response = await AirCANnect.http.requestOk("/api/wifi");
+        const [response, homeSsids] = await Promise.all([
+          AirCANnect.http.requestOk("/api/wifi"),
+          loadHomeSsids(),
+        ]);
         const data = await response.json();
         renderWifiCurrent(data);
         const root = document.getElementById("wifiProfiles");
@@ -39,14 +76,43 @@
           root.innerHTML = '<div class="value" style="text-align:left">No profiles</div>';
         }
         data.profiles.forEach((profile, index) => {
+          const controls = document.createElement("div");
+          controls.className = "btns";
+          if (homeSsids) controls.appendChild(homeButton(profile.ssid, homeSsids));
           const button = document.createElement("button");
           button.className = "btn danger";
           button.textContent = "Remove";
           button.onclick = () => wifiRemove(index);
-          root.appendChild(AirCANnect.ui.row(profile.ssid, button,
+          controls.appendChild(button);
+          root.appendChild(AirCANnect.ui.row(profile.ssid, controls,
             (index === data.active ? "active, " : "") +
             (profile.open ? "open" : "password")));
         });
+      } catch (error) {
+        AirCANnect.ui.message("wifiMsg", error.message, false);
+      }
+    }
+
+    async function setHomeSsid(ssid, home, homeSsids) {
+      const next = homeSsids.filter((item) => item !== ssid);
+      if (home) next.push(ssid);
+      const value = next.join(",");
+      if (value.length > HOME_SSIDS_MAX) {
+        AirCANnect.ui.message("wifiMsg",
+          "Home networks list is limited to " + HOME_SSIDS_MAX + " characters",
+          false);
+        return;
+      }
+      try {
+        await AirCANnect.http.requestOk("/api/config", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({wg_home: value}),
+        });
+        AirCANnect.ui.message("wifiMsg",
+          home ? ssid + " set as home Wi-Fi" : ssid + " no longer home Wi-Fi",
+          true);
+        setTimeout(loadWifi, 600);
       } catch (error) {
         AirCANnect.ui.message("wifiMsg", error.message, false);
       }
