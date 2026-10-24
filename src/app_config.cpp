@@ -1037,7 +1037,8 @@ bool AppConfig::set_wireguard(const WireguardConfig &wireguard) {
         current.preshared_key == parsed.preshared_key &&
         current.endpoint == parsed.endpoint &&
         current.keepalive_s == parsed.keepalive_s &&
-        current.allowed_ips == parsed.allowed_ips) {
+        current.allowed_ips == parsed.allowed_ips &&
+        current.dns == parsed.dns) {
         return true;
     }
 

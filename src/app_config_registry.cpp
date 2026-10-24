@@ -443,6 +443,12 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_VPN, "Allowed IPs",
      "Comma-separated IPv4 CIDRs accepted from the peer.", nullptr, 0, -1,
      AC_CFG_OFFSET(wireguard.allowed_ips)},
+    {"wg_dns", AppConfigFieldId::WireguardDns, AppConfigGroup::Vpn, 100,
+     AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
+     "Tunnel DNS",
+     "Optional IPv4 [Interface] DNS used while the tunnel is up. Empty "
+     "keeps the Wi-Fi network's DNS.",
+     nullptr, 0, -1, AC_CFG_OFFSET(wireguard.dns)},
 };
 
 #undef AC_LOG_FIELD
@@ -728,7 +734,8 @@ bool AppConfigFieldWriter::set_value(
         case AppConfigFieldId::WireguardPresharedKey:
         case AppConfigFieldId::WireguardEndpoint:
         case AppConfigFieldId::WireguardKeepalive:
-        case AppConfigFieldId::WireguardAllowedIps: {
+        case AppConfigFieldId::WireguardAllowedIps:
+        case AppConfigFieldId::WireguardDns: {
             WireguardConfig wireguard = cfg.wireguard;
             switch (field.id) {
                 case AppConfigFieldId::WireguardMode:
@@ -766,6 +773,9 @@ bool AppConfigFieldWriter::set_value(
                         static_cast<uint16_t>(keepalive_s);
                     break;
                 }
+                case AppConfigFieldId::WireguardDns:
+                    wireguard.dns = value;
+                    break;
                 default:
                     wireguard.allowed_ips = value;
                     break;

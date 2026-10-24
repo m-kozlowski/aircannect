@@ -34,6 +34,9 @@ struct WireguardConfig {
     uint16_t keepalive_s = AC_WIREGUARD_DEFAULT_KEEPALIVE_S;
     // Comma-separated IPv4 CIDRs accepted from the peer.
     String allowed_ips = AC_WIREGUARD_DEFAULT_ALLOWED_IPS;
+    // Optional IPv4 resolver used while the tunnel is up; empty keeps the
+    // Wi-Fi network's DNS.
+    String dns;
 };
 
 struct WireguardEndpoint {

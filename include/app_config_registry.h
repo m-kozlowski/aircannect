@@ -153,6 +153,7 @@ enum class AppConfigFieldId : uint8_t {
     WireguardEndpoint,
     WireguardKeepalive,
     WireguardAllowedIps,
+    WireguardDns,
 };
 
 struct AppConfigEnumValue {

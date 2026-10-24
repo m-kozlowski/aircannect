@@ -623,7 +623,12 @@
       if (allowed.length !== allowedAll.length) result.notes.push("IPv6 routes ignored");
       if (!allowed.length) throw new Error("[Peer] AllowedIPs has no IPv4 range");
 
-      if (iface.dns) result.notes.push("DNS ignored (uses the Wi-Fi network's DNS)");
+      // Hotspot resolvers often refuse queries arriving via the home WAN.
+      const dnsAll = String(iface.dns || "").split(",").map((item) => item.trim())
+        .filter((item) => item.length);
+      const dns = dnsAll.find((item) => validIpv4(item));
+      if (dnsAll.length && !dns) result.notes.push("DNS ignored (no IPv4 server)");
+      if (dns && dnsAll.length > 1) result.notes.push("DNS uses " + dns + " only");
       ["mtu", "listenport", "table", "preup", "postup", "predown", "postdown"]
         .forEach((key) => {
           if (iface[key]) result.notes.push(key + " ignored");
@@ -635,6 +640,7 @@
       result.values.wg_psk = peer.presharedkey || "";
       result.values.wg_ep = peer.endpoint;
       result.values.wg_allowed = allowed.join(",");
+      result.values.wg_dns = dns || "";
       if (peer.persistentkeepalive) {
         result.values.wg_ka = peer.persistentkeepalive;
       }
@@ -781,6 +787,10 @@
       }
       if (!validWireguardAllowedIps(value("wg_allowed"))) {
         return fail("wg_allowed must be IPv4 CIDRs separated by commas");
+      }
+      if (String(value("wg_dns") || "").trim().length &&
+          !validIpv4(String(value("wg_dns")).trim())) {
+        return fail("wg_dns must be an IPv4 address");
       }
       if (value("wg_mode") && value("wg_mode") !== "off") {
         const missing = ["wg_addr", "wg_peer", "wg_ep", "wg_allowed"]

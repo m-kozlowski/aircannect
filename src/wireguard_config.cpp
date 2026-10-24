@@ -130,6 +130,7 @@ void normalize_wireguard_config(WireguardConfig &config) {
     config.endpoint.trim();
     config.allowed_ips = normalize_list(config.allowed_ips);
     config.allowed_ips.replace(" ", "");
+    config.dns.trim();
 }
 
 bool parse_wireguard_endpoint(const String &text, WireguardEndpoint &out) {
@@ -235,6 +236,10 @@ const char *wireguard_config_reject_reason(const WireguardConfig &config) {
     while (next_wireguard_cidr(config.allowed_ips, cursor, cidr, malformed)) {
     }
     if (malformed) return "bad_allowed_ips";
+    if (config.dns.length() &&
+        !parse_wireguard_address(config.dns, nullptr, 0)) {
+        return "bad_dns";
+    }
 
     if (config.mode != WireguardMode::Off &&
         !wireguard_config_complete(config)) {

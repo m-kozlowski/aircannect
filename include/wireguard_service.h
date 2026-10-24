@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
+#include <lwip/dns.h>
+#include <lwip/ip_addr.h>
 #include <stdint.h>
 
 #include "wireguard_config.h"
@@ -52,6 +54,9 @@ private:
     void schedule_retry(uint32_t now_ms, const char *error);
     void set_state(WireguardState state);
     void set_error(const char *error);
+    // Callers hold the lwIP core lock.
+    void apply_tunnel_dns();
+    void restore_wifi_dns();
 
     WireguardConfig config_;
     bool restart_pending_ = false;
@@ -61,6 +66,13 @@ private:
     String endpoint_host_;
     bool tunnel_open_ = false;
     bool peer_connected_ = false;
+
+    // Resolvers the Wi-Fi network handed out, saved while the tunnel's
+    // resolver is installed so they can be put back when it goes down.
+    bool has_tunnel_dns_ = false;
+    ip_addr_t tunnel_dns_ = {};
+    bool tunnel_dns_active_ = false;
+    ip_addr_t wifi_dns_[DNS_MAX_SERVERS] = {};
 
     uint32_t connect_started_ms_ = 0;
     uint32_t retry_at_ms_ = 0;

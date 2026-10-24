@@ -150,6 +150,12 @@ bool WireguardService::start(uint32_t now_ms) {
     address_ = address;
     endpoint_host_ = endpoint.host;
 
+    char dns[16] = {};
+    has_tunnel_dns_ =
+        config_.dns.length() &&
+        parse_wireguard_address(config_.dns, dns, sizeof(dns)) &&
+        ipaddr_aton(dns, &tunnel_dns_) == 1;
+
     wg_config = ESP_WIREGUARD_CONFIG_DEFAULT();
     wg_config.private_key = config_.private_key.c_str();
     wg_config.public_key = config_.peer_public_key.c_str();
@@ -257,6 +263,11 @@ void WireguardService::poll_up(uint32_t now_ms) {
             esp_wireguard_restore_default(&wg_ctx);
         }
         default_route = netif_default == wg_ctx.netif;
+        if (default_route) {
+            apply_tunnel_dns();
+        } else {
+            restore_wifi_dns();
+        }
     }
 
     int32_t age_s = -1;
@@ -304,6 +315,7 @@ void WireguardService::stop(const char *reason) {
     if (!tunnel_open_) return;
     {
         LwipCoreGuard guard;
+        restore_wifi_dns();
         if (wg_ctx.netif) {
             esp_wireguard_disconnect(&wg_ctx);
         } else {
@@ -318,6 +330,37 @@ void WireguardService::stop(const char *reason) {
     portEXIT_CRITICAL(&status_lock_);
     Log::logf(CAT_WIFI, LOG_INFO, "[WG] tunnel stopped: %s\n",
               reason ? reason : "");
+}
+
+// Hotspot resolvers (e.g. an ISP's) often refuse queries that arrive from
+// the home WAN once the tunnel carries them, so use the tunnel's own.
+void WireguardService::apply_tunnel_dns() {
+    if (!has_tunnel_dns_) return;
+    const ip_addr_t *current = dns_getserver(0);
+    if (current && ip_addr_cmp(current, &tunnel_dns_)) return;
+    // DHCP renewals rewrite the servers; keep their latest values.
+    for (u8_t i = 0; i < DNS_MAX_SERVERS; i++) {
+        const ip_addr_t *server = dns_getserver(i);
+        if (server) ip_addr_copy(wifi_dns_[i], *server);
+        else ip_addr_set_zero(&wifi_dns_[i]);
+    }
+    dns_setserver(0, &tunnel_dns_);
+    for (u8_t i = 1; i < DNS_MAX_SERVERS; i++) dns_setserver(i, nullptr);
+    if (!tunnel_dns_active_) {
+        Log::logf(CAT_WIFI, LOG_INFO, "[WG] DNS via tunnel %s\n",
+                  ipaddr_ntoa(&tunnel_dns_));
+    }
+    tunnel_dns_active_ = true;
+}
+
+void WireguardService::restore_wifi_dns() {
+    if (!tunnel_dns_active_) return;
+    for (u8_t i = 0; i < DNS_MAX_SERVERS; i++) {
+        dns_setserver(i, ip_addr_isany(&wifi_dns_[i]) ? nullptr
+                                                      : &wifi_dns_[i]);
+    }
+    tunnel_dns_active_ = false;
+    Log::logf(CAT_WIFI, LOG_INFO, "[WG] DNS restored to Wi-Fi\n");
 }
 
 void WireguardService::schedule_retry(uint32_t now_ms, const char *error) {
