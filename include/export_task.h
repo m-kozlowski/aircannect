@@ -55,9 +55,6 @@ struct ExportTaskControlSnapshot {
     ExportEndpointStatus &endpoint(ExportEndpoint id) {
         return endpoints[static_cast<size_t>(id)];
     }
-#if AC_STACK_PROFILE_ENABLED
-    uint32_t stack_high_water_words = 0;
-#endif
 };
 
 struct ExportSmbStatusSnapshot {

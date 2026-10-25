@@ -186,16 +186,10 @@ BleSensorStatus BleSensorSource::status() const {
     out.peer[sizeof(out.peer) - 1] = 0;
     strncpy(out.name, connected_name_, sizeof(out.name) - 1);
     out.name[sizeof(out.name) - 1] = 0;
-#if AC_STACK_PROFILE_ENABLED
-    TaskHandle_t task = task_;
-#endif
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
 #endif
     out.observing = runtime_.passive_observation_active();
-#if AC_STACK_PROFILE_ENABLED
-    if (task) out.task_stack_high_water_bytes = uxTaskGetStackHighWaterMark(task);
-#endif
     return out;
 }
 

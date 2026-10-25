@@ -3247,9 +3247,6 @@ StorageEdfStatusSnapshot edf_status_snapshot() {
     out.open_file_count = service_state.open_file_count;
     out.queue_drops = service_state.queue_drops;
     out.patch_errors = service_state.patch_errors;
-#if AC_STACK_PROFILE_ENABLED
-    if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
-#endif
     copy_cstr(out.last_error, sizeof(out.last_error), service_state.last_error);
     unlock_queue();
     return out;

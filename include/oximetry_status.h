@@ -38,9 +38,6 @@ struct UdpOximeterStatus {
 struct BleSensorStatus {
     OximetrySensorState state = OximetrySensorState::Off;
     bool task_started = false;
-#if AC_STACK_PROFILE_ENABLED
-    uint32_t task_stack_high_water_bytes = 0;
-#endif
     bool scanning = false;
     bool observing = false;
     bool connected = false;

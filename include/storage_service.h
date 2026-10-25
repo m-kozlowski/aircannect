@@ -135,9 +135,6 @@ struct StorageEdfStatusSnapshot {
     uint8_t open_file_count = 0;
     uint32_t queue_drops = 0;
     uint32_t patch_errors = 0;
-#if AC_STACK_PROFILE_ENABLED
-    uint32_t stack_high_water_words = 0;
-#endif
     char last_error[AC_STORAGE_ERROR_MAX] = {};
 };
 

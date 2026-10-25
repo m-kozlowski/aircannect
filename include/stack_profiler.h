@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <array>
 
 #include "board.h"
 
@@ -11,6 +12,7 @@ namespace aircannect {
 enum class StackProfileTask : uint8_t {
     Loop,
     AsyncTcp,
+    Tcpip,
     NimbleHost,
     As11Ble,
     ReportTask,
@@ -27,11 +29,13 @@ struct StackProfileSample {
     uint32_t free_bytes = 0;
 };
 
+using StackProfileSamples =
+    std::array<StackProfileSample, static_cast<size_t>(StackProfileTask::Count)>;
+using StackProfileCollector = StackProfileSamples (*)();
+
 class StackProfiler {
 public:
-    void poll(uint32_t now_ms,
-              const StackProfileSample *samples,
-              size_t count);
+    void poll(uint32_t now_ms, StackProfileCollector collect);
 
 private:
     struct Slot {

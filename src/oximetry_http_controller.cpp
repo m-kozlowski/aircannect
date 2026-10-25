@@ -70,7 +70,7 @@ bool build_sensor_json(LargeTextBuffer &json,
     json_add_bool(json, "sensor_task_started", sensor.task_started);
 #if AC_STACK_PROFILE_ENABLED
     json_add_int(json, "sensor_task_stack_free",
-                 static_cast<long>(sensor.task_stack_high_water_bytes));
+                 static_cast<long>(sensor_source.task_stack_high_water_bytes()));
 #endif
     json_add_bool(json, "sensor_scanning", sensor.scanning);
     json_add_bool(json, "sensor_observing", sensor.observing);

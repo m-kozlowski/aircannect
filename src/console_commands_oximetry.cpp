@@ -133,7 +133,7 @@ void print_sensor_status(Print &out, const BleSensorSource &sensor) {
 #if AC_STACK_PROFILE_ENABLED
     if (status.task_started) {
         out.print(" stack_free=");
-        out.print(static_cast<unsigned long>(status.task_stack_high_water_bytes));
+        out.print(static_cast<unsigned long>(sensor.task_stack_high_water_bytes()));
     }
 #endif
     out.print(" scanning=");
@@ -429,7 +429,7 @@ void OximetryConsoleCommands::print_memory_detail(Print &out) {
 #if AC_STACK_PROFILE_ENABLED
     if (status.task_started) {
         out.print(" stack_free=");
-        out.print(static_cast<unsigned long>(status.task_stack_high_water_bytes));
+        out.print(static_cast<unsigned long>(sensor_.task_stack_high_water_bytes()));
     }
 #endif
     out.println();

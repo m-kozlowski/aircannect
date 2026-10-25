@@ -91,7 +91,7 @@ void print_edf_recorder_status(Print &out,
     out.print(assembly.buffers_ready ? "ready" : "unavailable");
 #if AC_STACK_PROFILE_ENABLED
     out.print(" stack_free=");
-    out.print(static_cast<unsigned long>(storage.stack_high_water_words));
+    out.print(static_cast<unsigned long>(StorageService::stack_high_water_bytes()));
 #endif
     out.println();
 

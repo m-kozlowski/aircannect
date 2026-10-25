@@ -41,6 +41,9 @@ void begin();
 // Pass false to skip these queries and leave the largest-block fields zero.
 MemoryStatus status(bool include_largest_free_block = true);
 MemoryDetailStatus detail_status();
+#ifdef ARDUINO
+MemoryRegionStatus region_status(uint32_t caps);
+#endif
 bool psram_available();
 
 // Select a smaller working set on boards with at most 2 MiB PSRAM.

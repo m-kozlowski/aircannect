@@ -81,6 +81,7 @@
 #include "therapy_telemetry_broker.h"
 #if AC_STACK_PROFILE_ENABLED
 #include "stack_profiler.h"
+#include <lwip/opt.h>
 #endif
 #include "system_status_snapshot.h"
 #include "tcp_bridge.h"
@@ -551,17 +552,22 @@ static void sync_rpc_transport_generation(uint32_t now_ms) {
 
 #if AC_STACK_PROFILE_ENABLED
 static void log_memory_profile_checkpoint(const char *phase) {
-    static MemoryDetailStatus previous = {};
+    static size_t previous_internal_free = 0;
+    static size_t previous_psram_free = 0;
     static bool previous_valid = false;
 
-    const MemoryDetailStatus current = Memory::detail_status();
+    const MemoryRegionStatus internal =
+        Memory::region_status(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const MemoryRegionStatus psram =
+        Memory::region_status(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
     const int internal_delta = previous_valid
-        ? static_cast<int>(current.internal_8bit.free_bytes) -
-              static_cast<int>(previous.internal_8bit.free_bytes)
+        ? static_cast<int>(internal.free_bytes) -
+              static_cast<int>(previous_internal_free)
         : 0;
     const int psram_delta = previous_valid
-        ? static_cast<int>(current.psram_8bit.free_bytes) -
-              static_cast<int>(previous.psram_8bit.free_bytes)
+        ? static_cast<int>(psram.free_bytes) -
+              static_cast<int>(previous_psram_free)
         : 0;
 
     Log::logf(CAT_GENERAL,
@@ -570,49 +576,38 @@ static void log_memory_profile_checkpoint(const char *phase) {
               "internal_allocated=%u internal_blocks=%u psram_free=%u "
               "delta=%d psram_allocated=%u\n",
               phase ? phase : "?",
-              static_cast<unsigned>(current.internal_8bit.free_bytes),
+              static_cast<unsigned>(internal.free_bytes),
               internal_delta,
-              static_cast<unsigned>(current.internal_8bit.allocated_bytes),
-              static_cast<unsigned>(current.internal_8bit.allocated_blocks),
-              static_cast<unsigned>(current.psram_8bit.free_bytes),
+              static_cast<unsigned>(internal.allocated_bytes),
+              static_cast<unsigned>(internal.allocated_blocks),
+              static_cast<unsigned>(psram.free_bytes),
               psram_delta,
-              static_cast<unsigned>(current.psram_8bit.allocated_bytes));
+              static_cast<unsigned>(psram.allocated_bytes));
 
-    previous = current;
+    previous_internal_free = internal.free_bytes;
+    previous_psram_free = psram.free_bytes;
     previous_valid = true;
 }
 
-static void poll_stack_profiler(uint32_t now_ms) {
-    static TaskHandle_t async_tcp_task = nullptr;
-    static TaskHandle_t nimble_host_task = nullptr;
-    static TaskHandle_t as11_ble_task = nullptr;
-    static TaskHandle_t report_task_handle = nullptr;
-    static TaskHandle_t display_task = nullptr;
-
-    if (!async_tcp_task) {
-        async_tcp_task = xTaskGetHandle("async_tcp");
-    }
-    if (!nimble_host_task) {
-        nimble_host_task = xTaskGetHandle("nimble_host");
-    }
-    if (!as11_ble_task) {
-        as11_ble_task = xTaskGetHandle("as11_ble");
-    }
-    if (!report_task_handle) {
-        report_task_handle = xTaskGetHandle("ac_report");
-    }
-    if (!display_task) {
-        display_task = xTaskGetHandle("ac_display");
-    }
+static StackProfileSamples collect_stack_profile() {
+    const TaskHandle_t async_tcp_task = xTaskGetHandle("async_tcp");
+    const TaskHandle_t tcpip_task = xTaskGetHandle(TCPIP_THREAD_NAME);
+    const TaskHandle_t nimble_host_task = xTaskGetHandle("nimble_host");
+    const TaskHandle_t as11_ble_task = xTaskGetHandle("as11_ble");
+    const TaskHandle_t report_task_handle = xTaskGetHandle("ac_report");
+    const TaskHandle_t display_task = xTaskGetHandle("ac_display");
 
     const uint32_t oxi_stack =
         oximetry_sensor_source.task_stack_high_water_bytes();
 
-    StackProfileSample samples[] = {
+    return {{
         {StackProfileTask::Loop, true, uxTaskGetStackHighWaterMark(nullptr)},
         {StackProfileTask::AsyncTcp,
          async_tcp_task != nullptr,
          async_tcp_task ? uxTaskGetStackHighWaterMark(async_tcp_task) : 0},
+        {StackProfileTask::Tcpip,
+         tcpip_task != nullptr,
+         tcpip_task ? uxTaskGetStackHighWaterMark(tcpip_task) : 0},
         {StackProfileTask::NimbleHost,
          nimble_host_task != nullptr,
          nimble_host_task
@@ -635,9 +630,13 @@ static void poll_stack_profiler(uint32_t now_ms) {
         {StackProfileTask::StorageTask,
          true,
          StorageService::stack_high_water_bytes()},
-        {StackProfileTask::OximetrySensor, oxi_stack != 0, oxi_stack},
-    };
-    stack_profiler.poll(now_ms, samples, sizeof(samples) / sizeof(samples[0]));
+        {StackProfileTask::OximetrySensor,
+         oximetry_sensor_source.status().task_started, oxi_stack},
+    }};
+}
+
+static void poll_stack_profiler(uint32_t now_ms) {
+    stack_profiler.poll(now_ms, collect_stack_profile);
 }
 
 #else

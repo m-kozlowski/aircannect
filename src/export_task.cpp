@@ -443,9 +443,6 @@ void ExportTask::publish_status() {
         control.active = control.active || status.executing();
         control.busy = control.busy || status.busy();
     }
-#if AC_STACK_PROFILE_ENABLED
-    control.stack_high_water_words = uxTaskGetStackHighWaterMark(nullptr);
-#endif
 
     xSemaphoreGive(status_lock_);
 }
