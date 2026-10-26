@@ -1,0 +1,19 @@
+--- a/ed25519_ref10.c
++++ b/ed25519_ref10.c
+@@ -878,6 +878,8 @@
+  p is public
+  */
+ 
++#pragma GCC diagnostic push
++#pragma GCC diagnostic warning "-Wframe-larger-than=3072"
+ void
+ ge25519_scalarmult(ge25519_p3 *h, const unsigned char *a, const ge25519_p3 *p)
+ {
+@@ -964,6 +966,7 @@
+ 
+     ge25519_p1p1_to_p3(h, &r);
+ }
++#pragma GCC diagnostic pop
+ 
+ /*
+  h = a * B (with precomputation)
