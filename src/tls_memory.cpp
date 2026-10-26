@@ -21,7 +21,7 @@ namespace {
 static constexpr size_t TLS_LARGE_ALLOC_THRESHOLD = 4096;
 static constexpr size_t TLS_MIN_INTERNAL_FREE = 60 * 1024;
 static constexpr size_t TLS_MIN_INTERNAL_LARGEST = 36 * 1024;
-static constexpr size_t TLS_MIN_INTERNAL_FREE_WITH_PSRAM = 48 * 1024;
+static constexpr size_t TLS_MIN_INTERNAL_FREE_WITH_PSRAM = 40 * 1024;
 static constexpr size_t TLS_MIN_INTERNAL_LARGEST_WITH_PSRAM = 8 * 1024;
 
 std::atomic<bool> installed{false};
