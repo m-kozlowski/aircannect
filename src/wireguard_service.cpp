@@ -29,6 +29,9 @@ static constexpr time_t MIN_VALID_EPOCH = 1704067200;
 wireguard_config_t wg_config = ESP_WIREGUARD_CONFIG_DEFAULT();
 wireguard_ctx_t wg_ctx = ESP_WIREGUARD_CONTEXT_DEFAULT();
 
+static_assert(AC_WIREGUARD_MAX_ALLOWED_IPS + 1 == CONFIG_WIREGUARD_MAX_SRC_IPS,
+              "route limit must leave a peer slot for the tunnel address");
+
 class LwipCoreGuard {
 public:
     LwipCoreGuard()
@@ -147,6 +150,22 @@ bool WireguardService::start(uint32_t now_ms) {
         return false;
     }
 
+    routes_ = {};
+    size_t cursor = 0;
+    WireguardCidr cidr;
+    bool malformed = false;
+    while (next_wireguard_cidr(config_.allowed_ips, cursor, cidr, malformed)) {
+        if (routes_.count == AC_WIREGUARD_MAX_ALLOWED_IPS) {
+            schedule_retry(now_ms, "too_many_allowed_ips");
+            return false;
+        }
+        routes_.prefixes[routes_.count++] = cidr;
+    }
+    if (malformed) {
+        schedule_retry(now_ms, "bad_allowed_ips");
+        return false;
+    }
+
     address_ = address;
     endpoint_host_ = endpoint.host;
 
@@ -215,19 +234,23 @@ bool WireguardService::continue_connect(uint32_t now_ms) {
             return false;
         }
 
-        size_t cursor = 0;
-        WireguardCidr cidr;
-        bool malformed = false;
         bool rejected = false;
         {
             LwipCoreGuard guard;
-            while (next_wireguard_cidr(config_.allowed_ips, cursor, cidr,
-                                       malformed)) {
-                if (esp_wireguard_add_allowed_ip(&wg_ctx, cidr.ip,
-                                                 cidr.netmask) != ESP_OK) {
+            for (size_t i = 0; i < routes_.count; ++i) {
+                const auto &prefix = routes_.prefixes[i];
+                const ip4_addr_t ip = {lwip_htonl(prefix.address)};
+                const ip4_addr_t mask = {lwip_htonl(prefix.netmask)};
+                char ip_text[16];
+                char mask_text[16];
+                ip4addr_ntoa_r(&ip, ip_text, sizeof(ip_text));
+                ip4addr_ntoa_r(&mask, mask_text, sizeof(mask_text));
+
+                if (esp_wireguard_add_allowed_ip(&wg_ctx, ip_text,
+                                                 mask_text) != ESP_OK) {
                     Log::logf(CAT_WIFI, LOG_WARN,
-                              "[WG] allowed IP rejected: %s/%s\n", cidr.ip,
-                              cidr.netmask);
+                              "[WG] allowed IP rejected: %s/%s\n", ip_text,
+                              mask_text);
                     rejected = true;
                 }
             }
@@ -254,16 +277,9 @@ void WireguardService::poll_up(uint32_t now_ms) {
         if (esp_wireguard_latest_handshake(&wg_ctx, &handshake) != ESP_OK) {
             handshake = 0;
         }
-        // Route everything through the tunnel only once the peer answers,
-        // so a dead endpoint does not black-hole the device's traffic.
-        // DHCP renewals can reset the default netif, so reassert it.
-        if (peer_up && netif_default != wg_ctx.netif) {
-            esp_wireguard_set_default(&wg_ctx);
-        } else if (!peer_up && netif_default == wg_ctx.netif) {
-            esp_wireguard_restore_default(&wg_ctx);
-        }
-        default_route = netif_default == wg_ctx.netif;
-        if (default_route) {
+        publish_wireguard_routes(peer_up ? wg_ctx.netif : nullptr, &routes_);
+        default_route = peer_up && routes_.has_default_route();
+        if (peer_up) {
             apply_tunnel_dns();
         } else {
             restore_wifi_dns();
@@ -315,11 +331,13 @@ void WireguardService::stop(const char *reason) {
     if (!tunnel_open_) return;
     {
         LwipCoreGuard guard;
+        publish_wireguard_routes(nullptr, nullptr);
         restore_wifi_dns();
         if (wg_ctx.netif) {
+            // The library restores this pointer on disconnect. We did not
+            // replace the default interface; preserve its current owner.
+            wg_ctx.netif_default = netif_default;
             esp_wireguard_disconnect(&wg_ctx);
-        } else {
-            esp_wireguard_restore_default(&wg_ctx);
         }
     }
     tunnel_open_ = false;
@@ -347,7 +365,7 @@ void WireguardService::apply_tunnel_dns() {
     dns_setserver(0, &tunnel_dns_);
     for (u8_t i = 1; i < DNS_MAX_SERVERS; i++) dns_setserver(i, nullptr);
     if (!tunnel_dns_active_) {
-        Log::logf(CAT_WIFI, LOG_INFO, "[WG] DNS via tunnel %s\n",
+        Log::logf(CAT_WIFI, LOG_INFO, "[WG] DNS resolver %s\n",
                   ipaddr_ntoa(&tunnel_dns_));
     }
     tunnel_dns_active_ = true;

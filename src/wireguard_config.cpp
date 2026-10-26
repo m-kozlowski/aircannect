@@ -59,15 +59,6 @@ void format_ipv4(const uint8_t ip[4], char *out, size_t out_size) {
     snprintf(out, out_size, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
 }
 
-void prefix_to_netmask(uint8_t prefix, uint8_t out[4]) {
-    const uint32_t mask =
-        prefix == 0 ? 0 : (0xffffffffUL << (32 - prefix));
-    out[0] = static_cast<uint8_t>(mask >> 24);
-    out[1] = static_cast<uint8_t>(mask >> 16);
-    out[2] = static_cast<uint8_t>(mask >> 8);
-    out[3] = static_cast<uint8_t>(mask);
-}
-
 bool printable_without_space(const String &value) {
     for (size_t i = 0; i < value.length(); ++i) {
         const char c = value[i];
@@ -195,10 +186,10 @@ bool next_wireguard_cidr(const String &list,
         return false;
     }
 
-    uint8_t mask[4] = {};
-    prefix_to_netmask(prefix, mask);
-    format_ipv4(ip, out.ip, sizeof(out.ip));
-    format_ipv4(mask, out.netmask, sizeof(out.netmask));
+    out.address = (static_cast<uint32_t>(ip[0]) << 24) |
+                  (static_cast<uint32_t>(ip[1]) << 16) |
+                  (static_cast<uint32_t>(ip[2]) << 8) | ip[3];
+    out.netmask = prefix == 0 ? 0 : (UINT32_MAX << (32 - prefix));
     return true;
 }
 
@@ -233,9 +224,15 @@ const char *wireguard_config_reject_reason(const WireguardConfig &config) {
     size_t cursor = 0;
     WireguardCidr cidr;
     bool malformed = false;
+    size_t route_count = 0;
     while (next_wireguard_cidr(config.allowed_ips, cursor, cidr, malformed)) {
+        ++route_count;
     }
     if (malformed) return "bad_allowed_ips";
+    if (config.mode != WireguardMode::Off &&
+        route_count > AC_WIREGUARD_MAX_ALLOWED_IPS) {
+        return "too_many_allowed_ips";
+    }
     if (config.dns.length() &&
         !parse_wireguard_address(config.dns, nullptr, 0)) {
         return "bad_dns";

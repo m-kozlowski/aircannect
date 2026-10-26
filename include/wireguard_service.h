@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "wireguard_config.h"
+#include "wireguard_routes.h"
 
 namespace aircannect {
 
@@ -23,7 +24,7 @@ enum class WireguardState : uint8_t {
 struct WireguardStatus {
     WireguardState state = WireguardState::Disabled;
     WireguardMode mode = WireguardMode::Off;
-    bool default_route = false;
+    bool default_route = false; // Active AllowedIPs includes /0.
     // Seconds since the last completed handshake, or -1 when none.
     int32_t handshake_age_s = -1;
     uint32_t connects = 0;
@@ -32,8 +33,8 @@ struct WireguardStatus {
 
 const char *wireguard_state_name(WireguardState state);
 
-// Owns the single esp_wireguard tunnel. All tunnel calls run from the main
-// loop; status() may be read from any task.
+// Owns the single esp_wireguard tunnel. Lifecycle runs from the main loop;
+// the lwIP hook reads published routes. status() may be read from any task.
 class WireguardService {
 public:
     void configure(const WireguardConfig &config);
@@ -66,6 +67,9 @@ private:
     String endpoint_host_;
     bool tunnel_open_ = false;
     bool peer_connected_ = false;
+
+    // Prepared once per connection; immutable while published to lwIP.
+    WireguardRoutes routes_;
 
     // Resolvers the Wi-Fi network handed out, saved while the tunnel's
     // resolver is installed so they can be put back when it goes down.

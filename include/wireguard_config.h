@@ -13,6 +13,8 @@ static constexpr size_t AC_WIREGUARD_KEY_TEXT_LEN = 44;
 static constexpr size_t AC_WIREGUARD_HOST_MAX = 128;
 static constexpr size_t AC_WIREGUARD_HOME_SSIDS_MAX = 160;
 static constexpr size_t AC_WIREGUARD_ALLOWED_IPS_MAX = 160;
+// The library's eighth slot holds the tunnel address.
+static constexpr size_t AC_WIREGUARD_MAX_ALLOWED_IPS = 7;
 
 enum class WireguardMode : uint8_t {
     Off,
@@ -32,7 +34,7 @@ struct WireguardConfig {
     // host[:port]; the port defaults to 51820.
     String endpoint;
     uint16_t keepalive_s = AC_WIREGUARD_DEFAULT_KEEPALIVE_S;
-    // Comma-separated IPv4 CIDRs accepted from the peer.
+    // IPv4 CIDRs routed through the tunnel and accepted from the peer.
     String allowed_ips = AC_WIREGUARD_DEFAULT_ALLOWED_IPS;
     // Optional IPv4 resolver used while the tunnel is up; empty keeps the
     // Wi-Fi network's DNS.
@@ -45,8 +47,9 @@ struct WireguardEndpoint {
 };
 
 struct WireguardCidr {
-    char ip[16] = {};
-    char netmask[16] = {};
+    // Host byte order, shared by route selection and peer configuration.
+    uint32_t address = 0;
+    uint32_t netmask = 0;
 };
 
 const char *wireguard_mode_name(WireguardMode mode);
@@ -56,8 +59,7 @@ bool parse_wireguard_mode(const String &value, WireguardMode &mode);
 void normalize_wireguard_config(WireguardConfig &config);
 
 // Returns nullptr when the config is usable or empty, else a short reason.
-// A config with mode Off may be incomplete; other modes need every
-// required field.
+// Mode Off also permits incomplete or over-limit profiles for editing.
 const char *wireguard_config_reject_reason(const WireguardConfig &config);
 
 bool wireguard_config_complete(const WireguardConfig &config);
