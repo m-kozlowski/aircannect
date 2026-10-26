@@ -34,5 +34,21 @@ bool begin();
 TlsMemoryStatus status();
 TlsMemoryAdmission admission();
 
+#if AC_STACK_PROFILE_ENABLED
+class Measurement {
+public:
+    Measurement() = default;
+    ~Measurement();
+    Measurement(const Measurement &) = delete;
+    Measurement &operator=(const Measurement &) = delete;
+
+    void start(const char *owner);
+    void stop();
+
+private:
+    const char *owner_ = nullptr;
+};
+#endif
+
 }  // namespace TlsMemory
 }  // namespace aircannect

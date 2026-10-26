@@ -8,6 +8,9 @@
 #include "background_operation_control.h"
 #include "large_text_buffer.h"
 #include "sleephq_protocol.h"
+#if AC_STACK_PROFILE_ENABLED
+#include "tls_memory.h"
+#endif
 
 namespace aircannect {
 
@@ -179,6 +182,9 @@ private:
     SleepHqConfig config_;
     esp_http_client_handle_t client_ = nullptr;
     size_t header_capacity_ = 0;
+#if AC_STACK_PROFILE_ENABLED
+    TlsMemory::Measurement tls_measurement_;
+#endif
     const BackgroundOperationControl *operation_ = nullptr;
     LargeTextBuffer access_token_;
     char last_error_[AC_SLEEPHQ_ERROR_MAX] = {};

@@ -82,6 +82,9 @@ void SleepHqClient::disconnect() {
         client_ = nullptr;
     }
     header_capacity_ = 0;
+#if AC_STACK_PROFILE_ENABLED
+    tls_measurement_.stop();
+#endif
 }
 
 bool SleepHqClient::tls_heap_available() {
@@ -165,6 +168,10 @@ bool SleepHqClient::open_request(
     if (!client_) {
         if (!tls_heap_available()) return false;
 
+#if AC_STACK_PROFILE_ENABLED
+        tls_measurement_.start("shq");
+#endif
+
         esp_http_client_config_t config = {};
         config.url = url;
         config.cert_pem = SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA;
@@ -179,6 +186,7 @@ bool SleepHqClient::open_request(
         client_ = esp_http_client_init(&config);
         if (!client_) {
             set_error("http_client_alloc_failed");
+            disconnect();
             return false;
         }
         header_capacity_ = header_capacity;

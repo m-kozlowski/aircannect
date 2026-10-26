@@ -398,6 +398,11 @@ void UpdateChecker::reap_task_locked() {
 }
 
 void UpdateChecker::run_task() {
+#if AC_STACK_PROFILE_ENABLED
+    TlsMemory::Measurement tls_measurement;
+    tls_measurement.start("ota_check");
+#endif
+
     trace_phase("worker_started");
     char *url = nullptr;
     uint32_t generation = 0;
