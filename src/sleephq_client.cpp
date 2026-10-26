@@ -104,24 +104,63 @@ bool SleepHqClient::tls_heap_available() {
 }
 
 bool SleepHqClient::operation_allows(
-    const BackgroundOperationControl *operation) {
+    const BackgroundOperationControl *operation, const char *stage) {
     if (!operation) return true;
 
-    const BackgroundOperationStop reason = operation->stop_reason(millis());
+    const uint32_t now_ms = millis();
+    const BackgroundOperationStop reason = operation->stop_reason(now_ms);
     if (reason == BackgroundOperationStop::None) return true;
+
+    if (reason == BackgroundOperationStop::Deadline &&
+        strcmp(last_error_, "operation_timeout") != 0) {
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] timeout stage=%s operation_ms=%lu limit_ms=%lu\n",
+                  stage, static_cast<unsigned long>(now_ms - operation->started_ms),
+                  static_cast<unsigned long>(operation->timeout_ms));
+    }
 
     set_error(background_operation_stop_error(reason));
     return false;
 }
 
+#if AC_STACK_PROFILE_ENABLED
+void SleepHqClient::trace_http(const char *stage) const {
+    Log::logf(CAT_EXPORT, LOG_INFO,
+              "[SLEEPHQ] HTTP stage=%s elapsed_ms=%lu\n", stage,
+              static_cast<unsigned long>(millis() - request_started_ms_));
+}
+#endif
+
 esp_err_t SleepHqClient::http_event(esp_http_client_event_t *event) {
     auto *self = static_cast<SleepHqClient *>(event->user_data);
-    if (!self || !self->operation_) return ESP_OK;
+    if (!self) return ESP_OK;
+
+#if AC_STACK_PROFILE_ENABLED
+    switch (event->event_id) {
+        case HTTP_EVENT_ON_CONNECTED: self->trace_http("connected"); break;
+        case HTTP_EVENT_HEADERS_SENT: self->trace_http("headers_sent"); break;
+        case HTTP_EVENT_ON_HEADER:
+            if (!self->header_seen_) self->trace_http("first_header");
+            self->header_seen_ = true;
+            break;
+        case HTTP_EVENT_ON_DATA:
+            if (!self->data_seen_ && event->data_len > 0) {
+                self->trace_http("first_data");
+                self->data_seen_ = true;
+            }
+            break;
+        default: break;
+    }
+#endif
 
     if (event->event_id == HTTP_EVENT_ON_CONNECTED ||
         event->event_id == HTTP_EVENT_ON_HEADER ||
         event->event_id == HTTP_EVENT_ON_DATA) {
-        if (!self->operation_allows(self->operation_)) {
+        const char *stage = event->event_id == HTTP_EVENT_ON_CONNECTED
+            ? "connected" : event->event_id == HTTP_EVENT_ON_HEADER
+            ? "headers" : "body";
+
+        if (!self->operation_allows(self->operation_, stage)) {
             // IDF ignores callback errors during synchronous reads.
             esp_http_client_close(event->client);
             return ESP_FAIL;
@@ -139,7 +178,7 @@ bool SleepHqClient::open_request(
     uint64_t content_length,
     const BackgroundOperationControl *operation,
     bool close_after) {
-    if (!operation_allows(operation)) {
+    if (!operation_allows(operation, "prepare")) {
         disconnect();
         return false;
     }
@@ -159,6 +198,13 @@ bool SleepHqClient::open_request(
         set_error("request_url_too_long");
         return false;
     }
+
+#if AC_STACK_PROFILE_ENABLED
+    request_started_ms_ = millis();
+    header_seen_ = data_seen_ = false;
+    Log::logf(CAT_EXPORT, LOG_INFO, "[SLEEPHQ] HTTP begin method=%s path=%s\n",
+              method, path);
+#endif
 
     // IDF must fit each complete header in its transmit buffer.
     const size_t header_capacity = std::max<size_t>(
@@ -235,15 +281,19 @@ bool SleepHqClient::open_request(
     const uint32_t connect_started_ms = millis();
     const esp_err_t opened =
         esp_http_client_open(client_, static_cast<int>(content_length));
-    if (!operation_allows(operation) || opened != ESP_OK || last_error_[0]) {
-        if (!last_error_[0]) {
+    if (!operation_allows(operation, "open") || opened != ESP_OK || last_error_[0]) {
+        if (!last_error_[0]) set_error("connect_failed");
+
+        if (strcmp(last_error_, "preempted") != 0) {
             const int socket_error = esp_http_client_get_errno(client_);
             int tls_error = 0;
             int tls_flags = 0;
             const esp_err_t tls_result =
                 esp_http_client_get_and_clear_last_tls_error(
                     client_, &tls_error, &tls_flags);
-            set_error("connect_failed");
+            Log::logf(CAT_EXPORT, LOG_WARN,
+                      "[SLEEPHQ] HTTP open failed method=%.4s path=%.120s error=%.48s\n",
+                      method, path, last_error_);
             Log::logf(CAT_EXPORT, LOG_WARN,
                       "[SLEEPHQ] connect failed esp=%s(0x%x) "
                       "errno=%d/%.32s tls=%s(0x%x) code=%d "
@@ -278,12 +328,12 @@ bool SleepHqClient::write_bytes(
     const BackgroundOperationControl *operation) {
     size_t offset = 0;
     while (offset < len) {
-        if (!operation_allows(operation)) return false;
+        if (!operation_allows(operation, "write")) return false;
 
         const size_t chunk = std::min(len - offset, SLEEPHQ_WRITE_CHUNK);
         const int written = esp_http_client_write(
             client_, reinterpret_cast<const char *>(data + offset), chunk);
-        if (!operation_allows(operation)) return false;
+        if (!operation_allows(operation, "write")) return false;
         if (written <= 0) {
             // A failed IDF write may already have sent part of this chunk.
             set_error("write_failed");
@@ -346,6 +396,10 @@ bool SleepHqClient::raw_request(const char *method,
         return false;
     }
 
+#if AC_STACK_PROFILE_ENABLED
+    trace_http("request_sent");
+#endif
+
     return read_response(out, body_callback, body_ctx, operation);
 }
 
@@ -357,13 +411,13 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out,
     uint32_t progress_ms = millis();
     int64_t content_length = -1;
     while (true) {
-        if (!operation_allows(operation)) {
+        if (!operation_allows(operation, "headers")) {
             disconnect();
             return false;
         }
 
         content_length = esp_http_client_fetch_headers(client_);
-        if (!operation_allows(operation) || last_error_[0]) {
+        if (!operation_allows(operation, "headers") || last_error_[0]) {
             disconnect();
             return false;
         }
@@ -398,7 +452,7 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out,
     progress_ms = millis();
     uint8_t buf[SLEEPHQ_READ_CHUNK];
     while (true) {
-        if (!operation_allows(operation)) {
+        if (!operation_allows(operation, "body")) {
             disconnect();
             return false;
         }
@@ -407,7 +461,7 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out,
         // the message complete already.
         const int count = esp_http_client_read(
             client_, reinterpret_cast<char *>(buf), sizeof(buf));
-        if (!operation_allows(operation) || last_error_[0]) {
+        if (!operation_allows(operation, "body") || last_error_[0]) {
             disconnect();
             return false;
         }
@@ -437,6 +491,10 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out,
     }
 
     operation_ = nullptr;
+#if AC_STACK_PROFILE_ENABLED
+    trace_http("response_complete");
+#endif
+
     if (!successful_status) {
         snprintf(last_error_, sizeof(last_error_), "http_%d", out.status);
         disconnect();
@@ -807,7 +865,7 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         upload_started_ms + SLEEPHQ_UPLOAD_PROGRESS_INTERVAL_MS;
     bool ok = true;
     while (sent < request.size) {
-        if (!operation_allows(request.operation)) {
+        if (!operation_allows(request.operation, "upload_read")) {
             ok = false;
             disconnect();
             break;

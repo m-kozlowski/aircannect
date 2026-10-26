@@ -147,7 +147,11 @@ private:
                       bool close_after = false);
     static esp_err_t http_event(esp_http_client_event_t *event);
     bool tls_heap_available();
-    bool operation_allows(const BackgroundOperationControl *operation);
+    bool operation_allows(const BackgroundOperationControl *operation,
+                          const char *stage);
+#if AC_STACK_PROFILE_ENABLED
+    void trace_http(const char *stage) const;
+#endif
     bool write_all(const char *data, size_t len,
                    const BackgroundOperationControl *operation);
     bool write_bytes(const uint8_t *data, size_t len,
@@ -184,6 +188,9 @@ private:
     size_t header_capacity_ = 0;
 #if AC_STACK_PROFILE_ENABLED
     TlsMemory::Measurement tls_measurement_;
+    uint32_t request_started_ms_ = 0;
+    bool header_seen_ = false;
+    bool data_seen_ = false;
 #endif
     const BackgroundOperationControl *operation_ = nullptr;
     LargeTextBuffer access_token_;
