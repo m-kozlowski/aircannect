@@ -71,6 +71,9 @@ ConfigFieldUpdate ConfigService::set_transaction_value(
             field_result) ||
         !field_result.accepted) {
         update.disposition = ConfigFieldDisposition::InvalidValue;
+        if (field->group == AppConfigGroup::Vpn) {
+            transaction_error_ = "invalid_wireguard_value";
+        }
         return update;
     }
 
@@ -117,7 +120,25 @@ ConfigTransactionResult ConfigService::commit_transaction() {
     result.accepted_fields = transaction_accepted_;
     result.changed_fields = transaction_changed_;
     result.dirty = transaction_dirty_;
+    result.revision = revision_;
+    result.error = transaction_error_;
+    if (!result.error && (transaction_dirty_ & AC_CONFIG_DIRTY_VPN)) {
+        result.error = wireguard_config_reject_reason(
+            transaction_store_->data().wireguard);
+    }
+
+    if (result.error) {
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "config transaction rejected reason=%s\n", result.error);
+        clear_transaction();
+        return result;
+    }
+
     result.persisted = transaction_store_->commit_update(store_.data());
+    if (!result.persisted) {
+        result.error = "persist_failed";
+        Log::logf(CAT_CONFIG, LOG_WARN, "config transaction persist failed\n");
+    }
 
     if (result.persisted && transaction_dirty_ != 0) {
         store_ = std::move(*transaction_store_);
@@ -261,6 +282,7 @@ void ConfigService::clear_transaction() {
     transaction_accepted_ = 0;
     transaction_changed_ = 0;
     transaction_dirty_ = 0;
+    transaction_error_ = nullptr;
 }
 
 void ConfigService::publish_changes(uint32_t dirty) {

@@ -342,6 +342,12 @@ bool handle_config_key(Print &out,
     ConfigTransactionResult transaction;
     const ConfigFieldUpdate update = config.set_value(
         field->key, value, false, &transaction);
+    if (transaction.error) {
+        out.print("[CONFIG] update failed: ");
+        out.println(transaction.error);
+        return true;
+    }
+
     if (!update.accepted()) {
         out.print("[CONFIG] invalid ");
         out.println(field->key);

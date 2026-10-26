@@ -1017,16 +1017,9 @@ bool AppConfig::set_smb_credentials(const String &endpoint,
 }
 
 bool AppConfig::set_wireguard(const WireguardConfig &wireguard) {
+    // ConfigService validates the complete candidate at transaction commit.
     WireguardConfig parsed = wireguard;
     normalize_wireguard_config(parsed);
-    const char *reject_reason = wireguard_config_reject_reason(parsed);
-    if (reject_reason) {
-        Log::logf(CAT_CONFIG,
-                  LOG_WARN,
-                  "rejected wireguard config reason=%s mode=%s\n",
-                  reject_reason, wireguard_mode_name(parsed.mode));
-        return false;
-    }
 
     const WireguardConfig &current = data_.wireguard;
     if (current.mode == parsed.mode &&
@@ -1043,14 +1036,6 @@ bool AppConfig::set_wireguard(const WireguardConfig &wireguard) {
     }
 
     data_.wireguard = parsed;
-    Log::logf(CAT_CONFIG,
-              LOG_INFO,
-              "updated wireguard config mode=%s endpoint=%s key_set=%u "
-              "psk_set=%u\n",
-              wireguard_mode_name(parsed.mode),
-              parsed.endpoint.length() ? parsed.endpoint.c_str() : "<empty>",
-              parsed.private_key.length() ? 1u : 0u,
-              parsed.preshared_key.length() ? 1u : 0u);
     return mark_dirty(AC_CONFIG_DIRTY_VPN);
 }
 

@@ -35,6 +35,7 @@ struct ConfigTransactionResult {
     uint32_t dirty = 0;
     uint32_t revision = 0;
     bool persisted = false;
+    const char *error = nullptr;
 };
 
 class ConfigService {
@@ -99,6 +100,7 @@ private:
     size_t transaction_accepted_ = 0;
     size_t transaction_changed_ = 0;
     uint32_t transaction_dirty_ = 0;
+    const char *transaction_error_ = nullptr;
     uint32_t revision_ = 0;
 };
 

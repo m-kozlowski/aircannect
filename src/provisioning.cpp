@@ -336,6 +336,12 @@ void consume_config_file(ConfigService &config_service,
 
     const ConfigTransactionResult transaction =
         config_service.commit_transaction();
+    if (transaction.error) {
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "[PROVISION] config transaction failed reason=%s\n",
+                  transaction.error);
+    }
+
     bool ok = parsed && transaction.persisted;
     ok = commit_wifi(wifi_manager, state) && ok;
 

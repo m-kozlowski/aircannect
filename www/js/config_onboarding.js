@@ -735,12 +735,6 @@
         }
       });
 
-      if (Object.prototype.hasOwnProperty.call(changes, "wg_mode")) {
-        const mode = changes.wg_mode;
-        delete changes.wg_mode;
-        changes.wg_mode = mode;
-      }
-
       root.querySelectorAll("[data-keybindings]").forEach((panel) => {
         const overrides = [];
         panel.querySelectorAll("select[data-button]").forEach((select) => {

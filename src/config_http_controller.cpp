@@ -593,13 +593,8 @@ void ConfigHttpController::execute(Command &command) {
     }
 
     const ConfigTransactionResult result = config_->commit_transaction();
-    if (!result.persisted) {
-        Log::logf(CAT_CONFIG, LOG_WARN,
-                  "failed to persist one or more web config values\n");
-    }
     publish_update_result(command.update_revision, result.persisted,
-                          result.revision,
-                          result.persisted ? nullptr : "persist_failed");
+                          result.revision, result.error);
 }
 
 uint32_t ConfigHttpController::next_update_revision() {
