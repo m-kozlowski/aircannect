@@ -1871,7 +1871,8 @@ void loop() {
                         resmed_ota_transport_active ? "waiting_resmed_ota" :
                         report_status.foreground_active ? "waiting_report" :
                         "runtime_busy",
-                        session_manager.idle_for(now_ms, 60 * 1000));
+                        session_manager.idle_for(now_ms, 60 * 1000) &&
+                            !export_coordinator.post_therapy_pending());
     firmware_installer.poll(esp_reboot_allowed, therapy_active);
 
     drain_can_rx();

@@ -26,6 +26,7 @@ public:
               const ActivitySnapshot &activity,
               uint32_t now_ms);
     bool endpoint_work_claimed() const;
+    bool post_therapy_pending() const;
     ExportTaskControlSnapshot status_snapshot() const {
         return status_snapshot_;
     }
@@ -81,7 +82,6 @@ private:
     void queue_post_therapy(bool stream_activity_active,
                             const ExportTaskControlSnapshot &status,
                             uint32_t now_ms);
-    bool post_therapy_pending() const;
     void defer_idle_work(const ExportTaskControlSnapshot &status,
                          uint32_t until_ms);
 
