@@ -56,14 +56,20 @@ bool status_contains_failure_token(const char *status) {
 
 bool parse_remote_file_item(JsonVariantConst item, SleepHqRemoteFile &file) {
     JsonVariantConst attr = item["attributes"];
+    const char *name = json_string_or_empty(attr["name"]);
+    const char *path = json_string_or_empty(attr["path"]);
+    const char *hash = json_string_or_empty(attr["content_hash"]);
+    if (!name[0] || strlen(name) >= sizeof(file.name) ||
+        !path[0] || strlen(path) >= sizeof(file.path) ||
+        !hash[0] || strlen(hash) >= sizeof(file.content_hash) ||
+        !json_string_to_u64(attr["size"], file.size)) {
+        return false;
+    }
+
     json_variant_to_uint32(attr["id"], file.id);
-    json_string_to_u64(attr["size"], file.size);
-    copy_cstr(file.name, sizeof(file.name),
-              json_string_or_empty(attr["name"]));
-    copy_cstr(file.path, sizeof(file.path),
-              json_string_or_empty(attr["path"]));
-    copy_cstr(file.content_hash, sizeof(file.content_hash),
-              json_string_or_empty(attr["content_hash"]));
+    copy_cstr(file.name, sizeof(file.name), name);
+    copy_cstr(file.path, sizeof(file.path), path);
+    copy_cstr(file.content_hash, sizeof(file.content_hash), hash);
     if (file.id == 0) json_variant_to_uint32(item["id"], file.id);
     return true;
 }
@@ -184,7 +190,9 @@ bool SleepHqRemoteFileListStreamParser::publish_item() {
     if (err) return fail("file_list_json_parse");
 
     SleepHqRemoteFile file;
-    parse_remote_file_item(doc.as<JsonVariantConst>(), file);
+    if (!parse_remote_file_item(doc.as<JsonVariantConst>(), file)) {
+        return fail("file_list_item_invalid");
+    }
     if (!callback_(ctx_, file)) return fail("file_list_callback_failed");
     count_++;
     item_.clear();

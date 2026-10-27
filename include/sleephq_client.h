@@ -31,6 +31,7 @@ struct SleepHqImportInfo {
     uint32_t id = 0;
     char status[AC_SLEEPHQ_STATUS_MAX] = {};
     char failed_reason[AC_SLEEPHQ_ERROR_MAX] = {};
+    bool accepts_files = false;
 };
 
 struct SleepHqUploadRequest {
@@ -88,6 +89,7 @@ public:
     bool upload_file(const SleepHqUploadRequest &request,
                      SleepHqUploadResult &out);
     bool list_team_files(uint32_t team_id,
+                         const char *path_prefix,
                          uint32_t page,
                          uint32_t per_page,
                          SleepHqRemoteFileCallback callback,
@@ -95,6 +97,14 @@ public:
                          size_t &count,
                          bool &has_more,
                          const BackgroundOperationControl *operation = nullptr);
+    bool list_import_files(uint32_t import_id,
+                           uint32_t page,
+                           uint32_t per_page,
+                           SleepHqRemoteFileCallback callback,
+                           void *ctx,
+                           size_t &count,
+                           bool &has_more,
+                           const BackgroundOperationControl *operation = nullptr);
     bool list_team_machines(uint32_t team_id,
                             uint32_t page,
                             uint32_t per_page,
@@ -165,6 +175,13 @@ private:
                        uint32_t &team_id);
     bool parse_import(const SleepHqHttpResponse &response,
                       SleepHqImportInfo &out);
+    bool list_files(const char *path,
+                    uint32_t per_page,
+                    SleepHqRemoteFileCallback callback,
+                    void *ctx,
+                    size_t &count,
+                    bool &has_more,
+                    const BackgroundOperationControl *operation);
     bool parse_machine_list(const SleepHqHttpResponse &response,
                             uint32_t per_page,
                             SleepHqMachineCallback callback,

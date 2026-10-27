@@ -34,6 +34,18 @@ SleepHqRemoteFileCache::~SleepHqRemoteFileCache() {
     clear();
 }
 
+bool SleepHqRemoteFileCache::get(size_t index, SleepHqRemoteFile &out) const {
+    if (index >= count_) return false;
+
+    const Entry &entry = entries_[index];
+    out = {};
+    out.size = entry.size;
+    memcpy(out.name, entry.name, sizeof(out.name));
+    memcpy(out.path, entry.path, sizeof(out.path));
+    memcpy(out.content_hash, entry.content_hash, sizeof(out.content_hash));
+    return true;
+}
+
 uint64_t SleepHqRemoteFileCache::hash_key(const char *name,
                                            const char *path,
                                            const char *content_hash,

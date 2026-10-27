@@ -6,11 +6,13 @@
 #include <atomic>
 #include <memory>
 #include <stdint.h>
+#include <vector>
 
 #include "export_endpoint_config.h"
 #include "export_endpoint.h"
 #include "export_step.h"
 #include "large_byte_buffer.h"
+#include "large_allocator.h"
 #include "sleephq_client.h"
 #include "sleephq_remote_file_cache.h"
 #include "sleephq_sync_file.h"
@@ -132,6 +134,7 @@ private:
         HashLocalFile,
         ResolveRemoteFile,
         FetchRemoteFiles,
+        FetchImportFiles,
         UploadFile,
         ProcessImport,
         WaitImport,
@@ -171,6 +174,8 @@ private:
         uint64_t size = 0;
         uint64_t mtime = 0;
         uint32_t import_id = 0;
+        bool remote_present = false;
+        bool confirmed = false;
     };
 
     struct RemoteMachineDateCache {
@@ -264,6 +269,14 @@ private:
     bool staged_contains_locked(const char *path,
                                 uint64_t size,
                                 uint64_t mtime) const;
+    StagedFile *find_staged_locked(const char *path);
+    bool merge_import_files_locked(const SleepHqRemoteFileCache &files);
+    bool defer_current_file_locked();
+    void forget_deferred_file_locked(const char *path);
+    bool next_deferred_file_locked();
+    bool configure_staged_hash_locked(const StagedFile &entry,
+                                     const StorageFileInfo &info);
+    void accept_staged_hash_locked(const char *hash);
     void note_completed_datalog_day_locked(const char *day);
     bool prepare_staged_state_locked();
     ExportStep step_flush_state_locked();
@@ -369,9 +382,23 @@ private:
     size_t staged_count_ = 0;
     size_t staged_capacity_ = 0;
     SleepHqRemoteFileCache remote_files_;
+    char remote_file_prefix_[AC_STORAGE_PATH_MAX] = {};
     uint32_t remote_file_next_page_ = 1;
-    uint32_t remote_file_pages_loaded_ = 0;
     bool remote_file_cache_complete_ = false;
+    bool remote_file_lookup_failed_ = false;
+
+    // Recovery and newer versions waiting for the previous import to finish.
+    bool resuming_import_ = false;
+    bool resumed_import_accepts_files_ = false;
+    bool resumed_import_complete_ = false;
+    uint32_t import_file_next_page_ = 1;
+    bool validating_staged_hash_ = false;
+    bool followup_active_ = false;
+    bool refreshing_inventory_ = false;
+    bool replan_after_import_ = false;
+    size_t deferred_file_index_ = 0;
+    std::vector<SleepHqSyncFileState, LargeAllocator<SleepHqSyncFileState>>
+        deferred_files_;
 
     // remote reconcile
     RemoteMachineDateCache *remote_dates_ = nullptr;

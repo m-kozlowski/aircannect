@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "debug_log.h"
 #include "hex_util.h"
@@ -51,6 +52,39 @@ static const char *SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA =
 
 const char *json_string_or_empty(JsonVariantConst value) {
     return value.is<const char *>() ? value.as<const char *>() : "";
+}
+
+enum class UrlEncodeResult : uint8_t {
+    Success,
+    Invalid,
+    NoMemory,
+};
+
+UrlEncodeResult append_url_encoded_component(LargeTextBuffer &out,
+                                             const char *value) {
+    if (!value) return UrlEncodeResult::Invalid;
+
+    static constexpr char HEX_DIGITS[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < AC_STORAGE_PATH_MAX; ++i) {
+        const uint8_t ch = static_cast<uint8_t>(value[i]);
+        if (ch == 0) return UrlEncodeResult::Success;
+
+        const bool unreserved =
+            (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+            ch == '.' || ch == '~';
+
+        if (unreserved) {
+            if (!out.append(value + i, 1)) return UrlEncodeResult::NoMemory;
+        } else {
+            const char encoded[] = {
+                '%', HEX_DIGITS[ch >> 4], HEX_DIGITS[ch & 0x0f]};
+            if (!out.append(encoded, sizeof(encoded))) {
+                return UrlEncodeResult::NoMemory;
+            }
+        }
+    }
+    return UrlEncodeResult::Invalid;
 }
 
 }  // namespace
@@ -966,6 +1000,7 @@ bool SleepHqClient::upload_file(const SleepHqUploadRequest &request,
 }
 
 bool SleepHqClient::list_team_files(uint32_t team_id,
+                                    const char *path_prefix,
                                     uint32_t page,
                                     uint32_t per_page,
                                     SleepHqRemoteFileCallback callback,
@@ -975,16 +1010,103 @@ bool SleepHqClient::list_team_files(uint32_t team_id,
                                     const BackgroundOperationControl *operation) {
     count = 0;
     has_more = false;
-    if (!team_id || !callback || per_page == 0 || per_page > 100) {
+    if (!team_id || !path_prefix) {
         set_error("bad_file_list_request");
         return false;
     }
-    char path[96];
-    snprintf(path, sizeof(path),
-             "/api/v1/teams/%lu/files?page=%lu&per_page=%lu",
-             static_cast<unsigned long>(team_id),
-             static_cast<unsigned long>(page ? page : 1),
-             static_cast<unsigned long>(per_page));
+
+    LargeTextBuffer path;
+    if (!path.reserve(AC_STORAGE_PATH_MAX * 3 + 128)) {
+        set_error("file_list_path_alloc");
+        return false;
+    }
+
+    char prefix[64];
+    const int prefix_size = snprintf(
+        prefix, sizeof(prefix), "/api/v1/teams/%lu/files?path_prefix=",
+        static_cast<unsigned long>(team_id));
+    if (prefix_size <= 0 || static_cast<size_t>(prefix_size) >= sizeof(prefix)) {
+        set_error("bad_file_list_request");
+        return false;
+    }
+    if (!path.append(prefix, static_cast<size_t>(prefix_size))) {
+        set_error("file_list_path_alloc");
+        return false;
+    }
+
+    const UrlEncodeResult encoded =
+        append_url_encoded_component(path, path_prefix);
+    if (encoded != UrlEncodeResult::Success) {
+        set_error(encoded == UrlEncodeResult::Invalid
+                      ? "bad_file_list_request"
+                      : "file_list_path_alloc");
+        return false;
+    }
+
+    char pagination[48];
+    const int pagination_size = snprintf(
+        pagination, sizeof(pagination), "&page=%lu&per_page=%lu",
+        static_cast<unsigned long>(page ? page : 1),
+        static_cast<unsigned long>(per_page));
+    if (pagination_size <= 0 ||
+        static_cast<size_t>(pagination_size) >= sizeof(pagination)) {
+        set_error("bad_file_list_request");
+        return false;
+    }
+    if (!path.append(pagination, static_cast<size_t>(pagination_size))) {
+        set_error("file_list_path_alloc");
+        return false;
+    }
+
+    return list_files(path.c_str(), per_page, callback, ctx, count, has_more,
+                      operation);
+}
+
+bool SleepHqClient::list_import_files(
+    uint32_t import_id,
+    uint32_t page,
+    uint32_t per_page,
+    SleepHqRemoteFileCallback callback,
+    void *ctx,
+    size_t &count,
+    bool &has_more,
+    const BackgroundOperationControl *operation) {
+    count = 0;
+    has_more = false;
+    if (!import_id) {
+        set_error("bad_file_list_request");
+        return false;
+    }
+
+    char path[80];
+    const int path_size = snprintf(
+        path, sizeof(path), "/api/v1/imports/%lu/files?page=%lu&per_page=%lu",
+        static_cast<unsigned long>(import_id),
+        static_cast<unsigned long>(page ? page : 1),
+        static_cast<unsigned long>(per_page));
+    if (path_size <= 0 || static_cast<size_t>(path_size) >= sizeof(path)) {
+        set_error("bad_file_list_request");
+        return false;
+    }
+    return list_files(path, per_page, callback, ctx, count, has_more,
+                      operation);
+}
+
+bool SleepHqClient::list_files(
+    const char *path,
+    uint32_t per_page,
+    SleepHqRemoteFileCallback callback,
+    void *ctx,
+    size_t &count,
+    bool &has_more,
+    const BackgroundOperationControl *operation) {
+    count = 0;
+    has_more = false;
+    if (!path || !callback || per_page == 0 || per_page > 100) {
+        set_error("bad_file_list_request");
+        return false;
+    }
+
     SleepHqRemoteFileListStreamParser parser;
     if (!parser.begin(per_page, callback, ctx)) {
         set_error("bad_file_list_request");
@@ -1150,6 +1272,14 @@ bool SleepHqClient::parse_import(const SleepHqHttpResponse &response,
     copy_cstr(out.failed_reason, sizeof(out.failed_reason),
               json_string_or_empty(
                   doc["data"]["attributes"]["failed_reason"]));
+
+    JsonObjectConst attributes =
+        doc["data"]["attributes"].as<JsonObjectConst>();
+    JsonVariantConst processed_at = attributes["processed_at"];
+    out.accepts_files = strcasecmp(out.status, "uploading") == 0 &&
+                        processed_at.is<JsonVariantConst>() &&
+                        processed_at.isNull();
+
     set_error("");
     return true;
 }

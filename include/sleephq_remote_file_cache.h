@@ -22,6 +22,7 @@ public:
     void clear();
 
     size_t size() const { return count_; }
+    bool get(size_t index, SleepHqRemoteFile &out) const;
 
 private:
     struct Entry {
