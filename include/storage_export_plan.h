@@ -32,6 +32,8 @@ struct StorageLocalNodeInfo {
 
 size_t storage_export_root_count();
 const StorageExportRoot &storage_export_root_at(size_t index);
+// Accepts a normalized absolute path.
+bool storage_export_contains_path(const char *path);
 
 bool storage_export_all_digits(const char *text, size_t len);
 bool storage_export_parse_yyyymmdd(const char *text,

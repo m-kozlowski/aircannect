@@ -78,6 +78,20 @@ const StorageExportRoot &storage_export_root_at(size_t index) {
     return EXPORT_ROOTS[index];
 }
 
+bool storage_export_contains_path(const char *path) {
+    if (!path) return false;
+
+    for (const auto &root : EXPORT_ROOTS) {
+        const size_t length = strlen(root.path);
+        if (strcmp(path, root.path) == 0 ||
+            (root.recursive && strncmp(path, root.path, length) == 0 &&
+             path[length] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool storage_export_all_digits(const char *text, size_t len) {
     if (!text || len == 0) return false;
     for (size_t i = 0; i < len; ++i) {

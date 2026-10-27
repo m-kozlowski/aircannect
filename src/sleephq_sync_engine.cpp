@@ -1374,19 +1374,7 @@ bool SleepHqSyncEngine::merge_import_files_locked(
             return false;
         }
 
-        bool exported_path = false;
-        for (size_t root_index = 0; root_index < storage_export_root_count();
-             ++root_index) {
-            const auto &root = storage_export_root_at(root_index);
-            const size_t length = strlen(root.path);
-            if (strcmp(path, root.path) == 0 ||
-                (root.recursive && strncmp(path, root.path, length) == 0 &&
-                 path[length] == '/')) {
-                exported_path = true;
-                break;
-            }
-        }
-        if (!exported_path) return false;
+        if (!storage_export_contains_path(path)) return false;
 
         StagedFile *entry = find_staged_locked(path);
         if (!entry) {
