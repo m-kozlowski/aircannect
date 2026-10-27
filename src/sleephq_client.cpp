@@ -176,8 +176,7 @@ bool SleepHqClient::open_request(
     const char *content_type,
     bool authorize,
     uint64_t content_length,
-    const BackgroundOperationControl *operation,
-    bool close_after) {
+    const BackgroundOperationControl *operation) {
     if (!operation_allows(operation, "prepare")) {
         disconnect();
         return false;
@@ -266,7 +265,7 @@ bool SleepHqClient::open_request(
             "application/vnd.api+json, application/json") == ESP_OK &&
         esp_http_client_set_header(client_, "Accept-Encoding", "identity") == ESP_OK &&
         esp_http_client_set_header(client_, "Connection",
-            close_after ? "close" : "keep-alive") == ESP_OK &&
+            "keep-alive") == ESP_OK &&
         esp_http_client_set_header(client_, "Content-Type",
             content_type ? content_type : "application/json") == ESP_OK &&
         (auth_header == ESP_OK ||
@@ -732,8 +731,8 @@ bool SleepHqClient::attach_file(const SleepHqAttachRequest &attach,
     const bool request_ok = request("POST", api_path, body.c_str(),
                                     content_type, true, response,
                                     nullptr, nullptr, operation);
-    disconnect();
     if (!request_ok) {
+        disconnect();
         return false;
     }
     copy_cstr(out.content_hash, sizeof(out.content_hash),
@@ -810,7 +809,7 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
     snprintf(content_type, sizeof(content_type),
              "multipart/form-data; boundary=%s", boundary);
     if (!open_request("POST", api_path, content_type, true, content_length,
-                      request.operation, true)) {
+                      request.operation)) {
         return false;
     }
 
@@ -944,7 +943,6 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
                   static_cast<unsigned long long>(out.bytes),
                   static_cast<unsigned long>(upload_elapsed_ms));
     }
-    disconnect();
     return response_ok;
 }
 

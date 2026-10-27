@@ -143,8 +143,7 @@ private:
     bool open_request(const char *method, const char *path,
                       const char *content_type, bool authorize,
                       uint64_t content_length,
-                      const BackgroundOperationControl *operation,
-                      bool close_after = false);
+                      const BackgroundOperationControl *operation);
     static esp_err_t http_event(esp_http_client_event_t *event);
     bool tls_heap_available();
     bool operation_allows(const BackgroundOperationControl *operation,
