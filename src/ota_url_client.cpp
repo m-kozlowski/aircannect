@@ -89,12 +89,13 @@ esp_http_client_handle_t create_client(const char *url,
     config.buffer_size_tx = AC_OTA_URL_HTTP_TX_BUFFER_BYTES;
     config.user_data = user_data;
     config.crt_bundle_attach = esp_crt_bundle_attach;
+    // TCP idle probes are separate from HTTP connection reuse.
     config.keep_alive_enable = false;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client) {
         esp_http_client_set_header(client, "Accept-Encoding", "identity");
-        esp_http_client_set_header(client, "Connection", "close");
+        esp_http_client_set_header(client, "Connection", "keep-alive");
     }
     return client;
 }
