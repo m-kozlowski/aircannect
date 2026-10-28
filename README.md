@@ -38,6 +38,10 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
     (one JSON-RPC payload per line, compatible with `as11_config.py` and other host tooling.)
 - **Multi-profile Wi-Fi**
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
+- **WireGuard VPN**
+  - reach a home SMB share and SleepHQ while travelling
+  - `away` mode brings the tunnel up on any Wi-Fi not marked as home; `always` keeps it up
+  - import a WireGuard `.conf` in the Web UI; uses the tunnel's DNS while it holds the default route
 - **ResMed OTA**
   - flash compatible AirSense 11 / AirCurve 11 / AirMini firmware from web UI or CLI. \
     (Autodetects raw and .abc formats; CONF, APPL, and bootloader regions can
