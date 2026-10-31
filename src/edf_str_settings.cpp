@@ -20,6 +20,7 @@ namespace {
 static constexpr size_t EDF_STR_GET_NAMES_RESERVE = 512;
 static constexpr uint64_t EDF_STR_SUMMARY_SESSION_TOLERANCE_MS =
     2ULL * 60ULL * 1000ULL;
+static constexpr uint64_t EDF_STR_SUMMARY_END_EVENT_TOLERANCE_MS = 1000;
 
 struct EdfStrSummaryFieldMap {
     const char *tag = nullptr;
@@ -505,16 +506,18 @@ bool summary_record_contains_session(const ReportSummaryRecord &record,
 
     if (session_end_ms <= session_start_ms) return false;
     if (session_end_ms - session_start_ms < 60000) {
-        // A zero-minute entry proves presence, not a zero-length waveform.
-        // Its minute alone cannot distinguish a later short therapy.
+        // A sub-minute therapy can have duration 0 or 1 in Summary. Its record
+        // timestamp and stop event are sampled separately (38 ms in capture).
         uint64_t recorded_at = record.record_timestamp_ms;
         if (!recorded_at || !adjust_summary_timestamp(recorded_at, adjustment_ms) ||
-            recorded_at < session_end_ms) {
+            recorded_at <= session_start_ms ||
+            (recorded_at < session_end_ms &&
+             session_end_ms - recorded_at > EDF_STR_SUMMARY_END_EVENT_TOLERANCE_MS)) {
             return false;
         }
 
         size_t matches = 0;
-        bool zero_duration = false;
+        bool short_duration = false;
         for (uint32_t i = 0; i < record.session_interval_count; ++i) {
             const auto &candidate = record.sessions[i];
             uint64_t start = candidate.start_ms;
@@ -522,9 +525,9 @@ bool summary_record_contains_session(const ReportSummaryRecord &record,
                 start / 60000 != session_start_ms / 60000) continue;
 
             ++matches;
-            zero_duration = candidate.duration_min == 0;
+            short_duration = candidate.duration_min <= 1;
         }
-        return matches == 1 && zero_duration;
+        return matches == 1 && short_duration;
     }
 
     for (uint32_t i = 0; i < record.session_interval_count; ++i) {
