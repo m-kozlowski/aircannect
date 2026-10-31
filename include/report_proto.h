@@ -37,6 +37,7 @@ struct ReportSummaryRecord {
     uint64_t start_ms = 0;
     uint64_t end_ms = 0;
     uint32_t duration_min = 0;
+    uint64_t record_timestamp_ms = 0;
 
     bool has_tz_offset_min = false;
     int32_t tz_offset_min = 0;

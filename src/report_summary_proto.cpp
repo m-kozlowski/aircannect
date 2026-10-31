@@ -167,7 +167,7 @@ void parse_summary_metric_fields(uint32_t field_id,
 void append_summary_session(ReportSummaryRecord &record,
                             uint64_t start_ms,
                             uint32_t duration_min) {
-    if (!start_ms || !duration_min ||
+    if (!start_ms ||
         record.session_interval_count >= AC_REPORT_SUMMARY_SESSION_MAX) {
         return;
     }
@@ -297,6 +297,9 @@ bool parse_summary_record(const uint8_t *record,
             case 39:
                 out.has_session_count = true;
                 out.session_count = static_cast<uint32_t>(field.value);
+                break;
+            case 40:
+                out.record_timestamp_ms = field.value;
                 break;
             default:
                 break;

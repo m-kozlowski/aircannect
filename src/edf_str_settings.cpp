@@ -474,14 +474,19 @@ struct SummarySpoolApplyContext {
     EdfStrSummaryApplyResult *result = nullptr;
 };
 
-bool summary_timestamp_within(uint64_t lhs, uint64_t rhs, int64_t adjustment_ms) {
+bool adjust_summary_timestamp(uint64_t &timestamp, int64_t adjustment_ms) {
     if (adjustment_ms >= 0) {
-        if (lhs > UINT64_MAX - static_cast<uint64_t>(adjustment_ms)) return false;
-        lhs += static_cast<uint64_t>(adjustment_ms);
+        if (timestamp > UINT64_MAX - static_cast<uint64_t>(adjustment_ms)) return false;
+        timestamp += static_cast<uint64_t>(adjustment_ms);
     } else {
-        if (lhs < static_cast<uint64_t>(-adjustment_ms)) return false;
-        lhs -= static_cast<uint64_t>(-adjustment_ms);
+        if (timestamp < static_cast<uint64_t>(-adjustment_ms)) return false;
+        timestamp -= static_cast<uint64_t>(-adjustment_ms);
     }
+    return true;
+}
+
+bool summary_timestamp_within(uint64_t lhs, uint64_t rhs, int64_t adjustment_ms) {
+    if (!adjust_summary_timestamp(lhs, adjustment_ms)) return false;
 
     return lhs >= rhs
         ? lhs - rhs <= EDF_STR_SUMMARY_SESSION_TOLERANCE_MS
@@ -497,6 +502,30 @@ bool summary_record_contains_session(const ReportSummaryRecord &record,
     const int64_t adjustment_ms =
         (static_cast<int64_t>(record.tz_offset_min) -
          session_timezone_offset_minutes) * 60000LL;
+
+    if (session_end_ms <= session_start_ms) return false;
+    if (session_end_ms - session_start_ms < 60000) {
+        // A zero-minute entry proves presence, not a zero-length waveform.
+        // Its minute alone cannot distinguish a later short therapy.
+        uint64_t recorded_at = record.record_timestamp_ms;
+        if (!recorded_at || !adjust_summary_timestamp(recorded_at, adjustment_ms) ||
+            recorded_at < session_end_ms) {
+            return false;
+        }
+
+        size_t matches = 0;
+        bool zero_duration = false;
+        for (uint32_t i = 0; i < record.session_interval_count; ++i) {
+            const auto &candidate = record.sessions[i];
+            uint64_t start = candidate.start_ms;
+            if (!start || !adjust_summary_timestamp(start, adjustment_ms) ||
+                start / 60000 != session_start_ms / 60000) continue;
+
+            ++matches;
+            zero_duration = candidate.duration_min == 0;
+        }
+        return matches == 1 && zero_duration;
+    }
 
     for (uint32_t i = 0; i < record.session_interval_count; ++i) {
         const ReportSummarySession &candidate = record.sessions[i];
