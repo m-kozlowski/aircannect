@@ -64,10 +64,10 @@ identification. Leave it off when the original PSU already sends CAN messages.
 
 | Pin | Signal |
 |---|---|
-| 1 | +24 V |
-| 2 | CAN-H |
-| 3 | CAN-L |
-| 4 | GND |
+| 1 | GND |
+| 2 | CAN-L |
+| 3 | CAN-H |
+| 4 | +24 V |
 
 **Sourcing.** The original plug and socket are custom OEM parts. The
 most practical source is salvaging a Pilot-24 cable kit ([Amazon
