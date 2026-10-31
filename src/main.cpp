@@ -662,6 +662,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                   !ota_storage_upload_active && Storage::mounted());
     const bool supports_as11_spools =
         as11_device_service.state().model() == ResmedDeviceModel::AirSense11;
+    const bool edf_finalization_pending = edf_recorder_manager.finalization_pending();
     const bool changed =
         !runtime_activity_published ||
         storage_activity.foreground_report_demand != foreground_report_demand ||
@@ -671,6 +672,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
         storage_activity.manual_update_check_active != manual_update_check_active ||
         ota_storage_upload_active_published != ota_storage_upload_active ||
         storage_activity.therapy_active != therapy_active ||
+        storage_activity.edf_finalization_pending != edf_finalization_pending ||
         storage_activity.as11_rpc_available != as11_rpc_available ||
         storage_activity.supports_as11_spools != supports_as11_spools;
     if (!changed) return;
@@ -681,6 +683,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.ota_install_active = ota_install_active;
     storage_activity.manual_update_check_active = manual_update_check_active;
     storage_activity.therapy_active = therapy_active;
+    storage_activity.edf_finalization_pending = edf_finalization_pending;
     storage_activity.as11_rpc_available = as11_rpc_available;
     storage_activity.supports_as11_spools = supports_as11_spools;
     ota_storage_upload_active_published = ota_storage_upload_active;
@@ -691,7 +694,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     StorageService::publish_activity(storage_activity,
                                      ota_storage_upload_active);
     report_task.publish_activity(storage_activity);
-    export_task.publish_activity(storage_activity);
+    runtime_activity_published = export_task.publish_activity(storage_activity);
     resmed_firmware_preparer.publish_activity(storage_activity);
     resmed_firmware_repository.publish_activity(storage_activity);
 }
@@ -1007,7 +1010,8 @@ static void publish_report_catalog_inputs() {
                   hint.datalog_sleep_day);
     }
 
-    (void)report_task.publish_session_ended(sessions_ended, target);
+    (void)report_task.publish_session_ended(
+        sessions_ended, target, edf_recorder_manager.finalization_pending());
 
     const bool offset_valid =
         as11_device_service.state().timezone_offset_valid();

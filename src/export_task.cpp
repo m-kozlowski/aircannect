@@ -124,7 +124,7 @@ bool ExportTask::publish_config(const ExportEndpointConfig &config) {
     return true;
 }
 
-void ExportTask::publish_activity(const ActivitySnapshot &activity) {
+bool ExportTask::publish_activity(const ActivitySnapshot &activity) {
     const bool blocked = runtime_blocked(activity);
     if (blocked && runtime_) {
         // The export task may be inside blocking network I/O. Its operation
@@ -134,7 +134,7 @@ void ExportTask::publish_activity(const ActivitySnapshot &activity) {
         }
     }
 
-    if (!runtime_ || !lock_inputs()) return;
+    if (!runtime_ || !lock_inputs()) return false;
 
     const bool changed =
         runtime_->inputs.activity_generation != activity.generation;
@@ -145,6 +145,7 @@ void ExportTask::publish_activity(const ActivitySnapshot &activity) {
 
     unlock_inputs();
     if (changed) wake();
+    return true;
 }
 
 void ExportTask::publish_network(const NetworkSnapshot &network) {
@@ -260,7 +261,8 @@ bool ExportTask::copy_inputs(PublishedInputs &out) const {
 }
 
 bool ExportTask::runtime_blocked(const ActivitySnapshot &activity) const {
-    return activity.therapy_active || activity.realtime_stream_active ||
+    return activity.edf_finalization_pending ||
+           activity.therapy_active || activity.realtime_stream_active ||
            activity.foreground_report_demand || activity.ota_install_active;
 }
 

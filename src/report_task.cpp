@@ -533,7 +533,13 @@ struct ReportTask::Runtime {
 
     OperationAdmission publish_session_ended(
         uint32_t sessions_ended,
-        const NightCatalogRefreshTarget &target) {
+        const NightCatalogRefreshTarget &target,
+        bool finalization_pending) {
+        // Publish the storage gate even when the session-hint mutex is busy.
+        if (edf_finalization_pending.exchange(finalization_pending) != finalization_pending) {
+            wake();
+        }
+
         if (sessions_ended == 0) return OperationAdmission::Accepted;
         if (!lock()) return OperationAdmission::Busy;
 
@@ -927,7 +933,8 @@ struct ReportTask::Runtime {
     }
 
     bool local_background_work_blocked() const {
-        return activity.therapy_active || activity.realtime_stream_active ||
+        return edf_finalization_pending.load() ||
+               activity.therapy_active || activity.realtime_stream_active ||
                activity.foreground_report_demand ||
                activity.ota_install_active || activity.export_work_claimed ||
                activity.manual_update_check_active ||
@@ -1308,7 +1315,7 @@ struct ReportTask::Runtime {
     }
 
     bool post_therapy_settle_pending() const {
-        return pending_session_ended.pending ||
+        return edf_finalization_pending.load() || pending_session_ended.pending ||
                (pending_refresh.valid() && pending_refresh.post_therapy) ||
                (reconcile_pending && reconcile_post_therapy) ||
                refresh_post_therapy || pending_catalog_save_post_therapy ||
@@ -2548,6 +2555,7 @@ struct ReportTask::Runtime {
     ReportSourceChange refresh_source_change_covered;
     uint32_t source_change_revision = 0;
     PendingSessionEnded pending_session_ended;
+    std::atomic<bool> edf_finalization_pending{false};
     bool pending_timezone_change = false;
     uint32_t last_sessions_ended = 0;
     bool timezone_seen = false;
@@ -2848,11 +2856,12 @@ OperationAdmission ReportTask::request_night(
 
 OperationAdmission ReportTask::publish_session_ended(
     uint32_t sessions_ended,
-    const NightCatalogRefreshTarget &target) {
+    const NightCatalogRefreshTarget &target,
+    bool finalization_pending) {
     if (!runtime_ || !runtime_->initialized) {
         return OperationAdmission::Rejected;
     }
-    return runtime_->publish_session_ended(sessions_ended, target);
+    return runtime_->publish_session_ended(sessions_ended, target, finalization_pending);
 }
 
 OperationAdmission ReportTask::publish_timezone_change(
@@ -3659,6 +3668,23 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog,
                 runtime.pending_refresh.target);
         if (admitted == OperationAdmission::Accepted) {
+            if (runtime.pending_refresh.post_therapy) {
+                ReportSourceChange covered;
+                const SleepDayId day = runtime.pending_refresh.target.sleep_day;
+                for (size_t i = 0; i < runtime.source_change_count; ++i) {
+                    const auto &change = runtime.source_changes[i];
+                    if (!day.valid()) {
+                        covered.merge(change);
+                    } else if (!(day < change.first_day) && !(change.last_day < day)) {
+                        covered.merge({day, day, change.revision});
+                    }
+                }
+                if (covered.valid()) {
+                    runtime.pending_refresh.source_change = true;
+                    runtime.refresh_source_change_covered = covered;
+                }
+            }
+
             runtime.refresh_generation =
                 runtime.pending_refresh.generation;
             runtime.refresh_offset_valid =

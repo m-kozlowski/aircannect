@@ -146,7 +146,8 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
     const auto status = task_->control_snapshot();
     status_snapshot_ = status;
 
-    poll_post_therapy(report, activity.realtime_stream_active,
+    poll_post_therapy(report, activity.realtime_stream_active ||
+                              activity.edf_finalization_pending,
                       activity.therapy_active, status, now_ms);
     poll_manual_sync(status);
     poll_maintenance(report, activity, status, now_ms);

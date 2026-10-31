@@ -274,7 +274,8 @@ public:
     std::shared_ptr<const ReportPeriodResult> period_completion(uint32_t &serial) const;
     OperationAdmission publish_session_ended(
         uint32_t sessions_ended,
-        const NightCatalogRefreshTarget &target = {});
+        const NightCatalogRefreshTarget &target = {},
+        bool finalization_pending = false);
     OperationAdmission publish_timezone_change(
         uint32_t revision,
         bool offset_valid,

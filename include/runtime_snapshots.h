@@ -8,6 +8,7 @@ namespace aircannect {
 
 struct ActivitySnapshot {
     bool therapy_active = false;
+    bool edf_finalization_pending = false;
     bool realtime_stream_active = false;
     bool foreground_report_demand = false;
     bool ota_install_active = false;

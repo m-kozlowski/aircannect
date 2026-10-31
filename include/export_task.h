@@ -92,7 +92,7 @@ public:
 
     // immutable runtime inputs
     bool publish_config(const ExportEndpointConfig &config);
-    void publish_activity(const ActivitySnapshot &activity);
+    bool publish_activity(const ActivitySnapshot &activity);
     void publish_network(const NetworkSnapshot &network);
     void set_storage_suspended(bool suspended);
     bool storage_quiesced() const { return !task_ || storage_paused_.load(); }
