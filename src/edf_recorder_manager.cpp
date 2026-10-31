@@ -13,6 +13,7 @@
 #include "edf_identification.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_session_metadata_publisher.h"
+#include "edf_str_record_publisher.h"
 #include "edf_storage_catalog.h"
 #include "storage_service.h"
 #include "edf_stream_signal_table.h"
@@ -178,6 +179,7 @@ struct EdfRecorderManager::ColdState {
     explicit ColdState(RpcRequestPort &rpc) : history(rpc) {}
 
     EdfSessionMetadataPublisher metadata_publisher;
+    EdfStrRecordPublisher str_publisher;
     EdfStrSummaryRefresh str_summary_refresh;
     AirMiniHistoryService history;
     EdfSessionMetadata segment_metadata;
@@ -220,6 +222,7 @@ void EdfRecorderManager::begin(EventBroker &events,
     time_sync_ = &time_sync;
     report_spool_ = &report_spool;
     cold_->metadata_publisher.begin(metadata_storage);
+    cold_->str_publisher.begin(StorageService::edf_str_port());
     cold_->str_summary_refresh.begin(report_spool,
                                      storage_read,
                                      metadata_storage,
@@ -271,6 +274,13 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
 
     poll_rpc_completions();
     poll_str_summary_fetch(now_ms);
+    if (str_record_pending_write_ && !str_summary_.active()) {
+        (void)write_str_day_record();
+    }
+    cold_->str_publisher.poll(now_ms);
+    if (cold_->str_publisher.last_error()[0]) {
+        set_error(cold_->str_publisher.last_error());
+    }
     if (storage_suspended_) {
         cold_->history.cancel("storage_usb");
         if (segment_close_pending_ && close_recording_segment()) {
@@ -418,6 +428,15 @@ uint32_t EdfRecorderManager::sessions_ended() const {
         ? status_.sessions_ended - 1 : status_.sessions_ended;
 }
 
+bool EdfRecorderManager::finalization_pending() const {
+    return cold_ && (segment_close_pending_ ||
+        cold_->pending_final_metadata_valid || !cold_->metadata_publisher.idle() ||
+        str_record_pending_write_ || str_summary_.active() ||
+        !cold_->str_publisher.idle() || str_settings_rpc_.active() ||
+        identification_rpc_.active() || history_active() ||
+        cold_->str_summary_refresh.status().active());
+}
+
 void EdfRecorderManager::set_history_activity(bool rpc_available,
                                              bool suspended) {
     history_rpc_available_ = rpc_available;
@@ -442,8 +461,7 @@ void EdfRecorderManager::poll_airmini_history(uint32_t now_ms) {
     }
 
     const EdfStrSessionAccumulator *record = cold_->history.record();
-    if (record && write_str_day_record(
-            *record, true, !post_therapy_history_pending_)) {
+    if (record && write_str_day_record(*record, true)) {
         cold_->history.record_published();
     }
     if (was_active && !history_active()) {
@@ -489,6 +507,7 @@ bool EdfRecorderManager::storage_quiesced() const {
     return storage_suspended_ && (!cold_ ||
         (!status_.active && !segment_close_pending_ &&
          !cold_->pending_final_metadata_valid && cold_->metadata_publisher.idle() &&
+         cold_->str_publisher.idle() &&
          !str_record_pending_write_ && !str_summary_.active() &&
          !str_settings_rpc_.active() && !identification_rpc_.active() &&
          !cold_->str_summary_refresh.status().active() && !history_active()));
@@ -719,7 +738,6 @@ void EdfRecorderManager::finish_mask_event(const char *end_time,
         if (str_summary_.active()) {
             str_record_pending_write_ = true;
         } else {
-            str_record_pending_write_ = false;
             (void)write_str_day_record();
         }
     }
@@ -1088,6 +1106,8 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
                   "id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
+        next_session_start_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        return;
     }
 
     cold_->str_session_checkpoint = str_;
@@ -2010,6 +2030,8 @@ bool EdfRecorderManager::ensure_str_session_started(uint32_t now_ms) {
 
 bool EdfRecorderManager::begin_str_session_at(const EdfLocalDateTime &start,
                                               uint32_t now_ms) {
+    if (!flush_pending_str_record("str_session_start")) return false;
+
     EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
     if (!str_.begin_therapy(start, str_status)) {
         switch (str_status) {
@@ -2289,7 +2311,6 @@ void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
                           static_cast<unsigned long>(applied.missing),
                           static_cast<unsigned long>(applied.unmapped));
                 str_summary_.clear();
-                str_record_pending_write_ = false;
                 (void)write_str_day_record();
                 return;
             }
@@ -2388,7 +2409,6 @@ void EdfRecorderManager::finish_str_summary_without_data(
               static_cast<unsigned>(str_.day_epoch_days()),
               status_.last_error);
 
-    str_record_pending_write_ = false;
     (void)write_str_day_record();
 }
 
@@ -2410,7 +2430,6 @@ bool EdfRecorderManager::flush_pending_str_record(const char *reason) {
 
     const bool summary_was_pending = str_summary_.active();
     cancel_str_summary_fetch();
-    str_record_pending_write_ = false;
 
     if (!write_str_day_record()) {
         return false;
@@ -2538,24 +2557,18 @@ bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
         return true;
     }
 
-    str_record_pending_write_ = false;
     return write_str_day_record();
 }
 
 bool EdfRecorderManager::write_str_day_record() {
-    return write_str_day_record(str_);
+    const bool accepted = write_str_day_record(str_);
+    str_record_pending_write_ = !accepted;
+    return accepted;
 }
 
 bool EdfRecorderManager::write_str_day_record(
     const EdfStrSessionAccumulator &accumulator,
-    bool replace_existing,
-    bool notify_report_source_change) {
-    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
-    if (!edf_str_path(path, sizeof(path))) {
-        set_error("str_path_failed");
-        return false;
-    }
-
+    bool replace_existing) {
     char date[9] = {};
     char time[9] = {};
     if (!edf_header_date(accumulator.day_start(), date, sizeof(date)) ||
@@ -2578,19 +2591,7 @@ bool EdfRecorderManager::write_str_day_record(
     info.start_time = time;
     info.record_count = 0;
 
-    EdfStrRecordView record;
-    record.digital_samples = accumulator.samples();
-    record.sample_count = accumulator.sample_count();
-    SleepDayId changed_day;
-    if (notify_report_source_change &&
-        !SleepDayId::from_epoch_days(accumulator.day_epoch_days(),
-                                     changed_day)) {
-        set_error("str_source_day_failed");
-        return false;
-    }
-    if (!StorageService::enqueue_edf_str_record(path, info, record,
-                                               replace_existing,
-                                               changed_day)) {
+    if (!cold_->str_publisher.publish(accumulator, info, replace_existing)) {
         status_.str_enqueue_failures++;
         set_error("str_queue_failed");
         return false;

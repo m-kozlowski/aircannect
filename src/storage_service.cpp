@@ -88,6 +88,7 @@ struct JobSlot {
     JobType type = JobType::Record;
     StoredFileKind kind = StoredFileKind::Brp;
     uint32_t request_id = 0;
+    OperationTicket str_ticket;
     uint32_t admitted_ms = 0;
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     char patient_id[AC_EDF_STORAGE_PATIENT_ID_MAX] = {};
@@ -181,6 +182,11 @@ struct ReadCompletionSlot {
     StorageReadCompletion completion;
 };
 
+struct EdfStrCompletionSlot {
+    bool ready = false;
+    StorageEdfStrWriteCompletion completion;
+};
+
 void close_file(OpenFile &state);
 bool lock_queue(uint32_t timeout_ms = 10);
 void unlock_queue();
@@ -202,6 +208,7 @@ size_t queued = 0;
 OpenFile open_files[AC_EDF_STORAGE_FILE_COUNT];
 OpenRequestResult open_results[AC_EDF_STORAGE_FILE_COUNT];
 uint32_t next_open_request_id = 0;
+uint32_t next_edf_str_ticket_id = 0;
 bool processing_job = false;
 std::shared_ptr<EdfStorageProgress> edf_progress_state;
 bool edf_progress_dirty = false;
@@ -223,6 +230,7 @@ void notify_completion() {
 ReadJob read_jobs[AC_STORAGE_PREPARED_READ_CAPACITY];
 PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
 ReadCompletionSlot read_completions[AC_STORAGE_PREPARED_READ_CAPACITY];
+EdfStrCompletionSlot edf_str_completion;
 StorageReadFile active_read;
 File &active_read_file = active_read.file;
 size_t active_read_index = SIZE_MAX;
@@ -241,6 +249,10 @@ bool cancel_prepared_read(OperationTicket ticket);
 bool abandon_prepared_read(OperationTicket ticket);
 bool take_read_completion(OperationTicket ticket,
                           StorageReadCompletion &completion);
+OperationSubmission submit_edf_str_write(
+    const StorageEdfStrWriteCommand &command);
+bool take_edf_str_completion(OperationTicket ticket,
+                             StorageEdfStrWriteCompletion &completion);
 PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
                                     size_t offset,
                                     uint8_t *buffer,
@@ -289,6 +301,20 @@ public:
     }
 };
 
+class ServiceEdfStrPort final : public StorageEdfStrPort {
+public:
+    OperationSubmission request_write(
+        const StorageEdfStrWriteCommand &command) override {
+        return submit_edf_str_write(command);
+    }
+
+    bool take_completion(
+        OperationTicket ticket,
+        StorageEdfStrWriteCompletion &completion) override {
+        return take_edf_str_completion(ticket, completion);
+    }
+};
+
 class ServiceStatusPort final : public StorageStatusPort {
 public:
     bool mounted() const override { return Storage::mounted(); }
@@ -302,6 +328,7 @@ public:
 };
 
 ServiceReadPort service_read_port;
+ServiceEdfStrPort service_edf_str_port;
 ServiceStatusPort service_status_port;
 std::atomic<MaintenanceOwner> maintenance_owner{MaintenanceOwner::None};
 std::atomic<bool> storage_therapy_active{false};
@@ -804,6 +831,12 @@ OperationTicket next_read_ticket_locked(uint32_t generation) {
     next_read_ticket_id++;
     if (next_read_ticket_id == 0) next_read_ticket_id++;
     return {next_read_ticket_id, generation};
+}
+
+OperationTicket next_edf_str_ticket_locked(uint32_t generation) {
+    next_edf_str_ticket_id++;
+    if (next_edf_str_ticket_id == 0) next_edf_str_ticket_id++;
+    return {next_edf_str_ticket_id, generation};
 }
 
 StoragePreparedRead next_prepared_handle_locked(size_t length) {
@@ -1915,19 +1948,24 @@ bool process_numeric_record(JobSlot &job) {
     return true;
 }
 
-bool process_str_record(const JobSlot &job) {
-    if (!valid_path(job.path)) {
-        set_error("bad_str_path");
+bool process_str_record(const JobSlot &job, char *error_out) {
+    if (error_out) error_out[0] = 0;
+
+    const auto fail = [error_out](const char *error) {
+        set_error(error);
+        copy_cstr(error_out, AC_STORAGE_ERROR_MAX, error);
         return false;
+    };
+
+    if (!valid_path(job.path)) {
+        return fail("bad_str_path");
     }
     if (!Storage::mounted()) {
-        set_error("storage_not_mounted");
-        return false;
+        return fail("storage_not_mounted");
     }
 
     if (!ensure_parent_dirs(job.path)) {
-        set_error("str_mkdir_failed");
-        return false;
+        return fail("str_mkdir_failed");
     }
 
     EdfStrStorageWriteRequest request;
@@ -1948,8 +1986,7 @@ bool process_str_record(const JobSlot &job) {
         } else if (result.error_kind == EdfStrStorageErrorKind::Publish) {
             service_state.patch_errors++;
         }
-        set_error(result.error ? result.error : "str_write_failed");
-        return false;
+        return fail(result.error ? result.error : "str_write_failed");
     }
 
     if (result.timeline_rewritten) {
@@ -2458,7 +2495,7 @@ bool process_foreground_step() {
     return false;
 }
 
-bool process_job(JobSlot &job) {
+bool process_job(JobSlot &job, char *str_error = nullptr) {
     switch (job.type) {
         case JobType::Open:
             return process_open(job);
@@ -2471,7 +2508,7 @@ bool process_job(JobSlot &job) {
         case JobType::NumericRecord:
             return process_numeric_record(job);
         case JobType::StrRecord:
-            return process_str_record(job);
+            return process_str_record(job, str_error);
         case JobType::Identification:
             return process_identification_files(job);
         default:
@@ -2663,14 +2700,32 @@ void task_entry(void *) {
                 if (slots[slot_index].type != JobType::Open) {
                     Storage::release_write_handles();
                 }
-                const bool completed = process_job(slots[slot_index]);
+                char str_error[AC_STORAGE_ERROR_MAX] = {};
+                const bool is_str_record =
+                    slots[slot_index].type == JobType::StrRecord;
+                const bool completed = process_job(
+                    slots[slot_index], is_str_record ? str_error : nullptr);
                 if (completed && slots[slot_index].type == JobType::StrRecord) {
                     queue_report_source_change(slots[slot_index]);
                 }
                 xSemaphoreTake(queue_lock, portMAX_DELAY);
+                bool str_completion_published = false;
+                if (is_str_record &&
+                    edf_str_completion.completion.ticket ==
+                        slots[slot_index].str_ticket) {
+                    edf_str_completion.completion.outcome =
+                        completed ? OperationOutcome::succeeded()
+                                  : OperationOutcome::failed();
+                    copy_cstr(edf_str_completion.completion.error,
+                              sizeof(edf_str_completion.completion.error),
+                              completed ? "" : str_error);
+                    edf_str_completion.ready = true;
+                    str_completion_published = true;
+                }
                 clear_slot(slots[slot_index]);
                 processing_job = false;
                 unlock_queue();
+                if (str_completion_published) notify_completion();
                 did_work = true;
                 file_log_burst = 0;
             } else {
@@ -2743,10 +2798,14 @@ template <typename Prepare>
 EdfStorageEnqueueResult try_enqueue_prepared_slot(
     Prepare prepare,
     const char *prepare_error,
-    bool report_busy) {
+    bool report_busy,
+    OperationTicket *ticket_out = nullptr,
+    uint32_t ticket_generation = 0,
+    uint32_t lock_timeout_ms = 10) {
+    if (ticket_out) *ticket_out = {};
     if (!service_state.initialized) begin();
     if (!service_state.available) return EdfStorageEnqueueResult::Busy;
-    if (!lock_queue()) {
+    if (!lock_queue(lock_timeout_ms)) {
         if (report_busy) {
             service_state.queue_drops++;
             set_error("queue_lock_failed");
@@ -2762,6 +2821,11 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
     if (!storage_local_requests_enabled.load()) {
         unlock_queue();
         return EdfStorageEnqueueResult::Rejected;
+    }
+
+    if (ticket_out && edf_str_completion.completion.ticket.valid()) {
+        unlock_queue();
+        return EdfStorageEnqueueResult::Busy;
     }
 
     if (free_slots() == 0) {
@@ -2781,6 +2845,15 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
         set_error(prepare_error);
         log_worker_failure(LOG_WARN, prepare_error, job.path);
         return EdfStorageEnqueueResult::Rejected;
+    }
+
+    if (ticket_out) {
+        const OperationTicket ticket =
+            next_edf_str_ticket_locked(ticket_generation);
+        job.str_ticket = ticket;
+        edf_str_completion = {};
+        edf_str_completion.completion.ticket = ticket;
+        *ticket_out = ticket;
     }
 
     if (job.type == JobType::Open) job.admitted_ms = millis();
@@ -2813,6 +2886,73 @@ bool enqueue_rendered_slot(Prepare prepare,
             return true;
         },
         render_error);
+}
+
+OperationSubmission submit_edf_str_write(
+    const StorageEdfStrWriteCommand &command) {
+    if (!valid_path(command.path) || !command.record.digital_samples ||
+        command.record.sample_count != AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
+        edf_str_record_size() > AC_EDF_STORAGE_SLOT_BYTES) {
+        return OperationSubmission::rejected();
+    }
+
+    OperationTicket ticket;
+    const EdfStorageEnqueueResult result = try_enqueue_prepared_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::StrRecord;
+            job.str_replace_existing = command.replace_existing;
+            job.source_change_day = command.changed_day;
+            copy_cstr(job.path, sizeof(job.path), command.path);
+            copy_cstr(job.patient_id, sizeof(job.patient_id),
+                      command.header.patient_id);
+            copy_cstr(job.recording_id, sizeof(job.recording_id),
+                      command.header.recording_id);
+            copy_cstr(job.start_date, sizeof(job.start_date),
+                      command.header.start_date);
+            copy_cstr(job.start_time, sizeof(job.start_time),
+                      command.header.start_time);
+
+            size_t written = 0;
+            if (!edf_render_str_record(command.record,
+                                       job.bytes,
+                                       AC_EDF_STORAGE_SLOT_BYTES,
+                                       written)) {
+                return false;
+            }
+
+            job.len = written;
+            return true;
+        },
+        "str_render_failed",
+        false,
+        &ticket,
+        command.generation,
+        0);
+
+    if (result == EdfStorageEnqueueResult::Accepted) {
+        return OperationSubmission::accepted(ticket);
+    }
+    if (result == EdfStorageEnqueueResult::Busy) {
+        return OperationSubmission::busy();
+    }
+    return OperationSubmission::rejected();
+}
+
+bool take_edf_str_completion(
+    OperationTicket ticket,
+    StorageEdfStrWriteCompletion &completion) {
+    if (!ticket.valid() || !lock_queue(0)) return false;
+
+    if (!edf_str_completion.ready ||
+        edf_str_completion.completion.ticket != ticket) {
+        unlock_queue();
+        return false;
+    }
+
+    completion = edf_str_completion.completion;
+    edf_str_completion = {};
+    unlock_queue();
+    return true;
 }
 
 }  // namespace
@@ -3004,36 +3144,8 @@ bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
         "annotation_render_failed");
 }
 
-bool enqueue_edf_str_record(const char *path,
-                            const EdfHeaderInfo &info,
-                            const EdfStrRecordView &record,
-                            bool replace_existing,
-                            SleepDayId changed_day) {
-    if (!valid_path(path) || edf_str_record_size() > AC_EDF_STORAGE_SLOT_BYTES) {
-        return false;
-    }
-    return enqueue_rendered_slot(
-        [&](JobSlot &job) {
-            job.type = JobType::StrRecord;
-            job.str_replace_existing = replace_existing;
-            job.source_change_day = changed_day;
-            copy_cstr(job.path, sizeof(job.path), path);
-            copy_cstr(job.patient_id, sizeof(job.patient_id),
-                      info.patient_id);
-            copy_cstr(job.recording_id, sizeof(job.recording_id),
-                      info.recording_id);
-            copy_cstr(job.start_date, sizeof(job.start_date),
-                      info.start_date);
-            copy_cstr(job.start_time, sizeof(job.start_time),
-                      info.start_time);
-        },
-        [&](JobSlot &job, size_t &written) {
-            return edf_render_str_record(record,
-                                         job.bytes,
-                                         AC_EDF_STORAGE_SLOT_BYTES,
-                                         written);
-        },
-        "str_render_failed");
+StorageEdfStrPort &edf_str_port() {
+    return service_edf_str_port;
 }
 
 bool enqueue_edf_identification_files(const std::string &json) {

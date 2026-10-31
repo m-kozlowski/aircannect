@@ -157,6 +157,7 @@ public:
     void accept_oximetry_sample(const OximetrySample &sample);
     const EdfRecorderStatus &status() const;
     uint32_t sessions_ended() const;
+    bool finalization_pending() const;
     bool latest_catalog_refresh_hint(EdfCatalogRefreshHint &out) const;
     bool active_segment_metadata(EdfSessionMetadata &out) const;
     const EdfStreamAssemblerStatus &assembler_status() const {
@@ -382,8 +383,7 @@ private:
     void handle_identification_response(RpcPayloadView payload);
     bool write_str_day_record();
     bool write_str_day_record(const EdfStrSessionAccumulator &record,
-                              bool replace_existing = false,
-                              bool notify_report_source_change = false);
+                              bool replace_existing = false);
     void poll_airmini_history(uint32_t now_ms);
 
     // device time

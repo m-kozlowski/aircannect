@@ -22,6 +22,7 @@
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
 #include "storage_stream_port.h"
+#include "storage_edf_str_port.h"
 #include "storage_upload_port.h"
 
 namespace aircannect {
@@ -181,11 +182,7 @@ EdfStorageEnqueueResult enqueue_edf_numeric_record(
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
                                    const EdfAnnotationRecord &record);
 // Replacement requires a complete day, including previously saved fields.
-bool enqueue_edf_str_record(const char *path,
-                            const EdfHeaderInfo &info,
-                            const EdfStrRecordView &record,
-                            bool replace_existing = false,
-                            SleepDayId changed_day = {});
+StorageEdfStrPort &edf_str_port();
 
 // EDF metadata and closes
 bool enqueue_edf_identification_files(const std::string &json);
