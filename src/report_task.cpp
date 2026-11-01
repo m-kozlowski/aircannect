@@ -2096,6 +2096,7 @@ struct ReportTask::Runtime {
     ReportTaskOperationalSnapshot operational(
         const ReportEngineStatus &engine_status, size_t queued_commands) const {
         ReportTaskOperationalSnapshot out;
+        copy_cstr(out.warning, sizeof(out.warning), catalog_refresh.status().warning);
         out.catalog_nights = catalog ? catalog->size() : 0;
         out.materialized_nights = store_catalog ? store_catalog->size() : 0;
         if (!initialized) return out;
@@ -3651,9 +3652,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
             const char *rebuild_error = nullptr;
             if (runtime.refresh_rebuild) {
+                const bool str_warning =
+                    strcmp(status.warning, "night_catalog_str_read_failed") == 0 ||
+                    strcmp(status.warning, "night_catalog_str_layout_invalid") == 0;
                 rebuild_error = status.state == NightCatalogRefreshState::NoCompleteRecords
                     ? "night_catalog_no_complete_records"
-                    : status.error[0] ? status.error : status.warning[0]
+                    : status.error[0] ? status.error : status.warning[0] && !str_warning
                     ? status.warning : runtime.rebuild_source_error(*refreshed_catalog);
             }
 
@@ -3675,6 +3679,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_refresh_retry_attempt = 0;
                 runtime.catalog_refresh_error[0] = '\0';
             } else if (status.state == NightCatalogRefreshState::Ready) {
+#ifdef ARDUINO
+                if (status.warning[0]) {
+                    Log::logf(CAT_REPORT, LOG_WARN, "catalog refreshed warning=%s\n",
+                              status.warning);
+                }
+#endif
                 publish_catalog(refreshed_catalog,
                                 runtime.refresh_generation);
                 if (!runtime.refresh_install_complete) {

@@ -75,6 +75,10 @@ void print_report_status(Print &out, const ReportTask &task) {
         out.print(" error=");
         out.print(status.error);
     }
+    if (status.warning[0]) {
+        out.print(" warning=");
+        out.print(status.warning);
+    }
     out.println();
 }
 

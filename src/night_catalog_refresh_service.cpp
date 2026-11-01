@@ -331,6 +331,7 @@ struct SourceReadCursor {
         ticket = value;
         prepared = {};
         bytes = 0;
+        io_failure = false;
     }
 
     SourceReadState poll(StorageReadPort &port,
@@ -344,6 +345,11 @@ struct SourceReadCursor {
                 return SourceReadState::Waiting;
             }
             ticket = {};
+            io_failure = completion.outcome.disposition == OperationDisposition::Failed &&
+                (strcmp(completion.error, "read_open_failed") == 0 ||
+                 strcmp(completion.error, "read_not_found") == 0 ||
+                 strcmp(completion.error, "read_seek_failed") == 0 ||
+                 strcmp(completion.error, "read_short_file") == 0);
 
             if (completion.outcome.disposition !=
                     OperationDisposition::Succeeded ||
@@ -394,6 +400,7 @@ struct SourceReadCursor {
     OperationTicket ticket;
     StoragePreparedRead prepared;
     size_t bytes = 0;
+    bool io_failure = false;
 };
 
 }  // namespace
@@ -462,7 +469,7 @@ struct NightCatalogRefreshRuntime {
         previous_source_loader.cancel();
         (void)previous_source_loader.take_snapshot();
         previous_sources_requested = false;
-        previous_fallback.reset();
+        previous_sources.reset();
 
         destroy_large_array(edf_scan_indices, edf_scan_index_capacity);
         edf_scan_indices = nullptr;
@@ -519,6 +526,7 @@ struct NightCatalogRefreshRuntime {
         str_next_record = 0;
         str_chunk_records = 0;
         str_chunk_index = 0;
+        str_read_failures = 0;
         str_header_read = false;
         str_model = ResmedDeviceModel::Unknown;
         current_scan_entry = 0;
@@ -547,6 +555,8 @@ struct NightCatalogRefreshRuntime {
         history_str_cursor = 0;
         history_str_header = false;
         history_str_model = ResmedDeviceModel::Unknown;
+        str_read_failures = 0;
+        history_str_unavailable = false;
         pending_night.reset();
         index_builder.reset();
     }
@@ -574,6 +584,8 @@ struct NightCatalogRefreshRuntime {
     uint32_t history_str_cursor = 0;
     bool history_str_header = false;
     ResmedDeviceModel history_str_model = ResmedDeviceModel::Unknown;
+    uint8_t str_read_failures = 0;
+    bool history_str_unavailable = false;
     std::shared_ptr<const NightCatalog> pending_night;
     NightCatalogBuilder index_builder;
 
@@ -595,7 +607,7 @@ struct NightCatalogRefreshRuntime {
     std::shared_ptr<const NightCatalogSummarySnapshot> summary;
     std::shared_ptr<const NightCatalog> previous_catalog;
     NightCatalogStoreService previous_source_loader;
-    std::shared_ptr<const NightCatalog> previous_fallback;
+    std::shared_ptr<const NightCatalog> previous_sources;
     bool previous_sources_requested = false;
     NightCatalogRefreshTarget target;
     char datalog_root[AC_STORAGE_PATH_MAX] = {};
@@ -920,7 +932,8 @@ bool discover_days(NightCatalogRefreshRuntime &runtime,
         for (size_t i = 0; runtime.previous_catalog &&
                            i < runtime.previous_catalog->size(); ++i) {
             const auto &night = *runtime.previous_catalog->record(i);
-            if (night.source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) {
+            if (night.source_flags & (NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
+                                      NIGHT_CATALOG_SOURCE_STR)) {
                 runtime.days.push_back(night.sleep_day);
             }
         }
@@ -1446,7 +1459,7 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
 void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
                            NightCatalogRefreshStatus &status,
                            const char *warning) {
-    runtime.previous_fallback.reset();
+    runtime.previous_sources.reset();
     runtime.previous_sources_requested = false;
 
     ++status.files_skipped;
@@ -1457,6 +1470,34 @@ void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
     runtime.current_modified = 0;
     status.current_path[0] = '\0';
     set_warning(status, warning);
+}
+
+bool load_previous_sources(NightCatalogRefreshRuntime &runtime,
+                            SleepDayId day, uint32_t generation,
+                            const char *&error) {
+    if (runtime.previous_sources) return true;
+    auto &loader = runtime.previous_source_loader;
+    if (!runtime.previous_sources_requested) {
+        const auto admission = loader.request_load_night(day, generation);
+        if (admission == OperationAdmission::Busy) return false;
+        if (admission != OperationAdmission::Accepted) {
+            error = "night_catalog_previous_sources_read_rejected";
+            return false;
+        }
+        runtime.previous_sources_requested = true;
+        return false;
+    }
+
+    loader.poll();
+    if (loader.active()) return false;
+    if (loader.status().state != NightCatalogStoreState::Ready) {
+        error = "night_catalog_previous_sources_unavailable";
+        return false;
+    }
+
+    runtime.previous_sources = loader.take_snapshot();
+    if (!runtime.previous_sources) error = "night_catalog_previous_sources_invalid";
+    return runtime.previous_sources != nullptr;
 }
 
 bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
@@ -1487,39 +1528,11 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
         if (previous_night && previous_night->sources_external &&
             (previous_night->source_flags &
              NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0 &&
-            !runtime.previous_fallback) {
-            NightCatalogStoreService &loader = runtime.previous_source_loader;
-            if (!runtime.previous_sources_requested) {
-                const OperationAdmission admission =
-                    loader.request_load_night(day, status.generation);
-
-                if (admission == OperationAdmission::Busy) return false;
-                if (admission != OperationAdmission::Accepted) {
-                    error = "night_catalog_previous_sources_read_rejected";
-                    return true;
-                }
-
-                runtime.previous_sources_requested = true;
-                copy_cstr(status.current_path, sizeof(status.current_path),
-                          entry.path);
-
-                return true;
-            }
-
-            const bool progressed = loader.poll();
-            if (loader.active()) return progressed;
-
-            if (loader.status().state != NightCatalogStoreState::Ready) {
-                error = "night_catalog_previous_sources_unavailable";
-                return true;
-            }
-
+            !runtime.previous_sources) {
             // Sources may have been published before an interrupted index save.
             // Their fallback identity, not the index revision, owns clock reuse.
-            runtime.previous_fallback = loader.take_snapshot();
-            if (!runtime.previous_fallback) {
-                error = "night_catalog_previous_sources_invalid";
-                return true;
+            if (!load_previous_sources(runtime, day, status.generation, error)) {
+                return error != nullptr;
             }
         }
 
@@ -1647,8 +1660,8 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
     out.retain_with_edf = info.canonical_clock;
     out.local_history = info.canonical_clock;
     out.time_conflict = info.legacy_day_conflict;
-    const NightCatalog *previous_catalog = runtime.previous_fallback
-        ? runtime.previous_fallback.get()
+    const NightCatalog *previous_catalog = runtime.previous_sources
+        ? runtime.previous_sources.get()
         : runtime.previous_catalog.get();
 
     if (previous_catalog && !info.canonical_clock) {
@@ -1711,7 +1724,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
         section.data_crc32 = source.data_crc32;
     }
 
-    runtime.previous_fallback.reset();
+    runtime.previous_sources.reset();
     runtime.previous_sources_requested = false;
 
     ++runtime.fallback_record_count;
@@ -1745,7 +1758,8 @@ void skip_str(NightCatalogRefreshRuntime &runtime,
 bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
                           NightCatalogRefreshStatus &status,
                           const char *&error) {
-    if (!runtime.str_file_found || runtime.str_file_size == 0) {
+    if (!runtime.str_file_found || runtime.str_file_size == 0 ||
+        runtime.history_str_unavailable) {
         runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
         return true;
@@ -1794,7 +1808,7 @@ bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
         runtime.str_record_capacity);
     runtime.str_next_record = runtime.target.valid() ? layout.record_count : 0;
     if (!runtime.str_records) {
-        if (runtime.sweep) error = "night_catalog_str_alloc_failed";
+        error = "night_catalog_str_alloc_failed";
         skip_str(runtime, status, "night_catalog_str_alloc_failed");
         return true;
     }
@@ -1810,7 +1824,7 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     const size_t remaining = runtime.sweep
         ? runtime.str_directory_end - runtime.str_directory_cursor
         : runtime.str_next_record;
-    if (remaining == 0) {
+    if (remaining == 0 && runtime.str_read_failures == 0) {
         runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
         status.current_path[0] = '\0';
@@ -1828,11 +1842,13 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     // The ended day is normally the last record; older targets use batches.
     const size_t max_chunk_records = targeted && runtime.str_chunk_records == 0
         ? 1 : SOURCE_READ_BUFFER_BYTES / record_size;
-    const uint32_t chunk_records = runtime.sweep ? 1 : static_cast<uint32_t>(
-        std::min(remaining, max_chunk_records));
+    const uint32_t chunk_records = runtime.str_read_failures && runtime.str_header_read
+        ? runtime.str_chunk_records : runtime.sweep ? 1 : static_cast<uint32_t>(
+            std::min(remaining, max_chunk_records));
     const uint32_t first_record = runtime.sweep
         ? runtime.str_directory[runtime.str_directory_cursor].record
-        : runtime.str_next_record - chunk_records;
+        : runtime.str_read_failures ? runtime.str_next_record
+                                   : runtime.str_next_record - chunk_records;
 
     StorageReadCommand command;
     command.path = "/STR.edf";
@@ -1848,7 +1864,7 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     const OperationSubmission submission = read_port.request_read(command);
     if (submission.admission == OperationAdmission::Busy) return false;
     if (!submission.accepted()) {
-        if (runtime.sweep) error = "night_catalog_str_read_rejected";
+        error = "night_catalog_str_read_rejected";
         skip_str(runtime, status, "night_catalog_str_read_rejected");
         return true;
     }
@@ -1876,15 +1892,21 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
         read_port, runtime.read_buffer, runtime.read_buffer_bytes, expected);
     if (read_state == SourceReadState::Waiting) return false;
     if (read_state == SourceReadState::CompletionFailed) {
-        if (runtime.sweep) error = "night_catalog_str_read_failed";
-        skip_str(runtime, status, "night_catalog_str_read_failed");
+        if (!runtime.source_read.io_failure) {
+            error = "night_catalog_str_read_failed";
+        } else if (++runtime.str_read_failures < 3) {
+            runtime.phase = NightCatalogRefreshRuntime::Phase::SubmitStr;
+        } else {
+            runtime.history_str_unavailable = true;
+            skip_str(runtime, status, "night_catalog_str_read_failed");
+        }
         return true;
     }
     if (read_state == SourceReadState::CopyFailed) {
-        if (runtime.sweep) error = "night_catalog_str_read_short";
-        skip_str(runtime, status, "night_catalog_str_read_short");
+        error = "night_catalog_str_read_short";
         return true;
     }
+    runtime.str_read_failures = 0;
 
     if (!runtime.str_header_read) {
         runtime.str_model = edf_parse_header_device_model(runtime.read_buffer, expected);
@@ -2123,6 +2145,8 @@ bool begin_catalog_build(NightCatalogRefreshRuntime &runtime,
     input.edf_session_count = runtime.edf_session_count;
     input.str_records = runtime.str_records;
     input.str_record_count = runtime.str_record_count;
+    input.retained_str_catalog = runtime.previous_sources
+        ? runtime.previous_sources.get() : runtime.previous_catalog.get();
     input.summary_records = runtime.summary ? runtime.summary->records() : nullptr;
     input.summary_record_count = runtime.summary ? runtime.summary->size() : 0;
     if (runtime.sweep) {
@@ -2246,9 +2270,19 @@ bool NightCatalogRefreshService::poll() {
             if (state == SourceReadState::Waiting) return false;
 
             if (state != SourceReadState::Ready) {
-                fail("night_catalog_str_read_failed", true);
+                if (!runtime_->source_read.io_failure) {
+                    fail("night_catalog_str_read_failed", true);
+                } else if (++runtime_->str_read_failures < 3) {
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::ReadStrDirectory;
+                } else {
+                    runtime_->str_directory.clear();
+                    runtime_->history_str_unavailable = true;
+                    set_warning(status_, "night_catalog_str_read_failed");
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::SortDiscovery;
+                }
                 return true;
             }
+            runtime_->str_read_failures = 0;
 
             if (!runtime_->history_str_header) {
                 runtime_->history_str_model = edf_parse_header_device_model(
@@ -2582,7 +2616,23 @@ bool NightCatalogRefreshService::poll() {
             return true;
         }
 
-        case NightCatalogRefreshRuntime::Phase::StartBuild:
+        case NightCatalogRefreshRuntime::Phase::StartBuild: {
+            const auto day = runtime_->target.valid()
+                ? runtime_->target.sleep_day : runtime_->current_day;
+            const auto *previous = runtime_->previous_catalog
+                ? runtime_->previous_catalog->find(day) : nullptr;
+            bool fresh_str = false;
+            for (size_t i = 0; i < runtime_->str_record_count; ++i) {
+                fresh_str |= runtime_->str_records[i].record.sleep_day == day;
+            }
+
+            if (!fresh_str && previous && previous->sources_external &&
+                (previous->source_flags & NIGHT_CATALOG_SOURCE_STR) &&
+                !load_previous_sources(*runtime_, day, status_.generation, error)) {
+                if (error) fail(error, true);
+                return error != nullptr;
+            }
+
             if (!begin_catalog_build(*runtime_, error)) {
                 const auto status = runtime_->builder.status();
                 fail(error ? error : status.detail, error || status.retryable());
@@ -2590,6 +2640,7 @@ bool NightCatalogRefreshService::poll() {
                 runtime_->phase = NightCatalogRefreshRuntime::Phase::Build;
             }
             return true;
+        }
 
         case NightCatalogRefreshRuntime::Phase::Build: {
             runtime_->builder.poll();
@@ -2635,18 +2686,22 @@ bool NightCatalogRefreshService::poll() {
                 return true;
             }
 
-            // Preserve inaccessible external fallback history, not a partial rebuild.
+            // Keep accepted history if its source is no longer accessible.
             const auto *previous = runtime_->sweep
                 ? runtime_->previous_catalog->find(runtime_->current_day)
                 : runtime_->previous_catalog->record(runtime_->build_cursor);
             ++runtime_->build_cursor;
             if (!previous || (runtime_->target.valid() &&
                  previous->sleep_day != runtime_->target.sleep_day) ||
-                (previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
+                (previous->source_flags & (NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
+                                           NIGHT_CATALOG_SOURCE_STR)) == 0) {
                 return true;
             }
 
             const auto *rebuilt = runtime_->building_catalog->find(previous->sleep_day);
+            if (rebuilt && !(previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK)) {
+                return true;
+            }
             if (rebuilt && (rebuilt->source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) {
                 // The source is present but quarantined, not lost. Its file
                 // remains protected; retaining it here would undo isolation.

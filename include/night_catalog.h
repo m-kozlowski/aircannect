@@ -198,6 +198,11 @@ struct NightCatalogRecord {
 
 class NightCatalogBuilder;
 class NightCatalogFileCodec;
+struct ReportDailyMetrics;
+
+void night_catalog_copy_metrics(const NightCatalogMetrics &source,
+                                NightCatalogMetricSource selected,
+                                ReportDailyMetrics &target);
 
 class NightCatalog {
 public:

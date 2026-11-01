@@ -5,6 +5,7 @@
 
 #include "checked_size.h"
 #include "memory_manager.h"
+#include "report_daily_metrics.h"
 
 namespace aircannect {
 namespace {
@@ -18,6 +19,17 @@ bool metric_bit(NightCatalogMetric metric, uint32_t &bit) {
 
     bit = 1u << index;
     return true;
+}
+
+template <typename T>
+void copy_catalog_metric(const NightCatalogMetrics &source,
+                         NightCatalogMetric metric,
+                         NightCatalogMetricSource selected,
+                         bool &present,
+                         T &value,
+                         T source_value) {
+    present = source.source(metric) == selected;
+    if (present) value = source_value;
 }
 
 }  // namespace
@@ -36,6 +48,114 @@ NightCatalogMetricSource NightCatalogMetrics::source(
     if ((str_mask & bit) != 0) return NightCatalogMetricSource::Str;
     if ((summary_mask & bit) != 0) return NightCatalogMetricSource::Summary;
     return NightCatalogMetricSource::None;
+}
+
+void night_catalog_copy_metrics(const NightCatalogMetrics &source,
+                                NightCatalogMetricSource selected,
+                                ReportDailyMetrics &target) {
+    target = {};
+    target.source = selected == NightCatalogMetricSource::Str
+        ? ReportMetricSource::StrEdf : ReportMetricSource::Summary;
+    copy_catalog_metric(source,
+                        NightCatalogMetric::Ahi, selected,
+                        target.has_ahi,
+                        target.ahi,
+                        source.ahi);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::ObstructiveApneaIndex, selected,
+                        target.has_oa_index,
+                        target.oa_index,
+                        source.obstructive_apnea_index);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::CentralApneaIndex, selected,
+                        target.has_ca_index,
+                        target.ca_index,
+                        source.central_apnea_index);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::UnknownApneaIndex, selected,
+                        target.has_ua_index,
+                        target.ua_index,
+                        source.unknown_apnea_index);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::HypopneaIndex, selected,
+                        target.has_hypopnea_index,
+                        target.hypopnea_index,
+                        source.hypopnea_index);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::ArousalIndex, selected,
+                        target.has_arousal_index,
+                        target.arousal_index,
+                        source.arousal_index);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::MaskPressure50, selected,
+                        target.has_mask_pressure_50,
+                        target.mask_pressure_50_cm_h2o,
+                        source.mask_pressure_50_cm_h2o);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::MaskPressure95, selected,
+                        target.has_mask_pressure_95,
+                        target.mask_pressure_95_cm_h2o,
+                        source.mask_pressure_95_cm_h2o);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::Leak50, selected,
+                        target.has_leak_50,
+                        target.leak_50_l_min,
+                        source.leak_50_l_min);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::Leak95, selected,
+                        target.has_leak_95,
+                        target.leak_95_l_min,
+                        source.leak_95_l_min);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::MinuteVentilation50, selected,
+                        target.has_minute_ventilation_50,
+                        target.minute_ventilation_50_l_min,
+                        source.minute_ventilation_50_l_min);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::MinuteVentilation95, selected,
+                        target.has_minute_ventilation_95,
+                        target.minute_ventilation_95_l_min,
+                        source.minute_ventilation_95_l_min);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::RespiratoryRate50, selected,
+                        target.has_respiratory_rate_50,
+                        target.respiratory_rate_50_bpm,
+                        source.respiratory_rate_50_bpm);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::RespiratoryRate95, selected,
+                        target.has_respiratory_rate_95,
+                        target.respiratory_rate_95_bpm,
+                        source.respiratory_rate_95_bpm);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::TidalVolume50, selected,
+                        target.has_tidal_volume_50,
+                        target.tidal_volume_50_l,
+                        source.tidal_volume_50_l);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::TidalVolume95, selected,
+                        target.has_tidal_volume_95,
+                        target.tidal_volume_95_l,
+                        source.tidal_volume_95_l);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::Spo2Median, selected,
+                        target.has_spo2_50,
+                        target.spo2_50_percent,
+                        source.spo2_median_percent);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::Spo2ThresholdMinutes, selected,
+                        target.has_spo2_threshold_minutes,
+                        target.spo2_threshold_minutes,
+                        source.spo2_threshold_minutes);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::CsrMinutes, selected,
+                        target.has_csr_minutes,
+                        target.csr_minutes,
+                        source.csr_minutes);
+    copy_catalog_metric(source,
+                        NightCatalogMetric::DurationMinutes, selected,
+                        target.has_duration_min,
+                        target.duration_min,
+                        source.duration_min);
 }
 
 NightCatalog::~NightCatalog() {

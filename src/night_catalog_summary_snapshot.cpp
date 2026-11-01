@@ -97,122 +97,6 @@ void fill_metrics(const ReportSummaryRecord &record,
     metrics.has_duration_min = record.duration_min > 0;
     metrics.duration_min = record.duration_min;
 }
-
-template <typename T>
-void copy_summary_metric(const NightCatalogMetrics &source,
-                         NightCatalogMetric metric,
-                         bool &present,
-                         T &value,
-                         T source_value) {
-    present = source.source(metric) == NightCatalogMetricSource::Summary;
-    if (present) value = source_value;
-}
-
-void copy_summary_metrics(const NightCatalogMetrics &source,
-                          ReportDailyMetrics &target) {
-    target.source = ReportMetricSource::Summary;
-    copy_summary_metric(source,
-                        NightCatalogMetric::Ahi,
-                        target.has_ahi,
-                        target.ahi,
-                        source.ahi);
-    copy_summary_metric(source,
-                        NightCatalogMetric::ObstructiveApneaIndex,
-                        target.has_oa_index,
-                        target.oa_index,
-                        source.obstructive_apnea_index);
-    copy_summary_metric(source,
-                        NightCatalogMetric::CentralApneaIndex,
-                        target.has_ca_index,
-                        target.ca_index,
-                        source.central_apnea_index);
-    copy_summary_metric(source,
-                        NightCatalogMetric::UnknownApneaIndex,
-                        target.has_ua_index,
-                        target.ua_index,
-                        source.unknown_apnea_index);
-    copy_summary_metric(source,
-                        NightCatalogMetric::HypopneaIndex,
-                        target.has_hypopnea_index,
-                        target.hypopnea_index,
-                        source.hypopnea_index);
-    copy_summary_metric(source,
-                        NightCatalogMetric::ArousalIndex,
-                        target.has_arousal_index,
-                        target.arousal_index,
-                        source.arousal_index);
-    copy_summary_metric(source,
-                        NightCatalogMetric::MaskPressure50,
-                        target.has_mask_pressure_50,
-                        target.mask_pressure_50_cm_h2o,
-                        source.mask_pressure_50_cm_h2o);
-    copy_summary_metric(source,
-                        NightCatalogMetric::MaskPressure95,
-                        target.has_mask_pressure_95,
-                        target.mask_pressure_95_cm_h2o,
-                        source.mask_pressure_95_cm_h2o);
-    copy_summary_metric(source,
-                        NightCatalogMetric::Leak50,
-                        target.has_leak_50,
-                        target.leak_50_l_min,
-                        source.leak_50_l_min);
-    copy_summary_metric(source,
-                        NightCatalogMetric::Leak95,
-                        target.has_leak_95,
-                        target.leak_95_l_min,
-                        source.leak_95_l_min);
-    copy_summary_metric(source,
-                        NightCatalogMetric::MinuteVentilation50,
-                        target.has_minute_ventilation_50,
-                        target.minute_ventilation_50_l_min,
-                        source.minute_ventilation_50_l_min);
-    copy_summary_metric(source,
-                        NightCatalogMetric::MinuteVentilation95,
-                        target.has_minute_ventilation_95,
-                        target.minute_ventilation_95_l_min,
-                        source.minute_ventilation_95_l_min);
-    copy_summary_metric(source,
-                        NightCatalogMetric::RespiratoryRate50,
-                        target.has_respiratory_rate_50,
-                        target.respiratory_rate_50_bpm,
-                        source.respiratory_rate_50_bpm);
-    copy_summary_metric(source,
-                        NightCatalogMetric::RespiratoryRate95,
-                        target.has_respiratory_rate_95,
-                        target.respiratory_rate_95_bpm,
-                        source.respiratory_rate_95_bpm);
-    copy_summary_metric(source,
-                        NightCatalogMetric::TidalVolume50,
-                        target.has_tidal_volume_50,
-                        target.tidal_volume_50_l,
-                        source.tidal_volume_50_l);
-    copy_summary_metric(source,
-                        NightCatalogMetric::TidalVolume95,
-                        target.has_tidal_volume_95,
-                        target.tidal_volume_95_l,
-                        source.tidal_volume_95_l);
-    copy_summary_metric(source,
-                        NightCatalogMetric::Spo2Median,
-                        target.has_spo2_50,
-                        target.spo2_50_percent,
-                        source.spo2_median_percent);
-    copy_summary_metric(source,
-                        NightCatalogMetric::Spo2ThresholdMinutes,
-                        target.has_spo2_threshold_minutes,
-                        target.spo2_threshold_minutes,
-                        source.spo2_threshold_minutes);
-    copy_summary_metric(source,
-                        NightCatalogMetric::CsrMinutes,
-                        target.has_csr_minutes,
-                        target.csr_minutes,
-                        source.csr_minutes);
-    copy_summary_metric(source,
-                        NightCatalogMetric::DurationMinutes,
-                        target.has_duration_min,
-                        target.duration_min,
-                        source.duration_min);
-}
-
 bool copy_catalog_record(const NightCatalog &catalog,
                          const NightCatalogRecord &source,
                          bool expired,
@@ -238,7 +122,8 @@ bool copy_catalog_record(const NightCatalog &catalog,
     target.timezone_offset_valid = source.timezone_offset_valid;
     target.expired = expired;
     target.time_conflict = source.unresolved_history;
-    copy_summary_metrics(source.metrics, target.metrics);
+    night_catalog_copy_metrics(source.metrics, NightCatalogMetricSource::Summary,
+                                target.metrics);
 
     if (session_count > 0) {
         memcpy(sessions,

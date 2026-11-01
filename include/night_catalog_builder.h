@@ -140,6 +140,8 @@ struct NightCatalogBuildInput {
     size_t raw_edf_session_count = 0;
     const NightCatalogStrInput *str_records = nullptr;
     size_t str_record_count = 0;
+    // Accepted history supplies STR only when this refresh has no new record.
+    const NightCatalog *retained_str_catalog = nullptr;
     const NightCatalogSummaryInput *summary_records = nullptr;
     size_t summary_record_count = 0;
     const NightCatalogFallbackInput *fallback_records = nullptr;

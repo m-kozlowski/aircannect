@@ -898,6 +898,42 @@ bool ingest_str(const NightCatalogBuildInput &input,
     return true;
 }
 
+bool retain_str(const NightCatalog &previous,
+                LargeScratchArray<BuildNight> &nights,
+                LargeScratchArray<BuildFile> &files, size_t index) {
+    const auto &night = nights.data()[index];
+    if (!night.has_edf || night.has_str) return true;
+
+    const auto *record = previous.find(night.sleep_day);
+    if (!record || !(record->source_flags & NIGHT_CATALOG_SOURCE_STR)) return true;
+
+    size_t count = 0;
+    const auto *sources = previous.files(*record, count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto &file = sources[i];
+        if (file.kind != NightCatalogFileKind::Str) continue;
+
+        NightCatalogStrInput retained;
+        retained.record.sleep_day = record->sleep_day;
+        retained.record.source_identity = file.identity;
+        night_catalog_copy_metrics(record->metrics, NightCatalogMetricSource::Str,
+                                    retained.record.metrics);
+        retained.record.settings = record->settings;
+        retained.record.statistics = record->statistics;
+        retained.path = previous.path(file);
+        retained.file_size = file.file_size;
+        retained.last_write_ms = file.last_write_ms;
+        retained.record_offset = file.data_offset;
+        retained.record_size = file.record_size;
+
+        NightCatalogBuildInput input;
+        input.str_records = &retained;
+        input.str_record_count = 1;
+        return ingest_str(input, nights, files, 0);
+    }
+    return false;
+}
+
 bool ingest_summary(const NightCatalogBuildInput &input,
                     LargeScratchArray<BuildNight> &nights,
                     LargeScratchArray<BuildSession> &sessions, size_t index) {
@@ -1143,7 +1179,9 @@ uint64_t calculate_revision(const NightCatalog &catalog,
             hash = hash_i64(hash, file.last_write_ms);
         }
 
-        hash = hash_u64(hash, file.data_offset);
+        if (file.kind != NightCatalogFileKind::Str) {
+            hash = hash_u64(hash, file.data_offset);
+        }
         hash = hash_u64(hash, file.data_size);
         hash = hash_i64(hash, file.record_start_ms);
         hash = hash_u32(hash, file.header_size);
@@ -1241,6 +1279,7 @@ struct NightCatalogBuilder::Runtime {
         AllocateFallbacks,
         Edf,
         Str,
+        RetainStr,
         Summary,
         Fallback,
         SortNights,
@@ -1959,6 +1998,11 @@ bool NightCatalogBuilder::begin(const NightCatalogBuildInput &input) {
     Runtime &r = *runtime_;
     r.max_sessions = input.edf_session_count;
     r.max_files = input.str_record_count;
+    if (input.retained_str_catalog && !add_count(r.max_files,
+            std::min(input.edf_session_count, input.retained_str_catalog->size()))) {
+        return r.fail(NightCatalogBuildFailure::InvalidInput,
+                      "night_catalog_count_overflow");
+    }
     if (!add_count(r.max_nights, input.edf_session_count) ||
         !add_count(r.max_nights, input.str_record_count) ||
         !add_count(r.max_nights, input.summary_record_count) ||
@@ -2229,6 +2273,15 @@ bool NightCatalogBuilder::poll() {
             if (r.cursor < input.str_record_count) {
                 ingested(ingest_str(input, r.nights, r.files, r.cursor),
                          "night_catalog_str_input_invalid");
+            } else {
+                r.advance(Phase::RetainStr);
+            }
+            break;
+
+        case Phase::RetainStr:
+            if (input.retained_str_catalog && r.cursor < r.nights.size()) {
+                ingested(retain_str(*input.retained_str_catalog, r.nights, r.files, r.cursor),
+                         "night_catalog_previous_str_unavailable");
             } else {
                 r.advance(Phase::Summary);
             }

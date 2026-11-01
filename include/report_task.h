@@ -88,6 +88,7 @@ struct ReportTaskOperationalSnapshot {
     size_t materialized_nights = 0;
     uint32_t retry_in_ms = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
+    char warning[AC_STORAGE_ERROR_MAX] = {};
 };
 
 struct ReportTaskControlSnapshot {
