@@ -276,11 +276,9 @@ private:
 };
 
 bool expirable_summary_history(const NightCatalogRecord &record) {
-    constexpr uint8_t local_sources = NIGHT_CATALOG_SOURCE_EDF |
-                                      NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
     return (record.source_flags &
             NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) != 0 &&
-           (record.source_flags & local_sources) == 0 &&
+           (record.source_flags & NIGHT_CATALOG_SOURCE_EDF) == 0 &&
            record.summary_identity != 0;
 }
 
@@ -718,6 +716,7 @@ NightCatalogSummarySnapshot::preserve_expired_history(
 
         const auto *previous = previous_catalog.find(source.sleep_day);
         if (previous && !previous->unresolved_history &&
+            !(previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) &&
             expirable_summary_history(*previous)) {
             const int64_t adjustment = previous->day_start_ms - source.day_start_ms;
             // Retain the saved projection, including days without sessions.

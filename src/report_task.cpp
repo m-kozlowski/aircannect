@@ -3844,9 +3844,23 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 ReportSummaryAcquisitionState::Ready &&
             runtime.summary_acquisition.status().generation ==
                 runtime.pending_refresh.generation) {
-            summary = NightCatalogSummarySnapshot::preserve_expired_history(
+            const auto retained = NightCatalogSummarySnapshot::preserve_expired_history(
                 *summary, *runtime.catalog);
-            if (summary) runtime.summary_acquisition.seed(summary);
+            if (!retained) {
+                runtime.catalog_refresh_retry_at_ms =
+                    now_ms + retry_delay(runtime.catalog_refresh_retry_attempt);
+                advance_retry(runtime.catalog_refresh_retry_attempt);
+                copy_cstr(runtime.catalog_refresh_error,
+                          sizeof(runtime.catalog_refresh_error),
+                          "night_catalog_summary_preserve_failed");
+                runtime.record_failure("refresh_catalog", runtime.catalog_refresh_error,
+                    runtime.pending_refresh.target.sleep_day,
+                    deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms));
+                return true;
+            }
+
+            summary = retained;
+            runtime.summary_acquisition.seed(summary);
         }
 
         // Keep the Summary request identity when renewing a queued publication.
