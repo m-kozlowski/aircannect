@@ -509,6 +509,7 @@ bool ReportFallbackAcquisitionService::poll_preservation() {
             PAYLOAD_WRITE_BYTES, preserve_section_->data_size - preserve_offset_);
         command.lane = preserve_lane(read_lane_);
         command.generation = generation_;
+        command.retain_handle = true;
         const OperationSubmission submitted =
             read_port_->request_read(command);
         if (submitted.admission == OperationAdmission::Busy) return false;
@@ -586,6 +587,7 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
         return true;
     }
 
+    read_port_->release_handle();
     preserved_event_count_ = event_records_.size() /
         report_event_record_wire_size();
     status_.state = ReportFallbackAcquisitionState::Fetching;
@@ -1483,6 +1485,7 @@ bool ReportFallbackAcquisitionService::poll_publication() {
             return true;
         case PublicationPhase::Copy:
             if (publication_offset_ == payload_size_) {
+                read_port_->release_handle();
                 publication_phase_ = PublicationPhase::CloseStaged;
                 return true;
             }
@@ -1504,6 +1507,7 @@ bool ReportFallbackAcquisitionService::poll_publication() {
                                           payload_size_ - publication_offset_);
                 command.generation = generation_;
                 command.lane = read_lane_;
+                command.retain_handle = true;
                 const auto submitted = read_port_->request_read(command);
                 if (submitted.admission == OperationAdmission::Busy) return false;
                 if (!submitted.accepted()) {
@@ -2144,6 +2148,8 @@ void ReportFallbackAcquisitionService::abandon_operations() {
         read_port_->release_prepared(preserve_prepared_);
         preserve_prepared_ = {};
     }
+    if (read_port_) read_port_->release_handle();
+
     builder_.discard_reserved_section();
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
