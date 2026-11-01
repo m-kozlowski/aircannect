@@ -43,11 +43,6 @@ const char *web_command_name(uint8_t kind) {
     }
 }
 
-size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
-    // JSON string escaping can expand a control byte to "\\u00XX".
-    return overhead + raw_len * 6;
-}
-
 void send_web_ui(AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse(
         200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
@@ -420,7 +415,7 @@ void WebUI::poll(ServicePendingWork service_pending_work) {
         const size_t payload_len =
             static_cast<size_t>(end > from ? end - from : 0);
         LargeTextBuffer console_json;
-        console_json.reserve(json_escaped_capacity(payload_len));
+        console_json.reserve(payload_len + 128);
         build_console_sse_json(console_json);
         const SseSendResult console_result =
             console_json.overflowed()
@@ -852,7 +847,7 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
         return;
     }
     LargeTextBuffer json;
-    json.reserve(json_escaped_capacity(console_log_length_));
+    json.reserve(console_log_length_ + 128);
     build_console_json(json);
     if (json.overflowed()) {
         xSemaphoreGive(cache_mutex_);
