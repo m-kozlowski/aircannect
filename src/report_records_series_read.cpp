@@ -9,9 +9,6 @@ namespace {
 
 using report_records_detail::bitmap_missing;
 using report_records_detail::get_le32;
-using report_records_detail::parse_series_v2_header;
-using report_records_detail::SERIES_V2_MODE_UNIFORM;
-using report_records_detail::SeriesV2HeaderView;
 using report_records_detail::valid_timestamp;
 
 }  // namespace
@@ -23,24 +20,19 @@ bool report_series_payload_v2_uniform_view(
     ReportSeriesV2UniformView &view) {
     view = {};
 
-    SeriesV2HeaderView header;
-    if (!parse_series_v2_header(data, len, record_count, header)) {
-        return false;
-    }
-
-    if (header.mode != SERIES_V2_MODE_UNIFORM ||
-        header.interval_ms == 0 ||
-        static_cast<size_t>(header.sample_count) > SIZE_MAX / 4u ||
-        header.body_len != static_cast<size_t>(header.sample_count) * 4u) {
+    ReportSeriesV2UniformLayout header;
+    if (!report_series_payload_v2_uniform_layout(
+            data, len, len, record_count, header)) {
         return false;
     }
 
     view.interval_ms = header.interval_ms;
     view.sample_count = header.sample_count;
-    view.missing_bitmap = header.missing_bitmap;
+    view.missing_bitmap = header.missing_bitmap_bytes
+        ? data + ReportSeriesV2UniformLayout::HeaderBytes : nullptr;
     view.missing_bitmap_bytes = header.missing_bitmap_bytes;
-    view.values_milli_le = header.body;
-    view.values_milli_bytes = header.body_len;
+    view.values_milli_le = data + header.values_offset();
+    view.values_milli_bytes = len - header.values_offset();
     return true;
 }
 
@@ -78,54 +70,24 @@ bool report_for_each_series_sample_range(
         return false;
     }
 
-    SeriesV2HeaderView header;
-    if (!parse_series_v2_header(data, len, record_count, header)) {
+    ReportSeriesV2UniformView header;
+    if (!report_series_payload_v2_uniform_view(data, len, record_count, header)) {
         return false;
     }
 
-    if (header.mode != SERIES_V2_MODE_UNIFORM ||
-        static_cast<size_t>(header.sample_count) > SIZE_MAX / 4u ||
-        header.body_len != static_cast<size_t>(header.sample_count) * 4u ||
-        sample_count == 0 || first_sample > header.sample_count ||
+    if (sample_count == 0 || first_sample > header.sample_count ||
         sample_count > header.sample_count - first_sample) {
         return false;
     }
-    if (static_cast<int64_t>(header.interval_ms) >
-        INT64_MAX - chunk_start_ms) {
-        return false;
-    }
 
-    const int64_t max_steps =
-        (INT64_MAX - chunk_start_ms) /
-        static_cast<int64_t>(header.interval_ms);
-    const uint32_t last_sample = first_sample + sample_count - 1;
-    if (static_cast<int64_t>(last_sample) > max_steps) {
-        return false;
-    }
-
-    const uint32_t end_sample = first_sample + sample_count;
-    for (uint32_t i = first_sample; i < end_sample; ++i) {
-        if (bitmap_missing(header.missing_bitmap,
-                           header.missing_bitmap_bytes,
-                           i)) {
-            continue;
-        }
-
-        ReportSeriesSample sample;
-        sample.timestamp_ms =
-            chunk_start_ms +
-            static_cast<int64_t>(i) *
-                static_cast<int64_t>(header.interval_ms);
-        sample.value_milli =
-            static_cast<int32_t>(get_le32(header.body + i * 4u));
-
-        if (!callback(context, sample)) return false;
-    }
-
-    return true;
+    return report_for_each_series_v2_uniform_slice(
+        chunk_start_ms, header.interval_ms, first_sample,
+        header.values_milli_le + static_cast<size_t>(first_sample) * 4u,
+        static_cast<size_t>(sample_count) * 4u, sample_count, callback, context,
+        header.missing_bitmap, header.missing_bitmap_bytes);
 }
 
-bool report_for_each_series_v2_uniform_unmasked_slice(
+bool report_for_each_series_v2_uniform_slice(
     int64_t chunk_start_ms,
     uint32_t interval_ms,
     uint32_t first_sample,
@@ -133,9 +95,12 @@ bool report_for_each_series_v2_uniform_unmasked_slice(
     size_t values_milli_bytes,
     uint32_t sample_count,
     ReportSeriesSampleCallback callback,
-    void *context) {
+    void *context,
+    const uint8_t *missing_bitmap,
+    size_t missing_bitmap_bytes) {
     if (!callback || !values_milli_le || !valid_timestamp(chunk_start_ms) ||
         interval_ms == 0 || sample_count == 0 ||
+        (missing_bitmap_bytes && !missing_bitmap) ||
         first_sample > UINT32_MAX - (sample_count - 1u) ||
         static_cast<size_t>(sample_count) > SIZE_MAX / sizeof(int32_t) ||
         values_milli_bytes !=
@@ -152,6 +117,10 @@ bool report_for_each_series_v2_uniform_unmasked_slice(
 
     for (uint32_t i = 0; i < sample_count; ++i) {
         const uint32_t sample_index = first_sample + i;
+        if (bitmap_missing(missing_bitmap, missing_bitmap_bytes, sample_index)) {
+            continue;
+        }
+
         ReportSeriesSample sample;
         sample.timestamp_ms = chunk_start_ms +
             static_cast<int64_t>(sample_index) * interval_ms;

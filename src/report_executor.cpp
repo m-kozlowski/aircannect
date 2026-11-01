@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <new>
 #include <stdio.h>
+#include <string.h>
 #include <utility>
 
 #include "board_report.h"
@@ -11,6 +12,8 @@
 
 namespace aircannect {
 namespace {
+
+constexpr size_t FALLBACK_READ_BYTES = 64 * 1024;
 
 bool source_kind(ReportReadOperationKind operation_kind,
                  NightCatalogFileKind file_kind,
@@ -208,6 +211,30 @@ bool ReportExecutor::submit_read() {
     command.lane = StorageReadLane::Report;
     command.generation = generation_;
     command.retain_handle = true;
+
+    if (fallback_kind(operation->kind)) {
+        const bool series =
+            operation->kind == ReportReadOperationKind::FallbackSeries;
+
+        if (series && !fallback_read_.layout_valid) {
+            command.length = std::min<size_t>(
+                operation->length, FALLBACK_READ_BYTES);
+        } else {
+            const size_t record_bytes = series
+                ? sizeof(int32_t) : report_event_record_wire_size();
+            fallback_read_.first_record = operation->first_record + record_index_;
+            fallback_read_.record_count = std::min<uint32_t>(
+                operation->record_count - record_index_,
+                FALLBACK_READ_BYTES / record_bytes);
+
+            fallback_read_.values_offset = 0;
+            command.offset += (series ? fallback_read_.layout.values_offset() : 0) +
+                static_cast<uint64_t>(fallback_read_.first_record) * record_bytes;
+            command.length =
+                static_cast<size_t>(fallback_read_.record_count) * record_bytes;
+        }
+    }
+
     const OperationSubmission submission = read_port_->request_read(command);
     if (submission.admission == OperationAdmission::Busy) return false;
     if (!submission.accepted()) {
@@ -217,6 +244,7 @@ bool ReportExecutor::submit_read() {
     }
 
     ticket_ = submission.ticket;
+    read_length_ = command.length;
     state_ = ReportExecutorState::WaitRead;
     return true;
 }
@@ -246,11 +274,26 @@ bool ReportExecutor::poll_read() {
 
     const ReportReadOperation *operation = operation_context_.operation;
     prepared_ = completion.prepared;
-    if (!operation || prepared_.length != operation->length) {
+    if (!operation || prepared_.length != read_length_) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::StorageShortRead);
         return true;
     }
+
+    if (fallback_kind(operation->kind)) {
+        if (fallback_read_.snapshot_valid &&
+            (completion.file_size != fallback_read_.file_size ||
+             completion.modified != fallback_read_.modified)) {
+            snprintf(storage_error_, sizeof(storage_error_), "storage_file_changed");
+            finish(ReportExecutorState::Failed, ReportExecutorError::StorageFailed);
+            return true;
+        }
+
+        fallback_read_.file_size = completion.file_size;
+        fallback_read_.modified = completion.modified;
+        fallback_read_.snapshot_valid = true;
+    }
+
     state_ = ReportExecutorState::DecodeRecords;
     return true;
 }
@@ -359,7 +402,7 @@ bool ReportExecutor::decode_record() {
             read_port_->view_prepared(prepared_);
         if (view.state == PreparedByteReadState::Retry) return false;
         if (view.state != PreparedByteReadState::Data || !view.data ||
-            view.length != operation->length) {
+            view.length != read_length_) {
             finish(ReportExecutorState::Failed,
                    ReportExecutorError::StorageShortRead);
             return false;
@@ -453,6 +496,49 @@ bool ReportExecutor::decode_record() {
     return true;
 }
 
+bool ReportExecutor::prepare_fallback_view() {
+    const ReportReadOperation &operation = *operation_context_.operation;
+    if (operation.kind != ReportReadOperationKind::FallbackSeries ||
+        fallback_read_.layout_valid) {
+        return true;
+    }
+
+    const NightCatalogFallbackSection &section =
+        *operation_context_.fallback_section;
+    ReportSeriesV2UniformLayout &layout = fallback_read_.layout;
+    if (section.payload_schema != REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 ||
+        !report_series_payload_v2_uniform_layout(
+            prepared_view_data_, prepared_view_length_, operation.length,
+            section.record_count, layout) ||
+        layout.interval_ms != section.sample_interval_ms ||
+        layout.values_offset() > prepared_view_length_ ||
+        operation.first_record > layout.sample_count ||
+        operation.record_count > layout.sample_count - operation.first_record) {
+        finish(ReportExecutorState::Failed, ReportExecutorError::DecodeFailed);
+        return false;
+    }
+
+    if (layout.missing_bitmap_bytes) {
+        fallback_read_.missing_bitmap =
+            LargeByteBuffer::allocate(layout.missing_bitmap_bytes);
+
+        if (!fallback_read_.missing_bitmap) {
+            finish(ReportExecutorState::Failed, ReportExecutorError::AllocationFailed);
+            return false;
+        }
+        memcpy(fallback_read_.missing_bitmap->data(),
+               prepared_view_data_ + ReportSeriesV2UniformLayout::HeaderBytes,
+               layout.missing_bitmap_bytes);
+    }
+
+    fallback_read_.first_record = 0;
+    fallback_read_.values_offset = layout.values_offset();
+    fallback_read_.record_count =
+        (prepared_view_length_ - fallback_read_.values_offset) / sizeof(int32_t);
+    fallback_read_.layout_valid = true;
+    return true;
+}
+
 bool ReportExecutor::decode_fallback_operation() {
     const OperationContext &operation_context = operation_context_;
     const ReportReadOperation *operation = operation_context.operation;
@@ -466,25 +552,41 @@ bool ReportExecutor::decode_fallback_operation() {
         return false;
     }
 
-    const uint8_t *data = prepared_view_data_;
-    const size_t data_size = operation->length;
+    if (!prepare_fallback_view()) return false;
+
+    const uint32_t first_record = operation->first_record + record_index_;
+    const uint32_t chunk_end =
+        fallback_read_.first_record + fallback_read_.record_count;
+    if (first_record >= chunk_end) {
+        release_prepared();
+        state_ = ReportExecutorState::SubmitRead;
+        return true;
+    }
+
+    const uint8_t *data = prepared_view_data_ + fallback_read_.values_offset;
+    const size_t data_size = prepared_view_length_ - fallback_read_.values_offset;
+    const uint32_t chunk_index = first_record - fallback_read_.first_record;
     const uint32_t batch_count = std::min<uint32_t>(
-        32, operation->record_count - record_index_);
+        32, std::min(operation->record_count - record_index_,
+                     chunk_end - first_record));
 
     sink_rejected_ = false;
     callback_operation_ = operation;
     if (operation->kind == ReportReadOperationKind::FallbackSeries) {
         callback_mapping_ = operation_context.mappings;
-        const bool decoded = report_for_each_series_sample_range(
-            section->payload_schema,
+        const bool decoded = report_for_each_series_v2_uniform_slice(
             section->coverage.start_ms,
-            data,
-            data_size,
-            section->record_count,
-            operation->first_record + record_index_,
+            fallback_read_.layout.interval_ms,
+            first_record,
+            data + static_cast<size_t>(chunk_index) * sizeof(int32_t),
+            static_cast<size_t>(batch_count) * sizeof(int32_t),
             batch_count,
             emit_series,
-            this);
+            this,
+            fallback_read_.missing_bitmap
+                ? fallback_read_.missing_bitmap->data() : nullptr,
+            fallback_read_.layout.missing_bitmap_bytes);
+
         if (!decoded) {
             finish(ReportExecutorState::Failed,
                    sink_rejected_
@@ -493,8 +595,8 @@ bool ReportExecutor::decode_fallback_operation() {
             return false;
         }
     } else {
-        for (uint32_t i = record_index_;
-             i < record_index_ + batch_count;
+        for (uint32_t i = chunk_index;
+             i < chunk_index + batch_count;
              ++i) {
             ReportEventRecord event;
             if (!report_read_event_record(data, data_size, i,
@@ -524,7 +626,12 @@ bool ReportExecutor::decode_fallback_operation() {
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
     record_index_ += batch_count;
-    if (record_index_ == operation->record_count) finish_operation();
+    if (record_index_ == operation->record_count) {
+        finish_operation();
+    } else if (first_record + batch_count == chunk_end) {
+        release_prepared();
+        state_ = ReportExecutorState::SubmitRead;
+    }
     return true;
 }
 
@@ -535,6 +642,7 @@ void ReportExecutor::finish_operation() {
     }
 
     release_prepared();
+    fallback_read_ = {};
     state_ = ReportExecutorState::FinishingOperation;
 }
 
@@ -578,6 +686,8 @@ void ReportExecutor::release_run_resources() {
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
     operation_context_ = {};
+    fallback_read_ = {};
+    read_length_ = 0;
     event_context_ = {};
     event_file_index_ = UINT16_MAX;
     event_next_record_ = 0;

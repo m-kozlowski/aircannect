@@ -151,11 +151,24 @@ private:
         bool prepared = false;
     };
 
+    struct FallbackReadState {
+        ReportSeriesV2UniformLayout layout;
+        std::unique_ptr<LargeByteBuffer> missing_bitmap;
+        uint64_t file_size = 0;
+        uint64_t modified = 0;
+        uint32_t first_record = 0;
+        uint32_t record_count = 0;
+        size_t values_offset = 0;
+        bool snapshot_valid = false;
+        bool layout_valid = false;
+    };
+
     bool allocate_decoders(size_t decoder_capacity);
     bool submit_read();
     bool poll_read();
     bool prepare_operation();
     bool decode_record();
+    bool prepare_fallback_view();
     bool decode_fallback_operation();
     void finish_operation();
     bool poll_operation_end(bool &progressed);
@@ -187,6 +200,8 @@ private:
     StoragePreparedRead prepared_;
     const uint8_t *prepared_view_data_ = nullptr;
     size_t prepared_view_length_ = 0;
+    size_t read_length_ = 0;
+    FallbackReadState fallback_read_;
 
     EdfReportSeriesDecoder *decoders_ = nullptr;
     size_t decoder_capacity_ = 0;

@@ -59,24 +59,30 @@ bool series_v2_size(uint32_t sample_count,
     return checked_add_size(with_bitmap, values, out);
 }
 
-bool parse_series_v2_header(const uint8_t *data,
-                            size_t len,
-                            uint32_t record_count,
-                            SeriesV2HeaderView &view) {
-    view = {};
+}  // namespace report_records_detail
+
+bool report_series_payload_v2_uniform_layout(
+    const uint8_t *data,
+    size_t len,
+    size_t payload_length,
+    uint32_t record_count,
+    ReportSeriesV2UniformLayout &layout) {
+    using namespace report_records_detail;
+    layout = {};
 
     if (!data || len < SERIES_V2_HEADER_SIZE || record_count == 0) {
         return false;
     }
     if (get_le32(data + 0) != SERIES_V2_MAGIC) return false;
 
-    view.mode = get_le32(data + 4);
+    const uint32_t mode = get_le32(data + 4);
+    ReportSeriesV2UniformLayout view;
     view.interval_ms = get_le32(data + 8);
     view.sample_count = get_le32(data + 12);
     view.missing_bitmap_bytes = get_le32(data + 16);
     const uint32_t value_encoding = get_le32(data + 20);
 
-    if (view.mode != SERIES_V2_MODE_UNIFORM ||
+    if (mode != SERIES_V2_MODE_UNIFORM ||
         value_encoding != SERIES_V2_VALUE_INT32_MILLI ||
         view.interval_ms == 0 ||
         view.sample_count == 0 || view.sample_count != record_count ||
@@ -84,18 +90,17 @@ bool parse_series_v2_header(const uint8_t *data,
                               view.missing_bitmap_bytes)) {
         return false;
     }
-    if (len < SERIES_V2_HEADER_SIZE + view.missing_bitmap_bytes) {
+    size_t expected = 0;
+    if (!series_v2_size(view.sample_count, view.missing_bitmap_bytes, expected) ||
+        payload_length != expected) {
         return false;
     }
 
-    view.missing_bitmap = view.missing_bitmap_bytes
-                              ? data + SERIES_V2_HEADER_SIZE
-                              : nullptr;
-    view.body = data + SERIES_V2_HEADER_SIZE + view.missing_bitmap_bytes;
-    view.body_len =
-        len - SERIES_V2_HEADER_SIZE - view.missing_bitmap_bytes;
+    layout = view;
     return true;
 }
+
+namespace report_records_detail {
 
 bool put_series_v2_header(ReportSpoolBuffer &out,
                           uint32_t interval_ms,

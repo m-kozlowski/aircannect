@@ -38,6 +38,15 @@ struct ReportEventRecord {
     uint16_t flags = 0;
 };
 
+struct ReportSeriesV2UniformLayout {
+    static constexpr size_t HeaderBytes = 24;
+    uint32_t interval_ms = 0;
+    uint32_t sample_count = 0;
+    size_t missing_bitmap_bytes = 0;
+
+    size_t values_offset() const { return HeaderBytes + missing_bitmap_bytes; }
+};
+
 struct ReportSeriesV2UniformView {
     uint32_t interval_ms = 0;
     uint32_t sample_count = 0;
@@ -92,6 +101,12 @@ bool report_series_payload_v2_uniform_view(
     size_t len,
     uint32_t record_count,
     ReportSeriesV2UniformView &view);
+bool report_series_payload_v2_uniform_layout(
+    const uint8_t *header,
+    size_t header_length,
+    size_t payload_length,
+    uint32_t record_count,
+    ReportSeriesV2UniformLayout &layout);
 size_t report_series_payload_v2_uniform_slice_size(
     const ReportSeriesV2UniformView &view,
     uint32_t first_sample,
@@ -119,7 +134,7 @@ bool report_for_each_series_sample_range(
     uint32_t sample_count,
     ReportSeriesSampleCallback callback,
     void *context);
-bool report_for_each_series_v2_uniform_unmasked_slice(
+bool report_for_each_series_v2_uniform_slice(
     int64_t chunk_start_ms,
     uint32_t interval_ms,
     uint32_t first_sample,
@@ -127,7 +142,9 @@ bool report_for_each_series_v2_uniform_unmasked_slice(
     size_t values_milli_bytes,
     uint32_t sample_count,
     ReportSeriesSampleCallback callback,
-    void *context);
+    void *context,
+    const uint8_t *missing_bitmap = nullptr,
+    size_t missing_bitmap_bytes = 0);
 bool report_read_event_record(const uint8_t *data,
                               size_t len,
                               size_t index,
