@@ -72,9 +72,6 @@ public:
     size_t storage_bytes() const { return storage_bytes_; }
 
     // Prepared by ReportPlanner from the final operation list.
-    size_t fallback_read_capacity() const {
-        return fallback_read_capacity_;
-    }
     size_t decoder_capacity() const { return decoder_capacity_; }
 
     uint32_t requested_signal_mask() const { return requested_signal_mask_; }
@@ -128,12 +125,6 @@ private:
                   size_t operation_count,
                   size_t mapping_count);
 
-    void set_executor_capacities(size_t fallback_read_capacity,
-                                 size_t decoder_capacity) {
-        fallback_read_capacity_ = fallback_read_capacity;
-        decoder_capacity_ = decoder_capacity;
-    }
-
     std::shared_ptr<const NightCatalog> catalog_;
     const NightCatalogRecord *night_ = nullptr;
     ReportArtifactKey key_;
@@ -146,8 +137,7 @@ private:
     size_t session_count_ = 0;
     size_t operation_count_ = 0;
     size_t mapping_count_ = 0;
-    // Maximum fallback payload read and EDF decoder count for this plan.
-    size_t fallback_read_capacity_ = 0;
+    // Maximum EDF decoder count for this plan.
     size_t decoder_capacity_ = 0;
 
     // Prepared once; paths borrow catalog_ or the retained progress payload.

@@ -1564,11 +1564,9 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
                      size_t plan_operation_count,
                      ReportReadMapping *plan_mappings,
                      size_t plan_mapping_count,
-                     size_t &fallback_read_capacity,
                      size_t &decoder_capacity) {
     size_t operation_index = 0;
     size_t mapping_index = 0;
-    fallback_read_capacity = 0;
     decoder_capacity = 0;
     const PendingOperation *previous_pending = nullptr;
     ReportReadOperation *operation = nullptr;
@@ -1582,12 +1580,6 @@ bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
             if (operation_index >= plan_operation_count) return false;
             operation = &plan_operations[operation_index++];
             *operation = entry.operation;
-            if (operation->kind == ReportReadOperationKind::FallbackSeries ||
-                operation->kind == ReportReadOperationKind::FallbackEvents) {
-                fallback_read_capacity = std::max(
-                    fallback_read_capacity,
-                    static_cast<size_t>(operation->length));
-            }
             operation->mapping_offset = static_cast<uint32_t>(mapping_index);
             operation->mapping_count = 0;
             mapping = nullptr;
@@ -1909,7 +1901,6 @@ ReportPlanResult ReportPlanner::build(
                                 NIGHT_CATALOG_SOURCE_LOCAL_HISTORY |
                                 NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) == 0 &&
         !night->unresolved_history;
-    size_t fallback_read_capacity = 0;
     size_t decoder_capacity = 0;
     if (!fill_sessions(request,
                        plan->catalog(),
@@ -1928,13 +1919,11 @@ ReportPlanResult ReportPlanner::build(
                          plan->operation_count_,
                          plan->mappings_,
                          plan->mapping_count_,
-                         fallback_read_capacity,
                          decoder_capacity)) {
         result.status = ReportPlanStatus::InvalidCatalog;
         return result;
     }
-    plan->set_executor_capacities(fallback_read_capacity,
-                                  decoder_capacity);
+    plan->decoder_capacity_ = decoder_capacity;
 
     if (!collect_current_progress_entries(*plan, plan->mappings_,
                                           plan->source_progress_)) {
@@ -2124,20 +2113,17 @@ ReportPlanResult ReportPlanner::resume(
         resumed_plan->sessions_[i] = *session;
     }
 
-    size_t fallback_read_capacity = 0;
     size_t decoder_capacity = 0;
     if (!fill_operations(pending,
                          resumed_plan->operations_,
                          resumed_plan->operation_count_,
                          resumed_plan->mappings_,
                          resumed_plan->mapping_count_,
-                         fallback_read_capacity,
                          decoder_capacity)) {
         result.status = ReportPlanStatus::InvalidCatalog;
         return result;
     }
-    resumed_plan->set_executor_capacities(fallback_read_capacity,
-                                          decoder_capacity);
+    resumed_plan->decoder_capacity_ = decoder_capacity;
 
     size_t progress_capacity = 0;
     LargeScratchArray<uint32_t> current_to_merged;

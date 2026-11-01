@@ -18,7 +18,7 @@ namespace aircannect {
 namespace {
 
 constexpr size_t MAX_EVENT_BYTES = 64 * 1024;
-constexpr size_t PAYLOAD_WRITE_BYTES = 16 * 1024;
+constexpr size_t PAYLOAD_WRITE_BYTES = 64 * 1024;
 constexpr const char *PAYLOAD_PATH = "/aircannect/report/tmp/fallback.payload";
 constexpr const char *STAGED_PATH = "/aircannect/report/tmp/fallback.staged";
 

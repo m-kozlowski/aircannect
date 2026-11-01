@@ -79,8 +79,7 @@ OperationAdmission ReportExecutor::start(
         return OperationAdmission::Accepted;
     }
 
-    if (!allocate_scratch(plan_->fallback_read_capacity(),
-                          plan_->decoder_capacity())) {
+    if (!allocate_decoders(plan_->decoder_capacity())) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::AllocationFailed);
         return OperationAdmission::Rejected;
@@ -172,15 +171,7 @@ ReportExecutorStatus ReportExecutor::status() const {
     return out;
 }
 
-bool ReportExecutor::allocate_scratch(size_t record_capacity,
-                                      size_t decoder_capacity) {
-    if (record_capacity > 0) {
-        fallback_buffer_ = static_cast<uint8_t *>(
-            Memory::calloc_large(record_capacity, 1, false));
-        if (!fallback_buffer_) return false;
-        fallback_capacity_ = record_capacity;
-    }
-
+bool ReportExecutor::allocate_decoders(size_t decoder_capacity) {
     if (decoder_capacity == 0) return true;
     decoders_ = static_cast<EdfReportSeriesDecoder *>(
         Memory::calloc_large(decoder_capacity,
@@ -280,7 +271,6 @@ bool ReportExecutor::prepare_operation() {
     if (context.mapping_count > 0 && !context.mappings) return false;
 
     record_index_ = 0;
-    fallback_loaded_ = false;
     if (fallback_kind(operation->kind)) {
         context.fallback_file = plan_->fallback_file(*operation);
         context.fallback_section = plan_->fallback_section(*operation);
@@ -363,24 +353,13 @@ bool ReportExecutor::decode_record() {
                ReportExecutorError::InvalidPlan);
         return false;
     }
-    if (fallback_kind(operation->kind)) {
-        return decode_fallback_operation();
-    }
 
-    const NightCatalogSourceFile *file = operation_context.source_file;
-    if (!operation || !file || record_index_ >= operation->record_count) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::InvalidPlan);
-        return false;
-    }
-
-    const size_t prepared_offset =
-        static_cast<size_t>(record_index_) * file->record_size;
     if (!prepared_view_data_) {
         const StoragePreparedReadView view =
             read_port_->view_prepared(prepared_);
         if (view.state == PreparedByteReadState::Retry) return false;
-        if (view.state != PreparedByteReadState::Data || !view.data) {
+        if (view.state != PreparedByteReadState::Data || !view.data ||
+            view.length != operation->length) {
             finish(ReportExecutorState::Failed,
                    ReportExecutorError::StorageShortRead);
             return false;
@@ -388,8 +367,22 @@ bool ReportExecutor::decode_record() {
         prepared_view_data_ = view.data;
         prepared_view_length_ = view.length;
     }
-    if (prepared_view_length_ != prepared_.length ||
-        prepared_offset > prepared_view_length_ ||
+
+    if (fallback_kind(operation->kind)) {
+        return decode_fallback_operation();
+    }
+
+    const NightCatalogSourceFile *file = operation_context.source_file;
+    if (!file || record_index_ >= operation->record_count) {
+        finish(ReportExecutorState::Failed,
+               ReportExecutorError::InvalidPlan);
+        return false;
+    }
+
+    const size_t prepared_offset =
+        static_cast<size_t>(record_index_) * file->record_size;
+
+    if (prepared_offset > prepared_view_length_ ||
         file->record_size > prepared_view_length_ - prepared_offset) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::StorageShortRead);
@@ -467,28 +460,13 @@ bool ReportExecutor::decode_fallback_operation() {
     const NightCatalogFallbackSection *section =
         operation_context.fallback_section;
     if (!operation_context.prepared || !operation || !file || !section ||
-        record_index_ >= operation->record_count ||
-        operation->length > fallback_capacity_) {
+        record_index_ >= operation->record_count) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
         return false;
     }
 
-    if (!fallback_loaded_) {
-        const PreparedByteRead read = read_port_->read_prepared(
-            prepared_, 0, fallback_buffer_, operation->length);
-
-        if (read.state == PreparedByteReadState::Retry) return false;
-        if (read.state != PreparedByteReadState::Data ||
-            read.bytes != operation->length) {
-            finish(ReportExecutorState::Failed,
-                   ReportExecutorError::StorageShortRead);
-            return false;
-        }
-        fallback_loaded_ = true;
-    }
-
-    const uint8_t *data = fallback_buffer_;
+    const uint8_t *data = prepared_view_data_;
     const size_t data_size = operation->length;
     const uint32_t batch_count = std::min<uint32_t>(
         32, operation->record_count - record_index_);
@@ -605,7 +583,6 @@ void ReportExecutor::release_run_resources() {
     event_next_record_ = 0;
     event_context_valid_ = false;
     sink_rejected_ = false;
-    fallback_loaded_ = false;
 }
 
 void ReportExecutor::release_prepared() {
@@ -624,9 +601,6 @@ void ReportExecutor::free_scratch() {
     Memory::free(decoders_);
     decoders_ = nullptr;
     decoder_capacity_ = 0;
-    Memory::free(fallback_buffer_);
-    fallback_buffer_ = nullptr;
-    fallback_capacity_ = 0;
 }
 
 bool ReportExecutor::emit_series(void *context,

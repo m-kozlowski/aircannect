@@ -151,8 +151,7 @@ private:
         bool prepared = false;
     };
 
-    bool allocate_scratch(size_t record_capacity,
-                          size_t decoder_capacity);
+    bool allocate_decoders(size_t decoder_capacity);
     bool submit_read();
     bool poll_read();
     bool prepare_operation();
@@ -189,12 +188,8 @@ private:
     const uint8_t *prepared_view_data_ = nullptr;
     size_t prepared_view_length_ = 0;
 
-    // Fallback payload scratch; EDF records borrow prepared storage directly.
-    uint8_t *fallback_buffer_ = nullptr;
-    size_t fallback_capacity_ = 0;
     EdfReportSeriesDecoder *decoders_ = nullptr;
     size_t decoder_capacity_ = 0;
-    bool fallback_loaded_ = false;
     OperationContext operation_context_;
 
     EdfReportEventDecodeContext event_context_;
