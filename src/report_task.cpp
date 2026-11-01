@@ -698,7 +698,6 @@ struct ReportTask::Runtime {
                         bool discover_stored_nights = true) {
         if (!next || generation == 0) return;
 
-        saved_catalog_index.reset();
         observe_catalog_generation(generation);
         catalog_generation = monotonic_generation(
             generation, catalog_generation);
@@ -738,23 +737,6 @@ struct ReportTask::Runtime {
         if (!publish_state()) {
             record_failure("publish_status", "report_snapshot_alloc_failed");
         }
-    }
-
-    bool compact_saved_catalog() {
-        if (!saved_catalog_index) return false;
-
-        if (saved_catalog_generation != catalog_generation) {
-            saved_catalog_index.reset();
-            return true;
-        }
-        if (engine.status().state != ReportEngineState::Idle) return false;
-
-        catalog = std::move(saved_catalog_index);
-        engine.publish_catalog(catalog);
-        if (!publish_state()) {
-            record_failure("publish_status", "report_snapshot_alloc_failed");
-        }
-        return true;
     }
 
     bool merge_loaded_sources(std::shared_ptr<const NightCatalog> loaded,
@@ -858,7 +840,8 @@ struct ReportTask::Runtime {
     }
 
     void release_loaded_sources() {
-        if (pending_catalog_save || catalog_store.active() ||
+        if (engine.status().state != ReportEngineState::Idle ||
+            pending_catalog_save || catalog_store.active() ||
             catalog_store.status().generation != catalog_generation) return;
 
         const auto index = catalog_store.snapshot();
@@ -2453,7 +2436,6 @@ struct ReportTask::Runtime {
             rebuild_sources_ready = false;
             refresh_rebuild = false;
             pending_catalog_save.reset();
-            saved_catalog_index.reset();
             pending_source_update.reset();
             pending_catalog_save_source_change = false;
             pending_catalog_save_post_therapy = false;
@@ -2543,8 +2525,6 @@ struct ReportTask::Runtime {
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportPublishedState> published;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
-    std::shared_ptr<const NightCatalog> saved_catalog_index;
-    uint32_t saved_catalog_generation = 0;
     std::shared_ptr<const NightCatalog> pending_source_update;
     bool source_update_from_rpc = false;
     uint32_t pending_catalog_save_generation = 0;
@@ -3231,7 +3211,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.date_repair_observed = true;
         runtime.date_preview_catalog.reset();
         runtime.date_preview_store.reset();
-        runtime.saved_catalog_index.reset();
         runtime.catalog_store.forget_media();
         runtime.catalog_load_pending = true;
         runtime.store_catalog_load_pending = true;
@@ -3407,13 +3386,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         runtime.pending_catalog_save_source_change;
                     const ReportSourceChange source_change =
                         runtime.pending_catalog_save_source;
-                    runtime.saved_catalog_index = runtime.catalog_store.snapshot();
-                    runtime.saved_catalog_generation = runtime.catalog_store_save_generation;
                     runtime.pending_catalog_save.reset();
                     runtime.pending_catalog_save_generation = 0;
                     runtime.pending_catalog_save_post_therapy = false;
                     runtime.pending_catalog_save_source_change = false;
                     runtime.pending_catalog_save_source = {};
+                    runtime.release_loaded_sources();
                     if (source_change_saved) {
                         runtime.clear_failures(source_change);
                         runtime.consume_source_change_coverage(source_change);
@@ -3824,7 +3802,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
-    worked = runtime.compact_saved_catalog() || worked;
     if (runtime.period_running) {
         worked = runtime.period_service.poll() || worked;
         if (!runtime.period_completed) runtime.period_completed = runtime.period_service.take_completed();
