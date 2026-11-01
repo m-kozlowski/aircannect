@@ -932,8 +932,7 @@ bool discover_days(NightCatalogRefreshRuntime &runtime,
         for (size_t i = 0; runtime.previous_catalog &&
                            i < runtime.previous_catalog->size(); ++i) {
             const auto &night = *runtime.previous_catalog->record(i);
-            if (night.source_flags & (NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
-                                      NIGHT_CATALOG_SOURCE_STR)) {
+            if (night.source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) {
                 runtime.days.push_back(night.sleep_day);
             }
         }
@@ -2626,7 +2625,7 @@ bool NightCatalogRefreshService::poll() {
                 fresh_str |= runtime_->str_records[i].record.sleep_day == day;
             }
 
-            if (!fresh_str && previous && previous->sources_external &&
+            if (runtime_->edf_session_count && !fresh_str && previous && previous->sources_external &&
                 (previous->source_flags & NIGHT_CATALOG_SOURCE_STR) &&
                 !load_previous_sources(*runtime_, day, status_.generation, error)) {
                 if (error) fail(error, true);
@@ -2686,22 +2685,18 @@ bool NightCatalogRefreshService::poll() {
                 return true;
             }
 
-            // Keep accepted history if its source is no longer accessible.
+            // Preserve inaccessible external fallback history, not a partial rebuild.
             const auto *previous = runtime_->sweep
                 ? runtime_->previous_catalog->find(runtime_->current_day)
                 : runtime_->previous_catalog->record(runtime_->build_cursor);
             ++runtime_->build_cursor;
             if (!previous || (runtime_->target.valid() &&
                  previous->sleep_day != runtime_->target.sleep_day) ||
-                (previous->source_flags & (NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK |
-                                           NIGHT_CATALOG_SOURCE_STR)) == 0) {
+                (previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
                 return true;
             }
 
             const auto *rebuilt = runtime_->building_catalog->find(previous->sleep_day);
-            if (rebuilt && !(previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK)) {
-                return true;
-            }
             if (rebuilt && (rebuilt->source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT)) {
                 // The source is present but quarantined, not lost. Its file
                 // remains protected; retaining it here would undo isolation.
