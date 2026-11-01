@@ -378,7 +378,9 @@ bool ReportMetricAccumulator::begin(uint32_t signal_mask) {
     return true;
 }
 
-bool ReportMetricAccumulator::begin(const ReportReadPlan &plan) {
+bool ReportMetricAccumulator::begin(const ReportReadPlan &plan,
+                                    const uint8_t *checkpoint,
+                                    size_t checkpoint_size) {
     if (!runtime_) return false;
 
     uint32_t signal_mask = 0;
@@ -391,7 +393,10 @@ bool ReportMetricAccumulator::begin(const ReportReadPlan &plan) {
 
         signal_mask |= report_signal_bit(mapping->series.signal);
     }
-    return begin(signal_mask);
+    if (!checkpoint) return begin(signal_mask);
+
+    runtime_->clear();
+    return restore(checkpoint, checkpoint_size, signal_mask);
 }
 
 void ReportMetricAccumulator::accept(ReportSignalId signal,
@@ -503,7 +508,8 @@ std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
     return LargeByteBuffer::freeze(std::move(output));
 }
 
-bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
+bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length,
+                                      uint32_t additional_signals) {
     if (!runtime_ || !data || length < 7 ||
         (LittleEndian::get_le16(data) != 1 &&
          LittleEndian::get_le16(data) != 2 &&
@@ -530,8 +536,11 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
 
     bool active[METRIC_HISTOGRAM_COUNT] = {};
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
-        active[i] = (active_mask & (1u << i)) != 0;
+        active[i] = (active_mask & (1u << i)) != 0 ||
+            (additional_signals & report_signal_bit(metric_signal(i))) != 0;
     }
+    active[static_cast<size_t>(MetricHistogramId::ExpirationTime)] |=
+        (additional_signals & report_signal_bit(ReportSignalId::InspiratoryDuration)) != 0;
 
     uint32_t *next_bins = nullptr;
     if (!allocate_histogram_bins(active, next_bins)) return false;
@@ -541,7 +550,7 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length) {
     const size_t bins_offset = legacy ? 16 : METRIC_CHECKPOINT_BINS_OFFSET;
     const uint8_t *record = data + (legacy ? 7 : version == 2 ? 8 : METRIC_CHECKPOINT_HEADER_BYTES);
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
-        if (!active[i]) continue;
+        if (!(active_mask & (1u << i))) continue;
 
         next[i].sum_milli = static_cast<int64_t>(LittleEndian::get_le64(
             record + METRIC_CHECKPOINT_SUM_OFFSET));

@@ -160,7 +160,6 @@ struct ReportSignalStoreBuilder::Runtime {
     int64_t first_block_start_ms = 0;
     uint16_t block_slot_count = 0;
     uint32_t store_generation = 0;
-    ReportMetricAccumulator metrics;
     ReportMetricAccumulator closed_metrics;
     struct BreathSpan {
         EdfReportSeriesSpan samples;
@@ -213,7 +212,6 @@ struct ReportSignalStoreBuilder::Runtime {
         event_count = 0;
         event_capacity = 0;
 
-        metrics.clear();
         closed_metrics.clear();
         decltype(inspiration_spans)().swap(inspiration_spans);
         decltype(ie_spans)().swap(ie_spans);
@@ -598,12 +596,9 @@ bool ReportSignalStoreBuilder::begin_build(
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         runtime_->set_expected_coverage(runtime_->tracks[i]);
     }
-    if (!runtime_->metrics.begin(plan) ||
-        !runtime_->closed_metrics.begin(plan) ||
-        (checkpoint_bytes &&
-         (!runtime_->closed_metrics.restore(
-              checkpoint.metrics, checkpoint.metrics_size) ||
-          !runtime_->closed_metrics.merge(runtime_->metrics)))) {
+    if (!runtime_->closed_metrics.begin(
+            plan, checkpoint_bytes ? checkpoint.metrics : nullptr,
+            checkpoint.metrics_size)) {
         failure_reason_ = "report_signal_store_metrics_allocation_failed";
         runtime_->clear_work();
         return false;
@@ -1329,11 +1324,6 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
                 work.tail_metrics->clear();
             }
         }
-
-        if (work.tail_metrics && !runtime_->metrics.merge(*work.tail_metrics)) {
-            failure_reason_ = "report_signal_store_metrics_merge_failed";
-            return false;
-        }
     }
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
@@ -1341,6 +1331,22 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         ReportSignalStoreFilePayload &payload = bundle->signals_[i];
         payload.track = work.track;
         runtime_->release_track_blocks(work);
+    }
+
+    // Preserve the closed contribution before folding in replaceable tails.
+    const auto metrics = runtime_->closed_metrics.snapshot();
+    if (!metrics) {
+        failure_reason_ = "report_signal_store_checkpoint_allocation_failed";
+        return false;
+    }
+
+    for (size_t i = 0; i < runtime_->track_count; ++i) {
+        const TrackWork &work = runtime_->tracks[i];
+        if (work.tail_metrics &&
+            !runtime_->closed_metrics.merge(*work.tail_metrics)) {
+            failure_reason_ = "report_signal_store_metrics_merge_failed";
+            return false;
+        }
     }
 
     ReportSignalStoreEventFileData event_data;
@@ -1416,11 +1422,7 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
             ? UINT32_MAX
             : static_cast<uint32_t>(minutes);
     }
-    if (!runtime_->metrics.merge(runtime_->closed_metrics)) {
-        failure_reason_ = "report_signal_store_metrics_merge_failed";
-        return false;
-    }
-    night.statistics = runtime_->metrics.finish();
+    night.statistics = runtime_->closed_metrics.finish();
     night.settings = runtime_->plan->night().settings;
     night.daily_statistics = runtime_->plan->night().statistics;
     report_night_complete_metrics(
@@ -1474,26 +1476,24 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     }
 
     bundle->histogram = ReportNightHistogramCodec::encode(
-        runtime_->metrics, bundle->metadata_view);
+        runtime_->closed_metrics, bundle->metadata_view);
     if (!bundle->histogram) {
         failure_reason_ = "report_night_histogram_allocation_failed";
         return false;
     }
-    runtime_->metrics.clear();
+    runtime_->closed_metrics.clear();
 
     const auto progress = ReportPlanner::capture_progress(
         runtime_->execution_plan ? *runtime_->execution_plan : *runtime_->plan,
         runtime_->closed_before_ms);
-    const auto metrics = runtime_->closed_metrics.snapshot();
     LargeScratchArray<ReportBuildTrackState> closed_tracks;
     LargeScratchArray<std::shared_ptr<const LargeByteBuffer>> tail_snapshots;
-    if (!progress || !metrics ||
+    if (!progress ||
         !closed_tracks.allocate(runtime_->track_count) ||
         !tail_snapshots.allocate(runtime_->track_count)) {
         failure_reason_ = "report_signal_store_checkpoint_allocation_failed";
         return false;
     }
-    runtime_->closed_metrics.clear();
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
         TrackWork &work = runtime_->tracks[i];

@@ -119,14 +119,16 @@ public:
         const ReportMetricAccumulator &) = delete;
 
     bool begin(uint32_t signal_mask);
-    bool begin(const ReportReadPlan &plan);
+    bool begin(const ReportReadPlan &plan,
+               const uint8_t *checkpoint = nullptr, size_t checkpoint_size = 0);
     void accept(ReportSignalId signal, int32_t value_milli,
                 uint32_t duration_ms = 0);
     void accept_expiration_time(int32_t value_milli);
     ReportCalculatedMetrics finish() const;
 
     std::shared_ptr<const LargeByteBuffer> snapshot() const;
-    bool restore(const uint8_t *data, size_t length);
+    bool restore(const uint8_t *data, size_t length,
+                 uint32_t additional_signals = 0);
     bool merge(const ReportMetricAccumulator &other);
 
     bool histogram(size_t index, Histogram &out) const;

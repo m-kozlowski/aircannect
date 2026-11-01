@@ -1990,8 +1990,10 @@ struct ReportTask::Runtime {
                           operation, day);
 #endif
             } else {
+                const uint32_t retry_ms = capture && failure.retryable
+                    ? CATALOG_RETRY_MAX_MS : failure.retry_after_ms;
                 record_failure(operation, completion.error,
-                               completed_day, failure.retry_after_ms);
+                               completed_day, retry_ms);
             }
         }
 

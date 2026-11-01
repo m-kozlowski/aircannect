@@ -69,6 +69,8 @@ private:
     uint32_t generation_ = 0;
     size_t maximum_size_ = 0;
     size_t copied_ = 0;
+    size_t prepared_copied_ = 0;
+    bool handle_requested_ = false;
     char path_[AC_STORAGE_PATH_MAX] = {};
     StorageBoundedFileLoadStatus status_;
 };

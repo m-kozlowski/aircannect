@@ -10,6 +10,10 @@
 
 namespace aircannect {
 
+namespace {
+constexpr size_t READ_BYTES = 64 * 1024;
+}
+
 bool StorageBoundedFileLoadStatus::active() const {
     return state == StorageBoundedFileLoadState::Submitting ||
            state == StorageBoundedFileLoadState::Waiting ||
@@ -59,9 +63,12 @@ OperationAdmission StorageBoundedFileLoader::start(
 bool StorageBoundedFileLoader::submit() {
     StorageReadCommand command;
     command.path = path_;
-    command.length = maximum_size_;
+    command.offset = copied_;
+    command.length = std::min(
+        READ_BYTES, (buffer_ ? buffer_->size() : maximum_size_) - copied_);
     command.lane = status_.lane;
     command.generation = generation_;
+    command.retain_handle = true;
 
     const OperationSubmission submission = read_port_->request_read(command);
     if (submission.admission == OperationAdmission::Busy) return false;
@@ -72,6 +79,7 @@ bool StorageBoundedFileLoader::submit() {
     }
 
     ticket_ = submission.ticket;
+    handle_requested_ = true;
     status_.state = StorageBoundedFileLoadState::Waiting;
     return true;
 }
@@ -92,7 +100,7 @@ bool StorageBoundedFileLoader::finish_read() {
         if (completion.prepared.valid()) {
             read_port_->release_prepared(completion.prepared);
         }
-        finish(strcmp(completion.error, "read_not_found") == 0
+        finish(copied_ == 0 && strcmp(completion.error, "read_not_found") == 0
                    ? StorageBoundedFileLoadState::Missing
                    : StorageBoundedFileLoadState::Failed,
                completion.error[0]
@@ -100,27 +108,35 @@ bool StorageBoundedFileLoader::finish_read() {
                    : "storage_file_read_failed");
         return true;
     }
-    if (!completion.prepared.valid() || completion.prepared.length == 0 ||
-        completion.prepared.length > maximum_size_) {
-        if (completion.prepared.valid()) {
-            read_port_->release_prepared(completion.prepared);
-        }
+    prepared_ = completion.prepared;
+    prepared_copied_ = 0;
+    if (buffer_ && (completion.file_size != status_.file_size ||
+                    completion.modified != status_.modified)) {
+        finish(StorageBoundedFileLoadState::Failed, "storage_file_changed");
+        return true;
+    }
+
+    const size_t length = static_cast<size_t>(
+        std::min<uint64_t>(completion.file_size, maximum_size_));
+    if (!prepared_.valid() || length <= copied_ ||
+        prepared_.length != std::min(READ_BYTES, length - copied_)) {
         finish(StorageBoundedFileLoadState::Failed,
                "storage_file_size_invalid");
         return true;
     }
 
-    buffer_ = LargeByteBuffer::allocate(completion.prepared.length);
     if (!buffer_) {
-        read_port_->release_prepared(completion.prepared);
-        finish(StorageBoundedFileLoadState::Failed,
-               "storage_file_allocation_failed");
-        return true;
+        buffer_ = LargeByteBuffer::allocate(length);
+        if (!buffer_) {
+            finish(StorageBoundedFileLoadState::Failed,
+                   "storage_file_allocation_failed");
+            return true;
+        }
+
+        status_.file_size = completion.file_size;
+        status_.modified = completion.modified;
     }
 
-    prepared_ = completion.prepared;
-    status_.file_size = completion.file_size;
-    status_.modified = completion.modified;
     status_.state = StorageBoundedFileLoadState::Copying;
     return copy();
 }
@@ -133,9 +149,9 @@ bool StorageBoundedFileLoader::copy() {
     }
 
     const size_t wanted = std::min(
-        buffer_->size() - copied_, AC_REPORT_FILE_LOAD_COPY_BYTES);
+        prepared_.length - prepared_copied_, AC_REPORT_FILE_LOAD_COPY_BYTES);
     const PreparedByteRead read = read_port_->read_prepared(
-        prepared_, copied_, buffer_->data() + copied_, wanted);
+        prepared_, prepared_copied_, buffer_->data() + copied_, wanted);
     if (read.state == PreparedByteReadState::Retry) return false;
     if (read.state != PreparedByteReadState::Data ||
         read.bytes == 0 || read.bytes > wanted) {
@@ -145,10 +161,16 @@ bool StorageBoundedFileLoader::copy() {
     }
 
     copied_ += read.bytes;
+    prepared_copied_ += read.bytes;
     status_.bytes_loaded = copied_;
-    if (copied_ < buffer_->size()) return true;
+    if (prepared_copied_ < prepared_.length) return true;
 
     release_prepared();
+    if (copied_ < buffer_->size()) {
+        status_.state = StorageBoundedFileLoadState::Submitting;
+        return true;
+    }
+
     completed_ = LargeByteBuffer::freeze(std::move(buffer_));
     if (!completed_) {
         finish(StorageBoundedFileLoadState::Failed,
@@ -156,7 +178,7 @@ bool StorageBoundedFileLoader::copy() {
         return true;
     }
 
-    status_.state = StorageBoundedFileLoadState::Ready;
+    finish(StorageBoundedFileLoadState::Ready, nullptr);
     return true;
 }
 
@@ -185,6 +207,10 @@ void StorageBoundedFileLoader::finish(StorageBoundedFileLoadState state,
     }
     ticket_ = {};
     release_prepared();
+    if (handle_requested_) {
+        read_port_->release_handle();
+        handle_requested_ = false;
+    }
     buffer_.reset();
     if (state != StorageBoundedFileLoadState::Ready) completed_.reset();
 
@@ -213,6 +239,7 @@ void StorageBoundedFileLoader::clear_operation() {
     generation_ = 0;
     maximum_size_ = 0;
     copied_ = 0;
+    prepared_copied_ = 0;
     path_[0] = '\0';
 }
 
