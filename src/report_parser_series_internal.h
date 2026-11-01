@@ -13,6 +13,14 @@ public:
     ReportSeriesBitReader(const uint8_t *data, size_t len);
 
     bool read_bit(uint8_t &out);
+    void set_position(size_t byte_index, uint8_t bit_index) {
+        byte_index_ = byte_index;
+        bit_index_ = bit_index;
+    }
+    void position(size_t &byte_index, uint8_t &bit_index) const {
+        byte_index = byte_index_;
+        bit_index = bit_index_;
+    }
 
 private:
     const uint8_t *data_ = nullptr;
@@ -38,11 +46,5 @@ int32_t report_series_milli_from_scaled(int64_t raw, double scale);
 bool report_series_append_scaled_value_le(ReportSpoolBuffer &values,
                                           int64_t raw,
                                           double scale);
-
-bool report_parse_therapy_1minute_spool(const ReportSpoolResult &result,
-                                        ReportParsedChunkCallback callback,
-                                        void *context,
-                                        char *error,
-                                        size_t error_len);
 
 }  // namespace aircannect

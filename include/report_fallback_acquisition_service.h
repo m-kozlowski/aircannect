@@ -3,7 +3,9 @@
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
 
+#include "large_allocator.h"
 #include "large_scratch_array.h"
 #include "report_fallback_artifact.h"
 #include "report_parser.h"
@@ -13,6 +15,7 @@
 #include "report_spool_types.h"
 #include "storage_atomic_write_port.h"
 #include "storage_read_port.h"
+#include "storage_range_write_port.h"
 
 namespace aircannect {
 
@@ -67,7 +70,8 @@ public:
 
     void begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
-               ReportSpoolPort &spool_port);
+               ReportSpoolPort &spool_port,
+               StorageRangeWritePort &range_port);
 
     OperationAdmission start(
         std::shared_ptr<const ReportReadPlan> plan,
@@ -84,10 +88,13 @@ public:
     const ReportFallbackAcquisitionStatus &status() const {
         return status_;
     }
-    std::shared_ptr<const LargeByteBuffer> replacement() const {
+    std::shared_ptr<const LargeByteBuffer> replacement_metadata() const {
         return status_.state == ReportFallbackAcquisitionState::Ready
             ? replacement_
             : nullptr;
+    }
+    const ReportFallbackArtifactView &replacement_view() const {
+        return replacement_view_;
     }
 
 private:
@@ -113,7 +120,7 @@ private:
         uint32_t sample_count = 0;
         int64_t start_ms = 0;
         int64_t end_ms = 0;
-        ReportSpoolBuffer values;
+        size_t payload_offset = 0;
 
         bool valid() const { return sample_count > 0; }
     };
@@ -122,6 +129,15 @@ private:
         ReportEventRecord event;
         size_t session_index = SIZE_MAX;
         size_t record_index = SIZE_MAX;
+    };
+
+    struct PayloadWrite {
+        std::shared_ptr<const LargeByteBuffer> bytes;
+        size_t offset = 0;
+    };
+    using PayloadWrites = std::vector<PayloadWrite, LargeAllocator<PayloadWrite>>;
+    enum class PublicationPhase : uint8_t {
+        ClosePayload, Header, Copy, CloseStaged, Publish
     };
 
     static bool accept_parsed_chunk(
@@ -143,6 +159,7 @@ private:
     bool complete_source_before_retention();
     bool submit_current_fetch();
     bool consume_fetch_round();
+    bool consume_series_record();
     bool finish_current_fetch();
     bool current_sampled_target_complete() const;
     bool complete_current_source();
@@ -171,6 +188,17 @@ private:
     bool submit_publication();
     bool finish_publication();
     bool poll_cancellation();
+
+    // Bounded payload staging; publication starts after storage closes both files.
+    bool queue_payload(const uint8_t *data, size_t length);
+    bool queue_payload_at(const uint8_t *data, size_t length, size_t offset);
+    bool flush_payload_tail();
+    bool poll_payload_writes();
+    bool write_range(const char *path,
+                     const std::shared_ptr<const LargeByteBuffer> &bytes,
+                     size_t offset, bool truncate = false);
+    bool close_ranges();
+    void clear_staging();
 
     const SourceTarget *source_target(ReportSourceId source) const;
     bool signal_targeted(size_t session_index,
@@ -212,9 +240,11 @@ private:
 
     StorageReadPort *read_port_ = nullptr;
     StorageAtomicWritePort *write_port_ = nullptr;
+    StorageRangeWritePort *range_port_ = nullptr;
     ReportSpoolPort *spool_port_ = nullptr;
     std::shared_ptr<const ReportReadPlan> plan_;
     std::shared_ptr<const LargeByteBuffer> replacement_;
+    ReportFallbackArtifactView replacement_view_;
     ReportFallbackArtifactBuilder builder_;
     ReportSpoolAvailability availability_;
     ReportSpoolBuffer event_records_;
@@ -242,8 +272,25 @@ private:
     size_t preserve_section_index_ = 0;
     const NightCatalogFallbackFile *preserve_file_ = nullptr;
     const NightCatalogFallbackSection *preserve_section_ = nullptr;
-    uint8_t *preserve_payload_ = nullptr;
+    size_t preserve_offset_ = 0;
     StoragePreparedRead preserve_prepared_;
+
+    // One received spool round and one decoded window stay alive through I/O.
+    ReportSpoolFetchRound fetch_round_;
+    ReportSeriesSpoolReader series_reader_;
+    bool series_round_active_ = false;
+
+    PayloadWrites payload_writes_;
+    size_t payload_write_index_ = 0;
+    std::shared_ptr<LargeByteBuffer> payload_tail_;
+    size_t payload_tail_offset_ = 0;
+    size_t payload_tail_bytes_ = 0;
+    size_t payload_size_ = 0;
+    bool payload_created_ = false;
+    OperationTicket range_ticket_;
+    PublicationPhase publication_phase_ = PublicationPhase::ClosePayload;
+    size_t publication_offset_ = 0;
+    std::shared_ptr<const LargeByteBuffer> publication_chunk_;
 
     OperationTicket read_ticket_;
     OperationTicket spool_ticket_;

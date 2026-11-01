@@ -8,6 +8,7 @@
 
 #include "report_planner.h"
 #include "report_sources.h"
+#include "report_records_internal.h"
 
 #ifdef ARDUINO
 #include "debug_log.h"
@@ -17,6 +18,9 @@ namespace aircannect {
 namespace {
 
 constexpr size_t MAX_EVENT_BYTES = 64 * 1024;
+constexpr size_t PAYLOAD_WRITE_BYTES = 16 * 1024;
+constexpr const char *PAYLOAD_PATH = "/aircannect/report/tmp/fallback.payload";
+constexpr const char *STAGED_PATH = "/aircannect/report/tmp/fallback.staged";
 
 bool ranges_overlap(const NightCatalogTimeRange &lhs,
                     const NightCatalogTimeRange &rhs) {
@@ -113,11 +117,13 @@ ReportFallbackAcquisitionService::~ReportFallbackAcquisitionService() {
 void ReportFallbackAcquisitionService::begin(
     StorageReadPort &read_port,
     StorageAtomicWritePort &write_port,
-    ReportSpoolPort &spool_port) {
+    ReportSpoolPort &spool_port,
+    StorageRangeWritePort &range_port) {
     reset();
     read_port_ = &read_port;
     write_port_ = &write_port;
     spool_port_ = &spool_port;
+    range_port_ = &range_port;
 }
 
 OperationAdmission ReportFallbackAcquisitionService::start(
@@ -129,7 +135,7 @@ OperationAdmission ReportFallbackAcquisitionService::start(
     if (status_.active()) return OperationAdmission::Busy;
 
     reset();
-    if (!read_port_ || !write_port_ || !spool_port_ || !plan ||
+    if (!read_port_ || !write_port_ || !spool_port_ || !range_port_ || !plan ||
         generation == 0) {
         fail("fallback_acquisition_invalid");
         return OperationAdmission::Rejected;
@@ -148,6 +154,14 @@ OperationAdmission ReportFallbackAcquisitionService::start(
 }
 
 bool ReportFallbackAcquisitionService::poll() {
+    if (status_.active() &&
+        status_.state != ReportFallbackAcquisitionState::Cancelling &&
+        !payload_writes_.empty()) {
+        const auto before = status_.state;
+        const bool progressed = poll_payload_writes();
+        return progressed || status_.state != before;
+    }
+
     switch (status_.state) {
         case ReportFallbackAcquisitionState::CheckingDestination:
             return poll_destination();
@@ -187,6 +201,8 @@ void ReportFallbackAcquisitionService::reset() {
     event_session_counts_.reset();
     plan_.reset();
     replacement_.reset();
+    replacement_view_ = {};
+    clear_staging();
     std::fill(std::begin(targets_), std::end(targets_), SourceTarget{});
     memset(missing_signal_masks_, 0, sizeof(missing_signal_masks_));
     memset(rebuild_events_, 0, sizeof(rebuild_events_));
@@ -203,7 +219,7 @@ void ReportFallbackAcquisitionService::reset() {
     preserve_section_index_ = 0;
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
-    preserve_payload_ = nullptr;
+    preserve_offset_ = 0;
     preserve_prepared_ = {};
     read_ticket_ = {};
     spool_ticket_ = {};
@@ -264,7 +280,8 @@ bool ReportFallbackAcquisitionService::prepare() {
                         sessions,
                         session_count_,
                         night.timezone_offset_valid,
-                        night.timezone_offset_minutes)) {
+                        night.timezone_offset_minutes,
+                        false, true)) {
         fail("fallback_builder_start_failed");
         return false;
     }
@@ -480,13 +497,16 @@ bool ReportFallbackAcquisitionService::build_targets() {
 }
 
 bool ReportFallbackAcquisitionService::poll_preservation() {
-    if (read_ticket_.valid()) return finish_preserved_read();
+    if (read_ticket_.valid() || preserve_prepared_.valid()) {
+        return finish_preserved_read();
+    }
 
     if (preserve_section_) {
         StorageReadCommand command;
         command.path = plan_->catalog().path(*preserve_file_);
-        command.offset = preserve_section_->data_offset;
-        command.length = preserve_section_->data_size;
+        command.offset = preserve_section_->data_offset + preserve_offset_;
+        command.length = std::min<size_t>(
+            PAYLOAD_WRITE_BYTES, preserve_section_->data_size - preserve_offset_);
         command.lane = preserve_lane(read_lane_);
         command.generation = generation_;
         const OperationSubmission submitted =
@@ -544,7 +564,7 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
 
         ReportFallbackSectionInput input = section_input(section);
         if (section.data_size == 0) {
-            if (!builder_.append_section(input)) {
+            if (!builder_.append_section_metadata(input)) {
                 fail("fallback_preserved_section_rejected");
                 return true;
             }
@@ -554,7 +574,8 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
 
         preserve_file_ = &file;
         preserve_section_ = &section;
-        if (!builder_.reserve_section(input, preserve_payload_)) {
+        preserve_offset_ = 0;
+        if (!builder_.append_section_metadata(input)) {
             fail("fallback_preserved_section_reserve_failed");
         }
         return true;
@@ -583,7 +604,8 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
             completion.outcome.disposition ==
                 OperationDisposition::Succeeded &&
             completion.prepared.valid() && preserve_section_ &&
-            completion.prepared.length == preserve_section_->data_size;
+            completion.prepared.length == std::min<size_t>(
+                PAYLOAD_WRITE_BYTES, preserve_section_->data_size - preserve_offset_);
         if (!succeeded) {
             if (completion.prepared.valid()) {
                 read_port_->release_prepared(completion.prepared);
@@ -597,22 +619,25 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
         preserve_prepared_ = completion.prepared;
     }
 
-    const PreparedByteRead read = read_port_->read_prepared(
-        preserve_prepared_, 0, preserve_payload_, preserve_section_->data_size);
+    const auto read = read_port_->view_prepared(preserve_prepared_);
     if (read.state == PreparedByteReadState::Retry) return false;
+
+    const size_t wanted = std::min<size_t>(
+        PAYLOAD_WRITE_BYTES, preserve_section_->data_size - preserve_offset_);
+    auto bytes = read.valid() && read.length == wanted
+        ? LargeByteBuffer::allocate(wanted) : nullptr;
+    if (bytes) memcpy(bytes->data(), read.data, wanted);
 
     read_port_->release_prepared(preserve_prepared_);
     preserve_prepared_ = {};
-    const bool payload_valid =
-        read.state == PreparedByteReadState::Data &&
-        read.bytes == preserve_section_->data_size;
+    const bool payload_valid = bytes != nullptr;
     const bool adjusted = payload_valid &&
         (!report_fallback_has_events(preserve_section_->kind) ||
          preserve_file_->time_adjust_ms == 0 ||
          report_adjust_event_payload(
-             preserve_payload_,
-             read.bytes,
-             preserve_section_->record_count,
+             bytes->data(),
+             wanted,
+             wanted / report_event_record_wire_size(),
              preserve_file_->time_adjust_ms));
     if (!adjusted) {
         fail("fallback_preserved_read_failed");
@@ -621,11 +646,11 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
 
     if (report_fallback_has_events(preserve_section_->kind)) {
         const size_t record_bytes = report_event_record_wire_size();
-        const size_t record_count = read.bytes / record_bytes;
+        const size_t record_count = wanted / record_bytes;
         for (size_t i = 0; i < record_count; ++i) {
             ReportEventRecord event;
-            if (!report_read_event_record(preserve_payload_,
-                                          read.bytes,
+            if (!report_read_event_record(bytes->data(),
+                                          wanted,
                                           i,
                                           event) ||
                 report_event_source_mask(event) == 0 ||
@@ -642,15 +667,17 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
         }
     }
 
-    if (!builder_.commit_reserved_section()) {
-        fail("fallback_preserved_read_failed");
+    if (!queue_payload(bytes->data(), wanted)) {
         return true;
     }
+
+    preserve_offset_ += wanted;
+    if (preserve_offset_ < preserve_section_->data_size) return true;
 
     status_.sections_preserved++;
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
-    preserve_payload_ = nullptr;
+    preserve_offset_ = 0;
     return true;
 }
 
@@ -678,6 +705,7 @@ bool ReportFallbackAcquisitionService::should_preserve(
 }
 
 bool ReportFallbackAcquisitionService::poll_fetch() {
+    if (series_round_active_) return consume_series_record();
     if (target_index_ >= target_count_) {
         status_.state = ReportFallbackAcquisitionState::Publishing;
         return true;
@@ -729,17 +757,54 @@ bool ReportFallbackAcquisitionService::submit_current_fetch() {
 }
 
 bool ReportFallbackAcquisitionService::consume_fetch_round() {
-    ReportSpoolFetchRound round;
-    if (!spool_port_->take_round(spool_ticket_, round)) return false;
+    if (!spool_port_->take_round(spool_ticket_, fetch_round_)) return false;
 
-    const bool parsed = parse_round(round.result);
-    round.clear();
+    if (targets_[target_index_].source != ReportSourceId::RespiratoryEvents) {
+        char error[AC_STORAGE_ERROR_MAX] = {};
+        round_chunk_seen_ = false;
+        if (!series_reader_.begin(fetch_round_.result,
+                                  targets_[target_index_].source,
+                                  error, sizeof(error))) {
+            fetch_round_.clear();
+            if (strcmp(error, "spool_empty") != 0) fail(error);
+            return true;
+        }
+        series_round_active_ = true;
+        return true;
+    }
+
+    const bool parsed = parse_round(fetch_round_.result);
+    fetch_round_.clear();
     if (parsed && status_.state == ReportFallbackAcquisitionState::Fetching &&
         (source_past_target_ || current_sampled_target_complete())) {
         source_stop_requested_ = true;
         (void)spool_port_->cancel(spool_ticket_);
     }
     return parsed || status_.state != ReportFallbackAcquisitionState::Fetching;
+}
+
+bool ReportFallbackAcquisitionService::consume_series_record() {
+    ReportParsedChunk chunk;
+    ReportSpoolBuffer payload;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    const auto next = series_reader_.next(chunk, payload, error, sizeof(error));
+    if (next == ReportSeriesReadResult::Failed) {
+        fail(error);
+        return true;
+    }
+    if (next == ReportSeriesReadResult::Chunk) {
+        (void)accept_parsed_chunk(this, chunk);
+        return true;
+    }
+
+    series_reader_.reset();
+    fetch_round_.clear();
+    series_round_active_ = false;
+    if (source_past_target_ || current_sampled_target_complete()) {
+        source_stop_requested_ = true;
+        (void)spool_port_->cancel(spool_ticket_);
+    }
+    return true;
 }
 
 bool ReportFallbackAcquisitionService::finish_current_fetch() {
@@ -837,19 +902,12 @@ bool ReportFallbackAcquisitionService::parse_round(
     char error[AC_STORAGE_ERROR_MAX] = {};
     round_chunk_seen_ = false;
     const ReportSourceId source = targets_[target_index_].source;
-    const bool parsed = source == ReportSourceId::RespiratoryEvents
-        ? report_parse_event_spool(result,
-                                   source,
-                                   accept_parsed_chunk,
-                                   this,
-                                   error,
-                                   sizeof(error))
-        : report_parse_series_spool(result,
-                                    source,
-                                    accept_parsed_chunk,
-                                    this,
-                                    error,
-                                    sizeof(error));
+    const bool parsed = report_parse_event_spool(result,
+                                                 source,
+                                                 accept_parsed_chunk,
+                                                 this,
+                                                 error,
+                                                 sizeof(error));
     if (parsed) return true;
     if (strcmp(error, "spool_empty") == 0) return true;
     if (status_.state == ReportFallbackAcquisitionState::Fetching) {
@@ -1042,15 +1100,15 @@ bool ReportFallbackAcquisitionService::append_series_run(
     section.coverage = {start_ms, end_ms};
     section.payload_size = payload_size;
 
-    uint8_t *payload = nullptr;
-    if (!builder_.reserve_section(section, payload) ||
+    auto payload = LargeByteBuffer::allocate(payload_size);
+    if (!payload || !builder_.append_section_metadata(section) ||
         !report_write_series_payload_v2_uniform_slice(
             view,
             first_sample,
             sample_count,
-            payload,
+            payload->data(),
             payload_size) ||
-        !builder_.commit_reserved_section() ||
+        !queue_payload(payload->data(), payload_size) ||
         !append_series_coverage(chunk.source,
                                 signal->id,
                                 section.coverage)) {
@@ -1106,11 +1164,19 @@ bool ReportFallbackAcquisitionService::append_high_res_series_run(
             pending_series_.interval_ms = interval_ms;
             pending_series_.start_ms = run_start;
             pending_series_.end_ms = run_start;
-            pending_series_.values.set_max_size(max_values_bytes);
+            pending_series_.payload_offset = payload_size_;
+
+            ReportSpoolBuffer header;
+            if (!report_records_detail::put_series_v2_header(
+                    header, interval_ms, 1, 0) ||
+                !queue_payload(header.data(), header.size())) {
+                fail("fallback_series_header_alloc_failed");
+                return false;
+            }
         }
 
         const size_t available_bytes =
-            max_values_bytes - pending_series_.values.size();
+            max_values_bytes - static_cast<size_t>(pending_series_.sample_count) * 4u;
         const uint32_t available_samples = static_cast<uint32_t>(
             available_bytes / sizeof(int32_t));
         if (available_samples == 0) {
@@ -1122,11 +1188,10 @@ bool ReportFallbackAcquisitionService::append_high_res_series_run(
             sample_count - consumed, available_samples);
         const size_t appended_bytes =
             static_cast<size_t>(appended) * sizeof(int32_t);
-        if (!pending_series_.values.append(
+        if (!queue_payload(
                 values_milli_le +
                     static_cast<size_t>(consumed) * sizeof(int32_t),
                 appended_bytes)) {
-            fail("fallback_series_append_failed");
             return false;
         }
 
@@ -1144,7 +1209,7 @@ bool ReportFallbackAcquisitionService::append_high_res_series_run(
             return false;
         }
 
-        if (pending_series_.values.size() == max_values_bytes &&
+        if (static_cast<size_t>(pending_series_.sample_count) * 4u == max_values_bytes &&
             !flush_pending_series()) {
             return false;
         }
@@ -1155,14 +1220,8 @@ bool ReportFallbackAcquisitionService::append_high_res_series_run(
 bool ReportFallbackAcquisitionService::flush_pending_series() {
     if (!pending_series_.valid()) return true;
 
-    ReportSeriesV2UniformView view;
-    view.interval_ms = pending_series_.interval_ms;
-    view.sample_count = pending_series_.sample_count;
-    view.values_milli_le = pending_series_.values.data();
-    view.values_milli_bytes = pending_series_.values.size();
-    const size_t payload_size =
-        report_series_payload_v2_uniform_slice_size(
-            view, 0, pending_series_.sample_count);
+    const size_t payload_size = report_series_v2_uniform_wire_size(
+        pending_series_.sample_count, 0);
 
     ReportFallbackSectionInput section;
     section.kind = ReportFallbackSectionKind::Series;
@@ -1174,17 +1233,13 @@ bool ReportFallbackAcquisitionService::flush_pending_series() {
     section.coverage = {pending_series_.start_ms, pending_series_.end_ms};
     section.payload_size = payload_size;
 
-    uint8_t *payload = nullptr;
+    ReportSpoolBuffer header;
     if (payload_size == 0 ||
-        !builder_.reserve_section(section, payload) ||
-        !report_write_series_payload_v2_uniform_slice(
-            view,
-            0,
-            pending_series_.sample_count,
-            payload,
-            payload_size) ||
-        !builder_.commit_reserved_section()) {
-        fail("fallback_series_append_failed");
+        !builder_.append_section_metadata(section) ||
+        !report_records_detail::put_series_v2_header(
+            header, pending_series_.interval_ms, pending_series_.sample_count, 0) ||
+        !queue_payload_at(header.data(), header.size(), pending_series_.payload_offset)) {
+        fail("fallback_series_section_failed");
         return false;
     }
 
@@ -1194,7 +1249,6 @@ bool ReportFallbackAcquisitionService::flush_pending_series() {
 }
 
 void ReportFallbackAcquisitionService::clear_pending_series() {
-    pending_series_.values.clear();
     pending_series_.source = ReportSourceId::Summary;
     pending_series_.signal = ReportSignalId::Invalid;
     pending_series_.session_index = SIZE_MAX;
@@ -1202,6 +1256,7 @@ void ReportFallbackAcquisitionService::clear_pending_series() {
     pending_series_.sample_count = 0;
     pending_series_.start_ms = 0;
     pending_series_.end_ms = 0;
+    pending_series_.payload_offset = 0;
 }
 
 bool ReportFallbackAcquisitionService::accept_event_chunk(
@@ -1310,21 +1365,20 @@ bool ReportFallbackAcquisitionService::append_event_sections() {
         section.payload_size =
             static_cast<size_t>(selected) * record_bytes;
 
-        uint8_t *payload = nullptr;
-        if (!builder_.reserve_section(section, payload)) {
+        auto payload = selected ? LargeByteBuffer::allocate(section.payload_size) : nullptr;
+        if ((selected && !payload) || !builder_.append_section_metadata(section)) {
             fail("fallback_event_section_reserve_failed");
             return false;
         }
 
         for (size_t i = group_start; i < grouped_begin; ++i) {
             const EventIndexEntry &entry = entries[i];
-            memcpy(payload + (i - group_start) * record_bytes,
+            memcpy(payload->data() + (i - group_start) * record_bytes,
                    event_records_.data() + entry.record_index * record_bytes,
                    record_bytes);
         }
 
-        if (!builder_.commit_reserved_section()) {
-            fail("fallback_event_section_commit_failed");
+        if (selected && !queue_payload(payload->data(), payload->size())) {
             return false;
         }
         status_.sections_added++;
@@ -1382,7 +1436,7 @@ bool ReportFallbackAcquisitionService::append_unavailable_sections() {
         section.source = source;
         section.signal = signal.id;
         section.coverage = unavailable;
-        if (!builder_.append_section(section)) {
+        if (!builder_.append_section_metadata(section)) {
             fail("fallback_unavailable_append_failed");
             return false;
         }
@@ -1393,11 +1447,11 @@ bool ReportFallbackAcquisitionService::append_unavailable_sections() {
 }
 
 bool ReportFallbackAcquisitionService::poll_publication() {
-    if (write_ticket_.valid()) return finish_publication();
-    return submit_publication();
-}
+    if (payload_tail_) {
+        flush_payload_tail();
+        return true;
+    }
 
-bool ReportFallbackAcquisitionService::submit_publication() {
     if (!replacement_) {
         replacement_ = builder_.finish();
         if (!replacement_) {
@@ -1405,15 +1459,109 @@ bool ReportFallbackAcquisitionService::submit_publication() {
             return true;
         }
 
-        ReportFallbackArtifactInfo info;
-        if (!ReportFallbackArtifactCodec::inspect_header(
-                replacement_->data(), replacement_->size(), info)) {
+        if (!ReportFallbackArtifactCodec::decode_metadata(
+                replacement_->data(), replacement_->size(), replacement_view_) ||
+            replacement_view_.info.payload_bytes != payload_size_) {
             fail("fallback_replacement_invalid");
             return true;
         }
-        status_.replacement_identity = info.content_identity;
+        status_.replacement_identity = replacement_view_.info.content_identity;
     }
 
+    switch (publication_phase_) {
+        case PublicationPhase::ClosePayload:
+            if (!close_ranges()) {
+                return status_.state != ReportFallbackAcquisitionState::Publishing;
+            }
+            publication_phase_ = PublicationPhase::Header;
+            return true;
+        case PublicationPhase::Header:
+            if (!write_range(STAGED_PATH, replacement_, 0, true)) {
+                return status_.state != ReportFallbackAcquisitionState::Publishing;
+            }
+            publication_phase_ = PublicationPhase::Copy;
+            return true;
+        case PublicationPhase::Copy:
+            if (publication_offset_ == payload_size_) {
+                publication_phase_ = PublicationPhase::CloseStaged;
+                return true;
+            }
+            if (publication_chunk_) {
+                if (!write_range(STAGED_PATH, publication_chunk_,
+                                 replacement_->size() + publication_offset_)) {
+                    return status_.state != ReportFallbackAcquisitionState::Publishing;
+                }
+
+                publication_offset_ += publication_chunk_->size();
+                publication_chunk_.reset();
+                return true;
+            }
+            if (!read_ticket_.valid() && !preserve_prepared_.valid()) {
+                StorageReadCommand command;
+                command.path = PAYLOAD_PATH;
+                command.offset = publication_offset_;
+                command.length = std::min(PAYLOAD_WRITE_BYTES,
+                                          payload_size_ - publication_offset_);
+                command.generation = generation_;
+                command.lane = read_lane_;
+                const auto submitted = read_port_->request_read(command);
+                if (submitted.admission == OperationAdmission::Busy) return false;
+                if (!submitted.accepted()) {
+                    fail("fallback_staged_read_rejected");
+                    return true;
+                }
+
+                read_ticket_ = submitted.ticket;
+                return true;
+            }
+            if (read_ticket_.valid()) {
+                StorageReadCompletion completion;
+                if (!read_port_->take_completion(read_ticket_, completion)) {
+                    return false;
+                }
+
+                read_ticket_ = {};
+                preserve_prepared_ = completion.prepared;
+                if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+                    !preserve_prepared_.valid()) {
+                    fail(completion.error[0]
+                             ? completion.error
+                             : "fallback_staged_read_failed");
+                    return true;
+                }
+            }
+            {
+                const auto view = read_port_->view_prepared(preserve_prepared_);
+                if (view.state == PreparedByteReadState::Retry) return false;
+
+                const size_t wanted = std::min(PAYLOAD_WRITE_BYTES,
+                                               payload_size_ - publication_offset_);
+                if (!view.valid() || view.length != wanted) {
+                    fail("fallback_staged_short_read");
+                    return true;
+                }
+
+                auto chunk = LargeByteBuffer::allocate_shared(wanted);
+                if (chunk) memcpy(chunk->data(), view.data, wanted);
+                publication_chunk_ = std::move(chunk);
+                read_port_->release_prepared(preserve_prepared_);
+                preserve_prepared_ = {};
+                if (!publication_chunk_) fail("fallback_staged_buffer_alloc_failed");
+                return true;
+            }
+        case PublicationPhase::CloseStaged:
+            if (!close_ranges()) {
+                return status_.state != ReportFallbackAcquisitionState::Publishing;
+            }
+            publication_phase_ = PublicationPhase::Publish;
+            return true;
+        case PublicationPhase::Publish:
+            return write_ticket_.valid() ? finish_publication() : submit_publication();
+    }
+    return false;
+}
+
+bool ReportFallbackAcquisitionService::submit_publication() {
     char path[AC_STORAGE_PATH_MAX] = {};
     if (!report_fallback_artifact_path(status_.sleep_day,
                                        path,
@@ -1424,7 +1572,8 @@ bool ReportFallbackAcquisitionService::submit_publication() {
 
     StorageAtomicWriteCommand command;
     command.path = path;
-    command.bytes = replacement_;
+    command.staged_path = STAGED_PATH;
+    command.staged_size = replacement_view_.info.total_bytes;
     command.lane = write_lane_;
     command.generation = generation_;
     const OperationSubmission submitted =
@@ -1448,7 +1597,8 @@ bool ReportFallbackAcquisitionService::finish_publication() {
     write_ticket_ = {};
     if (completion.outcome.disposition !=
             OperationDisposition::Succeeded ||
-        !replacement_ || completion.bytes_written != replacement_->size()) {
+        !replacement_ ||
+        completion.bytes_written != replacement_view_.info.total_bytes) {
         fail(completion.error[0]
                  ? completion.error
                  : "fallback_replacement_write_failed");
@@ -1457,6 +1607,156 @@ bool ReportFallbackAcquisitionService::finish_publication() {
 
     finish(ReportFallbackAcquisitionState::Ready);
     return true;
+}
+
+bool ReportFallbackAcquisitionService::queue_payload(
+    const uint8_t *data, size_t length) {
+    if (!queue_payload_at(data, length, payload_size_)) return false;
+    payload_size_ += length;
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::queue_payload_at(
+    const uint8_t *data, size_t length, size_t offset) {
+    if (payload_tail_ && payload_tail_offset_ + payload_tail_bytes_ != offset &&
+        !flush_payload_tail()) {
+        return false;
+    }
+
+    for (size_t copied = 0; copied < length;) {
+        if (!payload_tail_) {
+            payload_tail_ = LargeByteBuffer::allocate_shared(PAYLOAD_WRITE_BYTES);
+            if (!payload_tail_) {
+                fail("fallback_staged_buffer_alloc_failed");
+                return false;
+            }
+            payload_tail_offset_ = offset + copied;
+            payload_tail_bytes_ = 0;
+        }
+
+        const size_t size = std::min(
+            PAYLOAD_WRITE_BYTES - payload_tail_bytes_, length - copied);
+        memcpy(payload_tail_->data() + payload_tail_bytes_, data + copied, size);
+        payload_tail_bytes_ += size;
+        copied += size;
+
+        if (payload_tail_bytes_ == PAYLOAD_WRITE_BYTES && !flush_payload_tail()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::flush_payload_tail() {
+    if (!payload_tail_) return true;
+
+    payload_tail_->truncate(payload_tail_bytes_);
+    try {
+        payload_writes_.push_back({payload_tail_, payload_tail_offset_});
+    } catch (const std::bad_alloc &) {
+        fail("fallback_staged_queue_alloc_failed");
+        return false;
+    }
+
+    payload_tail_.reset();
+    payload_tail_bytes_ = 0;
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::poll_payload_writes() {
+    const auto &piece = payload_writes_[payload_write_index_];
+    if (!write_range(PAYLOAD_PATH, piece.bytes, piece.offset, !payload_created_)) {
+        return false;
+    }
+
+    payload_created_ = true;
+    if (++payload_write_index_ == payload_writes_.size()) {
+        PayloadWrites().swap(payload_writes_);
+        payload_write_index_ = 0;
+    }
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::write_range(
+    const char *path, const std::shared_ptr<const LargeByteBuffer> &bytes,
+    size_t offset, bool truncate) {
+    if (!range_ticket_.valid()) {
+        StorageRangeWriteCommand command;
+        command.path = path;
+        command.bytes = bytes;
+        command.offset = offset;
+        command.truncate = truncate;
+        command.retain_handle = true;
+        command.lane = write_lane_;
+        command.generation = generation_;
+
+        const auto submitted = range_port_->request_write(command);
+        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (!submitted.accepted()) {
+            fail("fallback_staged_write_rejected");
+            return false;
+        }
+
+        range_ticket_ = submitted.ticket;
+        return false;
+    }
+
+    StorageRangeWriteCompletion completion;
+    if (!range_port_->take_completion(range_ticket_, completion)) return false;
+
+    range_ticket_ = {};
+    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+        completion.bytes_written != bytes->size()) {
+        fail(completion.error[0] ? completion.error : "fallback_staged_write_failed");
+        return false;
+    }
+    return true;
+}
+
+bool ReportFallbackAcquisitionService::close_ranges() {
+    if (!range_ticket_.valid()) {
+        StorageRangeWriteCommand command;
+        command.finish = true;
+        command.lane = write_lane_;
+        command.generation = generation_;
+
+        const auto submitted = range_port_->request_write(command);
+        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (!submitted.accepted()) {
+            fail("fallback_staged_close_rejected");
+            return false;
+        }
+
+        range_ticket_ = submitted.ticket;
+        return false;
+    }
+
+    StorageRangeWriteCompletion completion;
+    if (!range_port_->take_completion(range_ticket_, completion)) return false;
+
+    range_ticket_ = {};
+    if (completion.outcome.disposition != OperationDisposition::Succeeded) {
+        fail(completion.error[0] ? completion.error : "fallback_staged_close_failed");
+        return false;
+    }
+    return true;
+}
+
+void ReportFallbackAcquisitionService::clear_staging() {
+    PayloadWrites().swap(payload_writes_);
+    payload_write_index_ = 0;
+    payload_tail_.reset();
+    payload_tail_offset_ = 0;
+    payload_tail_bytes_ = 0;
+    payload_size_ = 0;
+    payload_created_ = false;
+    range_ticket_ = {};
+    publication_phase_ = PublicationPhase::ClosePayload;
+    publication_offset_ = 0;
+    publication_chunk_.reset();
+    series_reader_.reset();
+    fetch_round_.clear();
+    series_round_active_ = false;
 }
 
 bool ReportFallbackAcquisitionService::poll_cancellation() {
@@ -1824,6 +2124,11 @@ bool ReportFallbackAcquisitionService::append_unique_event(
 }
 
 void ReportFallbackAcquisitionService::abandon_operations() {
+    if (range_port_) {
+        if (range_ticket_.valid()) (void)range_port_->abandon(range_ticket_);
+        range_ticket_ = {};
+        range_port_->release_handles();
+    }
     if (read_port_ && read_ticket_.valid()) {
         (void)read_port_->abandon(read_ticket_);
         read_ticket_ = {};
@@ -1842,7 +2147,7 @@ void ReportFallbackAcquisitionService::abandon_operations() {
     builder_.discard_reserved_section();
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
-    preserve_payload_ = nullptr;
+    preserve_offset_ = 0;
 }
 
 void ReportFallbackAcquisitionService::begin_terminal(
@@ -1871,13 +2176,18 @@ void ReportFallbackAcquisitionService::finish(
     builder_.reset();
     event_records_.clear();
     clear_pending_series();
+    series_coverage_index_.reset();
+    event_index_.reset();
+    event_session_counts_.reset();
     plan_.reset();
     if (state != ReportFallbackAcquisitionState::Ready) {
         replacement_.reset();
+        replacement_view_ = {};
     }
+    clear_staging();
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
-    preserve_payload_ = nullptr;
+    preserve_offset_ = 0;
     preserve_prepared_ = {};
     read_ticket_ = {};
     spool_ticket_ = {};

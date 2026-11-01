@@ -115,18 +115,23 @@ public:
                size_t session_count,
                bool timezone_offset_valid = false,
                int32_t timezone_offset_minutes = 0,
-               bool canonical_clock = false);
+               bool canonical_clock = false,
+               bool external_payload = false);
     void reset();
 
     bool append_section(const ReportFallbackSectionInput &section);
+    // External payloads are staged by the acquisition owner in section order.
+    bool append_section_metadata(const ReportFallbackSectionInput &section);
     bool reserve_section(const ReportFallbackSectionInput &section,
                          uint8_t *&payload);
     bool commit_reserved_section();
     void discard_reserved_section();
 
+    // External-payload mode returns metadata only, with final file offsets.
     std::shared_ptr<const LargeByteBuffer> finish();
 
 private:
+    bool accepts_section(const ReportFallbackSectionInput &section) const;
     bool ensure_output_size(size_t required_size);
     uint8_t *temporary_section_record(size_t index) const;
     bool sort_sections();
@@ -145,6 +150,7 @@ private:
     bool section_reserved_ = false;
     bool timezone_offset_valid_ = false;
     bool canonical_clock_ = false;
+    bool external_payload_ = false;
 };
 
 bool report_fallback_artifact_path(SleepDayId sleep_day,

@@ -171,12 +171,12 @@ bool parse_therapy_1minute_blob(const uint8_t *blob,
     return sample_count > 0;
 }
 
-bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
+bool build_therapy_1minute_chunk(const TherapyOneMinuteSignalSpec &spec,
                                  uint64_t interval_ms,
                                  const uint8_t *field_data,
                                  size_t field_len,
-                                 ReportParsedChunkCallback callback,
-                                 void *context,
+                                 ReportParsedChunk &chunk,
+                                 ReportSpoolBuffer &output,
                                  char *error,
                                  size_t error_len) {
     uint64_t start = 0;
@@ -215,9 +215,8 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
         return false;
     }
 
-    ReportSpoolBuffer parsed;
     if (!report_build_series_payload_v2_uniform_values_le(
-            parsed,
+            output,
             static_cast<uint32_t>(interval_ms),
             values.data(),
             sample_count)) {
@@ -227,7 +226,6 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
         return false;
     }
 
-    ReportParsedChunk chunk;
     chunk.source = ReportSourceId::TherapyOneMinute;
     chunk.kind = ReportParsedChunkKind::Series;
     chunk.name = report_signal_store_name(spec.signal);
@@ -236,129 +234,114 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
         chunk.start_ms + static_cast<int64_t>(sample_count * interval_ms);
     chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
     chunk.record_count = sample_count;
-    chunk.payload = parsed.data();
-    chunk.payload_len = parsed.size();
-
-    if (!callback(context, chunk)) {
-        if (!error || !error[0]) {
-            report_series_set_error(error,
-                                    error_len,
-                                    "therapy_series_chunk_rejected");
-        }
-
-        return false;
-    }
-
-    return true;
-}
-
-bool parse_therapy_1minute_record(const uint8_t *data,
-                                  size_t len,
-                                  ReportParsedChunkCallback callback,
-                                  void *context,
-                                  uint32_t &chunk_count,
-                                  char *error,
-                                  size_t error_len) {
-    uint64_t interval_token = 0;
-
-    size_t index = 0;
-    while (index < len) {
-        ReportProtoField field;
-        if (!report_proto_next(data, len, index, field)) {
-            report_series_set_error(error,
-                                    error_len,
-                                    "therapy_record_decode_failed");
-            return false;
-        }
-
-        if (field.field == 15 && field.wire == 0) {
-            interval_token = field.value;
-            break;
-        }
-    }
-
-    const uint64_t interval_ms =
-        therapy_1minute_interval_ms(interval_token, interval_token != 0);
-
-    index = 0;
-    while (index < len) {
-        ReportProtoField field;
-        if (!report_proto_next(data, len, index, field)) {
-            report_series_set_error(error,
-                                    error_len,
-                                    "therapy_record_decode_failed");
-            return false;
-        }
-
-        const TherapyOneMinuteSignalSpec *spec =
-            field.wire == 2 ? therapy_1minute_spec(field.field) : nullptr;
-        if (!spec) continue;
-
-        if (!emit_therapy_1minute_signal(*spec,
-                                         interval_ms,
-                                         field.data,
-                                         field.len,
-                                         callback,
-                                         context,
-                                         error,
-                                         error_len)) {
-            return false;
-        }
-
-        chunk_count++;
-    }
-
+    chunk.payload = output.data();
+    chunk.payload_len = output.size();
     return true;
 }
 
 }  // namespace
 
-bool report_parse_therapy_1minute_spool(const ReportSpoolResult &result,
-                                        ReportParsedChunkCallback callback,
-                                        void *context,
-                                        char *error,
-                                        size_t error_len) {
-    uint32_t chunk_count = 0;
+ReportSeriesReadResult ReportSeriesSpoolReader::next_therapy(
+    ReportParsedChunk &chunk,
+    ReportSpoolBuffer &output,
+    char *error,
+    size_t error_len) {
+    while (true) {
+        if (!therapy_record_active_) {
+            if (therapy_wrapped_) {
+                if (cursor_ >= result_->payload.size()) {
+                    return ReportSeriesReadResult::Done;
+                }
 
-    if (report_proto_all_length_fields(result.payload.data(),
-                                       result.payload.size(),
-                                       5)) {
-        size_t index = 0;
-        while (index < result.payload.size()) {
+                ReportProtoField field;
+                if (!report_proto_next(result_->payload.data(),
+                                       result_->payload.size(),
+                                       cursor_,
+                                       field)) {
+                    report_series_set_error(error,
+                                            error_len,
+                                            "therapy_outer_decode_failed");
+                    return ReportSeriesReadResult::Failed;
+                }
+
+                therapy_record_data_ = field.data;
+                therapy_record_len_ = field.len;
+            } else if (therapy_raw_pending_) {
+                therapy_raw_pending_ = false;
+                therapy_record_data_ = result_->payload.data();
+                therapy_record_len_ = result_->payload.size();
+            } else {
+                return ReportSeriesReadResult::Done;
+            }
+
+            therapy_record_active_ = true;
+            therapy_record_initialized_ = false;
+        }
+
+        if (!therapy_record_initialized_) {
+            uint64_t interval_token = 0;
+            size_t index = 0;
+            while (index < therapy_record_len_) {
+                ReportProtoField field;
+                if (!report_proto_next(therapy_record_data_,
+                                       therapy_record_len_,
+                                       index,
+                                       field)) {
+                    report_series_set_error(error,
+                                            error_len,
+                                            "therapy_record_decode_failed");
+                    return ReportSeriesReadResult::Failed;
+                }
+
+                if (field.field == 15 && field.wire == 0) {
+                    interval_token = field.value;
+                    break;
+                }
+            }
+
+            therapy_interval_ms_ = therapy_1minute_interval_ms(
+                interval_token, interval_token != 0);
+            therapy_signal_cursor_ = 0;
+            therapy_record_initialized_ = true;
+        }
+
+        while (therapy_signal_cursor_ < therapy_record_len_) {
             ReportProtoField field;
-            if (!report_proto_next(result.payload.data(),
-                                   result.payload.size(),
-                                   index,
+            if (!report_proto_next(therapy_record_data_,
+                                   therapy_record_len_,
+                                   therapy_signal_cursor_,
                                    field)) {
                 report_series_set_error(error,
                                         error_len,
-                                        "therapy_outer_decode_failed");
-                return false;
+                                        "therapy_record_decode_failed");
+                return ReportSeriesReadResult::Failed;
             }
 
-            if (!parse_therapy_1minute_record(field.data,
-                                              field.len,
-                                              callback,
-                                              context,
-                                              chunk_count,
-                                              error,
-                                              error_len)) {
-                return false;
-            }
-        }
-    } else if (!parse_therapy_1minute_record(result.payload.data(),
-                                             result.payload.size(),
-                                             callback,
-                                             context,
-                                             chunk_count,
+            const TherapyOneMinuteSignalSpec *spec =
+                field.wire == 2 ? therapy_1minute_spec(field.field) : nullptr;
+            if (!spec) continue;
+
+            if (!build_therapy_1minute_chunk(*spec,
+                                             therapy_interval_ms_,
+                                             field.data,
+                                             field.len,
+                                             chunk,
+                                             output,
                                              error,
                                              error_len)) {
-        return false;
-    }
+                return ReportSeriesReadResult::Failed;
+            }
 
-    (void)chunk_count;
-    report_series_set_error(error, error_len, "");
-    return true;
+            return ReportSeriesReadResult::Chunk;
+        }
+
+        therapy_record_active_ = false;
+        therapy_record_initialized_ = false;
+        therapy_record_data_ = nullptr;
+        therapy_record_len_ = 0;
+
+        if (!therapy_wrapped_) return ReportSeriesReadResult::Done;
+    }
 }
 
 }  // namespace aircannect

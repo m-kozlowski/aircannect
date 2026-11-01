@@ -5,9 +5,12 @@
 #include <string.h>
 
 #include "report_records.h"
+#include "report_records_internal.h"
 
 namespace aircannect {
 namespace {
+
+static constexpr uint32_t REPORT_SERIES_READ_WINDOW_SAMPLES = 4096;
 
 bool is_rc03_source(ReportSourceId source) {
     return source == ReportSourceId::RespiratoryFlow6p25Hz ||
@@ -67,13 +70,23 @@ bool decode_rc03_params(const uint8_t *data,
     return true;
 }
 
-bool parse_rc03_block(const uint8_t *block,
-                      size_t block_len,
-                      uint64_t interval_ms,
-                      uint64_t sample_count,
-                      ReportSpoolBuffer &payload,
-                      char *error,
-                      size_t error_len) {
+bool prepare_rc03_block(const uint8_t *block,
+                        size_t block_len,
+                        uint64_t interval_ms,
+                        uint64_t sample_count,
+                        const uint8_t *&body,
+                        size_t &body_len,
+                        size_t &bit_body_offset,
+                        int32_t &rice_m,
+                        double &scale,
+                        char *error,
+                        size_t error_len) {
+    body = nullptr;
+    body_len = 0;
+    bit_body_offset = 0;
+    rice_m = 0;
+    scale = 1.0;
+
     if (!block || block_len < 6 || sample_count == 0 ||
         sample_count > UINT32_MAX || sample_count > SIZE_MAX / 4u ||
         interval_ms == 0 || interval_ms > UINT32_MAX) {
@@ -106,85 +119,22 @@ bool parse_rc03_block(const uint8_t *block,
         return false;
     }
 
-    const int32_t rice_m = params[4];
+    rice_m = params[4];
     if (!report_series_power_of_two_positive(rice_m)) {
         report_series_set_error(error, error_len, "bad_rc03_rice");
         return false;
     }
 
-    const double scale = 2.0 * pow(10.0, static_cast<double>(params[1]));
-    const uint8_t *body = block + 1 + header_len;
-    const size_t body_len = block_len - 1 - header_len;
+    scale = 2.0 * pow(10.0, static_cast<double>(params[1]));
+    body = block + 1 + header_len;
+    body_len = block_len - 1 - header_len;
     if ((sample_count >= 1 && body_len < 2) ||
         (sample_count >= 2 && body_len < 4)) {
         report_series_set_error(error, error_len, "rc03_seed_missing");
         return false;
     }
 
-    ReportSpoolBuffer values;
-    if (!values.reserve_capacity(static_cast<size_t>(sample_count) * 4u)) {
-        report_series_set_error(error, error_len, "series_alloc_failed");
-        return false;
-    }
-
-    int64_t prev2 = 0;
-    int64_t prev1 = 0;
-    size_t body_offset = 0;
-    for (uint64_t i = 0; i < sample_count; ++i) {
-        int64_t raw = 0;
-        if (i == 0) {
-            raw = report_series_read_le_i16(body);
-            body_offset = 2;
-        } else if (i == 1) {
-            raw = report_series_read_le_i16(body + 2);
-            body_offset = 4;
-        } else {
-            break;
-        }
-
-        if (!report_series_append_scaled_value_le(values, raw, scale)) {
-            report_series_set_error(error, error_len, "series_append_failed");
-            return false;
-        }
-        if (i == 0) prev2 = raw;
-        else prev1 = raw;
-    }
-
-    if (sample_count > 2) {
-        ReportSeriesBitReader bits(body + body_offset,
-                                   body_len - body_offset);
-        for (uint64_t i = 2; i < sample_count; ++i) {
-            uint64_t encoded = 0;
-            if (!report_series_read_rice(bits, rice_m, encoded)) {
-                report_series_set_error(error,
-                                        error_len,
-                                        "rc03_bitstream_short");
-                return false;
-            }
-
-            const int64_t delta2 = report_series_zigzag_decode(encoded);
-            const int64_t raw = 2 * prev1 - prev2 + delta2;
-            prev2 = prev1;
-            prev1 = raw;
-
-            if (!report_series_append_scaled_value_le(values, raw, scale)) {
-                report_series_set_error(error,
-                                        error_len,
-                                        "series_append_failed");
-                return false;
-            }
-        }
-    }
-
-    if (values.size() != static_cast<size_t>(sample_count) * 4u ||
-        !report_build_series_payload_v2_uniform_values_le(
-            payload,
-            static_cast<uint32_t>(interval_ms),
-            values.data(),
-            static_cast<uint32_t>(sample_count))) {
-        report_series_set_error(error, error_len, "series_v2_build_failed");
-        return false;
-    }
+    bit_body_offset = sample_count > 1 ? 4 : 2;
     return true;
 }
 
@@ -252,6 +202,293 @@ bool parse_rc03_record(const uint8_t *data,
 
 }  // namespace
 
+bool ReportSeriesSpoolReader::begin(const ReportSpoolResult &result,
+                                    ReportSourceId source,
+                                    char *error,
+                                    size_t error_len) {
+    reset();
+
+    if (!is_series_source(source)) {
+        report_series_set_error(error, error_len, "unsupported_series_source");
+        return false;
+    }
+    if (!report_validate_spool_for_source(result, source, error, error_len)) {
+        return false;
+    }
+
+    if (source == ReportSourceId::TherapyOneMinute) {
+        result_ = &result;
+        source_ = source;
+        therapy_wrapped_ = report_proto_all_length_fields(
+            result.payload.data(), result.payload.size(), 5);
+        therapy_raw_pending_ = !therapy_wrapped_;
+        ready_ = true;
+        report_series_set_error(error, error_len, "");
+        return true;
+    }
+
+    const uint32_t expected_field = rc03_wire_field(source);
+    const ReportSourceDef *source_def = report_source_def(source);
+    const ReportSignalId signal_id = rc03_signal(source);
+    const char *signal_name = report_signal_store_name(signal_id);
+    if (!expected_field || !source_def || !signal_name || !signal_name[0]) {
+        report_series_set_error(error, error_len, "bad_series_mapping");
+        return false;
+    }
+
+    result_ = &result;
+    source_ = source;
+    expected_field_ = expected_field;
+    signal_name_ = signal_name;
+    ready_ = true;
+    report_series_set_error(error, error_len, "");
+    return true;
+}
+
+void ReportSeriesSpoolReader::reset() {
+    result_ = nullptr;
+    source_ = ReportSourceId::Summary;
+    cursor_ = 0;
+    expected_field_ = 0;
+    signal_name_ = nullptr;
+    ready_ = false;
+    failed_ = false;
+    done_ = false;
+    rc03_record_active_ = false;
+    rc03_body_ = nullptr;
+    rc03_body_len_ = 0;
+    rc03_bit_body_offset_ = 0;
+    rc03_bit_byte_index_ = 0;
+    rc03_bit_index_ = 0;
+    rc03_interval_ms_ = 0;
+    rc03_start_ms_ = 0;
+    rc03_sample_count_ = 0;
+    rc03_samples_decoded_ = 0;
+    rc03_rice_m_ = 0;
+    rc03_scale_ = 1.0;
+    rc03_prev2_ = 0;
+    rc03_prev1_ = 0;
+    therapy_wrapped_ = false;
+    therapy_record_active_ = false;
+    therapy_record_initialized_ = false;
+    therapy_raw_pending_ = false;
+    therapy_record_data_ = nullptr;
+    therapy_record_len_ = 0;
+    therapy_signal_cursor_ = 0;
+    therapy_interval_ms_ = 60000;
+}
+
+ReportSeriesReadResult ReportSeriesSpoolReader::next(
+    ReportParsedChunk &chunk,
+    ReportSpoolBuffer &output,
+    char *error,
+    size_t error_len) {
+    chunk = {};
+    output.clear();
+
+    if (failed_) {
+        report_series_set_error(error, error_len, "series_reader_failed");
+        return ReportSeriesReadResult::Failed;
+    }
+    if (!ready_ || !result_) {
+        failed_ = true;
+        report_series_set_error(error, error_len, "series_reader_not_ready");
+        return ReportSeriesReadResult::Failed;
+    }
+    if (done_) {
+        report_series_set_error(error, error_len, "");
+        return ReportSeriesReadResult::Done;
+    }
+
+    const ReportSeriesReadResult read_result =
+        source_ == ReportSourceId::TherapyOneMinute
+            ? next_therapy(chunk, output, error, error_len)
+            : next_rc03(chunk, output, error, error_len);
+    if (read_result == ReportSeriesReadResult::Failed) {
+        failed_ = true;
+    } else if (read_result == ReportSeriesReadResult::Done) {
+        done_ = true;
+        report_series_set_error(error, error_len, "");
+    }
+    return read_result;
+}
+
+ReportSeriesReadResult ReportSeriesSpoolReader::next_rc03(
+    ReportParsedChunk &chunk,
+    ReportSpoolBuffer &output,
+    char *error,
+    size_t error_len) {
+    if (!rc03_record_active_) {
+        bool found_record = false;
+        while (cursor_ < result_->payload.size()) {
+            ReportProtoField field;
+            if (!report_proto_next(result_->payload.data(),
+                                   result_->payload.size(),
+                                   cursor_,
+                                   field)) {
+                report_series_set_error(error,
+                                        error_len,
+                                        "series_outer_decode_failed");
+                return ReportSeriesReadResult::Failed;
+            }
+            if (field.field != expected_field_ || field.wire != 2) continue;
+
+            uint64_t interval_ms = 0;
+            uint64_t start_ms = 0;
+            uint64_t end_ms = 0;
+            const uint8_t *block = nullptr;
+            size_t block_len = 0;
+            if (!parse_rc03_record(field.data,
+                                   field.len,
+                                   interval_ms,
+                                   start_ms,
+                                   end_ms,
+                                   block,
+                                   block_len)) {
+                report_series_set_error(error,
+                                        error_len,
+                                        "series_record_decode_failed");
+                return ReportSeriesReadResult::Failed;
+            }
+            if (start_ms > INT64_MAX || end_ms > INT64_MAX ||
+                interval_ms > INT64_MAX || end_ms < start_ms) {
+                report_series_set_error(error,
+                                        error_len,
+                                        "series_time_invalid");
+                return ReportSeriesReadResult::Failed;
+            }
+
+            const uint64_t sample_count =
+                ((end_ms - start_ms) / interval_ms) + 1;
+            if (sample_count == 0 || sample_count > UINT32_MAX ||
+                sample_count > INT64_MAX / interval_ms) {
+                report_series_set_error(error,
+                                        error_len,
+                                        "series_count_invalid");
+                return ReportSeriesReadResult::Failed;
+            }
+
+            const uint64_t duration_ms = sample_count * interval_ms;
+            if (duration_ms > static_cast<uint64_t>(INT64_MAX) - start_ms) {
+                report_series_set_error(error,
+                                        error_len,
+                                        "series_range_invalid");
+                return ReportSeriesReadResult::Failed;
+            }
+
+            if (!prepare_rc03_block(block,
+                                    block_len,
+                                    interval_ms,
+                                    sample_count,
+                                    rc03_body_,
+                                    rc03_body_len_,
+                                    rc03_bit_body_offset_,
+                                    rc03_rice_m_,
+                                    rc03_scale_,
+                                    error,
+                                    error_len)) {
+                return ReportSeriesReadResult::Failed;
+            }
+
+            rc03_record_active_ = true;
+            rc03_bit_byte_index_ = 0;
+            rc03_bit_index_ = 0;
+            rc03_interval_ms_ = interval_ms;
+            rc03_start_ms_ = start_ms;
+            rc03_sample_count_ = sample_count;
+            rc03_samples_decoded_ = 0;
+            rc03_prev2_ = 0;
+            rc03_prev1_ = 0;
+            found_record = true;
+            break;
+        }
+
+        if (!found_record) return ReportSeriesReadResult::Done;
+    }
+
+    const uint64_t first_sample = rc03_samples_decoded_;
+    const uint64_t remaining = rc03_sample_count_ - first_sample;
+    const uint32_t window_count = static_cast<uint32_t>(
+        remaining > REPORT_SERIES_READ_WINDOW_SAMPLES
+            ? REPORT_SERIES_READ_WINDOW_SAMPLES
+            : remaining);
+    const size_t payload_size =
+        report_series_v2_uniform_wire_size(window_count, 0);
+    if (payload_size == 0 || !output.reserve_capacity(payload_size)) {
+        report_series_set_error(error, error_len, "series_alloc_failed");
+        return ReportSeriesReadResult::Failed;
+    }
+    if (!report_records_detail::put_series_v2_header(
+            output, static_cast<uint32_t>(rc03_interval_ms_), window_count, 0)) {
+        report_series_set_error(error, error_len, "series_v2_build_failed");
+        return ReportSeriesReadResult::Failed;
+    }
+
+    ReportSeriesBitReader bits(rc03_body_ + rc03_bit_body_offset_,
+                               rc03_body_len_ - rc03_bit_body_offset_);
+    bits.set_position(rc03_bit_byte_index_, rc03_bit_index_);
+
+    for (uint32_t i = 0; i < window_count; ++i) {
+        const uint64_t sample_index = rc03_samples_decoded_;
+        int64_t raw = 0;
+        if (sample_index == 0) {
+            raw = report_series_read_le_i16(rc03_body_);
+            rc03_prev2_ = raw;
+        } else if (sample_index == 1) {
+            raw = report_series_read_le_i16(rc03_body_ + 2);
+            rc03_prev1_ = raw;
+        } else {
+            uint64_t encoded = 0;
+            if (!report_series_read_rice(bits, rc03_rice_m_, encoded)) {
+                report_series_set_error(error,
+                                        error_len,
+                                        "rc03_bitstream_short");
+                return ReportSeriesReadResult::Failed;
+            }
+
+            const int64_t delta2 = report_series_zigzag_decode(encoded);
+            raw = 2 * rc03_prev1_ - rc03_prev2_ + delta2;
+            rc03_prev2_ = rc03_prev1_;
+            rc03_prev1_ = raw;
+        }
+
+        if (!report_series_append_scaled_value_le(output,
+                                                   raw,
+                                                   rc03_scale_)) {
+            report_series_set_error(error, error_len, "series_append_failed");
+            return ReportSeriesReadResult::Failed;
+        }
+
+        rc03_samples_decoded_++;
+    }
+    bits.position(rc03_bit_byte_index_, rc03_bit_index_);
+
+    if (output.size() != payload_size) {
+        report_series_set_error(error, error_len, "series_v2_build_failed");
+        return ReportSeriesReadResult::Failed;
+    }
+
+    const uint64_t chunk_start =
+        rc03_start_ms_ + first_sample * rc03_interval_ms_;
+    const uint64_t chunk_end = chunk_start +
+        static_cast<uint64_t>(window_count) * rc03_interval_ms_;
+    chunk.source = source_;
+    chunk.kind = ReportParsedChunkKind::Series;
+    chunk.name = signal_name_;
+    chunk.start_ms = static_cast<int64_t>(chunk_start);
+    chunk.end_ms = static_cast<int64_t>(chunk_end);
+    chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
+    chunk.record_count = window_count;
+    chunk.payload = output.data();
+    chunk.payload_len = output.size();
+
+    if (rc03_samples_decoded_ == rc03_sample_count_) {
+        rc03_record_active_ = false;
+    }
+    report_series_set_error(error, error_len, "");
+    return ReportSeriesReadResult::Chunk;
+}
+
 bool report_parse_series_spool(const ReportSpoolResult &result,
                                ReportSourceId source,
                                ReportParsedChunkCallback callback,
@@ -266,116 +503,29 @@ bool report_parse_series_spool(const ReportSpoolResult &result,
         report_series_set_error(error, error_len, "missing_chunk_callback");
         return false;
     }
-    if (!report_validate_spool_for_source(result, source, error, error_len)) {
-        return false;
-    }
 
-    if (source == ReportSourceId::TherapyOneMinute) {
-        return report_parse_therapy_1minute_spool(result,
-                                                  callback,
-                                                  context,
-                                                  error,
-                                                  error_len);
-    }
+    ReportSeriesSpoolReader reader;
+    if (!reader.begin(result, source, error, error_len)) return false;
 
-    const uint32_t expected_field = rc03_wire_field(source);
-    const ReportSourceDef *source_def = report_source_def(source);
-    const ReportSignalId signal_id = rc03_signal(source);
-    const char *signal_name = report_signal_store_name(signal_id);
-    if (!expected_field || !source_def || !signal_name || !signal_name[0]) {
-        report_series_set_error(error, error_len, "bad_series_mapping");
-        return false;
-    }
-
-    uint32_t emitted = 0;
-    size_t index = 0;
-    while (index < result.payload.size()) {
-        ReportProtoField field;
-        if (!report_proto_next(result.payload.data(),
-                               result.payload.size(),
-                               index,
-                               field)) {
-            report_series_set_error(error,
-                                    error_len,
-                                    "series_outer_decode_failed");
-            return false;
-        }
-        if (field.field != expected_field || field.wire != 2) continue;
-
-        uint64_t interval_ms = 0;
-        uint64_t start_ms = 0;
-        uint64_t end_ms = 0;
-        const uint8_t *block = nullptr;
-        size_t block_len = 0;
-        if (!parse_rc03_record(field.data,
-                               field.len,
-                               interval_ms,
-                               start_ms,
-                               end_ms,
-                               block,
-                               block_len)) {
-            report_series_set_error(error,
-                                    error_len,
-                                    "series_record_decode_failed");
-            return false;
-        }
-        if (start_ms > INT64_MAX || end_ms > INT64_MAX ||
-            interval_ms > INT64_MAX || end_ms < start_ms) {
-            report_series_set_error(error, error_len, "series_time_invalid");
-            return false;
-        }
-
-        const uint64_t sample_count =
-            ((end_ms - start_ms) / interval_ms) + 1;
-        if (sample_count == 0 || sample_count > UINT32_MAX ||
-            sample_count > INT64_MAX / interval_ms) {
-            report_series_set_error(error, error_len, "series_count_invalid");
-            return false;
-        }
-
-        const int64_t chunk_start = static_cast<int64_t>(start_ms);
-        const int64_t chunk_end =
-            chunk_start + static_cast<int64_t>(sample_count * interval_ms);
-        if (chunk_end <= chunk_start) {
-            report_series_set_error(error, error_len, "series_range_invalid");
-            return false;
-        }
-
-        ReportSpoolBuffer parsed;
-        if (!parse_rc03_block(block,
-                              block_len,
-                              interval_ms,
-                              sample_count,
-                              parsed,
-                              error,
-                              error_len)) {
-            return false;
-        }
-
+    ReportSpoolBuffer output;
+    while (true) {
         ReportParsedChunk chunk;
-        chunk.source = source;
-        chunk.kind = ReportParsedChunkKind::Series;
-        chunk.name = signal_name;
-        chunk.start_ms = chunk_start;
-        chunk.end_ms = chunk_end;
-        chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
-        chunk.record_count = static_cast<uint32_t>(sample_count);
-        chunk.payload = parsed.data();
-        chunk.payload_len = parsed.size();
+        const ReportSeriesReadResult read_result =
+            reader.next(chunk, output, error, error_len);
+        if (read_result == ReportSeriesReadResult::Done) return true;
+        if (read_result == ReportSeriesReadResult::Failed) return false;
+
         if (!callback(context, chunk)) {
             if (!error || !error[0]) {
                 report_series_set_error(error,
                                         error_len,
-                                        "series_chunk_rejected");
+                                        source == ReportSourceId::TherapyOneMinute
+                                            ? "therapy_series_chunk_rejected"
+                                            : "series_chunk_rejected");
             }
             return false;
         }
-        emitted++;
     }
-
-    (void)emitted;
-    report_series_set_error(error, error_len, "");
-    return true;
 }
 
 }  // namespace aircannect

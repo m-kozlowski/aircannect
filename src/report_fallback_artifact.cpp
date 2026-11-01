@@ -519,7 +519,8 @@ bool ReportFallbackArtifactBuilder::begin(
     size_t session_count,
     bool timezone_valid,
     int32_t timezone_minutes,
-    bool canonical_clock) {
+    bool canonical_clock,
+    bool external_payload) {
     reset();
     if (!sleep_day.valid() || identity == 0 || day_start_ms <= 0 ||
         day_end_ms <= day_start_ms ||
@@ -553,6 +554,7 @@ bool ReportFallbackArtifactBuilder::begin(
     timezone_offset_minutes_ = timezone_minutes;
     timezone_offset_valid_ = timezone_valid;
     canonical_clock_ = canonical_clock;
+    external_payload_ = external_payload;
     session_count_ = session_count;
     return true;
 }
@@ -566,6 +568,7 @@ void ReportFallbackArtifactBuilder::reset() {
     timezone_offset_minutes_ = 0;
     timezone_offset_valid_ = false;
     canonical_clock_ = false;
+    external_payload_ = false;
     session_count_ = 0;
     section_count_ = 0;
     payload_bytes_ = 0;
@@ -588,6 +591,24 @@ bool ReportFallbackArtifactBuilder::reserve_section(
     const ReportFallbackSectionInput &section,
     uint8_t *&payload) {
     payload = nullptr;
+    if (external_payload_ || !accepts_section(section)) return false;
+
+    const size_t required_size =
+        ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_ +
+        section.payload_size;
+    if (!ensure_output_size(required_size)) return false;
+
+    reserved_section_ = section;
+    reserved_section_.payload = nullptr;
+    reserved_payload_offset_ =
+        ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_;
+    section_reserved_ = true;
+    payload = output_->data() + reserved_payload_offset_;
+    return true;
+}
+
+bool ReportFallbackArtifactBuilder::accepts_section(
+    const ReportFallbackSectionInput &section) const {
     if (!output_ || section_reserved_ ||
         section_count_ >= ReportFallbackArtifactCodec::MaxSections ||
         section.coverage.start_ms < day_start_ms_ ||
@@ -608,17 +629,17 @@ bool ReportFallbackArtifactBuilder::reserve_section(
         return false;
     }
 
-    const size_t required_size =
-        ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_ +
-        section.payload_size;
-    if (!ensure_output_size(required_size)) return false;
+    return true;
+}
 
-    reserved_section_ = section;
-    reserved_section_.payload = nullptr;
-    reserved_payload_offset_ =
-        ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_;
-    section_reserved_ = true;
-    payload = output_->data() + reserved_payload_offset_;
+bool ReportFallbackArtifactBuilder::append_section_metadata(
+    const ReportFallbackSectionInput &section) {
+    if (!external_payload_ || !accepts_section(section)) return false;
+
+    encode_section(temporary_section_record(section_count_), section,
+                   ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_);
+    payload_bytes_ += section.payload_size;
+    ++section_count_;
     return true;
 }
 
@@ -736,9 +757,11 @@ ReportFallbackArtifactBuilder::finish() {
     memmove(section_table,
             temporary_section_record(0),
             section_bytes);
-    memmove(header + metadata_bytes,
-            header + ReportFallbackArtifactCodec::MaxMetadataBytes,
-            payload_bytes_);
+    if (!external_payload_) {
+        memmove(header + metadata_bytes,
+                header + ReportFallbackArtifactCodec::MaxMetadataBytes,
+                payload_bytes_);
+    }
 
     for (size_t i = 0; i < section_count_; ++i) {
         uint8_t *record = section_table +
@@ -769,7 +792,7 @@ ReportFallbackArtifactBuilder::finish() {
     put_le64(header + IDENTITY_OFFSET, identity_);
     put_le32(header + METADATA_CRC_OFFSET, 0);
     put_le32(header + HEADER_CRC_OFFSET, 0);
-    if (!output_->truncate(total_bytes)) return {};
+    if (!output_->truncate(external_payload_ ? metadata_bytes : total_bytes)) return {};
 
     std::unique_ptr<LargeByteBuffer> output = std::move(output_);
     sleep_day_ = {};

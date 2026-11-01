@@ -120,7 +120,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
                          StorageAtomicWritePort &write_port,
                          ReportSpoolPort &spool_port,
                          StorageRangeWritePort &range_write_port) {
-    fallback_acquisition_.begin(read_port, write_port, spool_port);
+    fallback_acquisition_.begin(read_port, write_port, spool_port, range_write_port);
     executor_.begin(read_port);
     store_.begin(read_port, range_write_port, write_port);
     builder_.begin(store_);
@@ -1037,8 +1037,8 @@ bool ReportEngine::finish_fallback_acquisition() {
         char path[AC_STORAGE_PATH_MAX] = {};
         report_fallback_artifact_path(active_request_.artifact.sleep_day,
                                      path, sizeof(path));
-        catalog_replacement_ = NightCatalogBuilder::replace_fallback(
-            active_plan_->catalog(), path, fallback_acquisition_.replacement());
+        catalog_replacement_ = NightCatalogBuilder::restore_fallback(
+            active_plan_->catalog(), path, fallback_acquisition_.replacement_view());
         if (!catalog_replacement_) {
             complete_active(OperationOutcome::failed(), ReportPlanStatus::InvalidCatalog,
                             ReportExecutorError::None, "fallback_catalog_replace_failed");
