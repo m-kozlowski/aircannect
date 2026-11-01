@@ -698,6 +698,7 @@ struct ReportTask::Runtime {
                         bool discover_stored_nights = true) {
         if (!next || generation == 0) return;
 
+        saved_catalog_index.reset();
         observe_catalog_generation(generation);
         catalog_generation = monotonic_generation(
             generation, catalog_generation);
@@ -737,6 +738,23 @@ struct ReportTask::Runtime {
         if (!publish_state()) {
             record_failure("publish_status", "report_snapshot_alloc_failed");
         }
+    }
+
+    bool compact_saved_catalog() {
+        if (!saved_catalog_index) return false;
+
+        if (saved_catalog_generation != catalog_generation) {
+            saved_catalog_index.reset();
+            return true;
+        }
+        if (engine.status().state != ReportEngineState::Idle) return false;
+
+        catalog = std::move(saved_catalog_index);
+        engine.publish_catalog(catalog);
+        if (!publish_state()) {
+            record_failure("publish_status", "report_snapshot_alloc_failed");
+        }
+        return true;
     }
 
     bool merge_loaded_sources(std::shared_ptr<const NightCatalog> loaded,
@@ -2435,6 +2453,7 @@ struct ReportTask::Runtime {
             rebuild_sources_ready = false;
             refresh_rebuild = false;
             pending_catalog_save.reset();
+            saved_catalog_index.reset();
             pending_source_update.reset();
             pending_catalog_save_source_change = false;
             pending_catalog_save_post_therapy = false;
@@ -2524,6 +2543,8 @@ struct ReportTask::Runtime {
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportPublishedState> published;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
+    std::shared_ptr<const NightCatalog> saved_catalog_index;
+    uint32_t saved_catalog_generation = 0;
     std::shared_ptr<const NightCatalog> pending_source_update;
     bool source_update_from_rpc = false;
     uint32_t pending_catalog_save_generation = 0;
@@ -3210,6 +3231,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.date_repair_observed = true;
         runtime.date_preview_catalog.reset();
         runtime.date_preview_store.reset();
+        runtime.saved_catalog_index.reset();
         runtime.catalog_store.forget_media();
         runtime.catalog_load_pending = true;
         runtime.store_catalog_load_pending = true;
@@ -3385,13 +3407,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         runtime.pending_catalog_save_source_change;
                     const ReportSourceChange source_change =
                         runtime.pending_catalog_save_source;
-                    if (runtime.engine.status().state == ReportEngineState::Idle) {
-                        runtime.catalog = runtime.catalog_store.snapshot();
-                        runtime.engine.publish_catalog(runtime.catalog);
-                        if (!runtime.publish_state()) {
-                            runtime.record_failure("publish_status", "report_snapshot_alloc_failed");
-                        }
-                    }
+                    runtime.saved_catalog_index = runtime.catalog_store.snapshot();
+                    runtime.saved_catalog_generation = runtime.catalog_store_save_generation;
                     runtime.pending_catalog_save.reset();
                     runtime.pending_catalog_save_generation = 0;
                     runtime.pending_catalog_save_post_therapy = false;
@@ -3509,12 +3526,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         if (status.state == NightCatalogRefreshState::Ready ||
             status.state == NightCatalogRefreshState::NoCompleteRecords ||
             status.state == NightCatalogRefreshState::Error) {
+            const auto refreshed_catalog = runtime.catalog_refresh.take_snapshot();
             const char *rebuild_error = nullptr;
             if (runtime.refresh_rebuild) {
                 rebuild_error = status.state == NightCatalogRefreshState::NoCompleteRecords
                     ? "night_catalog_no_complete_records"
                     : status.error[0] ? status.error : status.warning[0]
-                    ? status.warning : runtime.rebuild_source_error(*runtime.catalog_refresh.snapshot());
+                    ? status.warning : runtime.rebuild_source_error(*refreshed_catalog);
             }
 
             if (rebuild_error) {
@@ -3535,7 +3553,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_refresh_retry_attempt = 0;
                 runtime.catalog_refresh_logged_error[0] = '\0';
             } else if (status.state == NightCatalogRefreshState::Ready) {
-                publish_catalog(runtime.catalog_refresh.snapshot(),
+                publish_catalog(refreshed_catalog,
                                 runtime.refresh_generation);
                 runtime.pending_catalog_save = runtime.catalog;
                 runtime.pending_catalog_save_generation =
@@ -3806,6 +3824,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.observe_engine(now_ms) || worked;
     worked = runtime.advance_rebuild() || worked;
+    worked = runtime.compact_saved_catalog() || worked;
     if (runtime.period_running) {
         worked = runtime.period_service.poll() || worked;
         if (!runtime.period_completed) runtime.period_completed = runtime.period_service.take_completed();

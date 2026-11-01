@@ -36,7 +36,7 @@ enum class MetricHistogramId : uint8_t {
 
 constexpr size_t METRIC_HISTOGRAM_COUNT =
     static_cast<size_t>(MetricHistogramId::Count);
-constexpr uint16_t METRIC_CHECKPOINT_VERSION = 3;
+constexpr uint16_t METRIC_CHECKPOINT_VERSION = 4;
 constexpr size_t METRIC_CHECKPOINT_HEADER_BYTES = 32;
 constexpr size_t METRIC_CHECKPOINT_ACTIVE_MASK_OFFSET = 6;
 constexpr size_t METRIC_CHECKPOINT_SUM_OFFSET = 0;
@@ -173,7 +173,7 @@ uint16_t histogram_active_mask(
     return mask;
 }
 
-size_t checkpoint_size(uint16_t active_mask, uint16_t version = METRIC_CHECKPOINT_VERSION) {
+size_t checkpoint_size(uint16_t active_mask, uint16_t version) {
     size_t active_count = 0;
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         if ((active_mask & (1u << i)) != 0) ++active_count;
@@ -469,9 +469,21 @@ std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
         if (active[i] && !runtime_->histograms[i].bins) return {};
     }
     const uint16_t active_mask = histogram_active_mask(active);
+    uint16_t counts[METRIC_HISTOGRAM_COUNT] = {};
+    bool sparse[METRIC_HISTOGRAM_COUNT] = {};
+    size_t size = METRIC_CHECKPOINT_HEADER_BYTES;
+    for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
+        if (!active[i]) continue;
 
-    std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(checkpoint_size(active_mask));
+        for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
+            counts[i] += runtime_->histograms[i].bins[bin] != 0;
+        }
+        sparse[i] = counts[i] * 6u < METRIC_HISTOGRAM_BINS * 4u;
+        if (!sparse[i]) counts[i] = METRIC_HISTOGRAM_BINS;
+        size += METRIC_CHECKPOINT_BINS_OFFSET + counts[i] * (sparse[i] ? 6u : 4u);
+    }
+
+    std::unique_ptr<LargeByteBuffer> output = LargeByteBuffer::allocate(size);
     if (!output) return {};
 
     memset(output->data(), 0, output->size());
@@ -497,12 +509,19 @@ std::shared_ptr<const LargeByteBuffer> ReportMetricAccumulator::snapshot()
         LittleEndian::put_le32(record + 16, histogram.minimum);
         LittleEndian::put_le32(record + 20, histogram.maximum);
         record[24] = histogram.extrema_valid ? 1 : 0;
+        record[25] = sparse[i] ? 1 : 0;
+        LittleEndian::put_le16(record + 26, counts[i]);
+        uint8_t *bins = record + METRIC_CHECKPOINT_BINS_OFFSET;
         for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
-            LittleEndian::put_le32(
-                record + METRIC_CHECKPOINT_BINS_OFFSET + bin * sizeof(uint32_t),
-                histogram.bins[bin]);
+            if (sparse[i]) {
+                if (!histogram.bins[bin]) continue;
+                LittleEndian::put_le16(bins, bin);
+                bins += 2;
+            }
+            LittleEndian::put_le32(bins, histogram.bins[bin]);
+            bins += 4;
         }
-        record += METRIC_CHECKPOINT_HISTOGRAM_BYTES;
+        record = bins;
     }
 
     return LargeByteBuffer::freeze(std::move(output));
@@ -513,6 +532,7 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length,
     if (!runtime_ || !data || length < 7 ||
         (LittleEndian::get_le16(data) != 1 &&
          LittleEndian::get_le16(data) != 2 &&
+         LittleEndian::get_le16(data) != 3 &&
          LittleEndian::get_le16(data) != METRIC_CHECKPOINT_VERSION) ||
         LittleEndian::get_le32(data + 2) != length) {
         return false;
@@ -526,13 +546,54 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length,
         : LittleEndian::get_le16(data + METRIC_CHECKPOINT_ACTIVE_MASK_OFFSET);
     const bool legacy = version == 1;
     if ((active_mask & ~METRIC_CHECKPOINT_ACTIVE_MASK) != 0 ||
-        checkpoint_size(active_mask, version) != length ||
+        (version < 4 && checkpoint_size(active_mask, version) != length) ||
         (version >= 3 &&
          ((LittleEndian::get_le16(data + 8) & ~METRIC_CHECKPOINT_ACTIVE_MASK) != 0 ||
           data[10] > 1 ||
           LittleEndian::get_le64(data + 20) > LittleEndian::get_le64(data + 12)))) {
         return false;
     }
+
+    const uint8_t *records[METRIC_HISTOGRAM_COUNT] = {};
+    uint16_t counts[METRIC_HISTOGRAM_COUNT] = {};
+    bool sparse[METRIC_HISTOGRAM_COUNT] = {};
+    const size_t bins_offset = legacy ? 16 : METRIC_CHECKPOINT_BINS_OFFSET;
+    size_t offset = legacy ? 7 : version == 2 ? 8 : METRIC_CHECKPOINT_HEADER_BYTES;
+    for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
+        if (!(active_mask & (1u << i))) continue;
+        if (length - offset < bins_offset) return false;
+
+        const uint8_t *record = data + offset;
+        records[i] = record;
+        counts[i] = version < 4 ? METRIC_HISTOGRAM_BINS
+                               : LittleEndian::get_le16(record + 26);
+        sparse[i] = version >= 4 && record[25] == 1;
+        if (version >= 4 &&
+            (record[24] > 1 || record[25] > 1 ||
+             counts[i] > METRIC_HISTOGRAM_BINS ||
+             (!sparse[i] && counts[i] != METRIC_HISTOGRAM_BINS))) {
+            return false;
+        }
+
+        offset += bins_offset;
+        const size_t bytes = counts[i] * (sparse[i] ? 6u : 4u);
+        if (bytes > length - offset) return false;
+        if (sparse[i]) {
+            uint16_t previous = 0;
+            for (size_t bin = 0; bin < counts[i]; ++bin) {
+                const uint8_t *entry = data + offset + bin * 6;
+                const uint16_t index = LittleEndian::get_le16(entry);
+                if (index >= METRIC_HISTOGRAM_BINS ||
+                    (bin && index <= previous) ||
+                    LittleEndian::get_le32(entry + 2) == 0) {
+                    return false;
+                }
+                previous = index;
+            }
+        }
+        offset += bytes;
+    }
+    if (offset != length) return false;
 
     bool active[METRIC_HISTOGRAM_COUNT] = {};
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
@@ -547,11 +608,10 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length,
 
     MetricHistogram next[METRIC_HISTOGRAM_COUNT];
     bind_histograms(next, active, next_bins);
-    const size_t bins_offset = legacy ? 16 : METRIC_CHECKPOINT_BINS_OFFSET;
-    const uint8_t *record = data + (legacy ? 7 : version == 2 ? 8 : METRIC_CHECKPOINT_HEADER_BYTES);
     for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
         if (!(active_mask & (1u << i))) continue;
 
+        const uint8_t *record = records[i];
         next[i].sum_milli = static_cast<int64_t>(LittleEndian::get_le64(
             record + METRIC_CHECKPOINT_SUM_OFFSET));
         next[i].samples = LittleEndian::get_le64(
@@ -561,12 +621,13 @@ bool ReportMetricAccumulator::restore(const uint8_t *data, size_t length,
             next[i].minimum = static_cast<int32_t>(LittleEndian::get_le32(record + 16));
             next[i].maximum = static_cast<int32_t>(LittleEndian::get_le32(record + 20));
         }
-        for (size_t bin = 0; bin < METRIC_HISTOGRAM_BINS; ++bin) {
-            next[i].bins[bin] = LittleEndian::get_le32(
-                record + bins_offset +
-                bin * sizeof(uint32_t));
+        const uint8_t *bins = record + bins_offset;
+        for (size_t bin = 0; bin < counts[i]; ++bin) {
+            const uint16_t index = sparse[i] ? LittleEndian::get_le16(bins) : bin;
+            if (sparse[i]) bins += 2;
+            next[i].bins[index] = LittleEndian::get_le32(bins);
+            bins += 4;
         }
-        record += bins_offset + METRIC_HISTOGRAM_BINS * sizeof(uint32_t);
     }
 
     runtime_->clear();

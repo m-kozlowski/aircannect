@@ -431,12 +431,13 @@ struct NightCatalogRefreshRuntime {
 
     ~NightCatalogRefreshRuntime() {
         clear_sources();
-        Memory::free(read_buffer);
     }
 
     void clear_sources() {
         builder.reset();
         building_catalog.reset();
+        Memory::free(read_buffer);
+        read_buffer = nullptr;
         destroy_large_array(build_sessions, edf_session_count);
         build_sessions = nullptr;
         destroy_large_array(build_files, build_file_capacity);
@@ -619,6 +620,14 @@ bool NightCatalogRefreshService::active() const {
     return runtime_->phase != NightCatalogRefreshRuntime::Phase::Idle &&
            runtime_->phase != NightCatalogRefreshRuntime::Phase::Ready &&
            runtime_->phase != NightCatalogRefreshRuntime::Phase::Error;
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogRefreshService::take_snapshot() {
+    if (active()) return {};
+
+    std::shared_ptr<const NightCatalog> result;
+    result.swap(published_);
+    return result;
 }
 
 void NightCatalogRefreshService::reset_transient() {

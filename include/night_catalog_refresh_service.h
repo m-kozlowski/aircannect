@@ -82,6 +82,7 @@ public:
     std::shared_ptr<const NightCatalog> snapshot() const {
         return published_;
     }
+    std::shared_ptr<const NightCatalog> take_snapshot();
 
 private:
     void reset_transient();
