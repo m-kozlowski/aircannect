@@ -3806,9 +3806,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
+    const auto refresh_engine = runtime.engine.status();
+    const bool full_refresh_idle = refresh_engine.state == ReportEngineState::Idle &&
+                                   refresh_engine.queued == 0;
+
     if (runtime.pending_refresh.valid() &&
         !runtime.rebuild_catalog &&
         runtime.pending_refresh.summary_attempted &&
+        (runtime.pending_refresh.target.valid() || full_refresh_idle) &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save &&
         !runtime.summary_acquisition.active() &&
