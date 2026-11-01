@@ -127,9 +127,17 @@ struct NightCatalogFallbackInput {
     bool time_conflict = false;
 };
 
+// Accepted EDF clock provenance needed to match summaries for another day.
+struct NightCatalogRawEdfSessionInput {
+    SleepDayId sleep_day;
+    NightCatalogTimeRange window;
+};
+
 struct NightCatalogBuildInput {
     const NightCatalogEdfSessionInput *edf_sessions = nullptr;
     size_t edf_session_count = 0;
+    const NightCatalogRawEdfSessionInput *raw_edf_sessions = nullptr;
+    size_t raw_edf_session_count = 0;
     const NightCatalogStrInput *str_records = nullptr;
     size_t str_record_count = 0;
     const NightCatalogSummaryInput *summary_records = nullptr;
@@ -171,6 +179,13 @@ public:
     // Merge selected days in descending order. Catalogs and days are borrowed.
     bool begin_merge(const NightCatalog &catalog, const NightCatalog &replacement,
                      const SleepDayId *days, size_t day_count);
+
+    // Collect unordered single-night indexes; sort and flatten on finish.
+    bool begin_index();
+    // Accept exactly one night. Its ownership order is resolved at finish.
+    bool append_index(const NightCatalog &night_catalog);
+    bool finish_index();
+
     bool poll();
     bool active() const;
     void reset();
@@ -217,6 +232,8 @@ public:
 private:
     struct Runtime;
     struct ProjectionRuntime;
+    struct IndexRuntime;
+    bool fail_index(NightCatalogBuildFailure failure, const char *detail);
     bool begin_projection(const NightCatalog &catalog, Projection projection,
                           SleepDayId sleep_day, const NightCatalog *replacement,
                           const SleepDayId *days, size_t day_count);
@@ -229,6 +246,7 @@ private:
 
     Runtime *runtime_ = nullptr;
     ProjectionRuntime *projection_ = nullptr;
+    IndexRuntime *index_runtime_ = nullptr;
     NightCatalogBuildStatus status_;
 };
 

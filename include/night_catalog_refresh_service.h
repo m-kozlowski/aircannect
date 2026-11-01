@@ -21,6 +21,7 @@ enum class NightCatalogRefreshState : uint8_t {
     ReadingFallback,
     ReadingStr,
     Building,
+    Staging,
     Cancelling,
     Ready,
     NoCompleteRecords,
@@ -83,6 +84,10 @@ public:
         return published_;
     }
     std::shared_ptr<const NightCatalog> take_snapshot();
+
+    // Full refresh yields one night until its sources have been staged.
+    std::shared_ptr<const NightCatalog> pending_night() const;
+    bool accept_night();
 
 private:
     void reset_transient();

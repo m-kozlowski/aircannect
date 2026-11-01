@@ -8,6 +8,7 @@
 #include "night_catalog_file.h"
 #include "operation_outcome.h"
 #include "storage_atomic_write_port.h"
+#include "storage_delete_port.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -34,6 +35,7 @@ struct NightCatalogStoreRuntime;
 
 class NightCatalogStoreService {
 public:
+    // Lifecycle and operation servicing.
     NightCatalogStoreService() = default;
     ~NightCatalogStoreService();
 
@@ -44,7 +46,14 @@ public:
     void begin(StorageReadPort &read_port);
     void begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port);
+    void begin(StorageReadPort &read_port,
+               StorageAtomicWritePort &write_port,
+               StorageDeletePort &delete_port);
+    bool poll();
+    void cancel();
+    void forget_media();
 
+    // Catalog reads.
     // Both load operations publish only after a complete, validated read.
     OperationAdmission request_load(uint32_t generation);
     // Use a separate loader; compare its source_revision with the index.
@@ -53,16 +62,26 @@ public:
                                           StorageReadLane lane =
                                               StorageReadLane::Report);
 
+    // Catalog persistence.
     // Full sources are persisted first; the compact index is published last.
     OperationAdmission request_save(
         std::shared_ptr<const NightCatalog> catalog,
         uint32_t generation);
 
-    bool poll();
-    void cancel();
-    void forget_media();
+    // Full-refresh staging. Scratch files are never adopted across sessions.
+    OperationAdmission begin_staging(uint32_t generation);
+    OperationAdmission request_stage(
+        std::shared_ptr<const NightCatalog> single_night,
+        uint32_t generation);
+    OperationAdmission request_install(
+        std::shared_ptr<const NightCatalog> compact_index,
+        uint32_t generation);
 
+    // Published state and operation status.
     bool active() const;
+    bool staging() const;
+    bool installing() const;
+    bool cleanup_pending() const;
     const NightCatalogStoreStatus &status() const { return status_; }
     std::shared_ptr<const NightCatalog> snapshot() const {
         return published_;
@@ -74,24 +93,35 @@ public:
     }
 
 private:
+    // Operation lifecycle.
     void reset_operation();
+    void clear_staging();
     void fail(const char *error);
 
+    // Catalog reads.
     OperationAdmission start_load(const char *path,
                                   SleepDayId sleep_day,
                                   uint32_t generation,
                                   StorageReadLane lane);
     void finish_load(std::shared_ptr<const NightCatalog> catalog);
 
+    // Save admission and source baseline.
     bool sources_stored(const NightCatalogRecord &record) const;
     OperationAdmission reject_save(uint32_t generation,
                                    const char *error);
 
+    // Staged-refresh admission.
+    OperationAdmission reject_staging(uint32_t generation,
+                                      const char *error);
+
+    // Storage owners.
     StorageReadPort *read_port_ = nullptr;
     StorageAtomicWritePort *write_port_ = nullptr;
+    StorageDeletePort *delete_port_ = nullptr;
     NightCatalogStoreRuntime *runtime_ = nullptr;
     NightCatalogStoreStatus status_;
 
+    // Published catalog snapshots.
     std::shared_ptr<const NightCatalog> published_;
     // Night-only reads must not replace the catalog's persistence baseline.
     std::shared_ptr<const NightCatalog> stored_;

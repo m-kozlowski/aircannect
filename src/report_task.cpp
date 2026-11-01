@@ -128,6 +128,9 @@ enum class CatalogStorePurpose : uint8_t {
     Save,
     SourceUpdate,
     RebuildLoad,
+    StageCleanup,
+    StageNight,
+    Install,
 };
 
 uint32_t increment_generation(uint32_t generation) {
@@ -754,6 +757,8 @@ struct ReportTask::Runtime {
 
         const bool changed = current->source_revision != night->source_revision ||
                              current->source_flags != night->source_flags;
+        if (changed && catalog_store.installing()) return false;
+
         const auto merged = NightCatalogBuilder::upsert_night(
             *catalog, *loaded, night->sleep_day);
         if (!merged) {
@@ -817,6 +822,7 @@ struct ReportTask::Runtime {
 
     bool observe_capture_sources(uint32_t now_ms) {
         if (!capture_sources_pending) return false;
+        if (catalog_store.installing()) return false;
         if (capture_sources.active()) return capture_sources.poll();
 
         capture_sources_pending = false;
@@ -853,6 +859,19 @@ struct ReportTask::Runtime {
         if (!publish_state()) {
             record_failure("publish_status", "report_snapshot_alloc_failed");
         }
+    }
+
+    void discard_refresh_stage() {
+        if (!staging_generation || catalog_store.installing()) return;
+
+        catalog_store.cancel();
+        if (store_purpose == CatalogStorePurpose::StageCleanup ||
+            store_purpose == CatalogStorePurpose::StageNight) {
+            store_purpose = CatalogStorePurpose::None;
+        }
+        staging_generation = 0;
+        refresh_candidate.reset();
+        refresh_install_complete = false;
     }
 
     void remember_failure(const ReportEngineCompletion &completion,
@@ -1050,6 +1069,7 @@ struct ReportTask::Runtime {
                     pending_refresh.source_change || refresh_source_change;
             }
             catalog_refresh.cancel();
+            discard_refresh_stage();
             refresh_generation = 0;
             refresh_post_therapy = false;
             refresh_source_change = false;
@@ -1258,8 +1278,10 @@ struct ReportTask::Runtime {
                     }
 
                     if (refresh_generation != 0 &&
-                        !refresh_target.valid() && !refresh_post_therapy) {
+                        !refresh_target.valid() && !refresh_post_therapy &&
+                        !catalog_store.installing()) {
                         catalog_refresh.cancel();
+                        discard_refresh_stage();
                         refresh_generation = 0;
                     }
 
@@ -2098,7 +2120,9 @@ struct ReportTask::Runtime {
         }
         if (catalog_store.active()) {
             out.operation = store_purpose == CatalogStorePurpose::Save ||
-                            store_purpose == CatalogStorePurpose::SourceUpdate
+                            store_purpose == CatalogStorePurpose::SourceUpdate ||
+                            store_purpose == CatalogStorePurpose::StageNight ||
+                            store_purpose == CatalogStorePurpose::Install
                 ? ReportTaskOperation::SavingCatalog
                 : ReportTaskOperation::LoadingCatalog;
             return out;
@@ -2160,14 +2184,13 @@ struct ReportTask::Runtime {
             return out;
         }
 
-        if (pending_refresh.valid() &&
-            catalog_refresh.status().state == NightCatalogRefreshState::Error) {
+        if (pending_refresh.valid() && catalog_refresh_error[0]) {
             out.operation = ReportTaskOperation::RefreshingCatalog;
             out.sleep_day = pending_refresh.target.sleep_day;
             out.wait_reason = ReportTaskWaitReason::Retry;
             out.retry_in_ms = deadline_remaining(
                 last_step_ms, catalog_refresh_retry_at_ms);
-            copy_cstr(out.error, sizeof(out.error), catalog_refresh.status().error);
+            copy_cstr(out.error, sizeof(out.error), catalog_refresh_error);
             return out;
         }
 
@@ -2260,7 +2283,9 @@ struct ReportTask::Runtime {
             if (night.source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT) ++out.time_conflict_nights;
             if (night.unresolved_history) ++out.unresolved_history_nights;
         }
-        copy_cstr(out.catalog_error, sizeof(out.catalog_error), catalog_status.error);
+        copy_cstr(out.catalog_error, sizeof(out.catalog_error),
+                  pending_refresh.valid() && catalog_refresh_error[0]
+                      ? catalog_refresh_error : catalog_status.error);
 
         out.store_catalog_state = store_status.state;
         out.store_catalog_checked = store_status.nights_checked;
@@ -2289,7 +2314,9 @@ struct ReportTask::Runtime {
         next.catalog_refresh_generation =
             catalog_refresh.status().generation;
         next.catalog_refresh_retryable =
-            catalog_refresh.status().retryable;
+            catalog_refresh.status().retryable ||
+            (pending_refresh.valid() && catalog_refresh_retry_at_ms != 0 &&
+             catalog_refresh_error[0]);
 
         const ReportEngineStatus engine_status = engine.status();
         next.foreground_active = engine_status.foreground_active || period_running;
@@ -2415,12 +2442,16 @@ struct ReportTask::Runtime {
 
         bool worked = engine.poll(now_ms, 1);
         worked = catalog_refresh.poll() || worked;
+        if (catalog_store.active()) {
+            worked = catalog_store.poll() || worked;
+        }
         worked = summary_acquisition.poll() || worked;
         worked = spool_availability_probe.poll() || worked;
         worked = generation_cleanup.poll(false, now_ms) || worked;
 
         if (engine.status().state != ReportEngineState::Idle ||
             catalog_refresh.active() || summary_acquisition.active() ||
+            catalog_store.active() ||
             spool_availability_probe.status().active() ||
             generation_cleanup.deleting()) return worked;
 
@@ -2441,6 +2472,10 @@ struct ReportTask::Runtime {
             pending_catalog_save_post_therapy = false;
             pending_refresh = {};
             refresh_generation = 0;
+            staging_generation = 0;
+            refresh_candidate.reset();
+            refresh_install_complete = false;
+            refresh_stage_error[0] = '\0';
             refresh_post_therapy = false;
             refresh_source_change = false;
             store_purpose = CatalogStorePurpose::None;
@@ -2459,6 +2494,7 @@ struct ReportTask::Runtime {
             durable_catalog_generation = 0;
             catalog_store_retry_at_ms = 0;
             catalog_refresh_retry_at_ms = 0;
+            catalog_refresh_error[0] = '\0';
             store_catalog_load_retry_at_ms = 0;
             reset_background_pass();
             invalidate_spool_availability();
@@ -2570,6 +2606,12 @@ struct ReportTask::Runtime {
     uint32_t reconcile_due_ms = 0;
     bool reconcile_deadline_initialized = false;
     uint32_t refresh_generation = 0;
+    uint32_t refresh_base_generation = 0;
+    uint32_t staging_generation = 0;
+    uint8_t refresh_conflict_attempt = 0;
+    bool refresh_install_complete = false;
+    std::shared_ptr<const NightCatalog> refresh_candidate;
+    char refresh_stage_error[AC_STORAGE_ERROR_MAX] = {};
     bool refresh_offset_valid = false;
     int32_t refresh_offset_minutes = 0;
     NightCatalogRefreshTarget refresh_target;
@@ -2577,7 +2619,7 @@ struct ReportTask::Runtime {
     bool refresh_source_change = false;
     uint32_t catalog_refresh_retry_at_ms = 0;
     uint8_t catalog_refresh_retry_attempt = 0;
-    char catalog_refresh_logged_error[AC_STORAGE_ERROR_MAX] = {};
+    char catalog_refresh_error[AC_STORAGE_ERROR_MAX] = {};
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
@@ -2692,7 +2734,11 @@ bool ReportTask::begin(StorageReadPort &read_port,
 #endif
 
     runtime_->catalog_refresh.begin(scan_port, read_port);
-    runtime_->catalog_store.begin(read_port, write_port);
+    if (delete_port) {
+        runtime_->catalog_store.begin(read_port, write_port, *delete_port);
+    } else {
+        runtime_->catalog_store.begin(read_port, write_port);
+    }
     runtime_->capture_sources.begin(read_port);
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->summary_archive.begin(read_port, range_write_port, write_port, scan_port);
@@ -3150,6 +3196,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
     worked = runtime.apply_pending_activity() || worked;
 
+    if (runtime.staging_generation && !runtime.refresh_generation &&
+        (runtime.local_background_work_blocked() || !runtime.pending_refresh.valid() ||
+         runtime.pending_refresh.target.valid() || runtime.pending_catalog_save ||
+         static_cast<int32_t>(runtime.pending_refresh.generation -
+                              runtime.staging_generation) > 0)) {
+        runtime.discard_refresh_stage();
+    }
+
     const bool summary_media_available = runtime.storage_status && runtime.storage_status->mounted();
     if (runtime.summary_media_available && !summary_media_available) {
         if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
@@ -3298,7 +3352,36 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             status.state == NightCatalogStoreState::Error) {
             const CatalogStorePurpose completed = runtime.store_purpose;
             runtime.store_purpose = CatalogStorePurpose::None;
-            if (completed == CatalogStorePurpose::Load) {
+            if (completed == CatalogStorePurpose::StageCleanup ||
+                completed == CatalogStorePurpose::StageNight ||
+                completed == CatalogStorePurpose::Install) {
+                if (completed == CatalogStorePurpose::StageCleanup &&
+                    !runtime.catalog_store.staging() &&
+                    !runtime.staging_generation) {
+                    // Deferred scratch cleanup is best effort. Keep its pending
+                    // flag so an idle pass can retry after storage resumes.
+                } else if (status.state == NightCatalogStoreState::Error) {
+                    if (runtime.refresh_generation != 0) {
+                        copy_cstr(runtime.refresh_stage_error, sizeof(runtime.refresh_stage_error),
+                                  status.error);
+                        runtime.catalog_refresh.cancel();
+                    } else {
+                        runtime.catalog_refresh_retry_at_ms =
+                            now_ms + retry_delay(runtime.catalog_refresh_retry_attempt);
+                        advance_retry(runtime.catalog_refresh_retry_attempt);
+                        runtime.record_failure("stage_catalog", status.error, {},
+                            deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms));
+                        copy_cstr(runtime.catalog_refresh_error,
+                                  sizeof(runtime.catalog_refresh_error), status.error);
+                        runtime.discard_refresh_stage();
+                    }
+                } else if (completed == CatalogStorePurpose::StageNight) {
+                    (void)runtime.catalog_refresh.accept_night();
+                } else if (completed == CatalogStorePurpose::Install) {
+                    runtime.refresh_install_complete = true;
+                    runtime.record_durable_catalog_generation(status.generation);
+                }
+            } else if (completed == CatalogStorePurpose::Load) {
                 runtime.catalog_load_pending = false;
                 if (status.state == NightCatalogStoreState::Ready) {
                     runtime.record_durable_catalog_generation(status.generation);
@@ -3435,6 +3518,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
+    if (!runtime.local_background_work_blocked() &&
+        runtime.store_purpose == CatalogStorePurpose::None &&
+        !runtime.catalog_load_pending && !runtime.refresh_generation &&
+        runtime.catalog_store.cleanup_pending() &&
+        !runtime.catalog_store.staging() &&
+        runtime.catalog_store.status().state != NightCatalogStoreState::Error) {
+        (void)runtime.catalog_store.poll();
+        if (runtime.catalog_store.active()) {
+            runtime.store_purpose = CatalogStorePurpose::StageCleanup;
+        }
+        worked = true;
+    }
+
     worked = runtime.observe_capture_sources(now_ms) || worked;
     const ReportEngineStatus engine_work = runtime.engine.status();
     if (runtime.store_catalog_loader.status().active() &&
@@ -3494,17 +3590,65 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
+    if (runtime.refresh_generation && runtime.staging_generation &&
+        runtime.catalog_generation != runtime.refresh_base_generation &&
+        !runtime.catalog_store.installing() && !runtime.refresh_install_complete) {
+        copy_cstr(runtime.refresh_stage_error, sizeof(runtime.refresh_stage_error),
+                  "night_catalog_refresh_base_changed");
+        runtime.catalog_refresh.cancel();
+        runtime.discard_refresh_stage();
+    }
+
     if (runtime.catalog_refresh.active()) {
         worked = runtime.catalog_refresh.poll() || worked;
     }
+
+    if (runtime.catalog_refresh.pending_night() &&
+        runtime.store_purpose == CatalogStorePurpose::None) {
+        const auto admitted = runtime.catalog_store.request_stage(
+            runtime.catalog_refresh.pending_night(), runtime.refresh_generation);
+        if (admitted == OperationAdmission::Accepted) {
+            runtime.store_purpose = CatalogStorePurpose::StageNight;
+        } else if (admitted == OperationAdmission::Rejected) {
+            copy_cstr(runtime.refresh_stage_error, sizeof(runtime.refresh_stage_error),
+                      runtime.catalog_store.status().error);
+            runtime.catalog_refresh.cancel();
+        }
+        worked = true;
+    }
+
     if (runtime.refresh_generation != 0 &&
-        !runtime.catalog_refresh.active()) {
-        const NightCatalogRefreshStatus status =
+        !runtime.catalog_refresh.active() &&
+        runtime.store_purpose != CatalogStorePurpose::Install) {
+        NightCatalogRefreshStatus status =
             runtime.catalog_refresh.status();
+        if (runtime.refresh_stage_error[0]) {
+            status.state = NightCatalogRefreshState::Error;
+            status.retryable = true;
+            copy_cstr(status.error, sizeof(status.error), runtime.refresh_stage_error);
+        }
+
         if (status.state == NightCatalogRefreshState::Ready ||
             status.state == NightCatalogRefreshState::NoCompleteRecords ||
             status.state == NightCatalogRefreshState::Error) {
-            const auto refreshed_catalog = runtime.catalog_refresh.take_snapshot();
+            if (!runtime.refresh_candidate) {
+                runtime.refresh_candidate = runtime.catalog_refresh.take_snapshot();
+            }
+            const auto refreshed_catalog = runtime.refresh_candidate;
+
+            if (status.state == NightCatalogRefreshState::Ready &&
+                runtime.staging_generation && !runtime.refresh_install_complete) {
+                const auto admitted = runtime.catalog_store.request_install(
+                    refreshed_catalog, runtime.refresh_generation);
+                if (admitted == OperationAdmission::Accepted) {
+                    runtime.store_purpose = CatalogStorePurpose::Install;
+                } else if (admitted == OperationAdmission::Rejected) {
+                    copy_cstr(runtime.refresh_stage_error, sizeof(runtime.refresh_stage_error),
+                              runtime.catalog_store.status().error);
+                }
+                return true;
+            }
+
             const char *rebuild_error = nullptr;
             if (runtime.refresh_rebuild) {
                 rebuild_error = status.state == NightCatalogRefreshState::NoCompleteRecords
@@ -3529,16 +3673,16 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
-                runtime.catalog_refresh_logged_error[0] = '\0';
+                runtime.catalog_refresh_error[0] = '\0';
             } else if (status.state == NightCatalogRefreshState::Ready) {
                 publish_catalog(refreshed_catalog,
                                 runtime.refresh_generation);
-                runtime.pending_catalog_save = runtime.catalog;
-                runtime.pending_catalog_save_generation =
-                    runtime.catalog_generation;
-                runtime.pending_catalog_save_post_therapy =
-                    runtime.pending_catalog_save_post_therapy ||
-                    runtime.refresh_post_therapy;
+                if (!runtime.refresh_install_complete) {
+                    runtime.pending_catalog_save = runtime.catalog;
+                    runtime.pending_catalog_save_generation = runtime.catalog_generation;
+                    runtime.pending_catalog_save_post_therapy =
+                        runtime.pending_catalog_save_post_therapy || runtime.refresh_post_therapy;
+                }
 
                 if (runtime.refresh_post_therapy) {
                     const NightCatalogRecord *night =
@@ -3553,14 +3697,21 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
 
                 if (runtime.refresh_source_change) {
-                    runtime.pending_catalog_save_source_change = true;
-                    runtime.pending_catalog_save_source =
-                        runtime.refresh_source_change_covered;
+                    if (runtime.refresh_install_complete) {
+                        runtime.clear_failures(runtime.refresh_source_change_covered);
+                        runtime.consume_source_change_coverage(runtime.refresh_source_change_covered);
+                        runtime.refresh_source_change_covered = {};
+                        runtime.reset_background_pass();
+                    } else {
+                        runtime.pending_catalog_save_source_change = true;
+                        runtime.pending_catalog_save_source = runtime.refresh_source_change_covered;
+                    }
                 }
 
+                runtime.refresh_conflict_attempt = 0;
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
-                runtime.catalog_refresh_logged_error[0] = '\0';
+                runtime.catalog_refresh_error[0] = '\0';
                 if (runtime.refresh_rebuild) runtime.rebuild_sources_ready = true;
             } else if (status.retryable) {
                 if (!runtime.pending_refresh.valid()) {
@@ -3589,6 +3740,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     now_ms + retry_delay(
                                  runtime.catalog_refresh_retry_attempt);
                 advance_retry(runtime.catalog_refresh_retry_attempt);
+                if (strcmp(status.error, "night_catalog_refresh_base_changed") == 0) {
+                    runtime.pending_refresh.generation = runtime.next_catalog_generation();
+                    ++runtime.refresh_conflict_attempt;
+                    if (runtime.refresh_conflict_attempt >= 3) {
+                        runtime.catalog_refresh_retry_at_ms = now_ms + CATALOG_RECONCILE_IDLE_MS;
+                        runtime.refresh_conflict_attempt = 0;
+                    }
+                }
             } else if (runtime.refresh_source_change) {
                 if (!runtime.pending_refresh.valid()) {
                     runtime.pending_refresh.generation = runtime.refresh_generation;
@@ -3618,11 +3777,16 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.record_failure("refresh_catalog", status.error,
                                        runtime.refresh_target.sleep_day,
                                        deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms),
-                                       strcmp(runtime.catalog_refresh_logged_error, status.error) != 0);
-                copy_cstr(runtime.catalog_refresh_logged_error,
-                          sizeof(runtime.catalog_refresh_logged_error), status.error);
+                                       strcmp(status.error, "night_catalog_refresh_base_changed") == 0 ||
+                                       strcmp(runtime.catalog_refresh_error, status.error) != 0);
+                copy_cstr(runtime.catalog_refresh_error,
+                          sizeof(runtime.catalog_refresh_error), status.error);
             }
 
+            runtime.discard_refresh_stage();
+            runtime.refresh_candidate.reset();
+            runtime.refresh_stage_error[0] = '\0';
+            runtime.refresh_install_complete = false;
             runtime.refresh_generation = 0;
             runtime.refresh_rebuild = false;
             runtime.refresh_target = {};
@@ -3635,7 +3799,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (runtime.pending_refresh.valid() &&
         !runtime.rebuild_catalog &&
         runtime.pending_refresh.summary_attempted &&
-        runtime.store_purpose != CatalogStorePurpose::SourceUpdate &&
+        runtime.store_purpose == CatalogStorePurpose::None &&
+        !runtime.pending_catalog_save &&
         !runtime.summary_acquisition.active() &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
@@ -3644,6 +3809,33 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.catalog_storage_ready() &&
         deadline_due(now_ms, runtime.pending_refresh.due_ms) &&
         deadline_due(now_ms, runtime.catalog_refresh_retry_at_ms)) {
+        if (!runtime.pending_refresh.target.valid() && runtime.staging_generation &&
+            static_cast<int32_t>(runtime.staging_generation - runtime.catalog_generation) <= 0) {
+            runtime.discard_refresh_stage();
+        }
+
+        if (!runtime.pending_refresh.target.valid() && !runtime.staging_generation) {
+            uint32_t generation = runtime.pending_refresh.generation;
+            if (static_cast<int32_t>(generation - runtime.catalog_generation) <= 0) {
+                generation = runtime.next_catalog_generation();
+            }
+
+            const auto admitted = runtime.catalog_store.begin_staging(generation);
+            if (admitted == OperationAdmission::Accepted) {
+                runtime.staging_generation = generation;
+                runtime.store_purpose = CatalogStorePurpose::StageCleanup;
+            } else if (admitted == OperationAdmission::Rejected) {
+                runtime.catalog_refresh_retry_at_ms = now_ms + retry_delay(runtime.catalog_refresh_retry_attempt);
+                advance_retry(runtime.catalog_refresh_retry_attempt);
+                runtime.record_failure("stage_catalog", runtime.catalog_store.status().error, {},
+                    deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms));
+                copy_cstr(runtime.catalog_refresh_error,
+                          sizeof(runtime.catalog_refresh_error),
+                          runtime.catalog_store.status().error);
+            }
+            return true;
+        }
+
         std::shared_ptr<const NightCatalogSummarySnapshot> summary =
             runtime.pending_refresh.source_change
                 ? nullptr : runtime.summary_acquisition.snapshot();
@@ -3657,15 +3849,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             if (summary) runtime.summary_acquisition.seed(summary);
         }
 
+        // Keep the Summary request identity when renewing a queued publication.
+        const uint32_t refresh_generation = runtime.staging_generation
+            ? runtime.staging_generation : runtime.pending_refresh.generation;
         const OperationAdmission admitted =
             runtime.catalog_refresh.request_refresh(
                 summary,
                 runtime.pending_refresh.current_offset_valid,
                 runtime.pending_refresh.current_offset_minutes,
-                runtime.pending_refresh.generation,
+                refresh_generation,
                 runtime.catalog,
                 runtime.pending_refresh.target);
         if (admitted == OperationAdmission::Accepted) {
+            runtime.refresh_base_generation = runtime.catalog_generation;
             if (runtime.pending_refresh.post_therapy) {
                 ReportSourceChange covered;
                 const SleepDayId day = runtime.pending_refresh.target.sleep_day;
@@ -3683,8 +3879,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
             }
 
-            runtime.refresh_generation =
-                runtime.pending_refresh.generation;
+            runtime.refresh_generation = refresh_generation;
             runtime.refresh_offset_valid =
                 runtime.pending_refresh.current_offset_valid;
             runtime.refresh_offset_minutes =
@@ -3703,6 +3898,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.record_failure("refresh_catalog", runtime.catalog_refresh.status().error,
                                    runtime.pending_refresh.target.sleep_day,
                                    deadline_remaining(now_ms, runtime.catalog_refresh_retry_at_ms));
+            copy_cstr(runtime.catalog_refresh_error,
+                      sizeof(runtime.catalog_refresh_error),
+                      runtime.catalog_refresh.status().error);
         }
         worked = true;
     }
@@ -3713,6 +3911,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
          (runtime.capture_session.raw_segment_start_ms &&
                            runtime.capture_storage_ready())) &&
         runtime.pending_catalog_save &&
+        !runtime.staging_generation &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
         const OperationAdmission admitted =
@@ -3793,11 +3992,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             now_ms, runtime.activity.therapy_active
                 ? 1 : std::max<size_t>(record_budget, 1)) || worked;
     }
-    SourceRevision loaded_revision;
-    uint8_t loaded_flags = 0;
-    if (auto loaded = runtime.engine.take_loaded_sources(loaded_revision, loaded_flags)) {
-        worked = runtime.merge_loaded_sources(
-            std::move(loaded), loaded_revision, loaded_flags) || worked;
+    if (!runtime.catalog_store.installing()) {
+        SourceRevision loaded_revision;
+        uint8_t loaded_flags = 0;
+        if (auto loaded = runtime.engine.take_loaded_sources(loaded_revision, loaded_flags)) {
+            worked = runtime.merge_loaded_sources(
+                std::move(loaded), loaded_revision, loaded_flags) || worked;
+        }
     }
 
     worked = runtime.observe_engine(now_ms) || worked;

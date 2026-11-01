@@ -401,6 +401,13 @@ struct SourceReadCursor {
 struct NightCatalogRefreshRuntime {
     enum class Phase : uint8_t {
         Idle,
+        WaitDiscovery,
+        ReadStrDirectory,
+        WaitStrDirectory,
+        SortDiscovery,
+        NextNight,
+        WaitNight,
+        FinishIndex,
         WaitScan,
         SelectEdf,
         WaitEdf,
@@ -436,8 +443,10 @@ struct NightCatalogRefreshRuntime {
     void clear_sources() {
         builder.reset();
         building_catalog.reset();
+        decltype(night_summary){}.swap(night_summary);
         Memory::free(read_buffer);
         read_buffer = nullptr;
+        read_buffer_bytes = 0;
         destroy_large_array(build_sessions, edf_session_count);
         build_sessions = nullptr;
         destroy_large_array(build_files, build_file_capacity);
@@ -522,7 +531,51 @@ struct NightCatalogRefreshRuntime {
         datalog_root[0] = '\0';
         metadata_root[0] = '\0';
         fallback_root[0] = '\0';
+        sweep = false;
+        decltype(days){}.swap(days);
+        decltype(deferred_summary_days){}.swap(deferred_summary_days);
+        decltype(raw_edf_sessions){}.swap(raw_edf_sessions);
+        summary_pass = false;
+        decltype(str_directory){}.swap(str_directory);
+        day_cursor = 0;
+        current_day = {};
+        str_directory_cursor = 0;
+        str_directory_end = 0;
+        history_str_size = 0;
+        history_str_modified = 0;
+        history_str_records = 0;
+        history_str_cursor = 0;
+        history_str_header = false;
+        history_str_model = ResmedDeviceModel::Unknown;
+        pending_night.reset();
+        index_builder.reset();
     }
+
+    struct StrPosition {
+        SleepDayId day;
+        uint32_t record = 0;
+    };
+
+    // History retains only directory keys and STR positions, not decoded sources.
+    bool sweep = false;
+    std::vector<SleepDayId, LargeAllocator<SleepDayId>> days;
+    std::vector<SleepDayId, LargeAllocator<SleepDayId>> deferred_summary_days;
+    std::vector<NightCatalogRawEdfSessionInput,
+                LargeAllocator<NightCatalogRawEdfSessionInput>> raw_edf_sessions;
+    bool summary_pass = false;
+    size_t day_cursor = 0;
+    SleepDayId current_day;
+    std::vector<StrPosition, LargeAllocator<StrPosition>> str_directory;
+    size_t str_directory_cursor = 0;
+    size_t str_directory_end = 0;
+    uint64_t history_str_size = 0;
+    uint64_t history_str_modified = 0;
+    uint32_t history_str_records = 0;
+    uint32_t history_str_cursor = 0;
+    bool history_str_header = false;
+    ResmedDeviceModel history_str_model = ResmedDeviceModel::Unknown;
+    std::shared_ptr<const NightCatalog> pending_night;
+    NightCatalogBuilder index_builder;
 
     Phase phase = Phase::Idle;
     OperationTicket scan_ticket;
@@ -568,6 +621,7 @@ struct NightCatalogRefreshRuntime {
     size_t fallback_record_count = 0;
 
     NightCatalogBuilder builder;
+    std::vector<NightCatalogSummaryInput, LargeAllocator<NightCatalogSummaryInput>> night_summary;
     std::shared_ptr<const NightCatalog> building_catalog;
     NightCatalogEdfSessionInput *build_sessions = nullptr;
     NightCatalogSourceFileInput *build_files = nullptr;
@@ -583,6 +637,7 @@ struct NightCatalogRefreshRuntime {
     size_t preserve_count = 0;
 
     uint8_t *read_buffer = nullptr;
+    size_t read_buffer_bytes = 0;
     size_t scan_index = 0;
     size_t current_scan_entry = 0;
     char current_path[AC_STORAGE_PATH_MAX] = {};
@@ -628,6 +683,26 @@ std::shared_ptr<const NightCatalog> NightCatalogRefreshService::take_snapshot() 
     std::shared_ptr<const NightCatalog> result;
     result.swap(published_);
     return result;
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogRefreshService::pending_night() const {
+    return runtime_ ? runtime_->pending_night : nullptr;
+}
+
+bool NightCatalogRefreshService::accept_night() {
+    if (!runtime_ || runtime_->phase != NightCatalogRefreshRuntime::Phase::WaitNight) {
+        return false;
+    }
+
+    if (!runtime_->index_builder.append_index(*runtime_->pending_night)) {
+        const auto status = runtime_->index_builder.status();
+        fail(status.detail, status.retryable());
+        return false;
+    }
+
+    runtime_->pending_night.reset();
+    runtime_->phase = NightCatalogRefreshRuntime::Phase::NextNight;
+    return true;
 }
 
 void NightCatalogRefreshService::reset_transient() {
@@ -713,6 +788,7 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     runtime_->summary = target.valid() ? nullptr : std::move(summary);
     runtime_->previous_catalog = std::move(previous_catalog);
     runtime_->target = target;
+    runtime_->sweep = !target.valid();
     runtime_->current_offset_valid = current_offset_valid;
     runtime_->current_offset_minutes = current_offset_minutes;
 
@@ -769,8 +845,8 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
         }
         roots[root_count++] = {runtime_->fallback_root, false};
     } else {
-        roots[root_count++] = {"/DATALOG", true};
-        roots[root_count++] = {EDF_SESSION_METADATA_ROOT, true};
+        roots[root_count++] = {"/DATALOG", false};
+        roots[root_count++] = {EDF_SESSION_METADATA_ROOT, false};
         roots[root_count++] = {"/STR.edf", false};
         roots[root_count++] = {REPORT_FALLBACK_ARTIFACT_ROOT, false};
     }
@@ -779,6 +855,14 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     command.roots = roots;
     command.root_count = root_count;
     command.generation = generation;
+    command.include_directories = runtime_->sweep;
+
+    if (runtime_->sweep && !runtime_->index_builder.begin_index()) {
+        const auto status = runtime_->index_builder.status();
+        status_.generation = generation;
+        fail(status.detail, status.retryable());
+        return OperationAdmission::Rejected;
+    }
 
     const OperationSubmission submission = scan_port_->request_scan(command);
     if (!submission.accepted()) {
@@ -787,7 +871,9 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     }
 
     runtime_->scan_ticket = submission.ticket;
-    runtime_->phase = NightCatalogRefreshRuntime::Phase::WaitScan;
+    runtime_->phase = runtime_->sweep
+        ? NightCatalogRefreshRuntime::Phase::WaitDiscovery
+        : NightCatalogRefreshRuntime::Phase::WaitScan;
     status_ = {};
     status_.state = NightCatalogRefreshState::Scanning;
     status_.generation = generation;
@@ -796,11 +882,103 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
 
 namespace {
 
+bool discover_days(NightCatalogRefreshRuntime &runtime,
+                   const StorageScanSnapshot &scan) {
+    StorageScanEntryView entry;
+    try {
+        runtime.days.reserve(scan.size() +
+            (runtime.summary ? runtime.summary->size() : 0) +
+            (runtime.previous_catalog ? runtime.previous_catalog->size() : 0));
+
+        for (size_t i = 0; i < scan.size(); ++i) {
+            if (!scan.entry(i, entry)) continue;
+
+            const char *day_text = nullptr;
+            if (entry.root_index == STR_SCAN_ROOT && !entry.directory) {
+                runtime.history_str_size = entry.size;
+                runtime.history_str_modified = entry.modified;
+            } else if (entry.directory && entry.root_index <= SESSION_METADATA_SCAN_ROOT) {
+                const char *name = strrchr(entry.path, '/');
+                if (name && strlen(name + 1) == 8) day_text = name + 1;
+            } else if (entry.root_index == FALLBACK_SCAN_ROOT &&
+                       !entry.directory && path_is_fallback_artifact(entry.path)) {
+                day_text = entry.path + strlen(REPORT_FALLBACK_ARTIFACT_ROOT) + 1;
+            }
+
+            if (day_text) {
+                char text[9] = {};
+                memcpy(text, day_text, 8);
+                SleepDayId day;
+                if (SleepDayId::from_yyyymmdd(text, day)) runtime.days.push_back(day);
+            }
+        }
+
+        for (size_t i = 0; runtime.summary && i < runtime.summary->size(); ++i) {
+            runtime.days.push_back(runtime.summary->records()[i].sleep_day);
+        }
+
+        for (size_t i = 0; runtime.previous_catalog &&
+                           i < runtime.previous_catalog->size(); ++i) {
+            const auto &night = *runtime.previous_catalog->record(i);
+            if (night.source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) {
+                runtime.days.push_back(night.sleep_day);
+            }
+        }
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+
+    return true;
+}
+
+bool request_night_scan(NightCatalogRefreshRuntime &runtime,
+                        StorageScanPort &port,
+                        uint32_t generation,
+                        const char *&error) {
+    if (!runtime.current_day.valid()) {
+        runtime.clear_sources();
+        runtime.current_day = runtime.days[runtime.day_cursor];
+        char day[9] = {};
+        runtime.current_day.format_yyyymmdd(day, sizeof(day));
+        snprintf(runtime.datalog_root, sizeof(runtime.datalog_root), "/DATALOG/%s", day);
+        snprintf(runtime.metadata_root, sizeof(runtime.metadata_root), "%s/%s",
+                 EDF_SESSION_METADATA_ROOT, day);
+
+        if (!report_fallback_artifact_path(runtime.current_day, runtime.fallback_root,
+                                           sizeof(runtime.fallback_root))) {
+            error = "night_catalog_day_path_invalid";
+            return true;
+        }
+    }
+
+    StorageScanRoot roots[] = {
+        {runtime.datalog_root, true}, {runtime.metadata_root, true},
+        {"/STR.edf", false}, {runtime.fallback_root, false},
+    };
+    StorageScanCommand command;
+    command.roots = roots;
+    command.root_count = sizeof(roots) / sizeof(roots[0]);
+    command.generation = generation;
+
+    const auto submitted = port.request_scan(command);
+    if (submitted.admission == OperationAdmission::Busy) return false;
+    if (!submitted.accepted()) {
+        error = "night_catalog_scan_rejected";
+        return true;
+    }
+
+    runtime.scan_ticket = submitted.ticket;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::WaitScan;
+    ++runtime.day_cursor;
+    return true;
+}
+
 bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
                           NightCatalogRefreshStatus &status) {
     size_t report_file_count = 0;
     size_t metadata_file_count = 0;
     size_t fallback_file_count = 0;
+    size_t read_bytes = runtime.sweep ? EDF_HEADER_READ_MAX : SOURCE_READ_BUFFER_BYTES;
     LargeScratchArray<uint8_t> scan_entry_kinds;
     if (!scan_entry_kinds.allocate(runtime.scan->size())) {
         return false;
@@ -857,6 +1035,9 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
             scan_entry_kinds.data()[i] =
                 static_cast<uint8_t>(ScanSourceKind::SessionMetadata);
             ++metadata_file_count;
+            if (entry.size <= SOURCE_READ_BUFFER_BYTES) {
+                read_bytes = std::max(read_bytes, static_cast<size_t>(entry.size));
+            }
         } else if (entry.root_index == STR_SCAN_ROOT &&
                    strcmp(entry.path, "/STR.edf") == 0) {
             scan_entry_kinds.data()[i] =
@@ -869,6 +1050,8 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
             scan_entry_kinds.data()[i] =
                 static_cast<uint8_t>(ScanSourceKind::Fallback);
             ++fallback_file_count;
+            read_bytes = std::max(read_bytes, static_cast<size_t>(std::min<uint64_t>(
+                entry.size, ReportFallbackArtifactCodec::MaxMetadataBytes)));
         }
     }
 
@@ -931,13 +1114,14 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
 
     if (!runtime.read_buffer) {
         runtime.read_buffer = static_cast<uint8_t *>(
-            Memory::calloc_large(1, SOURCE_READ_BUFFER_BYTES, false));
+            Memory::alloc_large(read_bytes, false));
         if (!runtime.read_buffer) return false;
+        runtime.read_buffer_bytes = read_bytes;
     }
 
-    status.files_seen = static_cast<uint32_t>(std::min(
+    status.files_seen += static_cast<uint32_t>(std::min(
         report_file_count + metadata_file_count + fallback_file_count,
-        static_cast<size_t>(UINT32_MAX)));
+        static_cast<size_t>(UINT32_MAX - status.files_seen)));
     return true;
 }
 
@@ -1028,7 +1212,7 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
                      NightCatalogRefreshStatus &status,
                      const char *&error) {
     const SourceReadState read_state = runtime.source_read.poll(
-        read_port, runtime.read_buffer, SOURCE_READ_BUFFER_BYTES);
+        read_port, runtime.read_buffer, runtime.read_buffer_bytes);
     if (read_state == SourceReadState::Waiting) return false;
     if (read_state == SourceReadState::CompletionFailed) {
         skip_current_edf(runtime,
@@ -1181,7 +1365,7 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
     const SourceReadState read_state = runtime.source_read.poll(
         read_port,
         runtime.read_buffer,
-        SOURCE_READ_BUFFER_BYTES,
+        runtime.read_buffer_bytes,
         static_cast<size_t>(runtime.current_size));
     if (read_state == SourceReadState::Waiting) return false;
     if (read_state == SourceReadState::CompletionFailed) {
@@ -1394,7 +1578,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
                           NightCatalogRefreshStatus &status,
                           const char *&error) {
     const SourceReadState read_state = runtime.source_read.poll(
-        read_port, runtime.read_buffer, SOURCE_READ_BUFFER_BYTES);
+        read_port, runtime.read_buffer, runtime.read_buffer_bytes);
     if (read_state == SourceReadState::Waiting) return false;
     if (read_state == SourceReadState::CompletionFailed) {
         skip_current_fallback(runtime,
@@ -1552,14 +1736,15 @@ void skip_str(NightCatalogRefreshRuntime &runtime,
     runtime.str_chunk_records = 0;
     runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
     status.state = NightCatalogRefreshState::Building;
-    status.str_records = 0;
+    if (!runtime.sweep) status.str_records = 0;
     status.current_path[0] = '\0';
     ++status.files_skipped;
     set_warning(status, warning);
 }
 
 bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
-                         NightCatalogRefreshStatus &status) {
+                          NightCatalogRefreshStatus &status,
+                          const char *&error) {
     if (!runtime.str_file_found || runtime.str_file_size == 0) {
         runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
@@ -1582,11 +1767,34 @@ bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
         return true;
     }
 
-    runtime.str_record_capacity = runtime.target.valid() ? 1 : layout.record_count;
+    if (runtime.sweep) {
+        const auto begin = std::lower_bound(
+            runtime.str_directory.begin(), runtime.str_directory.end(), runtime.current_day,
+            [](const NightCatalogRefreshRuntime::StrPosition &position, SleepDayId day) {
+                return day < position.day;
+            });
+        auto end = begin;
+        while (end != runtime.str_directory.end() && end->day == runtime.current_day) ++end;
+        runtime.str_directory_cursor = begin - runtime.str_directory.begin();
+        runtime.str_directory_end = end - runtime.str_directory.begin();
+        runtime.str_record_capacity = end - begin;
+        runtime.str_header_read = true;
+        runtime.str_model = runtime.history_str_model;
+
+        if (runtime.str_record_capacity == 0) {
+            runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
+            status.state = NightCatalogRefreshState::Building;
+            return true;
+        }
+    } else {
+        runtime.str_record_capacity = 1;
+    }
+
     runtime.str_records = allocate_large_array<NightCatalogStrInput>(
         runtime.str_record_capacity);
     runtime.str_next_record = runtime.target.valid() ? layout.record_count : 0;
     if (!runtime.str_records) {
+        if (runtime.sweep) error = "night_catalog_str_alloc_failed";
         skip_str(runtime, status, "night_catalog_str_alloc_failed");
         return true;
     }
@@ -1596,10 +1804,12 @@ bool prepare_str_records(NightCatalogRefreshRuntime &runtime,
 
 bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
                       StorageReadPort &read_port,
-                      NightCatalogRefreshStatus &status) {
+                      NightCatalogRefreshStatus &status,
+                      const char *&error) {
     const bool targeted = runtime.target.valid();
-    const size_t remaining = targeted ? runtime.str_next_record :
-        runtime.str_record_capacity - runtime.str_next_record;
+    const size_t remaining = runtime.sweep
+        ? runtime.str_directory_end - runtime.str_directory_cursor
+        : runtime.str_next_record;
     if (remaining == 0) {
         runtime.phase = NightCatalogRefreshRuntime::Phase::SortLayouts;
         status.state = NightCatalogRefreshState::Building;
@@ -1618,11 +1828,11 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     // The ended day is normally the last record; older targets use batches.
     const size_t max_chunk_records = targeted && runtime.str_chunk_records == 0
         ? 1 : SOURCE_READ_BUFFER_BYTES / record_size;
-    const uint32_t chunk_records = static_cast<uint32_t>(
+    const uint32_t chunk_records = runtime.sweep ? 1 : static_cast<uint32_t>(
         std::min(remaining, max_chunk_records));
-    const uint32_t first_record = targeted
-        ? runtime.str_next_record - chunk_records
-        : runtime.str_next_record;
+    const uint32_t first_record = runtime.sweep
+        ? runtime.str_directory[runtime.str_directory_cursor].record
+        : runtime.str_next_record - chunk_records;
 
     StorageReadCommand command;
     command.path = "/STR.edf";
@@ -1638,6 +1848,7 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
     const OperationSubmission submission = read_port.request_read(command);
     if (submission.admission == OperationAdmission::Busy) return false;
     if (!submission.accepted()) {
+        if (runtime.sweep) error = "night_catalog_str_read_rejected";
         skip_str(runtime, status, "night_catalog_str_read_rejected");
         return true;
     }
@@ -1656,18 +1867,21 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
 
 bool finish_str_read(NightCatalogRefreshRuntime &runtime,
                      StorageReadPort &read_port,
-                     NightCatalogRefreshStatus &status) {
+                     NightCatalogRefreshStatus &status,
+                     const char *&error) {
     const size_t record_size = edf_str_record_size();
     const size_t expected = runtime.str_header_read
         ? runtime.str_chunk_records * record_size : AC_EDF_HEADER_FIXED_SIZE;
     const SourceReadState read_state = runtime.source_read.poll(
-        read_port, runtime.read_buffer, SOURCE_READ_BUFFER_BYTES, expected);
+        read_port, runtime.read_buffer, runtime.read_buffer_bytes, expected);
     if (read_state == SourceReadState::Waiting) return false;
     if (read_state == SourceReadState::CompletionFailed) {
+        if (runtime.sweep) error = "night_catalog_str_read_failed";
         skip_str(runtime, status, "night_catalog_str_read_failed");
         return true;
     }
     if (read_state == SourceReadState::CopyFailed) {
+        if (runtime.sweep) error = "night_catalog_str_read_short";
         skip_str(runtime, status, "night_catalog_str_read_short");
         return true;
     }
@@ -1709,15 +1923,17 @@ bool parse_str_chunk_record(NightCatalogRefreshRuntime &runtime,
         out.record_offset = edf_str_record_offset(
             runtime.str_next_record + static_cast<uint32_t>(i));
         out.record_size = static_cast<uint32_t>(record_size);
+        if (runtime.sweep && status.str_records != UINT32_MAX) ++status.str_records;
         if (targeted) runtime.str_chunk_index = runtime.str_chunk_records;
         return true;
     }
 
-    if (!targeted) runtime.str_next_record += runtime.str_chunk_records;
+    if (runtime.sweep) ++runtime.str_directory_cursor;
     else if (runtime.str_record_count != 0) runtime.str_next_record = 0;
-    status.str_records = static_cast<uint32_t>(std::min(
-        runtime.str_record_count,
-        static_cast<size_t>(UINT32_MAX)));
+    if (!runtime.sweep) {
+        status.str_records = static_cast<uint32_t>(std::min(
+            runtime.str_record_count, static_cast<size_t>(UINT32_MAX)));
+    }
     runtime.phase = NightCatalogRefreshRuntime::Phase::SubmitStr;
     return true;
 }
@@ -1900,7 +2116,8 @@ bool prepare_build_session(NightCatalogRefreshRuntime &runtime, const char *&err
     return true;
 }
 
-bool begin_catalog_build(NightCatalogRefreshRuntime &runtime) {
+bool begin_catalog_build(NightCatalogRefreshRuntime &runtime,
+                         const char *&error) {
     NightCatalogBuildInput input;
     input.edf_sessions = runtime.build_sessions;
     input.edf_session_count = runtime.edf_session_count;
@@ -1908,6 +2125,22 @@ bool begin_catalog_build(NightCatalogRefreshRuntime &runtime) {
     input.str_record_count = runtime.str_record_count;
     input.summary_records = runtime.summary ? runtime.summary->records() : nullptr;
     input.summary_record_count = runtime.summary ? runtime.summary->size() : 0;
+    if (runtime.sweep) {
+        try {
+            for (size_t i = 0; runtime.summary && i < runtime.summary->size(); ++i) {
+                const auto &summary = runtime.summary->records()[i];
+                if (summary.sleep_day == runtime.current_day) runtime.night_summary.push_back(summary);
+            }
+        } catch (const std::bad_alloc &) {
+            error = "night_catalog_summary_alloc_failed";
+            return false;
+        }
+
+        input.summary_records = runtime.night_summary.data();
+        input.summary_record_count = runtime.night_summary.size();
+        input.raw_edf_sessions = runtime.raw_edf_sessions.data();
+        input.raw_edf_session_count = runtime.raw_edf_sessions.size();
+    }
     input.fallback_records = runtime.fallback_records;
     input.fallback_record_count = runtime.fallback_record_count;
     return runtime.builder.begin(input);
@@ -1927,6 +2160,174 @@ bool NightCatalogRefreshService::poll() {
         case NightCatalogRefreshRuntime::Phase::Ready:
         case NightCatalogRefreshRuntime::Phase::Error:
             return false;
+
+        case NightCatalogRefreshRuntime::Phase::WaitDiscovery: {
+            StorageScanCompletion completion;
+            if (!scan_port_->take_completion(runtime_->scan_ticket, completion)) return false;
+
+            runtime_->scan_ticket = {};
+            if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+                !completion.snapshot ||
+                completion.snapshot->generation() != status_.generation) {
+                fail(completion.error[0] ? completion.error : "night_catalog_scan_failed", true);
+                return true;
+            }
+
+            if (!discover_days(*runtime_, *completion.snapshot)) {
+                fail("night_catalog_discovery_alloc_failed", true);
+                return true;
+            }
+
+            std::sort(runtime_->days.begin(), runtime_->days.end(),
+                      [](SleepDayId a, SleepDayId b) { return b < a; });
+            runtime_->days.erase(std::unique(runtime_->days.begin(), runtime_->days.end()),
+                                 runtime_->days.end());
+
+            EdfStrFileLayout layout;
+            if (runtime_->history_str_size != 0 &&
+                runtime_->history_str_size <= SIZE_MAX &&
+                edf_str_file_layout_from_size(runtime_->history_str_size, layout)) {
+                runtime_->history_str_records = layout.record_count;
+            } else if (runtime_->history_str_size != 0) {
+                set_warning(status_, "night_catalog_str_layout_invalid");
+            }
+
+            runtime_->phase = NightCatalogRefreshRuntime::Phase::ReadStrDirectory;
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::ReadStrDirectory: {
+            if (runtime_->history_str_cursor == runtime_->history_str_records) {
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::SortDiscovery;
+                return true;
+            }
+
+            if (!runtime_->read_buffer) {
+                runtime_->read_buffer = static_cast<uint8_t *>(
+                    Memory::alloc_large(SOURCE_READ_BUFFER_BYTES, false));
+                if (!runtime_->read_buffer) {
+                    fail("night_catalog_str_alloc_failed", true);
+                    return true;
+                }
+                runtime_->read_buffer_bytes = SOURCE_READ_BUFFER_BYTES;
+            }
+
+            StorageReadCommand command;
+            command.path = "/STR.edf";
+            command.lane = StorageReadLane::Report;
+            command.generation = status_.generation;
+            command.length = AC_EDF_HEADER_FIXED_SIZE;
+            if (runtime_->history_str_header) {
+                runtime_->str_chunk_records = std::min<uint32_t>(
+                    runtime_->history_str_records - runtime_->history_str_cursor,
+                    SOURCE_READ_BUFFER_BYTES / edf_str_record_size());
+                command.offset = edf_str_record_offset(runtime_->history_str_cursor);
+                command.length = runtime_->str_chunk_records * edf_str_record_size();
+            }
+
+            const auto submitted = read_port_->request_read(command);
+            if (submitted.admission == OperationAdmission::Busy) return false;
+            if (!submitted.accepted()) {
+                fail("night_catalog_str_read_rejected", true);
+                return true;
+            }
+
+            runtime_->source_read.begin(submitted.ticket);
+            runtime_->phase = NightCatalogRefreshRuntime::Phase::WaitStrDirectory;
+            status_.state = NightCatalogRefreshState::ReadingStr;
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::WaitStrDirectory: {
+            const size_t expected = runtime_->history_str_header
+                ? runtime_->str_chunk_records * edf_str_record_size() : AC_EDF_HEADER_FIXED_SIZE;
+            const auto state = runtime_->source_read.poll(
+                *read_port_, runtime_->read_buffer, SOURCE_READ_BUFFER_BYTES, expected);
+            if (state == SourceReadState::Waiting) return false;
+
+            if (state != SourceReadState::Ready) {
+                fail("night_catalog_str_read_failed", true);
+                return true;
+            }
+
+            if (!runtime_->history_str_header) {
+                runtime_->history_str_model = edf_parse_header_device_model(
+                    runtime_->read_buffer, expected);
+                runtime_->history_str_header = true;
+            } else {
+                try {
+                    for (uint32_t i = 0; i < runtime_->str_chunk_records; ++i) {
+                        SleepDayId day;
+                        const auto date = edf_str_record_date_sample(
+                            runtime_->read_buffer + i * edf_str_record_size(), edf_str_record_size());
+
+                        if (SleepDayId::from_epoch_days(date, day) &&
+                            std::binary_search(runtime_->days.begin(), runtime_->days.end(), day,
+                                               [](SleepDayId a, SleepDayId b) { return b < a; })) {
+                            runtime_->str_directory.push_back({day, runtime_->history_str_cursor + i});
+                        }
+                    }
+                } catch (const std::bad_alloc &) {
+                    fail("night_catalog_str_directory_alloc_failed", true);
+                    return true;
+                }
+
+                runtime_->history_str_cursor += runtime_->str_chunk_records;
+            }
+
+            runtime_->phase = NightCatalogRefreshRuntime::Phase::ReadStrDirectory;
+            return true;
+        }
+
+        case NightCatalogRefreshRuntime::Phase::SortDiscovery:
+            if (runtime_->sort.poll(runtime_->str_directory.data(), runtime_->str_directory.size(),
+                    [](const NightCatalogRefreshRuntime::StrPosition &a,
+                       const NightCatalogRefreshRuntime::StrPosition &b) {
+                        return a.day != b.day ? b.day < a.day : a.record < b.record;
+                    })) {
+                runtime_->sort.reset();
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::NextNight;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::NextNight:
+            if (runtime_->day_cursor == runtime_->days.size()) {
+                runtime_->clear_sources();
+                if (!runtime_->summary_pass && !runtime_->deferred_summary_days.empty()) {
+                    runtime_->days = std::move(runtime_->deferred_summary_days);
+                    runtime_->day_cursor = 0;
+                    runtime_->summary_pass = true;
+                    return true;
+                }
+
+                if (!runtime_->index_builder.finish_index()) {
+                    fail("night_catalog_index_alloc_failed", true);
+                } else {
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::FinishIndex;
+                }
+                return true;
+            }
+
+            if (!request_night_scan(*runtime_, *scan_port_, status_.generation, error)) return false;
+            if (error) fail(error, true);
+            else status_.state = NightCatalogRefreshState::Scanning;
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::WaitNight:
+            return false;
+
+        case NightCatalogRefreshRuntime::Phase::FinishIndex:
+            runtime_->index_builder.poll();
+            if (runtime_->index_builder.active()) return true;
+
+            runtime_->building_catalog = runtime_->index_builder.take_result();
+            if (!runtime_->building_catalog) {
+                fail("night_catalog_index_failed", true);
+            } else {
+                runtime_->sweep = false;
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::Publish;
+            }
+            return true;
 
         case NightCatalogRefreshRuntime::Phase::WaitScan: {
             StorageScanCompletion completion;
@@ -1950,6 +2351,13 @@ bool NightCatalogRefreshService::poll() {
                 fail("night_catalog_source_alloc_failed", true);
                 return true;
             }
+
+            if (runtime_->sweep &&
+                (runtime_->str_file_size != runtime_->history_str_size ||
+                 runtime_->str_file_modified != runtime_->history_str_modified)) {
+                fail("night_catalog_str_changed", true);
+                return true;
+            }
             runtime_->phase = NightCatalogRefreshRuntime::Phase::SelectEdf;
             status_.state = NightCatalogRefreshState::ReadingEdf;
             return true;
@@ -1966,6 +2374,30 @@ bool NightCatalogRefreshService::poll() {
             return true;
 
         case NightCatalogRefreshRuntime::Phase::SelectMetadata:
+            // A raw-clock Summary can belong to an EDF day encountered later.
+            // Defer only no-EDF Summary days until all raw windows are known.
+            if (runtime_->sweep && !runtime_->summary_pass &&
+                runtime_->edf_session_count == 0 && runtime_->summary &&
+                runtime_->summary->size() > 0 &&
+                std::any_of(runtime_->summary->records(),
+                            runtime_->summary->records() + runtime_->summary->size(),
+                            [&](const NightCatalogSummaryInput &record) {
+                                return record.sleep_day == runtime_->current_day &&
+                                       record.session_count != 0;
+                            })) {
+                try {
+                    runtime_->deferred_summary_days.push_back(runtime_->current_day);
+                } catch (const std::bad_alloc &) {
+                    fail("night_catalog_summary_days_alloc_failed", true);
+                    return true;
+                }
+
+                runtime_->clear_sources();
+                runtime_->current_day = {};
+                runtime_->phase = NightCatalogRefreshRuntime::Phase::NextNight;
+                return true;
+            }
+
             return submit_next_metadata(*runtime_, *read_port_, status_);
 
         case NightCatalogRefreshRuntime::Phase::WaitMetadata:
@@ -2001,20 +2433,23 @@ bool NightCatalogRefreshService::poll() {
         case NightCatalogRefreshRuntime::Phase::SubmitStr:
             if (!runtime_->str_records) {
                 const bool finished =
-                    prepare_str_records(*runtime_, status_);
+                    prepare_str_records(*runtime_, status_, error);
+                if (error) fail(error, true);
                 if (finished) return true;
             }
             if (!submit_str_chunk(*runtime_,
                                   *read_port_,
-                                  status_)) {
+                                  status_, error)) {
                 return false;
             }
+            if (error) fail(error, true);
             return true;
 
         case NightCatalogRefreshRuntime::Phase::WaitStr:
-            if (!finish_str_read(*runtime_, *read_port_, status_)) {
+            if (!finish_str_read(*runtime_, *read_port_, status_, error)) {
                 return false;
             }
+            if (error) fail(error, true);
             return true;
 
         case NightCatalogRefreshRuntime::Phase::ParseStr:
@@ -2061,6 +2496,22 @@ bool NightCatalogRefreshService::poll() {
                 if (!prepare_build_session(*runtime_, error)) {
                     fail(error);
                 } else {
+                    const auto &session = runtime_->build_sessions[runtime_->build_cursor];
+                    if (runtime_->sweep && runtime_->summary && runtime_->summary->size() > 0 &&
+                        session.has_clock_provenance && session.raw_sleep_day != session.sleep_day) {
+                        const auto window = session.raw_therapy_window.valid()
+                            ? session.raw_therapy_window : session.raw_segment_window;
+
+                        if (window.valid()) {
+                            try {
+                                runtime_->raw_edf_sessions.push_back({session.raw_sleep_day, window});
+                            } catch (const std::bad_alloc &) {
+                                fail("night_catalog_raw_clock_alloc_failed", true);
+                                return true;
+                            }
+                        }
+                    }
+
                     ++runtime_->build_cursor;
                 }
             } else {
@@ -2132,9 +2583,9 @@ bool NightCatalogRefreshService::poll() {
         }
 
         case NightCatalogRefreshRuntime::Phase::StartBuild:
-            if (!begin_catalog_build(*runtime_)) {
+            if (!begin_catalog_build(*runtime_, error)) {
                 const auto status = runtime_->builder.status();
-                fail(status.detail, status.retryable());
+                fail(error ? error : status.detail, error || status.retryable());
             } else {
                 runtime_->phase = NightCatalogRefreshRuntime::Phase::Build;
             }
@@ -2171,7 +2622,7 @@ bool NightCatalogRefreshService::poll() {
 
         case NightCatalogRefreshRuntime::Phase::Preserve: {
             if (!runtime_->previous_catalog ||
-                runtime_->build_cursor == runtime_->previous_catalog->size()) {
+                runtime_->build_cursor == (runtime_->sweep ? 1 : runtime_->previous_catalog->size())) {
                 if (runtime_->preserve_count == 0) {
                     runtime_->phase = NightCatalogRefreshRuntime::Phase::Merge;
                 } else if (!runtime_->builder.begin_merge(
@@ -2185,9 +2636,11 @@ bool NightCatalogRefreshService::poll() {
             }
 
             // Preserve inaccessible external fallback history, not a partial rebuild.
-            const auto *previous =
-                runtime_->previous_catalog->record(runtime_->build_cursor++);
-            if ((runtime_->target.valid() &&
+            const auto *previous = runtime_->sweep
+                ? runtime_->previous_catalog->find(runtime_->current_day)
+                : runtime_->previous_catalog->record(runtime_->build_cursor);
+            ++runtime_->build_cursor;
+            if (!previous || (runtime_->target.valid() &&
                  previous->sleep_day != runtime_->target.sleep_day) ||
                 (previous->source_flags & NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) == 0) {
                 return true;
@@ -2211,7 +2664,7 @@ bool NightCatalogRefreshService::poll() {
 
             if (!runtime_->preserve_days) {
                 runtime_->preserve_days = allocate_large_array<SleepDayId>(
-                    runtime_->previous_catalog->size());
+                    runtime_->sweep ? 1 : runtime_->previous_catalog->size());
                 if (!runtime_->preserve_days) {
                     fail("night_catalog_previous_night_preserve_failed", true);
                     return true;
@@ -2290,6 +2743,20 @@ bool NightCatalogRefreshService::poll() {
         }
 
         case NightCatalogRefreshRuntime::Phase::Publish:
+            if (runtime_->sweep) {
+                runtime_->pending_night = std::move(runtime_->building_catalog);
+                runtime_->clear_sources();
+                runtime_->current_day = {};
+                if (runtime_->pending_night->size() == 0) {
+                    runtime_->pending_night.reset();
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::NextNight;
+                } else {
+                    runtime_->phase = NightCatalogRefreshRuntime::Phase::WaitNight;
+                    status_.state = NightCatalogRefreshState::Staging;
+                }
+                return true;
+            }
+
             published_ = std::move(runtime_->building_catalog);
             status_.state = NightCatalogRefreshState::Ready;
             status_.sessions = static_cast<uint32_t>(
