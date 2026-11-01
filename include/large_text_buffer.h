@@ -13,6 +13,7 @@ public:
     LargeTextBuffer &operator=(const LargeTextBuffer &) = delete;
 
     bool reserve(size_t capacity);
+    bool reserve_exact(size_t capacity);
     void clear();
     void swap(LargeTextBuffer &other);
 

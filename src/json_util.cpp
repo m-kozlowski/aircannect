@@ -158,6 +158,22 @@ bool json_variant_to_uint32(JsonVariantConst value, uint32_t &out) {
     return false;
 }
 
+size_t json_escaped_length(const char *value, size_t len) {
+    size_t length = 0;
+    if (!value) return length;
+
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (c == '"' || c == '\\' || c == '\b' || c == '\f' ||
+            c == '\n' || c == '\r' || c == '\t') {
+            length += 2;
+        } else {
+            length += c < 0x20 ? 6 : 1;
+        }
+    }
+    return length;
+}
+
 void append_json_escaped(std::string &out, const char *value, size_t len) {
     append_json_escaped_impl(out, value, len);
 }

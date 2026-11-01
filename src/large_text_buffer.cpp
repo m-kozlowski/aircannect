@@ -16,6 +16,27 @@ bool LargeTextBuffer::reserve(size_t capacity) {
     return ensure_capacity(capacity);
 }
 
+bool LargeTextBuffer::reserve_exact(size_t capacity) {
+    if (capacity <= capacity_) return true;
+    if (capacity == SIZE_MAX) {
+        overflowed_ = true;
+        return false;
+    }
+
+    char *next = static_cast<char *>(Memory::alloc_large(capacity + 1));
+    if (!next) {
+        overflowed_ = true;
+        return false;
+    }
+
+    if (data_ && length_) memcpy(next, data_, length_);
+    next[length_] = 0;
+    Memory::free(data_);
+    data_ = next;
+    capacity_ = capacity;
+    return true;
+}
+
 void LargeTextBuffer::clear() {
     length_ = 0;
     overflowed_ = false;
@@ -89,14 +110,7 @@ bool LargeTextBuffer::ensure_capacity(size_t needed) {
         target *= 2;
     }
 
-    char *next = static_cast<char *>(Memory::alloc_large(target + 1));
-    if (!next) return false;
-    if (data_ && length_) memcpy(next, data_, length_);
-    next[length_] = 0;
-    Memory::free(data_);
-    data_ = next;
-    capacity_ = target;
-    return true;
+    return reserve_exact(target);
 }
 
 }  // namespace aircannect

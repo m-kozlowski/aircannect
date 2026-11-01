@@ -406,16 +406,7 @@ void WebUI::poll(ServicePendingWork service_pending_work) {
 
     if (console_push_due) {
         last_console_sse_ms_ = now_ms;
-        const uint64_t begin = console_log_begin_pos();
-        const uint64_t end = console_log_write_pos_;
-        const bool reset = console_sse_reset_pending_ ||
-                           console_sse_pos_ < begin ||
-                           console_sse_pos_ > end;
-        const uint64_t from = reset ? begin : console_sse_pos_;
-        const size_t payload_len =
-            static_cast<size_t>(end > from ? end - from : 0);
         LargeTextBuffer console_json;
-        console_json.reserve(payload_len + 128);
         build_console_sse_json(console_json);
         const SseSendResult console_result =
             console_json.overflowed()
@@ -791,6 +782,10 @@ void WebUI::append_console_log_json_range(LargeTextBuffer &json,
         (console_log_start_ + offset) % console_log_capacity_;
     size_t first = console_log_capacity_ - read_at;
     if (first > len) first = len;
+    const size_t escaped = json_escaped_length(console_log_ + read_at, first) +
+        json_escaped_length(console_log_, len - first);
+    if (!json.reserve_exact(json.length() + escaped + 2)) return;
+
     append_json_escaped(json, console_log_ + read_at, first);
     if (len > first) {
         append_json_escaped(json, console_log_, len - first);
@@ -847,7 +842,6 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
         return;
     }
     LargeTextBuffer json;
-    json.reserve(console_log_length_ + 128);
     build_console_json(json);
     if (json.overflowed()) {
         xSemaphoreGive(cache_mutex_);
@@ -857,7 +851,7 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
     }
 
     AsyncWebServerResponse *response = nullptr;
-    if (!http_prepare_json_response(json, response)) {
+    if (!http_prepare_json_response(std::move(json), response)) {
         xSemaphoreGive(cache_mutex_);
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response alloc\"}");
