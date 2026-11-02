@@ -1,5 +1,6 @@
 #include "night_catalog_store_service.h"
 
+#include <algorithm>
 #include <string.h>
 #include <stdio.h>
 #include <new>
@@ -17,6 +18,8 @@ namespace {
 
 constexpr const char *CATALOG_STAGING_ROOT =
     "/aircannect/report/catalog-staging";
+constexpr const char *CATALOG_INDEX_STAGING_PATH =
+    "/aircannect/report/catalog-staging/.index.bin";
 
 enum class StoreWriteKind : uint8_t {
     None,
@@ -51,6 +54,11 @@ struct NightCatalogStoreRuntime {
         PrepareWrite,
         SubmitWrite,
         WaitWrite,
+        PrepareIndexChunk,
+        SubmitIndexChunk,
+        WaitIndexChunk,
+        SubmitIndexFinish,
+        WaitIndexFinish,
         Ready,
         Error,
     };
@@ -58,6 +66,7 @@ struct NightCatalogStoreRuntime {
     Phase phase = Phase::Idle;
     OperationTicket read_ticket;
     OperationTicket write_ticket;
+    OperationTicket range_ticket;
     uint32_t delete_id = 0;
     bool cleanup_cancelled = false;
     StoragePreparedRead prepared;
@@ -70,7 +79,13 @@ struct NightCatalogStoreRuntime {
     std::unique_ptr<LargeByteBuffer> body;
 
     std::shared_ptr<const LargeByteBuffer> encoded;
-    std::shared_ptr<const LargeByteBuffer> index_encoded;
+    NightCatalogFileIndexReader index_reader;
+    std::shared_ptr<LargeByteBuffer> index_chunk;
+    size_t index_size = 0;
+    size_t index_offset = 0;
+    size_t index_chunk_size = 0;
+    bool index_stage_complete = false;
+    bool index_stage_touched = false;
     std::shared_ptr<const NightCatalog> saving;
     std::shared_ptr<const NightCatalog> index;
     StagedNightList staged;
@@ -105,24 +120,21 @@ void NightCatalogStoreService::begin(StorageReadPort &read_port) {
     if (!runtime_) runtime_ = LargeObject::create<NightCatalogStoreRuntime>();
 
     read_port_ = &read_port;
+    range_write_port_ = nullptr;
     write_port_ = nullptr;
     if (!runtime_ || runtime_->delete_id == 0) delete_port_ = nullptr;
 }
 
 void NightCatalogStoreService::begin(
     StorageReadPort &read_port,
-    StorageAtomicWritePort &write_port) {
-    begin(read_port);
-    write_port_ = &write_port;
-}
-
-void NightCatalogStoreService::begin(
-    StorageReadPort &read_port,
+    StorageRangeWritePort &range_write_port,
     StorageAtomicWritePort &write_port,
-    StorageDeletePort &delete_port) {
-    begin(read_port, write_port);
-    delete_port_ = &delete_port;
-    if (runtime_) {
+    StorageDeletePort *delete_port) {
+    begin(read_port);
+    range_write_port_ = &range_write_port;
+    write_port_ = &write_port;
+    delete_port_ = delete_port;
+    if (runtime_ && delete_port_) {
         runtime_->cleanup_pending = true;
         runtime_->staging_root_clean = false;
     }
@@ -156,12 +168,16 @@ void NightCatalogStoreService::reset_operation() {
     if (write_port_ && runtime_->write_ticket.valid()) {
         (void)write_port_->abandon(runtime_->write_ticket);
     }
+    if (range_write_port_ && runtime_->range_ticket.valid()) {
+        (void)range_write_port_->abandon(runtime_->range_ticket);
+    }
     if (read_port_ && runtime_->prepared.valid()) {
         read_port_->release_prepared(runtime_->prepared);
     }
 
     runtime_->read_ticket = {};
     runtime_->write_ticket = {};
+    runtime_->range_ticket = {};
     runtime_->prepared = {};
     runtime_->file_info = {};
     runtime_->loading_day = {};
@@ -171,7 +187,12 @@ void NightCatalogStoreService::reset_operation() {
     memset(runtime_->header, 0, sizeof(runtime_->header));
     runtime_->body.reset();
     runtime_->encoded.reset();
-    runtime_->index_encoded.reset();
+    runtime_->index_reader.reset();
+    runtime_->index_chunk.reset();
+    runtime_->index_size = 0;
+    runtime_->index_offset = 0;
+    runtime_->index_chunk_size = 0;
+    runtime_->index_stage_complete = false;
     runtime_->saving.reset();
     runtime_->index.reset();
     runtime_->install_stage_index = 0;
@@ -201,10 +222,18 @@ void NightCatalogStoreService::fail(const char *error) {
     if (!runtime_) return;
 
     const bool failed_staging = runtime_->staging;
+    const bool cleanup_index_stage = runtime_->index_stage_touched;
+    const bool close_index_handle = cleanup_index_stage &&
+                                    !runtime_->index_stage_complete;
     reset_operation();
-    if (failed_staging) {
+    if (close_index_handle && range_write_port_) {
+        range_write_port_->release_handles();
+    }
+    if (failed_staging || (cleanup_index_stage && delete_port_)) {
         runtime_->cleanup_pending = true;
         runtime_->staging_root_clean = false;
+    }
+    if (failed_staging) {
         clear_staging();
     }
     runtime_->phase = NightCatalogStoreRuntime::Phase::Error;
@@ -338,6 +367,28 @@ bool NightCatalogStoreService::sources_stored(
            previous->source_flags == record.source_flags;
 }
 
+bool NightCatalogStoreService::prepare_index_stream(
+    std::shared_ptr<const NightCatalog> compact_index) {
+    if (!runtime_ || !range_write_port_ || !write_port_ || !compact_index ||
+        !runtime_->index_reader.start(compact_index)) {
+        return false;
+    }
+
+    const size_t size = runtime_->index_reader.size();
+    if (size == 0 || size > UINT32_MAX) {
+        runtime_->index_reader.reset();
+        return false;
+    }
+
+    runtime_->index = std::move(compact_index);
+    runtime_->index_size = size;
+    runtime_->index_offset = 0;
+    runtime_->index_chunk_size = 0;
+    runtime_->index_chunk.reset();
+    runtime_->index_stage_complete = false;
+    return true;
+}
+
 namespace {
 
 bool staged_path(SleepDayId day,
@@ -376,8 +427,8 @@ size_t find_staged_day(const StagedNightList &staged, SleepDayId day) {
 
 OperationAdmission NightCatalogStoreService::begin_staging(
     uint32_t generation) {
-    if (!runtime_ || !read_port_ || !write_port_ || !delete_port_ ||
-        generation == 0) {
+    if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_ ||
+        !delete_port_ || generation == 0) {
         return reject_staging(generation, "night_catalog_staging_unavailable");
     }
     if (active() || staging()) return OperationAdmission::Busy;
@@ -406,7 +457,8 @@ OperationAdmission NightCatalogStoreService::begin_staging(
 OperationAdmission NightCatalogStoreService::request_stage(
     std::shared_ptr<const NightCatalog> single_night,
     uint32_t generation) {
-    if (!runtime_ || !read_port_ || !write_port_) {
+    if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_ ||
+        !delete_port_) {
         return OperationAdmission::Rejected;
     }
     if (active()) return OperationAdmission::Busy;
@@ -435,7 +487,8 @@ OperationAdmission NightCatalogStoreService::request_stage(
 OperationAdmission NightCatalogStoreService::request_install(
     std::shared_ptr<const NightCatalog> compact_index,
     uint32_t generation) {
-    if (!runtime_ || !read_port_ || !write_port_) {
+    if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_ ||
+        !delete_port_) {
         return OperationAdmission::Rejected;
     }
     if (active()) return OperationAdmission::Busy;
@@ -460,28 +513,27 @@ OperationAdmission NightCatalogStoreService::request_install(
         }
     }
 
-    const auto encoded_index = NightCatalogFileCodec::encode(*compact_index);
-    if (!encoded_index) {
+    reset_operation();
+    if (!prepare_index_stream(compact_index)) {
+        reset_operation();
         return reject_staging(generation,
                               "night_catalog_install_encode_failed");
     }
 
-    reset_operation();
     runtime_->saving = compact_index;
-    runtime_->index = std::move(compact_index);
-    runtime_->index_encoded = encoded_index;
     runtime_->installing = true;
-    runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareWrite;
+    runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareIndexChunk;
     status_ = {};
     status_.state = NightCatalogStoreState::Saving;
     status_.generation = generation;
+    status_.bytes = runtime_->index_size;
     return OperationAdmission::Accepted;
 }
 
 OperationAdmission NightCatalogStoreService::request_save(
     std::shared_ptr<const NightCatalog> catalog,
     uint32_t generation) {
-    if (!runtime_ || !read_port_ || !write_port_) {
+    if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_) {
         return OperationAdmission::Rejected;
     }
     if (active() || staging()) return OperationAdmission::Busy;
@@ -549,6 +601,7 @@ bool NightCatalogStoreService::poll() {
                 if (runtime_->staging) {
                     fail("night_catalog_staging_cleanup_unavailable");
                 } else {
+                    runtime_->cleanup_pending = false;
                     runtime_->phase = published_
                         ? NightCatalogStoreRuntime::Phase::Ready
                         : NightCatalogStoreRuntime::Phase::Idle;
@@ -609,6 +662,7 @@ bool NightCatalogStoreService::poll() {
                     strcmp(deletion.error, "not_directory") == 0) {
                     runtime_->cleanup_pending = false;
                     runtime_->staging_root_clean = true;
+                    runtime_->index_stage_touched = false;
                     runtime_->staging_ready = runtime_->staging;
                     runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
                     status_.state = NightCatalogStoreState::Ready;
@@ -632,6 +686,7 @@ bool NightCatalogStoreService::poll() {
 
             runtime_->cleanup_pending = false;
             runtime_->staging_root_clean = true;
+            runtime_->index_stage_touched = false;
             runtime_->staging_ready = runtime_->staging;
             runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
             status_.state = NightCatalogStoreState::Ready;
@@ -902,15 +957,17 @@ bool NightCatalogStoreService::poll() {
                     return true;
                 }
 
+                if (!runtime_->index_stage_complete) {
+                    fail("night_catalog_install_index_stage_incomplete");
+                    return true;
+                }
+
                 runtime_->write_kind = StoreWriteKind::Index;
                 copy_cstr(runtime_->path, sizeof(runtime_->path),
                           NIGHT_CATALOG_STORE_PATH);
-                runtime_->encoded = runtime_->index_encoded;
-                if (!runtime_->encoded) {
-                    fail("night_catalog_install_encode_failed");
-                    return true;
-                }
-                status_.bytes += runtime_->encoded->size();
+                copy_cstr(runtime_->staged_path,
+                          sizeof(runtime_->staged_path),
+                          CATALOG_INDEX_STAGING_PATH);
                 runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
                 return true;
             } else if (runtime_->staging) {
@@ -970,14 +1027,32 @@ bool NightCatalogStoreService::poll() {
                         *runtime_->saving, record->sleep_day);
                     runtime_->write_kind = StoreWriteKind::SaveSource;
                 } else {
-                    // The index is the commit point: every sources write has
-                    // completed successfully before reaching this phase.
-                    runtime_->index = NightCatalogBuilder::index(*runtime_->saving);
-                    next = runtime_->index;
-                    runtime_->write_kind = StoreWriteKind::Index;
+                    // The streamed index remains private until every sources
+                    // file is saved, then becomes the commit point.
+                    if (!runtime_->index_stage_complete) {
+                        runtime_->index =
+                            NightCatalogBuilder::index(*runtime_->saving);
+                        if (!runtime_->index ||
+                            !prepare_index_stream(runtime_->index)) {
+                            fail("night_catalog_save_encode_failed");
+                            return true;
+                        }
 
+                        status_.bytes += runtime_->index_size;
+                        runtime_->phase =
+                            NightCatalogStoreRuntime::Phase::PrepareIndexChunk;
+                        return true;
+                    }
+
+                    runtime_->write_kind = StoreWriteKind::Index;
                     copy_cstr(runtime_->path, sizeof(runtime_->path),
                               NIGHT_CATALOG_STORE_PATH);
+                    copy_cstr(runtime_->staged_path,
+                              sizeof(runtime_->staged_path),
+                              CATALOG_INDEX_STAGING_PATH);
+                    runtime_->phase =
+                        NightCatalogStoreRuntime::Phase::SubmitWrite;
+                    return true;
                 }
             }
 
@@ -1009,6 +1084,7 @@ bool NightCatalogStoreService::poll() {
         case NightCatalogStoreRuntime::Phase::SubmitWrite: {
             if (!runtime_->saving ||
                 (runtime_->write_kind != StoreWriteKind::InstallSource &&
+                 runtime_->write_kind != StoreWriteKind::Index &&
                  !runtime_->encoded)) {
                 fail("night_catalog_save_not_ready");
                 return true;
@@ -1019,6 +1095,14 @@ bool NightCatalogStoreService::poll() {
             if (runtime_->write_kind == StoreWriteKind::InstallSource) {
                 command.staged_path = runtime_->staged_path;
                 command.staged_size = runtime_->install_size;
+            } else if (runtime_->write_kind == StoreWriteKind::Index) {
+                if (!runtime_->index_stage_complete ||
+                    runtime_->index_size == 0) {
+                    fail("night_catalog_save_index_stage_incomplete");
+                    return true;
+                }
+                command.staged_path = runtime_->staged_path;
+                command.staged_size = runtime_->index_size;
             } else {
                 command.bytes = runtime_->encoded;
             }
@@ -1052,7 +1136,9 @@ bool NightCatalogStoreService::poll() {
             const uint64_t expected_bytes =
                 runtime_->write_kind == StoreWriteKind::InstallSource
                     ? runtime_->install_size
-                    : runtime_->encoded ? runtime_->encoded->size() : 0;
+                    : runtime_->write_kind == StoreWriteKind::Index
+                        ? runtime_->index_size
+                        : runtime_->encoded ? runtime_->encoded->size() : 0;
             if (completion.outcome.disposition !=
                     OperationDisposition::Succeeded ||
                 expected_bytes == 0 ||
@@ -1117,6 +1203,7 @@ bool NightCatalogStoreService::poll() {
                 return true;
             }
 
+            runtime_->index_stage_touched = false;
             published_ = runtime_->index;
             stored_ = published_;
             const bool installed_staging = runtime_->installing;
@@ -1131,6 +1218,141 @@ bool NightCatalogStoreService::poll() {
             status_.error[0] = '\0';
             return true;
         }
+
+        case NightCatalogStoreRuntime::Phase::PrepareIndexChunk: {
+            if (!runtime_->index || runtime_->index_size == 0 ||
+                runtime_->index_offset >= runtime_->index_size) {
+                fail("night_catalog_index_stream_state_invalid");
+                return true;
+            }
+
+            const size_t remaining =
+                runtime_->index_size - runtime_->index_offset;
+            const size_t length = std::min(
+                remaining, AC_STORAGE_RANGE_WRITE_STEP_BYTES);
+            auto chunk = LargeByteBuffer::allocate_shared(length);
+            if (!chunk) {
+                fail("night_catalog_index_chunk_alloc_failed");
+                return true;
+            }
+
+            const size_t read =
+                runtime_->index_reader.read(chunk->data(), length);
+            if (read != length) {
+                fail("night_catalog_index_stream_short");
+                return true;
+            }
+
+            runtime_->index_chunk = std::move(chunk);
+            runtime_->index_chunk_size = length;
+            runtime_->phase =
+                NightCatalogStoreRuntime::Phase::SubmitIndexChunk;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::SubmitIndexChunk: {
+            if (!runtime_->index_chunk || runtime_->index_chunk_size == 0 ||
+                runtime_->index_offset >= runtime_->index_size) {
+                fail("night_catalog_index_chunk_state_invalid");
+                return true;
+            }
+
+            StorageRangeWriteCommand command;
+            command.path = CATALOG_INDEX_STAGING_PATH;
+            command.bytes = runtime_->index_chunk;
+            command.offset = runtime_->index_offset;
+            command.truncate = runtime_->index_offset == 0;
+            command.sync_on_close = true;
+            command.retain_handle = true;
+            command.generation = status_.generation;
+            command.lane = StorageAtomicWriteLane::Foreground;
+
+            const OperationSubmission submission =
+                range_write_port_->request_write(command);
+            if (submission.admission == OperationAdmission::Busy) return false;
+            if (!submission.accepted()) {
+                fail("night_catalog_index_range_write_rejected");
+                return true;
+            }
+
+            runtime_->index_stage_touched = true;
+            runtime_->range_ticket = submission.ticket;
+            runtime_->phase =
+                NightCatalogStoreRuntime::Phase::WaitIndexChunk;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::WaitIndexChunk: {
+            StorageRangeWriteCompletion completion;
+            if (!range_write_port_->take_completion(runtime_->range_ticket,
+                                                     completion)) {
+                return false;
+            }
+            runtime_->range_ticket = {};
+
+            if (completion.outcome.disposition !=
+                    OperationDisposition::Succeeded ||
+                completion.bytes_written != runtime_->index_chunk_size) {
+                fail(completion.error[0]
+                         ? completion.error
+                         : "night_catalog_index_range_write_failed");
+                return true;
+            }
+
+            runtime_->index_offset += runtime_->index_chunk_size;
+            runtime_->index_chunk.reset();
+            runtime_->index_chunk_size = 0;
+            runtime_->phase = runtime_->index_offset < runtime_->index_size
+                ? NightCatalogStoreRuntime::Phase::PrepareIndexChunk
+                : NightCatalogStoreRuntime::Phase::SubmitIndexFinish;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::SubmitIndexFinish: {
+            if (runtime_->index_offset != runtime_->index_size) {
+                fail("night_catalog_index_finish_before_end");
+                return true;
+            }
+
+            StorageRangeWriteCommand command;
+            command.finish = true;
+            command.generation = status_.generation;
+            command.lane = StorageAtomicWriteLane::Foreground;
+
+            const OperationSubmission submission =
+                range_write_port_->request_write(command);
+            if (submission.admission == OperationAdmission::Busy) return false;
+            if (!submission.accepted()) {
+                fail("night_catalog_index_finish_rejected");
+                return true;
+            }
+
+            runtime_->range_ticket = submission.ticket;
+            runtime_->phase =
+                NightCatalogStoreRuntime::Phase::WaitIndexFinish;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::WaitIndexFinish: {
+            StorageRangeWriteCompletion completion;
+            if (!range_write_port_->take_completion(runtime_->range_ticket,
+                                                     completion)) {
+                return false;
+            }
+            runtime_->range_ticket = {};
+
+            if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded) {
+                fail(completion.error[0]
+                         ? completion.error
+                         : "night_catalog_index_finish_failed");
+                return true;
+            }
+
+            runtime_->index_stage_complete = true;
+            runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareWrite;
+            return true;
+        }
     }
     return false;
 }
@@ -1141,11 +1363,19 @@ void NightCatalogStoreService::cancel() {
     const uint32_t delete_id = runtime_->delete_id;
     const bool cancel_cleanup = delete_id != 0 && delete_port_;
     const bool discard_ledger = runtime_->staging;
+    const bool cleanup_index_stage = runtime_->index_stage_touched;
+    const bool close_index_handle = cleanup_index_stage &&
+                                    !runtime_->index_stage_complete;
     reset_operation();
+    if (close_index_handle && range_write_port_) {
+        range_write_port_->release_handles();
+    }
 
-    if (discard_ledger) {
+    if (discard_ledger || (cleanup_index_stage && delete_port_)) {
         runtime_->cleanup_pending = true;
         runtime_->staging_root_clean = false;
+    }
+    if (discard_ledger) {
         clear_staging();
     }
 

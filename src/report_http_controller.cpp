@@ -21,6 +21,7 @@
 #include "async_deferred_response.h"
 #include "http_request_utils.h"
 #include "json_util.h"
+#include "large_allocator.h"
 #include "night_catalog.h"
 #include "report_signal_tile.h"
 #include "report_signal_store.h"
@@ -483,9 +484,12 @@ bool report_task_available(AsyncWebServerRequest *request,
 bool begin_missing_night(AsyncWebServerRequest *request,
                          ReportTask &report_task,
                          SleepDayId sleep_day,
-                         uint32_t generation) {
+                         uint32_t generation,
+                         bool metadata_pending = false) {
+    const auto intent = metadata_pending
+        ? ReportRequestIntent::LoadMetadata : ReportRequestIntent::Build;
     ReportNightFailureStatus failure;
-    if (report_task.night_failure(sleep_day, failure)) {
+    if (report_task.night_failure(sleep_day, failure, 20, intent)) {
         send_night_failure(request, failure);
         return false;
     }
@@ -494,7 +498,8 @@ bool begin_missing_night(AsyncWebServerRequest *request,
         sleep_day,
         ReportRequestPriority::Foreground,
         generation,
-        false);
+        false,
+        intent);
     if (admitted == OperationAdmission::Busy) {
         send_json_error(request, 503, "report_queue_busy");
         return false;
@@ -532,6 +537,9 @@ bool handle_query_state(AsyncWebServerRequest *request,
         case ReportStoreQueryState::StorePending:
             return begin_missing_night(
                 request, report_task, sleep_day, generation);
+        case ReportStoreQueryState::MetadataPending:
+            return begin_missing_night(
+                request, report_task, sleep_day, generation, true);
         case ReportStoreQueryState::TrackMissing:
             send_json_error(request, 404, "signal_not_available");
             return false;
@@ -1147,19 +1155,27 @@ void ReportHttpController::send_summary(
         return;
     }
 
+    std::shared_ptr<ReportCatalogJsonReader> reader;
+    try {
+        reader = std::allocate_shared<ReportCatalogJsonReader>(
+            LargeAllocator<ReportCatalogJsonReader>(), summary);
+    } catch (const std::bad_alloc &) {
+        send_json_error(request, 503, "response_alloc");
+        return;
+    }
+    if (!reader || !reader->valid()) {
+        send_json_error(request, 503, "response_alloc");
+        return;
+    }
+
     AsyncWebServerResponse *response = new (std::nothrow)
         AsyncPreparedResponse(
             "application/json",
-            summary->body.length(),
-            [summary](uint8_t *buffer,
-                      size_t max_length,
-                      size_t offset) -> size_t {
-                if (!buffer || offset >= summary->body.length()) return 0;
-
-                const size_t copied = std::min(
-                    max_length, summary->body.length() - offset);
-                memcpy(buffer, summary->body.c_str() + offset, copied);
-                return copied;
+            summary->length(),
+            [reader](uint8_t *buffer,
+                     size_t max_length,
+                     size_t offset) -> size_t {
+                return reader->read(buffer, max_length, offset);
             });
     if (!response) {
         send_json_error(request, 503, "response_alloc");

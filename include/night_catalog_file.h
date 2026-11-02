@@ -47,4 +47,45 @@ public:
         size_t body_length);
 };
 
+class NightCatalogFileIndexReader {
+public:
+    bool start(std::shared_ptr<const NightCatalog> compact_index);
+    size_t size() const { return total_bytes_; }
+    size_t read(uint8_t *buffer, size_t length);
+    void reset();
+
+private:
+    enum class Section : uint8_t {
+        Records,
+        Sessions,
+        Masks,
+        Done,
+    };
+
+    bool prepare_next();
+    bool prepare_next_range();
+    void begin_range_section(bool masks);
+
+    // Immutable input and output length.
+    std::shared_ptr<const NightCatalog> catalog_;
+    size_t total_bytes_ = 0;
+    size_t emitted_bytes_ = 0;
+    Section section_ = Section::Done;
+
+    // Current record and range-table cursors.
+    size_t record_cursor_ = 0;
+    size_t range_record_cursor_ = 0;
+    const NightCatalogRecord *range_record_ = nullptr;
+    const NightCatalogTimeRange *ranges_ = nullptr;
+    size_t range_count_ = 0;
+    size_t range_cursor_ = 0;
+    bool range_masks_ = false;
+
+    // One wire record at most; partial reads resume within this scratch.
+    static constexpr size_t ScratchBytes = 512;
+    uint8_t scratch_[ScratchBytes] = {};
+    size_t scratch_size_ = 0;
+    size_t scratch_cursor_ = 0;
+};
+
 }  // namespace aircannect

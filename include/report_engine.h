@@ -11,6 +11,7 @@
 #include "report_request_queue.h"
 #include "report_signal_store_builder.h"
 #include "report_signal_store_catalog.h"
+#include "report_signal_store_metadata_loader.h"
 #include "report_signal_store_service.h"
 #include "report_spool_availability.h"
 #include "storage_bounded_file_loader.h"
@@ -77,7 +78,8 @@ public:
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
         uint32_t generation,
-        bool force_rebuild = false);
+        bool force_rebuild = false,
+        ReportRequestIntent intent = ReportRequestIntent::Build);
     size_t cancel_background();
     void clear();
 
@@ -109,7 +111,7 @@ private:
     bool start_request(ReportArtifactRequest request, uint32_t now_ms);
     bool finish_metadata_load(uint32_t now_ms);
     bool protect_history(uint32_t now_ms);
-    bool start_known_request(const ReportSignalStoreCatalogRecord *stored,
+    bool start_known_request(const ReportSignalStoreMetadata *stored,
                              uint32_t now_ms);
     bool finish_sources_load(uint32_t now_ms);
     bool finish_fallback_metadata_load(uint32_t now_ms);
@@ -138,6 +140,7 @@ private:
     ReportSignalStoreService store_;
 
     StorageBoundedFileLoader metadata_loader_;
+    ReportSignalStoreMetadataLoader night_loader_;
     StorageAtomicWritePort *history_writes_ = nullptr;
     OperationTicket history_write_;
     bool history_missing_ = false;

@@ -10,6 +10,7 @@
 #include "storage_atomic_write_port.h"
 #include "storage_delete_port.h"
 #include "storage_read_port.h"
+#include "storage_range_write_port.h"
 
 namespace aircannect {
 
@@ -45,10 +46,9 @@ public:
 
     void begin(StorageReadPort &read_port);
     void begin(StorageReadPort &read_port,
-               StorageAtomicWritePort &write_port);
-    void begin(StorageReadPort &read_port,
+               StorageRangeWritePort &range_write_port,
                StorageAtomicWritePort &write_port,
-               StorageDeletePort &delete_port);
+               StorageDeletePort *delete_port = nullptr);
     bool poll();
     void cancel();
     void forget_media();
@@ -106,6 +106,8 @@ private:
     void finish_load(std::shared_ptr<const NightCatalog> catalog);
 
     // Save admission and source baseline.
+    bool prepare_index_stream(
+        std::shared_ptr<const NightCatalog> compact_index);
     bool sources_stored(const NightCatalogRecord &record) const;
     OperationAdmission reject_save(uint32_t generation,
                                    const char *error);
@@ -116,6 +118,7 @@ private:
 
     // Storage owners.
     StorageReadPort *read_port_ = nullptr;
+    StorageRangeWritePort *range_write_port_ = nullptr;
     StorageAtomicWritePort *write_port_ = nullptr;
     StorageDeletePort *delete_port_ = nullptr;
     NightCatalogStoreRuntime *runtime_ = nullptr;

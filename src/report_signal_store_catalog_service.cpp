@@ -1,6 +1,7 @@
 #include "report_signal_store_catalog_service.h"
 
 #include <new>
+#include <string.h>
 #include <utility>
 
 #include "large_scratch_array.h"
@@ -12,7 +13,7 @@ namespace aircannect {
 struct ReportSignalStoreCatalogLoadService::Runtime {
     std::shared_ptr<const NightCatalog> source;
     std::shared_ptr<const ReportSignalStoreCatalog> known;
-    std::unique_ptr<LargeScratchArray<ReportSignalStoreCatalogInput>> inputs;
+    std::unique_ptr<LargeScratchArray<ReportSignalStoreCatalogRecord>> inputs;
     std::shared_ptr<const ReportSignalStoreCatalog> completed;
     size_t cursor = 0;
 };
@@ -56,7 +57,7 @@ OperationAdmission ReportSignalStoreCatalogLoadService::start(
     }
 
     runtime_->inputs = std::make_unique<
-        LargeScratchArray<ReportSignalStoreCatalogInput>>();
+        LargeScratchArray<ReportSignalStoreCatalogRecord>>();
     if (!runtime_->inputs ||
         !runtime_->inputs->allocate(runtime_->source->size())) {
         fail("report_store_catalog_allocation_failed");
@@ -82,17 +83,14 @@ bool ReportSignalStoreCatalogLoadService::start_current() {
     const auto *known = night && runtime_->known
         ? runtime_->known->find(night->sleep_day) : nullptr;
     if (known) {
-        *runtime_->inputs->append() = {known->metadata, known->view};
+        *runtime_->inputs->append() = *known;
         ++runtime_->cursor;
         ++status_.nights_checked;
         ++status_.nights_loaded;
         return true;
     }
 
-    char path[AC_STORAGE_PATH_MAX] = {};
-    if (!night || !night->sleep_day.valid() ||
-        !report_signal_store_night_path(
-            night->sleep_day, path, sizeof(path))) {
+    if (!night || !night->sleep_day.valid()) {
         ++runtime_->cursor;
         ++status_.nights_checked;
         ++status_.nights_skipped;
@@ -100,8 +98,7 @@ bool ReportSignalStoreCatalogLoadService::start_current() {
     }
 
     const OperationAdmission admitted = loader_.start(
-        path,
-        ReportSignalStoreNightCodec::MaxBytes,
+        night->sleep_day,
         status_.generation,
         StorageReadLane::Maintenance);
     if (admitted == OperationAdmission::Busy) return false;
@@ -121,29 +118,20 @@ bool ReportSignalStoreCatalogLoadService::finish_current() {
     const StorageBoundedFileLoadStatus load = loader_.status();
     if (!load.terminal()) return false;
 
-    const NightCatalogRecord *night =
-        runtime_->source->record(runtime_->cursor);
     if (load.state == StorageBoundedFileLoadState::Ready) {
-        std::shared_ptr<const LargeByteBuffer> metadata =
-            loader_.take_completed();
-        ReportSignalStoreNightView view;
-        if (night && metadata &&
-            ReportSignalStoreNightCodec::decode(
-                metadata->data(), metadata->size(), view) &&
-            view.night.sleep_day == night->sleep_day) {
-            // Keep the prior generation available when sources have advanced.
-            ReportSignalStoreCatalogInput *input =
-                runtime_->inputs->append();
-            if (!input) {
-                fail("report_store_catalog_capacity_exceeded");
-                return true;
-            }
-            *input = {std::move(metadata), view};
-            ++status_.nights_loaded;
-        } else {
-            ++status_.nights_skipped;
+        const auto metadata = loader_.take_completed();
+        auto *input = runtime_->inputs->append();
+        if (!input) {
+            fail("report_store_catalog_capacity_exceeded");
+            return true;
         }
-    } else if (load.state == StorageBoundedFileLoadState::Missing) {
+        // Keep prior generations in the index without retaining their bytes.
+        *input = ReportSignalStoreCatalogBuilder::project(metadata);
+        ++status_.nights_loaded;
+        loader_.reset();
+    } else if (load.state == StorageBoundedFileLoadState::Missing ||
+               (load.state == StorageBoundedFileLoadState::Failed &&
+                strcmp(load.error, "report_store_metadata_invalid") == 0)) {
         ++status_.nights_skipped;
         loader_.reset();
     } else if (load.state == StorageBoundedFileLoadState::Failed) {
@@ -170,8 +158,8 @@ bool ReportSignalStoreCatalogLoadService::finish_catalog() {
         return false;
     }
 
-    runtime_->completed = ReportSignalStoreCatalogBuilder::build(
-        runtime_->inputs->data(), runtime_->inputs->size());
+    runtime_->completed = ReportSignalStoreCatalogBuilder::build_records(
+        runtime_->inputs->data(), runtime_->inputs->size(), runtime_->known.get());
     if (!runtime_->completed) {
         fail("report_store_catalog_build_failed");
         return false;

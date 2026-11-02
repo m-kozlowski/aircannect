@@ -14,6 +14,11 @@ enum class ReportRequestPriority : uint8_t {
     Idle,
 };
 
+enum class ReportRequestIntent : uint8_t {
+    Build,
+    LoadMetadata,
+};
+
 constexpr bool report_request_priority_higher(ReportRequestPriority lhs,
                                               ReportRequestPriority rhs) {
     return static_cast<uint8_t>(lhs) < static_cast<uint8_t>(rhs);
@@ -26,6 +31,7 @@ struct ReportArtifactRequest {
     bool force_rebuild = false;
     uint32_t ready_at_ms = 0;
     uint8_t attempts = 0;
+    ReportRequestIntent intent = ReportRequestIntent::Build;
 };
 
 enum class ReportRequestEnqueueStatus : uint8_t {
@@ -59,7 +65,8 @@ public:
     ReportRequestEnqueueResult enqueue(const ReportArtifactKey &artifact,
                                        ReportRequestPriority priority,
                                        uint32_t generation,
-                                       bool force_rebuild = false);
+                                       bool force_rebuild = false,
+                                       ReportRequestIntent intent = ReportRequestIntent::Build);
     ReportRequestSelection take_next(uint32_t now_ms,
                                      ReportArtifactRequest &request);
     OperationOutcome retry(ReportArtifactRequest request,
@@ -79,7 +86,8 @@ private:
                                        const ReportArtifactKey &rhs);
     static bool ready(const ReportArtifactRequest &request, uint32_t now_ms);
 
-    size_t find_artifact(const ReportArtifactKey &artifact) const;
+    size_t find_artifact(const ReportArtifactKey &artifact,
+                         ReportRequestIntent intent) const;
     size_t find_ready(ReportRequestPriority priority, uint32_t now_ms) const;
     size_t find_evictable(ReportRequestPriority priority) const;
     void erase(size_t index);

@@ -220,6 +220,17 @@ std::shared_ptr<const NightCatalog> report_catalog(
 ReportConsoleCommands::ReportConsoleCommands(ReportTask &report)
     : report_(report) {}
 
+void ReportConsoleCommands::print_memory_detail(Print &out) {
+    const auto usage = report_.memory_usage();
+    out.printf("[MEM owner] reports nights=%u catalog=%u metadata_records=%u "
+               "metadata_cache=%u summary=%u\n",
+               static_cast<unsigned>(usage.nights),
+               static_cast<unsigned>(usage.night_catalog_bytes),
+               static_cast<unsigned>(usage.metadata_records_bytes),
+               static_cast<unsigned>(usage.metadata_cache_bytes),
+               static_cast<unsigned>(usage.summary_bytes));
+}
+
 bool ReportConsoleCommands::execute(const String &command,
                                     const String &rest_arg,
                                     Print &out,

@@ -125,6 +125,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
     store_.begin(read_port, range_write_port, write_port);
     builder_.begin(store_);
     metadata_loader_.begin(read_port);
+    night_loader_.begin(read_port);
     history_writes_ = &write_port;
     sources_loader_.begin(read_port);
 }
@@ -196,8 +197,10 @@ ReportRequestEnqueueResult ReportEngine::request(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild) {
-    if (!artifact.valid() || generation == 0) {
+    bool force_rebuild,
+    ReportRequestIntent intent) {
+    if (!artifact.valid() || generation == 0 ||
+        (intent == ReportRequestIntent::LoadMetadata && force_rebuild)) {
         return {};
     }
     if (catalog_ && !source_current(artifact)) return {};
@@ -207,7 +210,17 @@ ReportRequestEnqueueResult ReportEngine::request(
         const bool same_source = active_request_.artifact == artifact;
         const bool rebuild_upgrade = same_source && force_rebuild &&
             !active_request_.force_rebuild;
-        if (!rebuild_upgrade && same_source) {
+        const bool intent_upgrade = intent == ReportRequestIntent::Build &&
+            active_request_.intent == ReportRequestIntent::LoadMetadata;
+        const bool keep_build = same_source && intent == ReportRequestIntent::LoadMetadata &&
+            active_request_.intent == ReportRequestIntent::Build;
+
+        if (keep_build) {
+            return {ReportRequestEnqueueStatus::AlreadyQueued,
+                    active_request_.ticket};
+        }
+
+        if (!rebuild_upgrade && !intent_upgrade && same_source) {
             if (report_request_priority_higher(
                     priority, active_request_.priority)) {
                 active_request_.priority = priority;
@@ -215,11 +228,16 @@ ReportRequestEnqueueResult ReportEngine::request(
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     active_request_.ticket};
         }
+
+        if (same_source && report_request_priority_higher(
+                active_request_.priority, priority)) {
+            priority = active_request_.priority;
+        }
         cancel_active_work();
     }
 
     const ReportRequestEnqueueResult queued = queue_.enqueue(
-        artifact, priority, generation, force_rebuild);
+        artifact, priority, generation, force_rebuild, intent);
     const bool accepted =
         queued.status != ReportRequestEnqueueStatus::Full &&
         queued.status != ReportRequestEnqueueStatus::Invalid;
@@ -232,7 +250,8 @@ ReportRequestEnqueueResult ReportEngine::request(
         active_request_.artifact,
         active_request_.priority,
         active_request_.ticket.generation,
-        active_request_.force_rebuild);
+        active_request_.force_rebuild,
+        active_request_.intent);
     if (restored.status != ReportRequestEnqueueStatus::Full &&
         restored.status != ReportRequestEnqueueStatus::Invalid) {
         cancel_active_work();
@@ -284,8 +303,8 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             worked = protect_history(now_ms) || worked;
             break;
         case ActivePhase::LoadingMetadata:
-            worked = metadata_loader_.poll() || worked;
-            if (metadata_loader_.status().terminal()) {
+            worked = night_loader_.poll() || worked;
+            if (night_loader_.status().terminal()) {
                 worked = finish_metadata_load(now_ms) || worked;
             }
             break;
@@ -435,16 +454,13 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
                                  uint32_t now_ms) {
     active_request_ = request;
 
-    const ReportSignalStoreCatalogRecord *stored =
-        store_catalog_ ? store_catalog_->find(request.artifact.sleep_day)
+    const ReportSignalStoreMetadata *stored =
+        store_catalog_ ? store_catalog_->cached(request.artifact.sleep_day)
                        : nullptr;
     if (stored) return start_known_request(stored, now_ms);
 
-    char path[AC_STORAGE_PATH_MAX] = {};
-    if (!report_signal_store_night_path(
-            request.artifact.sleep_day, path, sizeof(path)) ||
-        metadata_loader_.start(
-            path, ReportSignalStoreNightCodec::MaxBytes,
+    if (night_loader_.start(
+            request.artifact.sleep_day,
             request.ticket.generation, read_lane(request.priority)) !=
             OperationAdmission::Accepted) {
         complete_active(OperationOutcome::failed(),
@@ -459,40 +475,24 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
 }
 
 bool ReportEngine::finish_metadata_load(uint32_t now_ms) {
-    const StorageBoundedFileLoadStatus load = metadata_loader_.status();
+    const StorageBoundedFileLoadStatus load = night_loader_.status();
     if (!load.terminal()) return false;
 
     if (load.state == StorageBoundedFileLoadState::Ready) {
-        std::shared_ptr<const LargeByteBuffer> metadata =
-            metadata_loader_.take_completed();
-        ReportSignalStoreNightView view;
-        if (!metadata ||
-            !ReportSignalStoreNightCodec::decode(
-                metadata->data(), metadata->size(), view) ||
-            view.night.sleep_day != active_request_.artifact.sleep_day) {
-            if (active_request_.force_rebuild) {
-                return start_known_request(nullptr, now_ms);
-            }
-
-            complete_active(OperationOutcome::failed(),
-                            ReportPlanStatus::Ready,
-                            ReportExecutorError::None,
-                            "report_store_metadata_invalid");
-            return true;
-        }
-
-        ReportSignalStoreCatalogRecord stored;
-        stored.sleep_day = view.night.sleep_day;
-        stored.source_revision = view.night.source_revision;
-        stored.generation = view.night.generation;
-        stored.metadata = std::move(metadata);
-        stored.view = view;
-        published_ = {stored.metadata, stored.view};
+        auto stored = night_loader_.take_completed();
+        published_ = stored;
         return start_known_request(&stored, now_ms);
     }
 
     if (load.state == StorageBoundedFileLoadState::Missing) {
-        metadata_loader_.reset();
+        night_loader_.reset();
+        return start_known_request(nullptr, now_ms);
+    }
+
+    if (active_request_.intent == ReportRequestIntent::Build &&
+        active_request_.force_rebuild &&
+        strcmp(load.error, "report_store_metadata_invalid") == 0) {
+        night_loader_.reset();
         return start_known_request(nullptr, now_ms);
     }
 
@@ -506,8 +506,17 @@ bool ReportEngine::finish_metadata_load(uint32_t now_ms) {
 }
 
 bool ReportEngine::start_known_request(
-    const ReportSignalStoreCatalogRecord *stored,
+    const ReportSignalStoreMetadata *stored,
     uint32_t now_ms) {
+    if (active_request_.intent == ReportRequestIntent::LoadMetadata) {
+        const uint32_t generation = stored ? stored->view.night.generation : 0;
+        complete_active(stored ? OperationOutcome::succeeded() : OperationOutcome::failed(),
+                        ReportPlanStatus::Ready, ReportExecutorError::None,
+                        stored ? nullptr : "report_store_metadata_missing");
+        last_completion_.store_generation = generation;
+        return true;
+    }
+
     const auto *source = catalog_->find(active_request_.artifact.sleep_day);
     if (source && source->unresolved_history) {
         complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
@@ -516,11 +525,11 @@ bool ReportEngine::start_known_request(
     }
 
     if (stored && (stored->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
-        active_store_generation_ = increment_generation(stored->generation);
+        active_store_generation_ = increment_generation(stored->view.night.generation);
         retained_metadata_ = {stored->metadata, stored->view};
         metadata_loader_.reset();
         char path[AC_STORAGE_PATH_MAX] = {};
-        report_signal_store_night_path(stored->sleep_day, path, sizeof(path), true);
+        report_signal_store_night_path(stored->view.night.sleep_day, path, sizeof(path), true);
         if (metadata_loader_.start(path, ReportSignalStoreNightCodec::MaxBytes,
                                   active_store_generation_, StorageReadLane::Report) !=
             OperationAdmission::Accepted) {
@@ -533,8 +542,8 @@ bool ReportEngine::start_known_request(
     }
 
     if (!active_request_.force_rebuild && stored &&
-        stored->source_revision == active_request_.artifact.source_revision) {
-        const uint32_t generation = stored->generation;
+        stored->view.night.source_revision == active_request_.artifact.source_revision) {
+        const uint32_t generation = stored->view.night.generation;
         complete_active(OperationOutcome::succeeded(),
                         ReportPlanStatus::Ready,
                         ReportExecutorError::None);
@@ -543,7 +552,7 @@ bool ReportEngine::start_known_request(
     }
 
     active_store_generation_ = stored
-        ? increment_generation(stored->generation) : 1;
+        ? increment_generation(stored->view.night.generation) : 1;
     retained_metadata_ = stored
         ? ReportSignalStoreMetadata{stored->metadata, stored->view}
         : ReportSignalStoreMetadata{};
@@ -561,7 +570,7 @@ bool ReportEngine::start_known_request(
          stored->view.night.checkpoint_slot != 0);
     previous_metadata_ = !active_request_.force_rebuild && edf_append
         ? retained_metadata_ : ReportSignalStoreMetadata{};
-    if (previous_metadata_.metadata) active_store_generation_ = stored->generation;
+    if (previous_metadata_.metadata) active_store_generation_ = stored->view.night.generation;
     return start_build(now_ms);
 }
 
@@ -667,14 +676,17 @@ bool ReportEngine::finish_sources_load(uint32_t now_ms) {
         return true;
     }
 
-    loaded_sources_ = sources;
+    loaded_sources_.reset();
     loaded_sources_expected_revision_ = sources_expected_revision_;
     loaded_sources_expected_flags_ = sources_expected_flags_;
     if (night->source_revision != active_request_.artifact.source_revision) {
-        loaded_sources_.reset();
         catalog_replacement_ = std::move(sources);
         phase_ = ActivePhase::WaitingForCatalog;
         return true;
+    }
+
+    if (night->source_flags != current->source_flags) {
+        loaded_sources_ = sources;
     }
 
     return start_build(now_ms, std::move(sources));
@@ -726,9 +738,6 @@ bool ReportEngine::start_build(
                             ReportExecutorError::None);
             return true;
         }
-        loaded_sources_ = sources;
-        loaded_sources_expected_revision_ = night->source_revision;
-        loaded_sources_expected_flags_ = night->source_flags;
     }
 
     const auto *source_night = sources->find(active_request_.artifact.sleep_day);
@@ -1238,6 +1247,10 @@ void ReportEngine::cancel_active_work() {
                             ReportExecutorError::None);
             break;
         case ActivePhase::LoadingMetadata:
+            night_loader_.cancel();
+            complete_active(OperationOutcome::cancelled(), ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            break;
         case ActivePhase::LoadingFallbackMetadata:
         case ActivePhase::LoadingCheckpoint:
             metadata_loader_.cancel();
@@ -1291,6 +1304,7 @@ void ReportEngine::reset_active() {
     if (history_write_.valid()) history_writes_->abandon(history_write_);
     history_write_ = {};
     history_missing_ = false;
+    night_loader_.reset();
     metadata_loader_.reset();
     (void)sources_loader_.take_snapshot();
     sources_loader_.cancel();

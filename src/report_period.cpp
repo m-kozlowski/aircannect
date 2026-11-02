@@ -39,6 +39,27 @@ void append_metric(LargeTextBuffer &json, bool valid, double milli) {
     else json += "null";
 }
 
+bool metadata_matches_snapshot(
+    const ReportSignalStoreCatalogRecord &snapshot,
+    const ReportSignalStoreMetadata &metadata) {
+    if (!metadata.metadata) return false;
+
+    const ReportSignalStoreCatalogRecord projected =
+        ReportSignalStoreCatalogBuilder::project(metadata);
+    return projected.sleep_day == snapshot.sleep_day &&
+        projected.source_revision == snapshot.source_revision &&
+        projected.generation == snapshot.generation &&
+        projected.rejected_source_revision == snapshot.rejected_source_revision &&
+        projected.flags == snapshot.flags &&
+        projected.source_flags == snapshot.source_flags &&
+        projected.checkpoint_slot == snapshot.checkpoint_slot &&
+        projected.compression_version == snapshot.compression_version &&
+        projected.metadata_size == snapshot.metadata_size &&
+        projected.trend_valid_mask == snapshot.trend_valid_mask &&
+        std::equal(projected.trend_values, projected.trend_values + 5,
+                   snapshot.trend_values);
+}
+
 }  // namespace
 
 bool ReportPeriodKey::valid() const {
@@ -132,6 +153,7 @@ struct ReportPeriodService::Runtime {
     std::shared_ptr<const LargeByteBuffer> histogram_bytes;
     ReportNightHistogramView histogram;
     const ReportSignalStoreCatalogRecord *saved = nullptr;
+    ReportSignalStoreMetadata metadata;
     LargeTextBuffer daily;
     uint16_t cursor = 0;
     uint16_t nights = 0;
@@ -152,30 +174,44 @@ struct ReportPeriodService::Runtime {
     uint64_t csr_minutes = 0;
     uint64_t leak_ms = 0;
     uint64_t leak_above_ms = 0;
-    enum class Phase { Night, ReadingHistogram, ReadCheckpoint, Reading,
-                       Tails, WriteHistogram, Metrics, Finish, Done } phase = Phase::Night;
+    enum class Phase { Night, ReadingMetadata, ReadingHistogram,
+                       ReadCheckpoint, Reading, Tails, WriteHistogram,
+                       Metrics, Finish, Done } phase = Phase::Night;
+
+    void fail(const char *error) {
+        copy_cstr(result->error, sizeof(result->error), error);
+        checkpoint = {};
+        histogram = {};
+        bytes.reset();
+        histogram_bytes.reset();
+        drop_metadata();
+        saved = nullptr;
+        phase = Phase::Done;
+    }
+
+    void drop_metadata() {
+        metadata.view = {};
+        metadata.metadata.reset();
+    }
 
     void finish_night() {
-        bytes.reset();
         checkpoint = {};
+        bytes.reset();
         night_metrics.clear();
         tail_metrics.clear();
-        histogram_bytes.reset();
         histogram = {};
+        histogram_bytes.reset();
+        drop_metadata();
         saved = nullptr;
         ++cursor;
         phase = Phase::Night;
     }
 
     void accept_metadata(SleepDayId day) {
-        saved = store ? store->find(day) : nullptr;
         const auto *source = catalog->find(day);
-        if (saved && (saved->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
-            saved = nullptr;
-        }
         if (source && source->unresolved_history) source = nullptr;
         ReportNightMetrics m;
-        const auto *night = saved ? &saved->view.night : nullptr;
+        const auto *night = metadata.metadata ? &metadata.view.night : nullptr;
         if (night) m = night->metrics;
         else if (source) report_night_metrics_from_catalog(source->metrics, m);
 
@@ -232,6 +268,44 @@ struct ReportPeriodService::Runtime {
             events[2] += night->events.unknown_apnea;
             events[3] += night->events.hypopnea;
             events[4] += night->events.arousal;
+        }
+    }
+
+    void start_night_work(Cache &cache,
+                          StorageBoundedFileLoader &loader,
+                          SleepDayId day) {
+        accept_metadata(day);
+
+        char path[AC_STORAGE_PATH_MAX];
+        if (!saved) {
+            finish_night();
+            return;
+        }
+        if (!metadata.metadata) {
+            fail("report_store_metadata_missing");
+            return;
+        }
+        if (!metadata.view.night.checkpoint_slot ||
+            !ReportNightHistogramCodec::path(
+                metadata.view.night, path, sizeof(path))) {
+            ++checkpoint_missing;
+            finish_night();
+            return;
+        }
+
+        if (const auto *cached = cache.find(metadata.view.night)) {
+            histogram_bytes = cached->bytes;
+            histogram = cached->view;
+            metric = 0;
+            phase = Phase::Metrics;
+            return;
+        }
+
+        if (loader.start(path, ReportNightHistogramCodec::MaxBytes, 1,
+                         StorageReadLane::Report) != OperationAdmission::Accepted) {
+            fail("period_read_rejected");
+        } else {
+            phase = Phase::ReadingHistogram;
         }
     }
 
@@ -321,6 +395,7 @@ struct ReportPeriodService::Runtime {
         if (json.overflowed() || daily.overflowed()) {
             copy_cstr(result->error, sizeof(result->error), "period_alloc");
         }
+        drop_metadata();
         phase = Phase::Done;
         catalog.reset();
         store.reset();
@@ -333,6 +408,7 @@ ReportPeriodService::~ReportPeriodService() { cancel(); }
 void ReportPeriodService::begin(StorageReadPort &port, StorageAtomicWritePort &writes) {
     cancel();
     clear_cache();
+    metadata_loader_.begin(port);
     loader_.begin(port);
     write_port_ = &writes;
 }
@@ -373,27 +449,60 @@ bool ReportPeriodService::poll() {
         if (r.cursor == r.result->key.days) { r.phase = Phase::Finish; return true; }
         SleepDayId day;
         SleepDayId::from_epoch_days(r.result->key.first().epoch_days() + r.cursor, day);
-        r.accept_metadata(day);
-        char path[AC_STORAGE_PATH_MAX];
-        if (!r.saved || !r.saved->view.night.checkpoint_slot ||
-            !ReportNightHistogramCodec::path(r.saved->view.night, path, sizeof(path))) {
-            if (r.saved) ++r.checkpoint_missing;
-            r.finish_night();
-            return true;
+
+        r.saved = r.store ? r.store->find(day) : nullptr;
+        r.drop_metadata();
+        if (r.saved && (r.saved->flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
+            r.saved = nullptr;
         }
-        if (const auto *cached = cache_->find(r.saved->view.night)) {
-            r.histogram_bytes = cached->bytes;
-            r.histogram = cached->view;
-            r.metric = 0;
-            r.phase = Phase::Metrics;
+
+        if (r.saved) {
+            const ReportSignalStoreMetadata *cached = r.store->cached(day);
+            if (cached) {
+                r.metadata = *cached;
+            } else {
+                const OperationAdmission admitted = metadata_loader_.start(
+                    day, 1, StorageReadLane::Report);
+                if (admitted == OperationAdmission::Busy) return false;
+                if (admitted != OperationAdmission::Accepted) {
+                    r.fail("report_store_metadata_read_rejected");
+                } else {
+                    r.phase = Phase::ReadingMetadata;
+                }
+                return true;
+            }
+        }
+
+        r.start_night_work(*cache_, loader_, day);
+        return true;
+    }
+    if (r.phase == Phase::ReadingMetadata) {
+        const bool worked = metadata_loader_.poll();
+        const StorageBoundedFileLoadStatus status = metadata_loader_.status();
+        if (status.active()) return worked;
+
+        if (status.state != StorageBoundedFileLoadState::Ready) {
+            metadata_loader_.reset();
+            if (status.state == StorageBoundedFileLoadState::Missing) {
+                r.fail("report_store_metadata_missing");
+            } else {
+                r.fail(status.error[0] ? status.error
+                                      : "report_store_metadata_read_failed");
+            }
             return true;
         }
 
-        if (loader_.start(path, ReportNightHistogramCodec::MaxBytes, 1,
-                          StorageReadLane::Report) != OperationAdmission::Accepted) {
-            copy_cstr(r.result->error, sizeof(r.result->error), "period_read_rejected");
-            r.phase = Phase::Done;
-        } else r.phase = Phase::ReadingHistogram;
+        r.metadata = metadata_loader_.take_completed();
+        metadata_loader_.reset();
+        if (!r.saved || !metadata_matches_snapshot(*r.saved, r.metadata)) {
+            r.fail("report_store_metadata_changed");
+            return true;
+        }
+
+        SleepDayId day;
+        SleepDayId::from_epoch_days(
+            r.result->key.first().epoch_days() + r.cursor, day);
+        r.start_night_work(*cache_, loader_, day);
         return true;
     }
     if (r.phase == Phase::ReadingHistogram) {
@@ -405,7 +514,7 @@ bool ReportPeriodService::poll() {
 
         if (r.histogram_bytes && ReportNightHistogramCodec::decode(
                 r.histogram_bytes->data(), r.histogram_bytes->size(), r.histogram) &&
-            r.histogram.matches(r.saved->view.night)) {
+            r.histogram.matches(r.metadata.view.night)) {
             cache_->remember(r.histogram_bytes, r.histogram);
             r.metric = 0;
             r.phase = Phase::Metrics;
@@ -413,24 +522,22 @@ bool ReportPeriodService::poll() {
                    status.state == StorageBoundedFileLoadState::Missing ||
                    strcmp(status.error, "storage_file_size_invalid") == 0) {
             // Only this derived shortcut is expendable. Leave the checkpoint intact.
-            r.histogram_bytes.reset();
             r.histogram = {};
+            r.histogram_bytes.reset();
             r.phase = Phase::ReadCheckpoint;
         } else {
-            copy_cstr(r.result->error, sizeof(r.result->error), status.error);
-            r.phase = Phase::Done;
+            r.fail(status.error[0] ? status.error : "period_read_failed");
         }
         return true;
     }
     if (r.phase == Phase::ReadCheckpoint) {
         char path[AC_STORAGE_PATH_MAX];
-        const auto &night = r.saved->view.night;
+        const auto &night = r.metadata.view.night;
         if (!report_build_checkpoint_path(night.sleep_day, night.generation,
                 night.checkpoint_slot, path, sizeof(path)) ||
             loader_.start(path, ReportBuildCheckpointCodec::MaxBytes, 1,
                 StorageReadLane::Report) != OperationAdmission::Accepted) {
-            copy_cstr(r.result->error, sizeof(r.result->error), "period_read_rejected");
-            r.phase = Phase::Done;
+            r.fail("period_read_rejected");
         } else {
             r.phase = Phase::Reading;
         }
@@ -444,18 +551,16 @@ bool ReportPeriodService::poll() {
         loader_.reset();
         if (!r.bytes) {
             if (status.state != StorageBoundedFileLoadState::Missing) {
-                copy_cstr(r.result->error, sizeof(r.result->error), status.error[0] ? status.error : "period_read_failed");
-                r.phase = Phase::Done;
+                r.fail(status.error[0] ? status.error : "period_read_failed");
             } else { ++r.checkpoint_missing; r.finish_night(); }
             return true;
         }
-        const auto &night = r.saved->view.night;
+        const auto &night = r.metadata.view.night;
         if (!ReportBuildCheckpointCodec::decode(r.bytes->data(), r.bytes->size(), r.checkpoint) ||
             r.checkpoint.sleep_day != night.sleep_day || r.checkpoint.source_revision != night.source_revision ||
             r.checkpoint.generation != night.generation || r.checkpoint.track_count != night.track_count ||
             !r.night_metrics.restore(r.checkpoint.metrics, r.checkpoint.metrics_size)) {
-            copy_cstr(r.result->error, sizeof(r.result->error), "period_checkpoint_invalid");
-            r.phase = Phase::Done;
+            r.fail("period_checkpoint_invalid");
             return true;
         }
         r.tail = 0;
@@ -465,14 +570,13 @@ bool ReportPeriodService::poll() {
     if (r.phase == Phase::Tails) {
         if (r.tail == r.checkpoint.track_count) {
             r.histogram_bytes = ReportNightHistogramCodec::encode(
-                r.night_metrics, r.saved->view, &r.histogram);
+                r.night_metrics, r.metadata.view, &r.histogram);
             if (!r.histogram_bytes) {
-                copy_cstr(r.result->error, sizeof(r.result->error), "period_histogram_alloc");
-                r.phase = Phase::Done;
+                r.fail("period_histogram_alloc");
                 return true;
             }
-            r.bytes.reset();
             r.checkpoint = {};
+            r.bytes.reset();
             r.night_metrics.clear();
             r.tail_metrics.clear();
             r.phase = Phase::WriteHistogram;
@@ -483,15 +587,15 @@ bool ReportPeriodService::poll() {
         if (track.tail_metrics_size &&
             (!r.tail_metrics.restore(track.tail_metrics, track.tail_metrics_size) ||
              !r.night_metrics.merge(r.tail_metrics))) {
-            copy_cstr(r.result->error, sizeof(r.result->error), "period_tail_invalid");
-            r.phase = Phase::Done;
+            r.fail("period_tail_invalid");
         }
         return true;
     }
     if (r.phase == Phase::WriteHistogram) {
         if (!write_ticket_.valid()) {
             char path[AC_STORAGE_PATH_MAX];
-            ReportNightHistogramCodec::path(r.saved->view.night, path, sizeof(path));
+            ReportNightHistogramCodec::path(
+                r.metadata.view.night, path, sizeof(path));
             StorageAtomicWriteCommand command;
             command.path = path;
             command.bytes = r.histogram_bytes;
@@ -500,8 +604,7 @@ bool ReportPeriodService::poll() {
             const auto submitted = write_port_->request_write(command);
             if (submitted.admission == OperationAdmission::Busy) return false;
             if (!submitted.accepted()) {
-                copy_cstr(r.result->error, sizeof(r.result->error), "period_cache_write_rejected");
-                r.phase = Phase::Done;
+                r.fail("period_cache_write_rejected");
             } else {
                 write_ticket_ = submitted.ticket;
             }
@@ -513,9 +616,8 @@ bool ReportPeriodService::poll() {
         write_ticket_ = {};
         if (completion.outcome.disposition != OperationDisposition::Succeeded ||
             completion.bytes_written != r.histogram_bytes->size()) {
-            copy_cstr(r.result->error, sizeof(r.result->error),
-                completion.error[0] ? completion.error : "period_cache_write_failed");
-            r.phase = Phase::Done;
+            r.fail(completion.error[0] ? completion.error
+                                       : "period_cache_write_failed");
         } else {
             cache_->remember(r.histogram_bytes, r.histogram);
             r.metric = 0;
@@ -533,6 +635,7 @@ bool ReportPeriodService::poll() {
 }
 
 void ReportPeriodService::cancel() {
+    metadata_loader_.reset();
     loader_.reset();
     if (write_port_ && write_ticket_.valid()) write_port_->abandon(write_ticket_);
     write_ticket_ = {};

@@ -3,6 +3,7 @@
 #include <memory>
 #include "large_text_buffer.h"
 #include "report_signal_store_catalog.h"
+#include "report_signal_store_metadata_loader.h"
 #include "storage_bounded_file_loader.h"
 #include "storage_atomic_write_port.h"
 
@@ -52,6 +53,7 @@ private:
     struct Cache;
     std::shared_ptr<Runtime> runtime_;
     std::shared_ptr<Cache> cache_;
+    ReportSignalStoreMetadataLoader metadata_loader_;
     StorageBoundedFileLoader loader_;
     StorageAtomicWritePort *write_port_ = nullptr;
     OperationTicket write_ticket_;

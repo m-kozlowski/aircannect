@@ -6,9 +6,11 @@
 #include <string.h>
 #include <utility>
 #include <string_view>
+#include <vector>
 
 #include "board_report.h"
 #include "edf_file_inventory.h"
+#include "large_allocator.h"
 #include "large_scratch_array.h"
 #include "night_catalog_builder.h"
 #include "night_catalog_capture.h"
@@ -77,6 +79,7 @@ struct ReportTaskCommand {
     SleepDayId sleep_day;
     ReportRequestPriority priority = ReportRequestPriority::Foreground;
     bool force_rebuild = false;
+    ReportRequestIntent intent = ReportRequestIntent::Build;
     uint32_t generation = 0;
     SleepDayId first_day;
     SleepDayId last_day;
@@ -240,6 +243,9 @@ int64_t align_block_start(int64_t timestamp_ms) {
 }  // namespace
 
 struct ReportTask::Runtime {
+    using RebuildSelection =
+        std::vector<ReportArtifactKey, LargeAllocator<ReportArtifactKey>>;
+
     Runtime() : engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
 
     void record_failure(const char *operation, const char *error,
@@ -308,8 +314,11 @@ struct ReportTask::Runtime {
             unlock();
             return OperationAdmission::Busy;
         }
+
+        const auto rebuild_state = command.kind == ReportTaskCommandKind::Rebuild
+            ? published_state() : nullptr;
         if (command.kind == ReportTaskCommandKind::Rebuild &&
-            (!published || !published->catalog)) {
+            (!rebuild_state || !rebuild_state->catalog)) {
             unlock();
             return OperationAdmission::Rejected;
         }
@@ -329,8 +338,17 @@ struct ReportTask::Runtime {
             if (queued.kind != command.kind) continue;
             if (queued.period_days != command.period_days) continue;
             if (queued.sleep_day == command.sleep_day) {
+                if (queued.intent == ReportRequestIntent::Build &&
+                    command.intent == ReportRequestIntent::LoadMetadata) {
+                    unlock();
+                    return OperationAdmission::Accepted;
+                }
+
                 queued.force_rebuild =
                     queued.force_rebuild || command.force_rebuild;
+                if (command.intent == ReportRequestIntent::Build) {
+                    queued.intent = command.intent;
+                }
                 if (report_request_priority_higher(
                         command.priority, queued.priority)) {
                     queued.priority = command.priority;
@@ -349,6 +367,31 @@ struct ReportTask::Runtime {
         }
 
         if (command.kind == ReportTaskCommandKind::Rebuild) {
+            RebuildSelection selected;
+            const auto &snapshot = *rebuild_state->catalog;
+            size_t count = 0;
+            for (size_t i = 0; i < snapshot.size(); ++i) {
+                const auto &night = *snapshot.record(i);
+                if (!(night.sleep_day < command.first_day) &&
+                    !(command.last_day < night.sleep_day)) ++count;
+            }
+
+            try {
+                selected.reserve(count);
+                for (size_t i = 0; i < snapshot.size(); ++i) {
+                    const auto &night = *snapshot.record(i);
+                    if (night.sleep_day < command.first_day ||
+                        command.last_day < night.sleep_day) continue;
+
+                    selected.push_back(ReportArtifactKey::result(
+                        night.sleep_day, night.source_revision));
+                }
+            } catch (const std::bad_alloc &) {
+                unlock();
+                return OperationAdmission::Rejected;
+            }
+
+            rebuild_selection.swap(selected);
             rebuild = {};
             rebuild.generation = command.generation;
             rebuild.active = true;
@@ -403,6 +446,18 @@ struct ReportTask::Runtime {
         }
         unlock();
         return true;
+    }
+
+    void start_period(const std::shared_ptr<const NightCatalog> &source,
+                      const std::shared_ptr<const ReportSignalStoreCatalog> &stored,
+                      uint64_t revision) {
+        if (period_service.start(period_key, source, stored, revision)) return;
+
+        auto failed = std::make_shared<ReportPeriodResult>();
+        failed->key = period_key;
+        failed->revision = revision;
+        copy_cstr(failed->error, sizeof(failed->error), "period_alloc");
+        period_completed = std::move(failed);
     }
 
     void publish_activity(const ActivitySnapshot &next) {
@@ -653,7 +708,7 @@ struct ReportTask::Runtime {
     bool publish_state() {
         const auto previous = published_state();
         const auto json = catalog
-            ? build_report_catalog_json(*catalog, store_catalog.get(),
+            ? build_report_catalog_json(catalog, store_catalog,
                                         catalog_generation,
                                         previous ? previous->catalog_json : nullptr)
             : nullptr;
@@ -855,8 +910,7 @@ struct ReportTask::Runtime {
     }
 
     void release_loaded_sources() {
-        if (engine.status().state != ReportEngineState::Idle ||
-            pending_catalog_save || catalog_store.active() ||
+        if (pending_catalog_save || catalog_store.active() ||
             catalog_store.status().generation != catalog_generation) return;
 
         const auto index = catalog_store.snapshot();
@@ -891,7 +945,12 @@ struct ReportTask::Runtime {
         }
 
         ReportNightFailureEntry *entry = nullptr;
-        for (ReportNightFailureEntry &candidate : failures) {
+        const bool metadata_only =
+            completion.request.intent == ReportRequestIntent::LoadMetadata;
+        auto &entries = metadata_only ? metadata_failures : failures;
+        auto &cursor = metadata_only ? metadata_failure_cursor : failure_cursor;
+
+        for (ReportNightFailureEntry &candidate : entries) {
             if (candidate.valid() &&
                 candidate.sleep_day ==
                     completion.request.artifact.sleep_day) {
@@ -900,8 +959,7 @@ struct ReportTask::Runtime {
             }
         }
         if (!entry) {
-            entry = &failures[failure_cursor++ %
-                              AC_REPORT_TASK_BUILD_CAPACITY];
+            entry = &entries[cursor++ % AC_REPORT_TASK_BUILD_CAPACITY];
         }
 
         entry->sleep_day = completion.request.artifact.sleep_day;
@@ -918,9 +976,13 @@ struct ReportTask::Runtime {
         unlock();
     }
 
-    void clear_failure(SleepDayId sleep_day) {
+    void clear_failure(SleepDayId sleep_day,
+                       ReportRequestIntent intent = ReportRequestIntent::Build) {
         if (!lock(20)) return;
-        for (ReportNightFailureEntry &entry : failures) {
+        auto &entries = intent == ReportRequestIntent::LoadMetadata
+            ? metadata_failures : failures;
+
+        for (ReportNightFailureEntry &entry : entries) {
             if (entry.sleep_day == sleep_day) entry = {};
         }
         unlock();
@@ -928,16 +990,25 @@ struct ReportTask::Runtime {
 
     bool find_failure(SleepDayId sleep_day,
                       ReportNightFailureStatus &out,
-                      uint32_t timeout_ms) const {
+                      uint32_t timeout_ms,
+                      ReportRequestIntent intent = ReportRequestIntent::Build) const {
         out = {};
         if (!sleep_day.valid() || !lock(timeout_ms)) return false;
 
         const auto state = published_state();
         const NightCatalogRecord *night =
             state && state->catalog ? state->catalog->find(sleep_day) : nullptr;
-        for (const ReportNightFailureEntry &entry : failures) {
+        const auto &entries = intent == ReportRequestIntent::LoadMetadata
+            ? metadata_failures : failures;
+
+        for (const ReportNightFailureEntry &entry : entries) {
             if (!entry.valid() || entry.sleep_day != sleep_day ||
                 !night || entry.source_revision != night->source_revision) {
+                continue;
+            }
+
+            if (intent == ReportRequestIntent::LoadMetadata && entry.retryable &&
+                deadline_due(last_step_ms, entry.retry_at_ms)) {
                 continue;
             }
 
@@ -949,10 +1020,11 @@ struct ReportTask::Runtime {
             return true;
         }
         unlock();
+        if (intent == ReportRequestIntent::LoadMetadata) return false;
 
         const auto *stored = state && state->store_catalog
             ? state->store_catalog->find(sleep_day) : nullptr;
-        if (night && stored && stored->view.night.rejected_source_revision ==
+        if (night && stored && stored->rejected_source_revision ==
                                    night->source_revision) {
             copy_cstr(out.error, sizeof(out.error), "report_source_changed_incomplete");
             out.retryable = false;
@@ -1187,7 +1259,7 @@ struct ReportTask::Runtime {
     bool schedule_source_change_refresh(uint32_t now_ms,
                                         bool local_blocked,
                                         bool startup_allowed) {
-        if (rebuild_catalog || source_change_count == 0 ||
+        if (rebuild_started || source_change_count == 0 ||
             local_blocked || !startup_allowed ||
             !catalog || pending_refresh.valid() || refresh_generation != 0 ||
             summary_acquisition.active() || catalog_refresh.active() ||
@@ -1320,7 +1392,7 @@ struct ReportTask::Runtime {
     }
 
     bool materialize_due_reconcile(uint32_t now_ms) {
-        if (rebuild_catalog || !reconcile_pending ||
+        if (rebuild_started || !reconcile_pending ||
             !deadline_due(now_ms, reconcile_due_ms) ||
             pending_refresh.valid() || refresh_generation != 0 ||
             (!reconcile_post_therapy &&
@@ -1522,13 +1594,19 @@ struct ReportTask::Runtime {
     void clear_failures(ReportSourceChange covered) {
         if (!covered.valid() || !lock(20)) return;
 
-        for (ReportNightFailureEntry &entry : failures) {
-            if (!entry.valid() || !entry.sleep_day.valid() ||
-                entry.sleep_day < covered.first_day ||
-                covered.last_day < entry.sleep_day) {
-                continue;
+        for (const auto intent : {ReportRequestIntent::Build,
+                                  ReportRequestIntent::LoadMetadata}) {
+            auto &entries = intent == ReportRequestIntent::LoadMetadata
+                ? metadata_failures : failures;
+
+            for (ReportNightFailureEntry &entry : entries) {
+                if (!entry.valid() || !entry.sleep_day.valid() ||
+                    entry.sleep_day < covered.first_day ||
+                    covered.last_day < entry.sleep_day) {
+                    continue;
+                }
+                entry = {};
             }
-            entry = {};
         }
         unlock();
     }
@@ -1632,14 +1710,21 @@ struct ReportTask::Runtime {
             store_catalog->ready(night->sleep_day, night->source_revision)) {
             const ReportSignalStoreCatalogRecord *stored =
                 store_catalog->find(night->sleep_day);
-            if (stored && stored->view.night.compression_version ==
+            if (stored && stored->compression_version ==
                               ReportSignalTile::CompressionVersion) {
                 ++idle_cursor;
                 return true;
             }
-            if (!stored || !stored->metadata ||
-                !signal_tile_backfill.start(
-                    {stored->metadata, stored->view}, idle_generation)) {
+            const auto *metadata = store_catalog->cached(night->sleep_day);
+            if (!metadata) {
+                // Use the existing engine read path; completion leaves this
+                // cursor in place until compression can consume the metadata.
+                return engine.request(ReportArtifactKey::result(
+                    night->sleep_day, night->source_revision),
+                    ReportRequestPriority::Idle, idle_generation).status !=
+                        ReportRequestEnqueueStatus::Full;
+            }
+            if (!signal_tile_backfill.start(*metadata, idle_generation)) {
                 ++idle_cursor;
                 idle_pass_failed = true;
                 idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
@@ -1744,24 +1829,18 @@ struct ReportTask::Runtime {
     }
 
     bool advance_rebuild() {
-        if (!rebuild_catalog || !lock()) return false;
+        if (!rebuild_started || !lock()) return false;
         if (!rebuild.active || rebuild_ticket.valid()) {
             unlock();
             return false;
         }
 
-        while (rebuild_cursor < rebuild_catalog->size()) {
-            const NightCatalogRecord *night =
-                rebuild_catalog->record(rebuild_cursor);
-            if (night->sleep_day < rebuild.first_day ||
-                rebuild.last_day < night->sleep_day) {
-                ++rebuild_cursor;
-                continue;
-            }
+        if (rebuild_cursor < rebuild_selection.size()) {
+            const ReportArtifactKey selected = rebuild_selection[rebuild_cursor];
 
             // Keep the requested days fixed, but use the latest source revision.
             const NightCatalogRecord *current = catalog
-                ? catalog->find(night->sleep_day) : nullptr;
+                ? catalog->find(selected.sleep_day) : nullptr;
 
             if (!rebuild_sources_ready) {
                 if (local_background_work_blocked() || !catalog_storage_ready() ||
@@ -1773,10 +1852,20 @@ struct ReportTask::Runtime {
                     return false;
                 }
 
-                if (current && current->sources_external) {
+                if (rebuild_previous_sources &&
+                    (!current || rebuild_previous_index != ReportArtifactKey::result(
+                         current->sleep_day, current->source_revision) ||
+                     rebuild_previous_flags != current->source_flags)) {
+                    rebuild_previous_sources.reset();
+                }
+
+                if (current && current->sources_external && !rebuild_previous_sources) {
                     const auto admission = catalog_store.request_load_night(
-                        night->sleep_day, rebuild.generation);
+                        selected.sleep_day, rebuild.generation);
                     if (admission == OperationAdmission::Accepted) {
+                        rebuild_previous_index = ReportArtifactKey::result(
+                            current->sleep_day, current->source_revision);
+                        rebuild_previous_flags = current->source_flags;
                         store_purpose = CatalogStorePurpose::RebuildLoad;
                     }
                     unlock();
@@ -1787,7 +1876,21 @@ struct ReportTask::Runtime {
                 }
 
                 if (current) {
-                    auto target = source_change_target(catalog.get(), night->sleep_day);
+                    if (!rebuild_previous_sources) {
+                        rebuild_previous_sources = NightCatalogBuilder::select_night(
+                            *catalog, selected.sleep_day);
+                        if (!rebuild_previous_sources) {
+                            unlock();
+                            return fail_rebuild("report_rebuild_alloc_failed");
+                        }
+                        rebuild_previous_index = ReportArtifactKey::result(
+                            current->sleep_day, current->source_revision);
+                        rebuild_previous_flags = current->source_flags;
+                    }
+
+                    const auto *previous = rebuild_previous_sources->record(0);
+                    auto target = source_change_target(
+                        rebuild_previous_sources.get(), selected.sleep_day);
                     if (!target.valid()) {
                         target.sleep_day.format_yyyymmdd(
                             target.datalog_sleep_day, sizeof(target.datalog_sleep_day));
@@ -1796,10 +1899,10 @@ struct ReportTask::Runtime {
 
                     const uint32_t generation = next_catalog_generation();
                     const auto admission = catalog_refresh.request_refresh(
-                        {}, current->timezone_offset_valid || timezone_offset_valid,
-                        current->timezone_offset_valid ? current->timezone_offset_minutes
-                                                       : timezone_offset_minutes,
-                        generation, catalog, target);
+                        {}, previous->timezone_offset_valid || timezone_offset_valid,
+                        previous->timezone_offset_valid ? previous->timezone_offset_minutes
+                                                        : timezone_offset_minutes,
+                        generation, rebuild_previous_sources, target);
                     if (admission == OperationAdmission::Accepted) {
                         refresh_generation = generation;
                         refresh_target = target;
@@ -1822,8 +1925,8 @@ struct ReportTask::Runtime {
             }
 
             const ReportArtifactKey key = ReportArtifactKey::result(
-                night->sleep_day,
-                current ? current->source_revision : night->source_revision);
+                selected.sleep_day,
+                current ? current->source_revision : selected.source_revision);
             const ReportRequestEnqueueResult queued = engine.request(
                 key, ReportRequestPriority::Foreground,
                 rebuild.generation, true);
@@ -1834,6 +1937,7 @@ struct ReportTask::Runtime {
 
             ++rebuild_cursor;
             rebuild_sources_ready = false;
+            rebuild_previous_sources.reset();
             if (queued.status == ReportRequestEnqueueStatus::Invalid) {
                 ++rebuild.completed;
                 ++rebuild.failed;
@@ -1844,7 +1948,7 @@ struct ReportTask::Runtime {
                           "report_request_rejected");
                 unlock();
                 record_failure("queue_rebuild", "report_request_rejected",
-                               night->sleep_day);
+                               selected.sleep_day);
                 return true;
             }
 
@@ -1860,37 +1964,46 @@ struct ReportTask::Runtime {
         }
 
         rebuild.active = false;
-        rebuild_catalog.reset();
+        RebuildSelection{}.swap(rebuild_selection);
+        rebuild_previous_sources.reset();
+        rebuild_started = false;
         unlock();
         return true;
     }
 
     bool fail_rebuild(const char *error) {
         if (!lock()) return false;
-        if (!rebuild_catalog || rebuild_cursor >= rebuild_catalog->size()) {
+        if (!rebuild_started || rebuild_cursor >= rebuild_selection.size()) {
             unlock();
             return false;
         }
 
-        const auto *night = rebuild_catalog->record(rebuild_cursor++);
+        const ReportArtifactKey selected = rebuild_selection[rebuild_cursor++];
         rebuild_sources_ready = false;
+        rebuild_previous_sources.reset();
         ++rebuild.completed;
         ++rebuild.failed;
         rebuild.last_completion = {};
-        rebuild.last_completion.request.artifact = ReportArtifactKey::result(
-            night->sleep_day, night->source_revision);
+        rebuild.last_completion.request.artifact = selected;
         rebuild.last_completion.request.force_rebuild = true;
         rebuild.last_completion.outcome.disposition = OperationDisposition::Failed;
         copy_cstr(rebuild.last_completion.error,
                   sizeof(rebuild.last_completion.error), error);
-        const auto day = night->sleep_day;
         unlock();
-        record_failure("rebuild", error, day);
+        record_failure("rebuild", error, selected.sleep_day);
         return true;
     }
 
     const char *rebuild_source_error(const NightCatalog &updated) const {
-        const auto *previous = catalog->find(refresh_target.sleep_day);
+        const auto *current = catalog ? catalog->find(refresh_target.sleep_day) : nullptr;
+        if (!current || rebuild_previous_index != ReportArtifactKey::result(
+                current->sleep_day, current->source_revision) ||
+            current->source_flags != rebuild_previous_flags) {
+            return "report_sources_index_changed";
+        }
+
+        const auto *previous = rebuild_previous_sources
+            ? rebuild_previous_sources->find(refresh_target.sleep_day) : nullptr;
         const auto *next = updated.find(refresh_target.sleep_day);
         if (!previous || !next) return "report_rebuild_sources_incomplete";
 
@@ -1908,11 +2021,11 @@ struct ReportTask::Runtime {
         for (size_t i = 0; i < count; ++i) *paths.append() = updated.path(files[i]);
         if (count > 1) std::sort(paths.data(), paths.data() + count);
 
-        files = catalog->files(*previous, count);
+        files = rebuild_previous_sources->files(*previous, count);
         for (size_t i = 0; i < count; ++i) {
             if (paths.size() == 0 || !std::binary_search(
                     paths.data(), paths.data() + paths.size(),
-                    std::string_view(catalog->path(files[i])))) {
+                    std::string_view(rebuild_previous_sources->path(files[i])))) {
                 return "report_rebuild_sources_incomplete";
             }
         }
@@ -1936,9 +2049,23 @@ struct ReportTask::Runtime {
         }
         observed_engine_completion = completion.request.ticket;
         release_loaded_sources();
+
+        // Cache reads do not complete a build or consume its retry state.
+        if (completion.request.intent == ReportRequestIntent::LoadMetadata) {
+            if (completion.outcome.disposition == OperationDisposition::Succeeded) {
+                clear_failure(completion.request.artifact.sleep_day,
+                              ReportRequestIntent::LoadMetadata);
+            } else if (completion.outcome.disposition == OperationDisposition::Failed) {
+                remember_failure(completion, now_ms);
+                record_failure("load_metadata", completion.error,
+                               completion.request.artifact.sleep_day);
+            }
+            return true;
+        }
+
         const bool retained = completion.retained_for_missing_sources();
         bool rebuilding = false;
-        if (rebuild_catalog) {
+        if (rebuild_started) {
             if (!lock()) {
                 observed_engine_completion = {};
                 return worked;
@@ -2003,6 +2130,7 @@ struct ReportTask::Runtime {
 
         if (succeeded) {
             clear_failure(completed_day);
+            clear_failure(completed_day, ReportRequestIntent::LoadMetadata);
         } else if (completion.outcome.disposition !=
                    OperationDisposition::Cancelled) {
             remember_failure(completion, now_ms);
@@ -2037,7 +2165,11 @@ struct ReportTask::Runtime {
                 catalog && idle_cursor < catalog->size()
                     ? catalog->record(idle_cursor) : nullptr;
             if (current && current->sleep_day == completed_day) {
-                ++idle_cursor;
+                const auto *stored = store_catalog ? store_catalog->find(completed_day) : nullptr;
+                if (!succeeded || !stored ||
+                    stored->compression_version == ReportSignalTile::CompressionVersion) {
+                    ++idle_cursor;
+                }
             }
             if (!succeeded && !retained) {
                 idle_pass_failed = true;
@@ -2331,7 +2463,7 @@ struct ReportTask::Runtime {
         const ReportEngineStatus engine_status = engine.status();
         next.foreground_active = engine_status.foreground_active || period_running;
         next.background_active =
-            date_repair.active() || period_running || rebuild_catalog != nullptr || engine_status.queued > 0 ||
+            date_repair.active() || period_running || rebuild_started || engine_status.queued > 0 ||
             engine_status.state != ReportEngineState::Idle ||
             store_catalog_loader.status().active() ||
             catalog_refresh.active() || summary_acquisition.active() ||
@@ -2422,6 +2554,7 @@ struct ReportTask::Runtime {
             period_latest.reset();
             period_completed.reset();
             for (auto &failure : failures) failure = {};
+            for (auto &failure : metadata_failures) failure = {};
             summary_archive_drops += pending_summary_count;
             pending_summary_count = 0;
             for (auto &observation : pending_summary) observation = {};
@@ -2472,9 +2605,11 @@ struct ReportTask::Runtime {
             engine.publish_store_catalog({});
             summary_acquisition.seed({});
             if (!generation_cleanup.forget_media()) return worked;
-            rebuild_catalog.reset();
+            RebuildSelection{}.swap(rebuild_selection);
+            rebuild_started = false;
             rebuild_ticket = {};
             rebuild_sources_ready = false;
+            rebuild_previous_sources.reset();
             refresh_rebuild = false;
             pending_catalog_save.reset();
             pending_source_update.reset();
@@ -2556,10 +2691,14 @@ struct ReportTask::Runtime {
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
     ReportRebuildStatus rebuild;
-    std::shared_ptr<const NightCatalog> rebuild_catalog;
+    RebuildSelection rebuild_selection;
+    bool rebuild_started = false;
     size_t rebuild_cursor = 0;
     OperationTicket rebuild_ticket;
     bool rebuild_sources_ready = false;
+    std::shared_ptr<const NightCatalog> rebuild_previous_sources;
+    ReportArtifactKey rebuild_previous_index;
+    uint8_t rebuild_previous_flags = 0;
     bool refresh_rebuild = false;
     size_t command_count = 0;
     uint32_t command_drops = 0;
@@ -2666,6 +2805,8 @@ struct ReportTask::Runtime {
 
     ReportNightFailureEntry failures[AC_REPORT_TASK_BUILD_CAPACITY] = {};
     size_t failure_cursor = 0;
+    ReportNightFailureEntry metadata_failures[AC_REPORT_TASK_BUILD_CAPACITY] = {};
+    size_t metadata_failure_cursor = 0;
     OperationTicket observed_engine_completion;
     uint32_t last_step_ms = 0;
 
@@ -2744,11 +2885,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
 #endif
 
     runtime_->catalog_refresh.begin(scan_port, read_port);
-    if (delete_port) {
-        runtime_->catalog_store.begin(read_port, write_port, *delete_port);
-    } else {
-        runtime_->catalog_store.begin(read_port, write_port);
-    }
+    runtime_->catalog_store.begin(
+        read_port, range_write_port, write_port, delete_port);
     runtime_->capture_sources.begin(read_port);
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->summary_archive.begin(read_port, range_write_port, write_port, scan_port);
@@ -2899,9 +3037,11 @@ OperationAdmission ReportTask::request_night(
     SleepDayId sleep_day,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild) {
+    bool force_rebuild,
+    ReportRequestIntent intent) {
     if (!runtime_ || !runtime_->initialized || !sleep_day.valid() ||
-        generation == 0) {
+        generation == 0 ||
+        (intent == ReportRequestIntent::LoadMetadata && force_rebuild)) {
         return OperationAdmission::Rejected;
     }
 
@@ -2909,6 +3049,7 @@ OperationAdmission ReportTask::request_night(
     command.sleep_day = sleep_day;
     command.priority = priority;
     command.force_rebuild = force_rebuild;
+    command.intent = intent;
     command.generation = generation;
     return runtime_->enqueue(command);
 }
@@ -3030,6 +3171,23 @@ DisplayReportSummary ReportTask::display_summary_snapshot() const {
     return state ? state->display_summary : DisplayReportSummary{};
 }
 
+ReportMemoryUsage ReportTask::memory_usage() const {
+    ReportMemoryUsage out;
+    const auto state = runtime_ ? runtime_->published_state() : nullptr;
+    if (!state) return out;
+
+    if (state->catalog) {
+        out.nights = state->catalog->size();
+        out.night_catalog_bytes = state->catalog->storage_bytes();
+    }
+    if (state->store_catalog) {
+        out.metadata_records_bytes = state->store_catalog->storage_bytes();
+        out.metadata_cache_bytes = state->store_catalog->metadata_bytes();
+    }
+    if (state->catalog_json) out.summary_bytes = sizeof(ReportCatalogJson);
+    return out;
+}
+
 ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
     ReportNightQuery out;
     out.sleep_day = sleep_day;
@@ -3055,15 +3213,21 @@ ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
 
     const ReportSignalStoreCatalogRecord *stored = state->store_catalog
         ? state->store_catalog->find(sleep_day) : nullptr;
-    if (!stored || !stored->metadata ||
-        (stored->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
+    const auto *metadata = stored ? state->store_catalog->cached(sleep_day) : nullptr;
+    if (!stored ||
+        (stored->flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
         out.state = ReportStoreQueryState::StorePending;
+        return out;
+    }
+
+    if (!metadata) {
+        out.state = ReportStoreQueryState::MetadataPending;
         return out;
     }
 
     out.outdated = stored->source_revision != source->source_revision;
     if (out.outdated && (source->source_flags & NIGHT_CATALOG_SOURCE_EDF) &&
-        (stored->view.night.source_flags & NIGHT_CATALOG_SOURCE_EDF)) {
+        (stored->source_flags & NIGHT_CATALOG_SOURCE_EDF)) {
         // An EDF append may update the published generation's tail in place.
         // This failure is detected before any write, so its old data is intact.
         ReportNightFailureStatus failure;
@@ -3077,9 +3241,9 @@ ReportNightQuery ReportTask::query_night(SleepDayId sleep_day) const {
     out.state = ReportStoreQueryState::Ready;
     out.source_revision = stored->source_revision;
     out.generation = stored->generation;
-    out.metadata = stored->metadata;
+    out.metadata = metadata->metadata;
     out.generation_owner = state->store_catalog;
-    out.view = stored->view;
+    out.view = metadata->view;
     return out;
 }
 
@@ -3164,12 +3328,14 @@ ReportEventFileQuery ReportTask::query_events(SleepDayId sleep_day) const {
 
 bool ReportTask::night_failure(SleepDayId sleep_day,
                                ReportNightFailureStatus &failure,
-                               uint32_t lock_timeout_ms) const {
+                               uint32_t lock_timeout_ms,
+                               ReportRequestIntent intent) const {
     if (!runtime_) {
         failure = {};
         return false;
     }
-    return runtime_->find_failure(sleep_day, failure, lock_timeout_ms);
+
+    return runtime_->find_failure(sleep_day, failure, lock_timeout_ms, intent);
 }
 
 bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
@@ -3311,17 +3477,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         } else if (command.kind == ReportTaskCommandKind::Period) {
             const auto revision = report_period_revision(
                 runtime.period_key, *runtime.catalog, runtime.store_catalog.get());
-            if (!runtime.period_service.start(runtime.period_key, runtime.catalog, runtime.store_catalog, revision)) {
-                auto failed = std::make_shared<ReportPeriodResult>();
-                failed->key = runtime.period_key;
-                failed->revision = revision;
-                copy_cstr(failed->error, sizeof(failed->error), "period_alloc");
-                runtime.period_completed = std::move(failed);
-            }
+            runtime.start_period(runtime.catalog, runtime.store_catalog, revision);
         } else if (command.kind == ReportTaskCommandKind::Rebuild) {
-            runtime.rebuild_catalog = runtime.catalog;
+            runtime.rebuild_started = true;
             runtime.rebuild_cursor = 0;
             runtime.rebuild_sources_ready = false;
+            runtime.rebuild_previous_sources.reset();
             (void)runtime.engine.cancel_background();
             runtime.cancel_signal_tile_backfill();
         } else if (!runtime.catalog) {
@@ -3336,14 +3497,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                             night->sleep_day, night->source_revision),
                         command.priority,
                         command.generation,
-                        command.force_rebuild);
+                        command.force_rebuild,
+                        command.intent);
                 if (queued.status == ReportRequestEnqueueStatus::Full) {
                     (void)runtime.enqueue(command);
                 } else if (queued.status ==
                            ReportRequestEnqueueStatus::Invalid) {
                     runtime.record_failure("queue_build", "report_request_rejected",
                                            command.sleep_day);
-                } else {
+                } else if (command.intent == ReportRequestIntent::Build) {
                     runtime.clear_failure(command.sleep_day);
                 }
             }
@@ -3412,15 +3574,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     if (!runtime.catalog) runtime.schedule_reconcile(now_ms, false);
                 }
             } else if (completed == CatalogStorePurpose::RebuildLoad) {
-                const auto loaded = runtime.catalog_store.snapshot();
-                const auto *night = loaded ? loaded->record(0) : nullptr;
-                const auto *prior = night && runtime.catalog
-                    ? runtime.catalog->find(night->sleep_day) : nullptr;
+                auto loaded = runtime.catalog_store.take_snapshot();
+                const auto *prior = runtime.catalog
+                    ? runtime.catalog->find(runtime.rebuild_previous_index.sleep_day) : nullptr;
                 if (status.state != NightCatalogStoreState::Ready) {
                     runtime.fail_rebuild(status.error);
-                } else if (!prior || !runtime.merge_loaded_sources(
-                               loaded, prior->source_revision, prior->source_flags)) {
+                } else if (!loaded) {
                     runtime.fail_rebuild("report_sources_load_failed");
+                } else if (!prior || prior->source_revision !=
+                               runtime.rebuild_previous_index.source_revision ||
+                           prior->source_flags != runtime.rebuild_previous_flags) {
+                    runtime.fail_rebuild("report_sources_index_changed");
+                } else {
+                    runtime.rebuild_previous_sources = std::move(loaded);
                 }
             } else if (completed == CatalogStorePurpose::SourceUpdate) {
                 const auto replacement = std::move(runtime.pending_source_update);
@@ -3576,7 +3742,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
     if (runtime.pending_refresh.valid() &&
-        !runtime.rebuild_catalog &&
+        !runtime.rebuild_started &&
         !runtime.pending_refresh.summary_attempted &&
         !runtime.summary_acquisition.active() &&
         !local_blocked && startup_allowed &&
@@ -3646,7 +3812,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             if (!runtime.refresh_candidate) {
                 runtime.refresh_candidate = runtime.catalog_refresh.take_snapshot();
             }
-            const auto refreshed_catalog = runtime.refresh_candidate;
+            auto refreshed_catalog = runtime.refresh_candidate;
 
             if (status.state == NightCatalogRefreshState::Ready &&
                 runtime.staging_generation && !runtime.refresh_install_complete) {
@@ -3670,6 +3836,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     ? "night_catalog_no_complete_records"
                     : status.error[0] ? status.error : status.warning[0] && !str_warning
                     ? status.warning : runtime.rebuild_source_error(*refreshed_catalog);
+
+                if (!rebuild_error) {
+                    refreshed_catalog = NightCatalogBuilder::upsert_night(
+                        *runtime.catalog, *refreshed_catalog, runtime.refresh_target.sleep_day);
+                    if (!refreshed_catalog) rebuild_error = "report_rebuild_alloc_failed";
+                }
+                runtime.rebuild_previous_sources.reset();
             }
 
             if (rebuild_error) {
@@ -3822,7 +3995,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                                    refresh_engine.queued == 0;
 
     if (runtime.pending_refresh.valid() &&
-        !runtime.rebuild_catalog &&
+        !runtime.rebuild_started &&
         runtime.pending_refresh.summary_attempted &&
         (runtime.pending_refresh.target.valid() || full_refresh_idle) &&
         runtime.store_purpose == CatalogStorePurpose::None &&
@@ -3985,7 +4158,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.catalog_refresh.active() &&
         !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required();
-    if (catalog_current && !runtime.rebuild_catalog && !local_blocked && startup_allowed) {
+    if (catalog_current && !runtime.rebuild_started && !local_blocked && startup_allowed) {
         worked = runtime.schedule_post_therapy_build() || worked;
         if (runtime.store_purpose == CatalogStorePurpose::None &&
             !runtime.pending_catalog_save && !runtime.store_catalog_load_pending &&
@@ -4005,7 +4178,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             backfill_competitor.state != ReportEngineState::Idle ||
             backfill_competitor.queued != 0 ||
             runtime.engine.catalog_update_required() ||
-            runtime.rebuild_catalog != nullptr ||
+            runtime.rebuild_started ||
             runtime.capture_build.valid() ||
             runtime.post_therapy_build.valid();
         if (competing_work) {
@@ -4020,7 +4193,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     const auto engine_status = runtime.engine.status();
     const bool cleanup_allowed = catalog_current && startup_allowed &&
         !local_blocked && engine_status.state == ReportEngineState::Idle &&
-        engine_status.queued == 0 && !runtime.rebuild_catalog &&
+        engine_status.queued == 0 && !runtime.rebuild_started &&
         !runtime.post_therapy_build.valid() && !runtime.capture_build.valid() &&
         !runtime.signal_tile_backfill_started && !runtime.store_catalog_load_pending &&
         !runtime.store_catalog_loader.status().active();
@@ -4046,6 +4219,24 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (runtime.period_running) {
         worked = runtime.period_service.poll() || worked;
         if (!runtime.period_completed) runtime.period_completed = runtime.period_service.take_completed();
+
+        if (runtime.period_completed &&
+            strcmp(runtime.period_completed->error, "report_store_metadata_changed") == 0) {
+            const auto state = runtime.published_state();
+            if (state && state->catalog) {
+                const auto revision = report_period_revision(
+                    runtime.period_key, *state->catalog, state->store_catalog.get());
+
+                // A foreground publication can replace night.meta during this read.
+                // Retry only against a newer published identity, never disk alone.
+                if (revision != runtime.period_completed->revision) {
+                    runtime.period_completed.reset();
+                    runtime.start_period(state->catalog, state->store_catalog, revision);
+                    worked = true;
+                }
+            }
+        }
+
         if (runtime.period_completed && runtime.lock(0)) {
             if (!runtime.period_completed->error[0]) {
                 runtime.period_cache[runtime.period_cache_cursor++ % 5] = runtime.period_completed;

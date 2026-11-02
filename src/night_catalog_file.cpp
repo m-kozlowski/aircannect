@@ -1,5 +1,6 @@
 #include "night_catalog_file.h"
 
+#include <algorithm>
 #include <cmath>
 #include <new>
 #include <string.h>
@@ -151,7 +152,9 @@ bool signal_layout_valid(const NightCatalogSourceFile &file,
            std::isfinite(layout.scale.offset) && layout.scale.scale > 0.0f;
 }
 
-bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
+bool inspect_catalog(const NightCatalog &catalog,
+                     CatalogLayout &layout,
+                     bool compact_index = false) {
     if (catalog.size() > UINT32_MAX) return false;
     layout.records = static_cast<uint32_t>(catalog.size());
 
@@ -169,6 +172,7 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
         const NightCatalogRecord *record = catalog.record(i);
         if (!record || !record->sleep_day.valid() ||
             !record->source_revision.valid() ||
+            (compact_index && !record->sources_external) ||
             record->day_end_ms <= record->day_start_ms ||
             record->source_flags == 0 ||
             (record->source_flags & ~SOURCE_FLAGS) != 0 ||
@@ -438,6 +442,51 @@ float bits_float(uint32_t bits) {
 void encode_range(uint8_t *out, const NightCatalogTimeRange &range) {
     put_le64(out, static_cast<uint64_t>(range.start_ms));
     put_le64(out + 8, static_cast<uint64_t>(range.end_ms));
+}
+
+void encode_header(uint8_t *header, const CatalogLayout &layout) {
+    memset(header, 0, NightCatalogFileCodec::HeaderBytes);
+    memcpy(header, FILE_MAGIC_V17, sizeof(FILE_MAGIC_V17));
+
+    put_le16(header + 8, NightCatalogFileCodec::Version);
+    put_le16(header + 10, NightCatalogFileCodec::HeaderBytes);
+
+    put_le16(header + 12, RECORD_BYTES);
+    put_le16(header + 14, RANGE_BYTES);
+    put_le16(header + 16, FILE_BYTES);
+    put_le16(header + 18, COVERAGE_BYTES);
+    put_le16(header + 20, SIGNAL_LAYOUT_BYTES);
+    put_le16(header + 22, FALLBACK_FILE_BYTES);
+    put_le16(header + 24, FALLBACK_SECTION_BYTES);
+    put_le16(header + 26, NIGHT_CATALOG_SOURCE_REVISION_POLICY);
+
+    put_le32(header + 28, layout.records);
+    put_le32(header + 32, layout.sessions);
+    put_le32(header + 36, layout.masks);
+    put_le32(header + 40, layout.files);
+    put_le32(header + 44, layout.coverage);
+    put_le32(header + 48, layout.signal_layouts);
+    put_le32(header + 52, layout.fallback_files);
+    put_le32(header + 56, layout.fallback_sections);
+    put_le32(header + 60, layout.path_bytes);
+
+    put_le64(header + 68, layout.body_bytes);
+
+    put_le32(header + 76, 0);
+    put_le32(header + 84, 0);
+}
+
+void encode_catalog_session(uint8_t *out,
+                            const NightCatalogRecord &record,
+                            NightCatalogTimeRange range) {
+    if ((record.source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) &&
+        !(record.source_flags & (NIGHT_CATALOG_SOURCE_EDF |
+                                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK))) {
+        range.start_ms -= record.day_start_ms;
+        range.end_ms -= record.day_start_ms;
+    }
+
+    encode_range(out, range);
 }
 
 NightCatalogTimeRange decode_range(const uint8_t *in) {
@@ -936,15 +985,10 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         const NightCatalogTimeRange *record_sessions =
             catalog.sessions(record, session_count);
         for (size_t j = 0; j < session_count; ++j) {
-            auto range = record_sessions[j];
-            if ((record.source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) &&
-                !(record.source_flags & (NIGHT_CATALOG_SOURCE_EDF |
-                                         NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK))) {
-                range.start_ms -= record.day_start_ms;
-                range.end_ms -= record.day_start_ms;
-            }
-            encode_range(sessions + next_session++ * RANGE_BYTES,
-                         range);
+            encode_catalog_session(
+                sessions + next_session++ * RANGE_BYTES,
+                record,
+                record_sessions[j]);
         }
 
         size_t mask_count = 0;
@@ -1022,30 +1066,121 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
         return {};
     }
 
-    memcpy(header, FILE_MAGIC_V17, sizeof(FILE_MAGIC_V17));
-    put_le16(header + 8, Version);
-    put_le16(header + 10, HeaderBytes);
-    put_le16(header + 12, RECORD_BYTES);
-    put_le16(header + 14, RANGE_BYTES);
-    put_le16(header + 16, FILE_BYTES);
-    put_le16(header + 18, COVERAGE_BYTES);
-    put_le16(header + 20, SIGNAL_LAYOUT_BYTES);
-    put_le16(header + 22, FALLBACK_FILE_BYTES);
-    put_le16(header + 24, FALLBACK_SECTION_BYTES);
-    put_le16(header + 26, NIGHT_CATALOG_SOURCE_REVISION_POLICY);
-    put_le32(header + 28, layout.records);
-    put_le32(header + 32, layout.sessions);
-    put_le32(header + 36, layout.masks);
-    put_le32(header + 40, layout.files);
-    put_le32(header + 44, layout.coverage);
-    put_le32(header + 48, layout.signal_layouts);
-    put_le32(header + 52, layout.fallback_files);
-    put_le32(header + 56, layout.fallback_sections);
-    put_le32(header + 60, layout.path_bytes);
-    put_le64(header + 68, layout.body_bytes);
-    put_le32(header + 76, 0);
-    put_le32(header + 84, 0);
+    encode_header(header, layout);
     return LargeByteBuffer::freeze(std::move(output));
+}
+
+bool NightCatalogFileIndexReader::start(
+    std::shared_ptr<const NightCatalog> compact_index) {
+    reset();
+    if (!compact_index) return false;
+
+    CatalogLayout layout;
+    if (!inspect_catalog(*compact_index, layout, true)) return false;
+
+    static_assert(ScratchBytes >= RECORD_BYTES,
+                  "index reader scratch must fit one encoded record");
+    catalog_ = std::move(compact_index);
+    total_bytes_ = NightCatalogFileCodec::HeaderBytes + layout.body_bytes;
+    section_ = Section::Records;
+    encode_header(scratch_, layout);
+    scratch_size_ = NightCatalogFileCodec::HeaderBytes;
+    return true;
+}
+
+size_t NightCatalogFileIndexReader::read(uint8_t *buffer, size_t length) {
+    if (!buffer || length == 0 || !catalog_) return 0;
+
+    size_t copied = 0;
+    while (copied < length && emitted_bytes_ < total_bytes_) {
+        if (scratch_cursor_ == scratch_size_) {
+            scratch_cursor_ = 0;
+            scratch_size_ = 0;
+            if (!prepare_next()) break;
+        }
+
+        const size_t available = scratch_size_ - scratch_cursor_;
+        const size_t count = std::min(available, length - copied);
+        memcpy(buffer + copied, scratch_ + scratch_cursor_, count);
+        copied += count;
+        scratch_cursor_ += count;
+        emitted_bytes_ += count;
+    }
+
+    return copied;
+}
+
+void NightCatalogFileIndexReader::reset() {
+    catalog_.reset();
+    total_bytes_ = 0;
+    emitted_bytes_ = 0;
+    section_ = Section::Done;
+    record_cursor_ = 0;
+    begin_range_section(false);
+    scratch_size_ = 0;
+    scratch_cursor_ = 0;
+}
+
+void NightCatalogFileIndexReader::begin_range_section(bool masks) {
+    range_record_cursor_ = 0;
+    range_record_ = nullptr;
+    ranges_ = nullptr;
+    range_count_ = 0;
+    range_cursor_ = 0;
+    range_masks_ = masks;
+}
+
+bool NightCatalogFileIndexReader::prepare_next_range() {
+    for (;;) {
+        if (range_record_ && range_cursor_ < range_count_) {
+            const NightCatalogTimeRange range = ranges_[range_cursor_++];
+            if (range_masks_) {
+                encode_range(scratch_, range);
+            } else {
+                encode_catalog_session(scratch_, *range_record_, range);
+            }
+            scratch_size_ = RANGE_BYTES;
+            return true;
+        }
+
+        if (range_record_cursor_ >= catalog_->size()) return false;
+
+        range_record_ = catalog_->record(range_record_cursor_++);
+        ranges_ = range_masks_
+            ? catalog_->mask_windows(*range_record_, range_count_)
+            : catalog_->sessions(*range_record_, range_count_);
+        range_cursor_ = 0;
+        if (range_count_ == 0) range_record_ = nullptr;
+    }
+}
+
+bool NightCatalogFileIndexReader::prepare_next() {
+    while (section_ != Section::Done) {
+        if (section_ == Section::Records) {
+            if (record_cursor_ < catalog_->size()) {
+                const NightCatalogRecord *record =
+                    catalog_->record(record_cursor_++);
+                memset(scratch_, 0, RECORD_BYTES);
+                encode_record(scratch_, *record);
+                scratch_size_ = RECORD_BYTES;
+                return true;
+            }
+
+            section_ = Section::Sessions;
+            begin_range_section(false);
+        } else if (section_ == Section::Sessions) {
+            if (prepare_next_range()) return true;
+
+            section_ = Section::Masks;
+            begin_range_section(true);
+        } else {
+            if (prepare_next_range()) return true;
+
+            section_ = Section::Done;
+        }
+    }
+
+    return false;
 }
 
 std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(

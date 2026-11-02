@@ -177,6 +177,7 @@ enum class ReportStoreQueryState : uint8_t {
     CatalogPending,
     NightMissing,
     HistoryTimeUnresolved,
+    MetadataPending,
     StorePending,
     TrackMissing,
     InvalidRange,
@@ -236,6 +237,14 @@ struct ReportRebuildStatus {
     ReportEngineCompletion last_completion;
 };
 
+struct ReportMemoryUsage {
+    size_t nights = 0;
+    size_t night_catalog_bytes = 0;
+    size_t metadata_records_bytes = 0;
+    size_t metadata_cache_bytes = 0;
+    size_t summary_bytes = 0;
+};
+
 // Owns source discovery and v9 materialization on one low-priority task.
 // Public methods enqueue work or read immutable metadata snapshots; HTTP file
 // transfer remains owned by ReportHttpController and StorageStreamPort.
@@ -263,7 +272,8 @@ public:
         SleepDayId sleep_day,
         ReportRequestPriority priority,
         uint32_t generation,
-        bool force_rebuild = false);
+        bool force_rebuild = false,
+        ReportRequestIntent intent = ReportRequestIntent::Build);
     OperationAdmission request_rebuild(SleepDayId first_day,
                                        SleepDayId last_day,
                                        uint32_t generation);
@@ -297,6 +307,7 @@ public:
     std::shared_ptr<const ReportSignalStoreCatalog>
         store_catalog_snapshot() const;
     DisplayReportSummary display_summary_snapshot() const;
+    ReportMemoryUsage memory_usage() const;
 
     ReportNightQuery query_night(SleepDayId sleep_day) const;
     ReportSignalRangeQuery query_signal(
@@ -308,7 +319,8 @@ public:
     ReportEventFileQuery query_events(SleepDayId sleep_day) const;
     bool night_failure(SleepDayId sleep_day,
                        ReportNightFailureStatus &failure,
-                       uint32_t lock_timeout_ms = 20) const;
+                       uint32_t lock_timeout_ms = 20,
+                       ReportRequestIntent intent = ReportRequestIntent::Build) const;
 
 private:
     struct Runtime;

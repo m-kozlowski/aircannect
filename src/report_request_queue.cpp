@@ -21,9 +21,11 @@ bool ReportRequestQueue::ready(const ReportArtifactRequest &request,
 }
 
 size_t ReportRequestQueue::find_artifact(
-    const ReportArtifactKey &artifact) const {
+    const ReportArtifactKey &artifact,
+    ReportRequestIntent intent) const {
     for (size_t i = 0; i < count_; ++i) {
-        if (same_artifact_identity(slots_[i].artifact, artifact)) return i;
+        if (slots_[i].intent == intent &&
+            same_artifact_identity(slots_[i].artifact, artifact)) return i;
     }
     return count_;
 }
@@ -67,25 +69,49 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     const ReportArtifactKey &artifact,
     ReportRequestPriority priority,
     uint32_t generation,
-    bool force_rebuild) {
-    if (!artifact.valid() || generation == 0 || !slots_) {
+    bool force_rebuild,
+    ReportRequestIntent intent) {
+    if (!artifact.valid() || generation == 0 || !slots_ ||
+        (intent == ReportRequestIntent::LoadMetadata && force_rebuild)) {
         return {};
     }
 
     bool replaced = false;
-    const size_t existing = find_artifact(artifact);
+    size_t existing = find_artifact(artifact, intent);
+    const size_t other = find_artifact(artifact, intent == ReportRequestIntent::Build
+        ? ReportRequestIntent::LoadMetadata : ReportRequestIntent::Build);
+
+    if (other < count_) {
+        if (intent == ReportRequestIntent::LoadMetadata) {
+            // A delayed build keeps its backoff; an independent read can run now.
+            if (slots_[other].ready_at_ms == 0 && slots_[other].artifact == artifact) {
+                return {ReportRequestEnqueueStatus::AlreadyQueued, slots_[other].ticket};
+            }
+        } else if (existing == count_) {
+            existing = other;
+        } else {
+            erase(other);
+            existing = find_artifact(artifact, intent);
+        }
+    }
+
     if (existing < count_) {
         if (slots_[existing].artifact == artifact) {
+
             ReportArtifactRequest &request = slots_[existing];
             const bool priority_upgrade = report_request_priority_higher(
                 priority, request.priority);
             const bool rebuild_upgrade =
                 force_rebuild && !request.force_rebuild;
-            if (priority_upgrade || rebuild_upgrade) {
+            const bool intent_upgrade = intent == ReportRequestIntent::Build &&
+                request.intent == ReportRequestIntent::LoadMetadata;
+
+            if (priority_upgrade || rebuild_upgrade || intent_upgrade) {
                 request.ticket = next_ticket(generation);
                 if (priority_upgrade) request.priority = priority;
                 request.force_rebuild =
                     request.force_rebuild || force_rebuild;
+                if (intent_upgrade) request.intent = intent;
                 request.ready_at_ms = 0;
                 request.attempts = 0;
                 return {ReportRequestEnqueueStatus::Replaced,
@@ -101,7 +127,10 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
 
     if (count_ >= capacity_) {
         const size_t evictable = find_evictable(priority);
-        if (evictable == count_) {
+        if (evictable == count_ ||
+            (intent == ReportRequestIntent::LoadMetadata &&
+             slots_[evictable].intent == ReportRequestIntent::Build &&
+             same_artifact_identity(slots_[evictable].artifact, artifact))) {
             return {ReportRequestEnqueueStatus::Full, {}};
         }
 
@@ -114,6 +143,7 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     request.ticket = next_ticket(generation);
     request.priority = priority;
     request.force_rebuild = force_rebuild;
+    request.intent = intent;
     return {replaced ? ReportRequestEnqueueStatus::Replaced
                      : ReportRequestEnqueueStatus::Queued,
             request.ticket};
@@ -149,7 +179,7 @@ OperationOutcome ReportRequestQueue::retry(ReportArtifactRequest request,
         return OperationOutcome::failed();
     }
 
-    if (find_artifact(request.artifact) < count_) {
+    if (find_artifact(request.artifact, request.intent) < count_) {
         return OperationOutcome::cancelled();
     }
 

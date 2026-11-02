@@ -6,7 +6,7 @@
 #include "night_catalog.h"
 #include "operation_outcome.h"
 #include "report_signal_store_catalog.h"
-#include "storage_bounded_file_loader.h"
+#include "report_signal_store_metadata_loader.h"
 
 namespace aircannect {
 
@@ -68,7 +68,7 @@ private:
     bool finish_catalog();
     void fail(const char *error);
 
-    StorageBoundedFileLoader loader_;
+    ReportSignalStoreMetadataLoader loader_;
     Runtime *runtime_ = nullptr;
     ReportSignalStoreCatalogLoadStatus status_;
 };

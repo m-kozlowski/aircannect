@@ -5,25 +5,38 @@
 #include <utility>
 
 #include "checked_size.h"
+#include "large_allocator.h"
 #include "memory_manager.h"
 
 namespace aircannect {
-namespace {
+ReportSignalStoreCatalogRecord ReportSignalStoreCatalogBuilder::project(
+    const ReportSignalStoreMetadata &input) {
+    ReportSignalStoreCatalogRecord record;
+    const auto &night = input.view.night;
+    record.sleep_day = night.sleep_day;
+    record.source_revision = night.source_revision;
+    record.generation = night.generation;
+    record.rejected_source_revision = night.rejected_source_revision;
+    record.flags = night.flags;
+    record.metadata_size = input.metadata ? input.metadata->size() : 0;
+    record.compression_version = night.compression_version;
+    record.source_flags = night.source_flags;
+    record.checkpoint_slot = night.checkpoint_slot;
 
-bool fill_record(ReportSignalStoreCatalogRecord &record,
-                 const ReportSignalStoreCatalogInput &input) {
-    if (!input.metadata) return false;
-    const auto &view = input.view;
-
-    record.sleep_day = view.night.sleep_day;
-    record.source_revision = view.night.source_revision;
-    record.generation = view.night.generation;
-    record.metadata = input.metadata;
-    record.view = view;
-    return true;
+    const auto &m = night.metrics;
+    const auto &s = night.statistics;
+    const int32_t values[] = {m.ahi_milli, m.ipap_mean_milli,
+        m.leak_mean_milli, s.tidal_volume.mean_milli, s.minute_ventilation.mean_milli};
+    const bool valid[] = {(m.valid_mask & 1u) != 0,
+        (m.valid_mask & REPORT_NIGHT_METRIC_IPAP_MEAN) != 0,
+        (m.valid_mask & REPORT_NIGHT_METRIC_LEAK_MEAN) != 0,
+        s.tidal_volume.valid, s.minute_ventilation.valid};
+    for (size_t i = 0; i < 5; ++i) {
+        record.trend_values[i] = values[i];
+        if (valid[i]) record.trend_valid_mask |= 1u << i;
+    }
+    return record;
 }
-
-}  // namespace
 
 ReportSignalStoreCatalog::~ReportSignalStoreCatalog() {
     for (size_t i = 0; i < record_count_; ++i) {
@@ -79,21 +92,71 @@ bool ReportSignalStoreCatalog::ready(
     SourceRevision source_revision) const {
     const ReportSignalStoreCatalogRecord *record = find(sleep_day);
     return record && record->source_revision == source_revision &&
-        !(record->view.night.flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED);
+        !(record->flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED);
+}
+
+const ReportSignalStoreMetadata *ReportSignalStoreCatalog::cached(SleepDayId day) const {
+    for (const auto &entry : cache_) {
+        if (entry && entry->view.night.sleep_day == day) return entry.get();
+    }
+    return nullptr;
+}
+
+size_t ReportSignalStoreCatalog::metadata_bytes() const {
+    size_t bytes = 0;
+    for (const auto &entry : cache_) {
+        if (entry) bytes += entry->metadata->size() + sizeof(*entry);
+    }
+    return bytes;
+}
+
+void ReportSignalStoreCatalog::copy_cache(const ReportSignalStoreCatalog &source) {
+    size_t count = 0;
+    for (const auto &entry : source.cache_) {
+        if (entry && find(entry->view.night.sleep_day)) cache_[count++] = entry;
+    }
+}
+
+void ReportSignalStoreCatalog::remember(const ReportSignalStoreMetadata &metadata) {
+    if (!metadata.metadata) return;
+
+    const auto day = metadata.view.night.sleep_day;
+    for (auto &entry : cache_) {
+        if (entry && entry->view.night.sleep_day == day) entry.reset();
+    }
+    // The newest accepted night always fits; older cache entries are optional.
+    auto next = std::allocate_shared<ReportSignalStoreMetadata>(
+        LargeAllocator<ReportSignalStoreMetadata>(), metadata);
+    size_t bytes = metadata.metadata->size();
+    size_t output = 1;
+    for (size_t i = 0; i < CacheEntries; ++i) {
+        auto entry = std::move(cache_[i]);
+        if (!entry || output >= CacheEntries ||
+            bytes + entry->metadata->size() > CacheBytes) continue;
+        bytes += entry->metadata->size();
+        // Compact towards the front, then shift once to insert the new entry.
+        cache_[output - 1] = std::move(entry);
+        ++output;
+    }
+    for (size_t i = output - 1; i > 0; --i) cache_[i] = std::move(cache_[i - 1]);
+    cache_[0] = std::move(next);
+    for (size_t i = output; i < CacheEntries; ++i) cache_[i].reset();
 }
 
 std::shared_ptr<const ReportSignalStoreCatalog>
 ReportSignalStoreCatalogBuilder::build(
     const ReportSignalStoreCatalogInput *inputs,
-    size_t input_count) {
+    size_t input_count) try {
     if (input_count > 0 && !inputs) return {};
 
-    std::shared_ptr<ReportSignalStoreCatalog> catalog(
-        new (std::nothrow) ReportSignalStoreCatalog());
+    auto catalog = std::allocate_shared<ReportSignalStoreCatalog>(
+        LargeAllocator<ReportSignalStoreCatalog>());
     if (!catalog || !catalog->allocate(input_count)) return {};
 
     for (size_t i = 0; i < input_count; ++i) {
-        if (!fill_record(catalog->records_[i], inputs[i])) return {};
+        if (!inputs[i].metadata) return {};
+        catalog->records_[i] = project(inputs[i]);
+        catalog->remember(inputs[i]);
     }
 
     if (input_count > 1) {
@@ -111,20 +174,36 @@ ReportSignalStoreCatalogBuilder::build(
         }
     }
     return catalog;
+} catch (const std::bad_alloc &) {
+    return {};
+}
+
+std::shared_ptr<const ReportSignalStoreCatalog>
+ReportSignalStoreCatalogBuilder::build_records(
+    const ReportSignalStoreCatalogRecord *records, size_t count,
+    const ReportSignalStoreCatalog *known) try {
+    auto catalog = std::allocate_shared<ReportSignalStoreCatalog>(
+        LargeAllocator<ReportSignalStoreCatalog>());
+    if (!catalog || !catalog->allocate(count)) return {};
+    if (count) std::copy_n(records, count, catalog->records_);
+    if (known) catalog->copy_cache(*known);
+    return catalog;
+} catch (const std::bad_alloc &) {
+    return {};
 }
 
 std::shared_ptr<const ReportSignalStoreCatalog>
 ReportSignalStoreCatalogBuilder::upsert(
     const ReportSignalStoreCatalog &source,
-    const ReportSignalStoreCatalogInput &input) {
-    ReportSignalStoreCatalogRecord input_record;
-    if (!fill_record(input_record, input)) return {};
+    const ReportSignalStoreCatalogInput &input) try {
+    if (!input.metadata) return {};
+    const auto input_record = project(input);
 
     const ReportSignalStoreCatalogRecord *replaced =
         source.find(input_record.sleep_day);
     const size_t count = source.record_count_ + (replaced ? 0 : 1);
-    std::shared_ptr<ReportSignalStoreCatalog> catalog(
-        new (std::nothrow) ReportSignalStoreCatalog());
+    auto catalog = std::allocate_shared<ReportSignalStoreCatalog>(
+        LargeAllocator<ReportSignalStoreCatalog>());
     if (!catalog || !catalog->allocate(count)) return {};
 
     size_t source_index = 0;
@@ -149,13 +228,17 @@ ReportSignalStoreCatalogBuilder::upsert(
         }
         ++output;
     }
+    catalog->copy_cache(source);
+    catalog->remember(input);
     return inserted ? catalog : nullptr;
+} catch (const std::bad_alloc &) {
+    return {};
 }
 
 std::shared_ptr<const ReportSignalStoreCatalog>
 ReportSignalStoreCatalogBuilder::reconcile(
     std::shared_ptr<const ReportSignalStoreCatalog> source,
-    const NightCatalog &night_catalog) {
+    const NightCatalog &night_catalog) try {
     if (!source) return {};
 
     // Stale metadata retains generation history, but ready() checks revision.
@@ -167,8 +250,8 @@ ReportSignalStoreCatalogBuilder::reconcile(
     }
     if (count == source->record_count_) return source;
 
-    std::shared_ptr<ReportSignalStoreCatalog> catalog(
-        new (std::nothrow) ReportSignalStoreCatalog());
+    auto catalog = std::allocate_shared<ReportSignalStoreCatalog>(
+        LargeAllocator<ReportSignalStoreCatalog>());
     if (!catalog || !catalog->allocate(count)) return {};
 
     size_t output = 0;
@@ -179,7 +262,10 @@ ReportSignalStoreCatalogBuilder::reconcile(
 
         catalog->records_[output++] = record;
     }
+    catalog->copy_cache(*source);
     return output == count ? catalog : nullptr;
+} catch (const std::bad_alloc &) {
+    return {};
 }
 
 }  // namespace aircannect

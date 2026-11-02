@@ -228,6 +228,7 @@ private:
 class ReportConsoleCommands final : public ConsoleCommandGroup {
 public:
     explicit ReportConsoleCommands(ReportTask &report);
+    void print_memory_detail(Print &out) override;
 
     bool execute(const String &command,
                  const String &rest,
