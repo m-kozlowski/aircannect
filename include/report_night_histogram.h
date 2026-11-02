@@ -25,6 +25,8 @@ struct ReportNightHistogramView {
     ReportNightHistogram metrics[ReportCalculatedMetrics::Count];
 
     bool matches(const ReportSignalStoreNight &night) const;
+    bool matches(SleepDayId day, SourceRevision revision,
+                 uint32_t generation, uint8_t slot) const;
 };
 
 // Derived, sparse distributions. Views borrow the encoded buffer's lifetime.
@@ -43,6 +45,8 @@ public:
     static bool decode(const uint8_t *bytes, size_t size,
                        ReportNightHistogramView &view);
     static bool path(const ReportSignalStoreNight &night,
+                     char *out, size_t size);
+    static bool path(SleepDayId day, uint32_t generation, uint8_t slot,
                      char *out, size_t size);
 };
 

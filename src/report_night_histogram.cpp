@@ -38,8 +38,14 @@ void ReportNightHistogram::bin(size_t entry, uint16_t &index, uint32_t &value) c
 }
 
 bool ReportNightHistogramView::matches(const ReportSignalStoreNight &night) const {
-    return sleep_day == night.sleep_day && source_revision == night.source_revision &&
-        generation == night.generation && checkpoint_slot == night.checkpoint_slot;
+    return matches(night.sleep_day, night.source_revision,
+                   night.generation, night.checkpoint_slot);
+}
+
+bool ReportNightHistogramView::matches(SleepDayId day, SourceRevision revision,
+                                       uint32_t expected_generation, uint8_t slot) const {
+    return sleep_day == day && source_revision == revision &&
+        generation == expected_generation && checkpoint_slot == slot;
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportNightHistogramCodec::encode(
@@ -168,10 +174,15 @@ bool ReportNightHistogramCodec::decode(const uint8_t *bytes, size_t size,
 
 bool ReportNightHistogramCodec::path(const ReportSignalStoreNight &night,
                                      char *out, size_t size) {
+    return path(night.sleep_day, night.generation, night.checkpoint_slot, out, size);
+}
+
+bool ReportNightHistogramCodec::path(SleepDayId sleep_day, uint32_t generation,
+                                     uint8_t slot, char *out, size_t size) {
     char day[9];
-    if (!out || !night.sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
+    if (!out || !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
     const int length = snprintf(out, size, "%s/%s/g%08x/statistics.%u.bin",
-        REPORT_SIGNAL_STORE_ROOT, day, night.generation, night.checkpoint_slot);
+        REPORT_SIGNAL_STORE_ROOT, day, generation, slot);
     return length > 0 && static_cast<size_t>(length) < size;
 }
 
