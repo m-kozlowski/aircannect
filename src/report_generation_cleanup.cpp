@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "night_catalog_store_service.h"
+
 #ifdef ARDUINO
 #include "debug_log.h"
 #endif
@@ -45,11 +47,18 @@ void ReportGenerationCleanup::publish(
     restart_ = true;
 }
 
+void ReportGenerationCleanup::publish_layout(
+    std::shared_ptr<const NightCatalogLayoutIssues> issues) {
+    layout_issues_ = std::move(issues);
+    restart_ = true;
+}
+
 bool ReportGenerationCleanup::forget_media() {
     // The caller has already waited for poll(false) to acknowledge deletion.
     metadata_.cancel();
     if (!discard_scan()) return false;
     catalog_.reset();
+    layout_issues_.reset();
     retired_.clear();
     pending_.clear();
     deferred_.clear();
@@ -275,6 +284,11 @@ bool ReportGenerationCleanup::poll(bool allowed, uint32_t now_ms) {
 
     if (night_cursor_ >= pending_.size()) return false;
     day_ = pending_[night_cursor_];
+    if (layout_issues_ && layout_issues_->blocked(day_)) {
+        finish_night("report_layout_night_blocked");
+        return true;
+    }
+
     char path[AC_STORAGE_PATH_MAX] = {};
     report_signal_store_night_path(day_, path, sizeof(path));
     const char *slash = strrchr(path, '/');

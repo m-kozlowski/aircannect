@@ -14,6 +14,10 @@
 #include "report_signal_store.h"
 #include "string_util.h"
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -44,7 +48,40 @@ struct StagedNight {
 using StagedNightList =
     std::vector<StagedNight, LargeAllocator<StagedNight>>;
 
+bool layout_root_child(const StorageScanEntryView &entry, const char *root,
+                       const char **name) {
+    const size_t root_length = strlen(root);
+    if (!entry.path || strlen(entry.path) <= root_length ||
+        strncmp(entry.path, root, root_length) != 0 ||
+        entry.path[root_length] != '/') {
+        return false;
+    }
+
+    const char *relative = entry.path + root_length + 1;
+    if (!relative[0] || strchr(relative, '/')) return false;
+    if (name) *name = relative;
+    return true;
+}
+
+bool layout_year_directory(const char *name) {
+    return name && strlen(name) == 4 && strspn(name, "0123456789") == 4;
+}
+
 }  // namespace
+
+bool NightCatalogLayoutIssues::blocked(SleepDayId day) const {
+    return std::find(days.begin(), days.end(), day) != days.end();
+}
+
+bool NightCatalogLayoutIssues::intersects(SleepDayId first,
+                                          SleepDayId last) const {
+    if (!first.valid() || !last.valid() || last < first) return false;
+
+    for (SleepDayId day : days) {
+        if (!(day < first) && !(last < day)) return true;
+    }
+    return false;
+}
 
 struct NightCatalogStoreRuntime {
     enum class Phase : uint8_t {
@@ -87,7 +124,7 @@ struct NightCatalogStoreRuntime {
     bool layout_ready = false;
     bool layout_backup_exists = false;
     bool layout_unknown_entries = false;
-    uint8_t layout_root_index = 0;
+    uint8_t layout_source_root_index = 0;
     uint32_t delete_id = 0;
     bool cleanup_cancelled = false;
     StoragePreparedRead prepared;
@@ -211,7 +248,7 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->layout_parent_depth = 0;
     runtime_->layout_backup_exists = false;
     runtime_->layout_unknown_entries = false;
-    runtime_->layout_root_index = 0;
+    runtime_->layout_source_root_index = 0;
 
     runtime_->read_ticket = {};
     runtime_->write_ticket = {};
@@ -405,6 +442,22 @@ bool NightCatalogStoreService::sources_stored(
            previous->source_flags == record.source_flags;
 }
 
+bool NightCatalogStoreService::blocked_layout_sources_unchanged(
+    const NightCatalog &catalog) const {
+    if (!layout_issues_) return true;
+
+    for (SleepDayId day : layout_issues_->days) {
+        const NightCatalogRecord *previous = stored_ ? stored_->find(day) : nullptr;
+        const NightCatalogRecord *next = catalog.find(day);
+        if (previous && (!next || !next->sources_external ||
+                         !sources_stored(*next))) {
+            return false;
+        }
+        if (!previous && next) return false;
+    }
+    return true;
+}
+
 bool NightCatalogStoreService::prepare_index_stream(
     std::shared_ptr<const NightCatalog> compact_index) {
     if (!runtime_ || !range_write_port_ || !write_port_ || !compact_index ||
@@ -513,6 +566,10 @@ OperationAdmission NightCatalogStoreService::request_stage(
         !single_night->record(0)->sleep_day.valid()) {
         return reject_staging(generation, "night_catalog_stage_invalid");
     }
+    if (layout_issues_ &&
+        layout_issues_->blocked(single_night->record(0)->sleep_day)) {
+        return reject_staging(generation, "report_layout_night_blocked");
+    }
 
     reset_operation();
     runtime_->saving = std::move(single_night);
@@ -540,6 +597,9 @@ OperationAdmission NightCatalogStoreService::request_install(
     }
     if (!compact_index) {
         return reject_staging(generation, "night_catalog_install_invalid");
+    }
+    if (!blocked_layout_sources_unchanged(*compact_index)) {
+        return reject_staging(generation, "report_layout_night_blocked");
     }
 
     for (size_t i = 0; i < compact_index->size(); ++i) {
@@ -582,6 +642,9 @@ OperationAdmission NightCatalogStoreService::request_save(
     }
 
     reset_operation();
+    if (!blocked_layout_sources_unchanged(*catalog)) {
+        return reject_save(generation, "report_layout_night_blocked");
+    }
 
     // Reject dangling references before submitting any persistent writes.
     for (size_t i = 0; i < catalog->size(); ++i) {
@@ -638,6 +701,8 @@ OperationAdmission NightCatalogStoreService::prepare_layout(uint32_t generation)
     if (active() || staging()) return OperationAdmission::Busy;
 
     reset_operation();
+    layout_issues_building_.reset();
+    layout_issues_.reset();
     runtime_->layout_ready = false;
     runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutInspect;
     status_ = {};
@@ -646,7 +711,8 @@ OperationAdmission NightCatalogStoreService::prepare_layout(uint32_t generation)
     return OperationAdmission::Accepted;
 }
 
-bool NightCatalogStoreService::poll_layout_path(
+NightCatalogStoreService::LayoutPathResult
+NightCatalogStoreService::poll_layout_path(
     StoragePathOperation operation, const char *source, const char *destination,
     StoragePathCompletion &out) {
     if (!runtime_->layout_path_ticket.valid()) {
@@ -656,26 +722,61 @@ bool NightCatalogStoreService::poll_layout_path(
         if (destination) command.destination = destination;
         command.generation = status_.generation;
         const auto submitted = layout_paths_->request(command);
-        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (submitted.admission == OperationAdmission::Busy) {
+            return LayoutPathResult::Pending;
+        }
         if (!submitted.accepted()) {
-            fail("report_layout_path_rejected");
-            return false;
+            out = {};
+            out.outcome = OperationOutcome::failed();
+            copy_cstr(out.error, sizeof(out.error),
+                      "report_layout_path_rejected");
+            return LayoutPathResult::Failed;
         }
         runtime_->layout_path_ticket = submitted.ticket;
+        return LayoutPathResult::Pending;
+    }
+
+    if (!layout_paths_->take_completion(runtime_->layout_path_ticket, out)) {
+        return LayoutPathResult::Pending;
+    }
+    runtime_->layout_path_ticket = {};
+    if (out.outcome.disposition != OperationDisposition::Succeeded) {
+        return LayoutPathResult::Failed;
+    }
+    return LayoutPathResult::Succeeded;
+}
+
+bool NightCatalogStoreService::record_layout_issue(SleepDayId day,
+                                                  const char *error) {
+    if (!day.valid()) return false;
+    if (layout_issues_building_ && layout_issues_building_->blocked(day)) {
+        return true;
+    }
+
+    try {
+        if (!layout_issues_building_) {
+            layout_issues_building_ =
+                std::make_shared<NightCatalogLayoutIssues>();
+        }
+        layout_issues_building_->days.push_back(day);
+    } catch (...) {
         return false;
     }
 
-    if (!layout_paths_->take_completion(runtime_->layout_path_ticket, out)) return false;
-    runtime_->layout_path_ticket = {};
-    if (out.outcome.disposition != OperationDisposition::Succeeded) {
-        fail(out.error[0] ? out.error : "report_layout_path_failed");
-        return false;
-    }
+#ifdef ARDUINO
+    char date[9] = {};
+    day.format_yyyymmdd(date, sizeof(date));
+    Log::logf(CAT_REPORT, LOG_WARN, "layout blocked night=%s error=%s",
+              date, error && error[0] ? error : "report_layout_path_failed");
+#else
+    (void)error;
+#endif
     return true;
 }
 
 void NightCatalogStoreService::finish_layout() {
     reset_operation();
+    layout_issues_ = std::move(layout_issues_building_);
     runtime_->layout_ready = true;
     runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
     status_.state = NightCatalogStoreState::Ready;
@@ -699,14 +800,21 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
     switch (runtime_->phase) {
         case NightCatalogStoreRuntime::Phase::LayoutInspect: {
             StoragePathCompletion completion;
-            if (!poll_layout_path(StoragePathOperation::Stat, FLAT_NIGHTS_ROOT,
-                                  nullptr, completion)) return false;
+            const LayoutPathResult result = poll_layout_path(
+                StoragePathOperation::Stat, FLAT_NIGHTS_ROOT, nullptr,
+                completion);
+            if (result == LayoutPathResult::Pending) return false;
+            if (result == LayoutPathResult::Failed) {
+                fail(completion.error[0] ? completion.error
+                                         : "report_layout_path_failed");
+                return true;
+            }
+
             if (completion.exists && !completion.directory) {
                 fail("report_layout_backup_not_directory");
                 return true;
             }
             runtime_->layout_backup_exists = completion.exists;
-            runtime_->layout_root_index = completion.exists ? 1 : 0;
             runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutScan;
             return true;
         }
@@ -745,18 +853,24 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             for (size_t i = 0; i < runtime_->layout_scan->size(); ++i) {
                 StorageScanEntryView entry;
                 runtime_->layout_scan->entry(i, entry);
-                if (entry.root_index || strcmp(entry.path, REPORT_SIGNAL_STORE_ROOT) == 0) continue;
-                const char *name = storage_basename_from_path(entry.path);
+                const char *name = nullptr;
+                if (entry.root_index != 0 || !entry.directory ||
+                    !layout_root_child(entry, REPORT_SIGNAL_STORE_ROOT,
+                                       &name)) {
+                    continue;
+                }
+
                 SleepDayId day;
                 flat |= entry.directory && SleepDayId::from_yyyymmdd(name, day);
-                years |= entry.directory && strlen(name) == 4 && strspn(name, "0123456789") == 4;
+                years |= layout_year_directory(name);
             }
-            if (flat && (years || runtime_->layout_backup_exists)) {
-                fail("report_layout_mixed_roots");
-            } else if (runtime_->layout_backup_exists) {
-                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
-            } else if (flat) {
+
+            runtime_->layout_cursor = 0;
+            runtime_->layout_unknown_entries = false;
+            if (!runtime_->layout_backup_exists && flat && !years) {
                 runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutRenameRoot;
+            } else if (runtime_->layout_backup_exists || flat) {
+                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
             } else {
                 finish_layout();
             }
@@ -765,30 +879,61 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
 
         case NightCatalogStoreRuntime::Phase::LayoutRenameRoot: {
             StoragePathCompletion completion;
-            if (!poll_layout_path(StoragePathOperation::Move, REPORT_SIGNAL_STORE_ROOT,
-                                  FLAT_NIGHTS_ROOT, completion)) return false;
-            runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+            const LayoutPathResult result = poll_layout_path(
+                StoragePathOperation::Move, REPORT_SIGNAL_STORE_ROOT,
+                FLAT_NIGHTS_ROOT, completion);
+            if (result == LayoutPathResult::Pending) return false;
+            if (result == LayoutPathResult::Failed) {
+                fail(completion.error[0] ? completion.error
+                                         : "report_layout_path_failed");
+                return true;
+            }
+
+            runtime_->layout_backup_exists = true;
+            runtime_->layout_scan.reset();
+            runtime_->layout_cursor = 0;
+            runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutScan;
             return true;
         }
 
         case NightCatalogStoreRuntime::Phase::LayoutSelectNight: {
             if (runtime_->layout_cursor == runtime_->layout_scan->size()) {
-                if (runtime_->layout_unknown_entries) finish_layout();
-                else runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutRemoveRoot;
+                if (runtime_->layout_unknown_entries ||
+                    (layout_issues_building_ &&
+                     !layout_issues_building_->days.empty())) {
+                    finish_layout();
+                } else if (runtime_->layout_backup_exists) {
+                    runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutRemoveRoot;
+                } else {
+                    finish_layout();
+                }
                 return true;
             }
 
             StorageScanEntryView entry;
             runtime_->layout_scan->entry(runtime_->layout_cursor++, entry);
-            if (entry.root_index != runtime_->layout_root_index ||
-                strcmp(entry.path, REPORT_SIGNAL_STORE_ROOT) == 0 ||
-                strcmp(entry.path, FLAT_NIGHTS_ROOT) == 0) return true;
+            const char *root = entry.root_index == 0
+                ? REPORT_SIGNAL_STORE_ROOT
+                : entry.root_index == 1 ? FLAT_NIGHTS_ROOT : nullptr;
+            const char *name = nullptr;
+            if (!root || !layout_root_child(entry, root, &name)) return true;
 
-            if (!entry.directory || !SleepDayId::from_yyyymmdd(
-                    storage_basename_from_path(entry.path), runtime_->layout_day)) {
+            if (!entry.directory ||
+                !SleepDayId::from_yyyymmdd(name, runtime_->layout_day)) {
+                if (entry.root_index == 0 && entry.directory &&
+                    layout_year_directory(name)) {
+                    return true;
+                }
                 runtime_->layout_unknown_entries = true;
                 return true;
             }
+
+            if (layout_issues_building_ &&
+                layout_issues_building_->blocked(runtime_->layout_day)) {
+                return true;
+            }
+
+            runtime_->layout_source_root_index = entry.root_index;
             char previous[9] = {};
             char current[9] = {};
             runtime_->layout_parent_day.format_yyyymmdd(previous, sizeof(previous));
@@ -815,8 +960,20 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 const size_t suffix[] = {0, 5, 8};
                 destination[strlen(REPORT_SIGNAL_STORE_ROOT) +
                     suffix[runtime_->layout_parent_depth]] = '\0';
-                if (!poll_layout_path(StoragePathOperation::EnsureDirectory, destination,
-                                      nullptr, completion)) return false;
+                const LayoutPathResult result = poll_layout_path(
+                    StoragePathOperation::EnsureDirectory, destination,
+                    nullptr, completion);
+                if (result == LayoutPathResult::Pending) return false;
+                if (result == LayoutPathResult::Failed) {
+                    if (!record_layout_issue(runtime_->layout_day, completion.error)) {
+                        fail("report_layout_issues_unavailable");
+                    } else {
+                        runtime_->phase =
+                            NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+                    }
+                    return true;
+                }
+
                 if (++runtime_->layout_parent_depth == 3) {
                     runtime_->layout_parent_day = runtime_->layout_day;
                     runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutMoveNight;
@@ -825,9 +982,25 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 char day[9];
                 char source[AC_STORAGE_PATH_MAX];
                 runtime_->layout_day.format_yyyymmdd(day, sizeof(day));
-                storage_append_child_path(FLAT_NIGHTS_ROOT, day, source, sizeof(source));
-                if (!poll_layout_path(StoragePathOperation::Move, source,
-                                      destination, completion)) return false;
+                const char *source_root = runtime_->layout_source_root_index == 0
+                    ? REPORT_SIGNAL_STORE_ROOT
+                    : FLAT_NIGHTS_ROOT;
+                storage_append_child_path(source_root, day, source,
+                                          sizeof(source));
+                const LayoutPathResult result = poll_layout_path(
+                    StoragePathOperation::Move, source, destination,
+                    completion);
+                if (result == LayoutPathResult::Pending) return false;
+                if (result == LayoutPathResult::Failed) {
+                    if (!record_layout_issue(runtime_->layout_day, completion.error)) {
+                        fail("report_layout_issues_unavailable");
+                    } else {
+                        runtime_->phase =
+                            NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+                    }
+                    return true;
+                }
+
                 runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
             }
             return true;
@@ -835,8 +1008,16 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
 
         case NightCatalogStoreRuntime::Phase::LayoutRemoveRoot: {
             StoragePathCompletion completion;
-            if (!poll_layout_path(StoragePathOperation::RemoveEmptyDirectory,
-                                  FLAT_NIGHTS_ROOT, nullptr, completion)) return false;
+            const LayoutPathResult result = poll_layout_path(
+                StoragePathOperation::RemoveEmptyDirectory, FLAT_NIGHTS_ROOT,
+                nullptr, completion);
+            if (result == LayoutPathResult::Pending) return false;
+            if (result == LayoutPathResult::Failed) {
+                fail(completion.error[0] ? completion.error
+                                         : "report_layout_path_failed");
+                return true;
+            }
+
             finish_layout();
             return true;
         }
@@ -1658,6 +1839,8 @@ void NightCatalogStoreService::forget_media() {
     cancel();
 
     if (runtime_) runtime_->layout_ready = false;
+    layout_issues_building_.reset();
+    layout_issues_.reset();
 
     if (runtime_ && delete_port_) {
         runtime_->cleanup_pending = true;

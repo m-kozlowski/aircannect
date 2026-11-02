@@ -3,7 +3,9 @@
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
 
+#include "large_allocator.h"
 #include "night_catalog.h"
 #include "night_catalog_file.h"
 #include "operation_outcome.h"
@@ -34,6 +36,13 @@ struct NightCatalogStoreStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
+struct NightCatalogLayoutIssues {
+    std::vector<SleepDayId, LargeAllocator<SleepDayId>> days;
+
+    bool blocked(SleepDayId day) const;
+    bool intersects(SleepDayId first, SleepDayId last) const;
+};
+
 struct NightCatalogStoreRuntime;
 
 class NightCatalogStoreService {
@@ -59,6 +68,9 @@ public:
     void configure_layout(StorageScanPort &scans, StoragePathPort &paths);
     OperationAdmission prepare_layout(uint32_t generation);
     bool layout_ready() const;
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues() const {
+        return layout_issues_;
+    }
 
     // Catalog reads.
     // Both load operations publish only after a complete, validated read.
@@ -100,6 +112,12 @@ public:
     }
 
 private:
+    enum class LayoutPathResult : uint8_t {
+        Pending,
+        Succeeded,
+        Failed,
+    };
+
     // Operation lifecycle.
     void reset_operation();
     void clear_staging();
@@ -113,14 +131,18 @@ private:
     void finish_load(std::shared_ptr<const NightCatalog> catalog);
 
     // Directory migration uses storage-owned scans and non-replacing moves.
-    bool poll_layout_path(StoragePathOperation operation, const char *source,
-                          const char *destination, StoragePathCompletion &out);
+    LayoutPathResult poll_layout_path(
+        StoragePathOperation operation, const char *source,
+        const char *destination, StoragePathCompletion &out);
+    bool record_layout_issue(SleepDayId day, const char *error);
     void finish_layout();
 
     // Save admission and source baseline.
     bool prepare_index_stream(
         std::shared_ptr<const NightCatalog> compact_index);
     bool sources_stored(const NightCatalogRecord &record) const;
+    bool blocked_layout_sources_unchanged(
+        const NightCatalog &catalog) const;
     OperationAdmission reject_save(uint32_t generation,
                                    const char *error);
 
@@ -135,6 +157,8 @@ private:
     StorageDeletePort *delete_port_ = nullptr;
     StorageScanPort *layout_scans_ = nullptr;
     StoragePathPort *layout_paths_ = nullptr;
+    std::shared_ptr<NightCatalogLayoutIssues> layout_issues_building_;
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues_;
     NightCatalogStoreRuntime *runtime_ = nullptr;
     NightCatalogStoreStatus status_;
 

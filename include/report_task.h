@@ -177,6 +177,7 @@ enum class ReportStoreQueryState : uint8_t {
     CatalogPending,
     NightMissing,
     HistoryTimeUnresolved,
+    LayoutBlocked,
     MetadataPending,
     StorePending,
     TrackMissing,

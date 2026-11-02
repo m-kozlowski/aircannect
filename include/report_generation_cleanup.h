@@ -11,6 +11,8 @@
 
 namespace aircannect {
 
+struct NightCatalogLayoutIssues;
+
 // Report-worker-only housekeeping. Readers retain the catalog from which
 // their paths were obtained, including while HTTP is waiting for storage.
 class ReportGenerationCleanup {
@@ -20,6 +22,7 @@ public:
     void begin(StorageReadPort &reads, StorageScanPort &scans,
                StorageDeletePort &deletes);
     void publish(std::shared_ptr<const ReportSignalStoreCatalog> catalog);
+    void publish_layout(std::shared_ptr<const NightCatalogLayoutIssues> issues);
     bool poll(bool allowed, uint32_t now_ms);
 
     // The writer must not reuse an orphan path until storage has stopped
@@ -43,6 +46,7 @@ private:
 
     // Published generations and reader lifetimes
     std::shared_ptr<const ReportSignalStoreCatalog> catalog_;
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues_;
     std::vector<Retired, LargeAllocator<Retired>> retired_;
     bool tracking_failed_ = false;
 
