@@ -7,6 +7,7 @@
 #include "large_allocator.h"
 #include "large_object.h"
 #include "memory_manager.h"
+#include "night_catalog_store_service.h"
 #include "report_build_checkpoint.h"
 #include "report_night_histogram.h"
 #include "string_util.h"
@@ -108,7 +109,8 @@ SleepDayId ReportPeriodKey::first() const {
 }
 
 uint64_t report_period_revision(ReportPeriodKey key, const NightCatalog &catalog,
-                               const ReportSignalStoreCatalog *store) {
+                               const ReportSignalStoreCatalog *store,
+                               const NightCatalogLayoutIssues *layout_issues) {
     // The cache identity contains only source/publication versions in this range.
     uint64_t revision = 1469598103934665603ULL;
     for (int32_t d = key.first().epoch_days(); d <= key.end.epoch_days(); ++d) {
@@ -122,6 +124,10 @@ uint64_t report_period_revision(ReportPeriodKey key, const NightCatalog &catalog
             saved ? saved->generation : 0};
         for (uint64_t value : values) {
             revision = (revision ^ value) * 1099511628211ULL;
+        }
+        if (source && layout_issues && layout_issues->blocked(day)) {
+            revision = (revision ^ 0x424c4f434b45444eULL) * 1099511628211ULL;
+            revision = (revision ^ static_cast<uint64_t>(d)) * 1099511628211ULL;
         }
     }
     return revision;
@@ -231,6 +237,7 @@ struct ReportPeriodService::Cache {
 struct ReportPeriodService::Runtime {
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const ReportSignalStoreCatalog> store;
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues;
     std::shared_ptr<ReportPeriodResult> result;
     PeriodHistogram histograms[MetricCount];
     ReportMetricAccumulator night_metrics;
@@ -247,6 +254,7 @@ struct ReportPeriodService::Runtime {
     uint16_t active_nights = 0;
     uint16_t outdated_nights = 0;
     uint16_t checkpoint_missing = 0;
+    uint16_t layout_blocked = 0;
     uint16_t event_nights = 0;
     uint16_t ahi_nights = 0;
     uint16_t csr_nights = 0;
@@ -448,6 +456,7 @@ struct ReportPeriodService::Runtime {
         json_add_int(json, "active_nights", active_nights);
         json_add_int(json, "outdated_nights", outdated_nights);
         json_add_int(json, "checkpoint_missing", checkpoint_missing);
+        json_add_int(json, "layout_blocked", layout_blocked);
         json_add_float(json, "duration_min", minutes);
         json += ",\"ahi\":";
         append_metric(json, ahi_minutes > 0, ahi_minutes ? ahi_sum / ahi_minutes : 0);
@@ -523,7 +532,8 @@ void ReportPeriodService::clear_cache() { cache_.reset(); }
 
 bool ReportPeriodService::start(ReportPeriodKey key,
     std::shared_ptr<const NightCatalog> catalog,
-    std::shared_ptr<const ReportSignalStoreCatalog> store, uint64_t revision) {
+    std::shared_ptr<const ReportSignalStoreCatalog> store, uint64_t revision,
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues) {
     cancel();
     if (!key.valid() || !catalog) return false;
     try {
@@ -536,6 +546,7 @@ bool ReportPeriodService::start(ReportPeriodKey key,
     r.result->revision = revision;
     r.catalog = std::move(catalog);
     r.store = std::move(store);
+    r.layout_issues = std::move(layout_issues);
     if (!r.daily.reserve(key.days * 160) || !r.result->body.reserve(key.days * 160 + 8192)) {
         cancel();
         return false;
@@ -555,6 +566,21 @@ bool ReportPeriodService::poll() {
         if (r.cursor == r.result->key.days) { r.phase = Phase::Finish; return true; }
         SleepDayId day;
         SleepDayId::from_epoch_days(r.result->key.first().epoch_days() + r.cursor, day);
+
+        if (r.layout_issues && r.catalog->find(day) &&
+            r.layout_issues->blocked(day)) {
+            ++r.layout_blocked;
+
+            char id[9];
+            day.format_yyyymmdd(id, sizeof(id));
+            if (r.cursor) r.daily += ',';
+            r.daily += '{';
+            json_add_string(r.daily, "id", id, false);
+            r.daily += ",\"duration_min\":null,\"means\":[null,null,null,null,null]}";
+
+            ++r.cursor;
+            return true;
+        }
 
         r.saved = r.store ? r.store->find(day) : nullptr;
         r.drop_metadata();

@@ -38,6 +38,7 @@ struct NightCatalogStoreStatus {
 
 struct NightCatalogLayoutIssues {
     std::vector<SleepDayId, LargeAllocator<SleepDayId>> days;
+    bool retryable = false;
 
     bool blocked(SleepDayId day) const;
     bool intersects(SleepDayId first, SleepDayId last) const;

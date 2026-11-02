@@ -2678,6 +2678,7 @@
         if (body.active_nights) notes.push(body.active_nights + " recording night(s) excluded");
         if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) awaiting update");
         if (body.checkpoint_missing) notes.push(body.checkpoint_missing + " night(s) without saved distributions");
+        if (body.layout_blocked) notes.push(body.layout_blocked + " night(s) skipped due to a storage layout conflict");
         AirCANnect.ui.message("reportMsg", notes.join("; ") || "Period loaded", true, !!notes.length);
       } catch (error) {
         if (!current()) return;

@@ -9,6 +9,8 @@
 
 namespace aircannect {
 
+struct NightCatalogLayoutIssues;
+
 struct ReportPeriodKey {
     SleepDayId end;
     uint16_t days = 0;
@@ -40,7 +42,8 @@ public:
     bool start(ReportPeriodKey key,
                std::shared_ptr<const NightCatalog> catalog,
                std::shared_ptr<const ReportSignalStoreCatalog> store,
-               uint64_t revision);
+               uint64_t revision,
+               std::shared_ptr<const NightCatalogLayoutIssues> layout_issues = {});
     bool poll();
     void cancel();
     void clear_cache();
@@ -61,6 +64,7 @@ private:
 
 uint64_t report_period_revision(ReportPeriodKey key,
                                const NightCatalog &catalog,
-                               const ReportSignalStoreCatalog *store);
+                               const ReportSignalStoreCatalog *store,
+                               const NightCatalogLayoutIssues *layout_issues = nullptr);
 
 }  // namespace aircannect

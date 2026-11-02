@@ -13,6 +13,8 @@
 
 namespace aircannect {
 
+struct NightCatalogLayoutIssues;
+
 enum class NightCatalogRefreshState : uint8_t {
     Idle,
     Scanning,
@@ -74,7 +76,8 @@ public:
         int32_t current_offset_minutes,
         uint32_t generation,
         std::shared_ptr<const NightCatalog> previous_catalog = {},
-        const NightCatalogRefreshTarget &target = {});
+        const NightCatalogRefreshTarget &target = {},
+        std::shared_ptr<const NightCatalogLayoutIssues> layout_issues = {});
     bool poll();
     void cancel();
 

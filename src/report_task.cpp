@@ -314,9 +314,6 @@ struct ReportTask::Runtime {
                     blocked = issues->intersects(command.first_day, command.last_day);
                     break;
                 case ReportTaskCommandKind::Period:
-                    blocked = issues->intersects(
-                        ReportPeriodKey{command.sleep_day, command.period_days}.first(),
-                        command.sleep_day);
                     break;
                 case ReportTaskCommandKind::PreviewDates:
                 case ReportTaskCommandKind::RepairDates:
@@ -342,7 +339,8 @@ struct ReportTask::Runtime {
 
             if (published && published->catalog) {
                 const auto revision = report_period_revision(
-                    key, *published->catalog, published->store_catalog.get());
+                    key, *published->catalog, published->store_catalog.get(),
+                    issues.get());
 
                 for (const auto &cached : period_cache) {
                     if (cached && cached->key == key && cached->revision == revision) {
@@ -495,14 +493,12 @@ struct ReportTask::Runtime {
                       const std::shared_ptr<const ReportSignalStoreCatalog> &stored,
                       uint64_t revision) {
         const auto issues = catalog_store.layout_issues();
-        const bool blocked = issues && issues->intersects(period_key.first(), period_key.end);
-        if (!blocked && period_service.start(period_key, source, stored, revision)) return;
+        if (period_service.start(period_key, source, stored, revision, issues)) return;
 
         auto failed = std::make_shared<ReportPeriodResult>();
         failed->key = period_key;
         failed->revision = revision;
-        copy_cstr(failed->error, sizeof(failed->error),
-                  blocked ? "report_layout_night_blocked" : "period_alloc");
+        copy_cstr(failed->error, sizeof(failed->error), "period_alloc");
         period_completed = std::move(failed);
     }
 
@@ -512,9 +508,7 @@ struct ReportTask::Runtime {
     }
 
     bool layout_blocks_refresh(const NightCatalogRefreshTarget &target) const {
-        const auto issues = catalog_store.layout_issues();
-        return issues && (target.valid() ? issues->blocked(target.sleep_day)
-                                         : !issues->days.empty());
+        return target.valid() && layout_blocked(target.sleep_day);
     }
 
     void publish_activity(const ActivitySnapshot &next) {
@@ -1292,13 +1286,6 @@ struct ReportTask::Runtime {
             const bool same_target = same_refresh_target(
                 pending_refresh.target, target);
             const bool keep_target = target.valid() && same_target;
-            if (!keep_target && layout_blocks_refresh({})) {
-                // Keep single-night work runnable; the normal coalescing rule
-                // would turn it into a full refresh blocked by another night.
-                record_failure("refresh_catalog", "report_layout_night_blocked", target.sleep_day);
-                return;
-            }
-
             if (!keep_target) {
                 pending_refresh.target = {};
                 pending_refresh.summary_attempted = false;
@@ -1370,7 +1357,12 @@ struct ReportTask::Runtime {
             target = {};
         }
 
-        if (layout_blocks_refresh(target)) return false;
+        if (layout_blocks_refresh(target)) {
+            // Preserve blocked dates in the full sweep instead of keeping the
+            // first notification at the head of the queue indefinitely.
+            target = {};
+            full_local_refresh = true;
+        }
 
         (void)engine.cancel_background();
         cancel_signal_tile_backfill();
@@ -1991,7 +1983,8 @@ struct ReportTask::Runtime {
                         {}, previous->timezone_offset_valid || timezone_offset_valid,
                         previous->timezone_offset_valid ? previous->timezone_offset_minutes
                                                         : timezone_offset_minutes,
-                        generation, rebuild_previous_sources, target);
+                        generation, rebuild_previous_sources, target,
+                        catalog_store.layout_issues());
                     if (admission == OperationAdmission::Accepted) {
                         refresh_generation = generation;
                         refresh_target = target;
@@ -2327,7 +2320,8 @@ struct ReportTask::Runtime {
         const ReportEngineStatus &engine_status, size_t queued_commands) const {
         ReportTaskOperationalSnapshot out;
         copy_cstr(out.warning, sizeof(out.warning), catalog_refresh.status().warning);
-        if (layout_blocks_refresh({})) {
+        const auto issues = catalog_store.layout_issues();
+        if (issues && !issues->days.empty()) {
             copy_cstr(out.warning, sizeof(out.warning), "report_layout_night_blocked");
         }
         out.catalog_nights = catalog ? catalog->size() : 0;
@@ -2745,6 +2739,7 @@ struct ReportTask::Runtime {
             catalog_generation = 0;
             durable_catalog_generation = 0;
             catalog_store_retry_at_ms = 0;
+            layout_retry_at_ms = 0;
             catalog_refresh_retry_at_ms = 0;
             catalog_refresh_error[0] = '\0';
             store_catalog_load_retry_at_ms = 0;
@@ -2880,6 +2875,7 @@ struct ReportTask::Runtime {
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
     uint32_t catalog_store_retry_at_ms = 0;
+    uint32_t layout_retry_at_ms = 0;
     uint8_t catalog_store_retry_attempt = 0;
     uint32_t catalog_generation = 0;
     uint32_t durable_catalog_generation = 0;
@@ -3124,14 +3120,8 @@ std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeri
     if (!runtime_ || !key.valid()) return {};
     const auto state = runtime_->published_state();
     if (!state || !state->catalog) return {};
-    const auto revision = report_period_revision(key, *state->catalog, state->store_catalog.get());
-    if (state->layout_issues && state->layout_issues->intersects(key.first(), key.end)) {
-        auto failed = std::make_shared<ReportPeriodResult>();
-        failed->key = key;
-        failed->revision = revision;
-        copy_cstr(failed->error, sizeof(failed->error), "report_layout_night_blocked");
-        return failed;
-    }
+    const auto revision = report_period_revision(
+        key, *state->catalog, state->store_catalog.get(), state->layout_issues.get());
 
     if (!runtime_->lock(0)) return {};
     std::shared_ptr<const ReportPeriodResult> result;
@@ -3594,10 +3584,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.record_failure("layout", runtime.catalog_store.status().error, {},
                         deadline_remaining(now_ms, runtime.catalog_store_retry_at_ms));
                 } else if (runtime.catalog_store.layout_ready()) {
+                    const bool retried = runtime.layout_retry_at_ms != 0;
+                    const auto issues = runtime.catalog_store.layout_issues();
+                    runtime.layout_retry_at_ms = issues && issues->retryable
+                        ? now_ms + CATALOG_RECONCILE_IDLE_MS : 0;
                     runtime.catalog_store_retry_at_ms = 0;
                     runtime.catalog_store_retry_attempt = 0;
                     runtime.generation_cleanup.publish_layout(
-                        runtime.catalog_store.layout_issues());
+                        issues);
+                    if (retried && runtime.catalog) {
+                        runtime.store_catalog_load_pending = true;
+                        runtime.reset_background_pass();
+                        runtime.schedule_reconcile(now_ms, false);
+                    }
                     if (runtime.pending_refresh.valid() &&
                         runtime.layout_blocks_refresh(runtime.pending_refresh.target)) {
                         runtime.record_failure("refresh_catalog", "report_layout_night_blocked",
@@ -3619,12 +3618,31 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     const bool startup_allowed = runtime.startup_idle_allowed(now_ms);
     const bool local_blocked = runtime.local_background_work_blocked();
 
+    if (runtime.layout_retry_at_ms && deadline_due(now_ms, runtime.layout_retry_at_ms) &&
+        startup_allowed && !local_blocked && runtime.catalog_storage_ready() &&
+        runtime.store_purpose == CatalogStorePurpose::None &&
+        !runtime.pending_catalog_save && !runtime.catalog_store.active() &&
+        !runtime.catalog_store.staging() && !runtime.refresh_generation &&
+        !runtime.catalog_refresh.active() && !runtime.store_catalog_loader.status().active() &&
+        !runtime.capture_sources.active() && !runtime.summary_acquisition.active() &&
+        !runtime.signal_tile_backfill_started && !runtime.rebuild_started &&
+        !runtime.generation_cleanup.deleting()) {
+        const auto engine = runtime.engine.status();
+        if (engine.state == ReportEngineState::Idle && engine.queued == 0 &&
+            runtime.catalog_store.prepare_layout(CATALOG_STORE_GENERATION) ==
+                OperationAdmission::Accepted) {
+            runtime.publish_status();
+            return true;
+        }
+    }
+
     ReportTaskCommand command;
     if (runtime.pop(command)) {
         if (command.kind == ReportTaskCommandKind::PreviewDates ||
             command.kind == ReportTaskCommandKind::RepairDates) {
             const bool apply = command.kind == ReportTaskCommandKind::RepairDates;
-            const bool blocked = runtime.layout_blocks_refresh({});
+            const auto issues = runtime.catalog_store.layout_issues();
+            const bool blocked = issues && !issues->days.empty();
             const bool accepted = !blocked && (apply
                 ? runtime.date_preview_catalog.lock() == runtime.catalog &&
                   runtime.date_preview_store.lock() == runtime.store_catalog && runtime.date_repair.apply()
@@ -3644,7 +3662,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             return true;
         } else if (command.kind == ReportTaskCommandKind::Period) {
             const auto revision = report_period_revision(
-                runtime.period_key, *runtime.catalog, runtime.store_catalog.get());
+                runtime.period_key, *runtime.catalog, runtime.store_catalog.get(),
+                runtime.catalog_store.layout_issues().get());
             runtime.start_period(runtime.catalog, runtime.store_catalog, revision);
         } else if (command.kind == ReportTaskCommandKind::Rebuild) {
             runtime.rebuild_started = true;
@@ -4242,7 +4261,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_refresh.current_offset_minutes,
                 refresh_generation,
                 runtime.catalog,
-                runtime.pending_refresh.target);
+                runtime.pending_refresh.target,
+                runtime.catalog_store.layout_issues());
         if (admitted == OperationAdmission::Accepted) {
             runtime.refresh_base_generation = runtime.catalog_generation;
             if (runtime.pending_refresh.post_therapy) {
@@ -4395,7 +4415,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             const auto state = runtime.published_state();
             if (state && state->catalog) {
                 const auto revision = report_period_revision(
-                    runtime.period_key, *state->catalog, state->store_catalog.get());
+                    runtime.period_key, *state->catalog, state->store_catalog.get(),
+                    state->layout_issues.get());
 
                 // A foreground publication can replace night.meta during this read.
                 // Retry only against a newer published identity, never disk alone.

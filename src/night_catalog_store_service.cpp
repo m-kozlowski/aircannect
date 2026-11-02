@@ -702,7 +702,6 @@ OperationAdmission NightCatalogStoreService::prepare_layout(uint32_t generation)
 
     reset_operation();
     layout_issues_building_.reset();
-    layout_issues_.reset();
     runtime_->layout_ready = false;
     runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutInspect;
     status_ = {};
@@ -759,6 +758,8 @@ bool NightCatalogStoreService::record_layout_issue(SleepDayId day,
                 std::make_shared<NightCatalogLayoutIssues>();
         }
         layout_issues_building_->days.push_back(day);
+        layout_issues_building_->retryable |=
+            !error || strcmp(error, "destination_exists") != 0;
     } catch (...) {
         return false;
     }

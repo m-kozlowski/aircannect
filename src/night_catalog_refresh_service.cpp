@@ -535,6 +535,7 @@ struct NightCatalogRefreshRuntime {
     void clear_summary() {
         summary.reset();
         previous_catalog.reset();
+        layout_issues.reset();
         target = {};
         datalog_root[0] = '\0';
         metadata_root[0] = '\0';
@@ -606,6 +607,7 @@ struct NightCatalogRefreshRuntime {
 
     std::shared_ptr<const NightCatalogSummarySnapshot> summary;
     std::shared_ptr<const NightCatalog> previous_catalog;
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues;
     NightCatalogStoreService previous_source_loader;
     std::shared_ptr<const NightCatalog> previous_sources;
     bool previous_sources_requested = false;
@@ -778,13 +780,18 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     int32_t current_offset_minutes,
     uint32_t generation,
     std::shared_ptr<const NightCatalog> previous_catalog,
-    const NightCatalogRefreshTarget &target) {
+    const NightCatalogRefreshTarget &target,
+    std::shared_ptr<const NightCatalogLayoutIssues> layout_issues) {
     if (!runtime_ || !scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
     if (generation == 0) return OperationAdmission::Rejected;
 
     if (target.valid()) {
+        if (layout_issues && layout_issues->blocked(target.sleep_day)) {
+            return OperationAdmission::Rejected;
+        }
+
         if (!previous_catalog || strlen(target.datalog_sleep_day) != 8) {
             return OperationAdmission::Rejected;
         }
@@ -799,6 +806,7 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     reset_transient();
     runtime_->summary = target.valid() ? nullptr : std::move(summary);
     runtime_->previous_catalog = std::move(previous_catalog);
+    runtime_->layout_issues = std::move(layout_issues);
     runtime_->target = target;
     runtime_->sweep = !target.valid();
     runtime_->current_offset_valid = current_offset_valid;
@@ -2338,6 +2346,28 @@ bool NightCatalogRefreshService::poll() {
                 } else {
                     runtime_->phase = NightCatalogRefreshRuntime::Phase::FinishIndex;
                 }
+                return true;
+            }
+
+            if (runtime_->layout_issues &&
+                runtime_->layout_issues->blocked(runtime_->days[runtime_->day_cursor])) {
+                const auto day = runtime_->days[runtime_->day_cursor++];
+                const auto *previous = runtime_->previous_catalog
+                    ? runtime_->previous_catalog->find(day) : nullptr;
+
+                // Neither colliding directory is authoritative. Keep the accepted
+                // index entry without reading or staging either source file.
+                if (previous) {
+                    const auto retained = NightCatalogBuilder::select_night(
+                        *runtime_->previous_catalog, day);
+
+                    if (!retained || !runtime_->index_builder.append_index(*retained)) {
+                        fail("night_catalog_previous_night_preserve_failed", true);
+                        return true;
+                    }
+                }
+
+                set_warning(status_, "report_layout_night_blocked");
                 return true;
             }
 
