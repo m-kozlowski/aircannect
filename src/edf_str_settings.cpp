@@ -1,6 +1,7 @@
 #include "edf_str_settings.h"
 
 #include <ArduinoJson.h>
+#include <algorithm>
 
 #include <math.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 #include "edf_str_signal_table.h"
 #include "report_parser.h"
 #include "large_json_allocator.h"
+#include "sleep_day_id.h"
 
 namespace aircannect {
 namespace {
@@ -494,7 +496,10 @@ bool summary_timestamp_within(uint64_t lhs, uint64_t rhs, int64_t adjustment_ms)
         : rhs - lhs <= EDF_STR_SUMMARY_SESSION_TOLERANCE_MS;
 }
 
-bool summary_record_contains_session(const ReportSummaryRecord &record,
+}  // namespace
+
+bool edf_str_summary_contains_session(const ReportSummaryRecord &record,
+                                     uint16_t sleep_day,
                                      uint64_t session_start_ms,
                                      uint64_t session_end_ms,
                                      int32_t session_timezone_offset_minutes) {
@@ -504,6 +509,16 @@ bool summary_record_contains_session(const ReportSummaryRecord &record,
         (static_cast<int64_t>(record.tz_offset_min) -
          session_timezone_offset_minutes) * 60000LL;
 
+    // Summary splits continuous therapy at native local noon. Match only the
+    // part inside this record's day, on the raw device axis, not corrected EDF.
+    SleepDayId day;
+    int64_t day_start = 0, day_end = 0;
+    if (!SleepDayId::from_epoch_days(sleep_day, day) ||
+        !day.utc_day_window(session_timezone_offset_minutes, day_start, day_end) ||
+        day_start < 0) return false;
+
+    session_start_ms = std::max(session_start_ms, static_cast<uint64_t>(day_start));
+    session_end_ms = std::min(session_end_ms, static_cast<uint64_t>(day_end));
     if (session_end_ms <= session_start_ms) return false;
     if (session_end_ms - session_start_ms < 60000) {
         // A sub-minute therapy can have duration 0 or 1 in Summary. Its record
@@ -550,6 +565,8 @@ bool summary_record_contains_session(const ReportSummaryRecord &record,
     return false;
 }
 
+namespace {
+
 bool apply_summary_spool_record(void *opaque,
                                 const ReportSummaryRecord &record) {
     SummarySpoolApplyContext *context =
@@ -562,7 +579,8 @@ bool apply_summary_spool_record(void *opaque,
     int32_t sleep_day = 0;
     if (!report_summary_sleep_day_epoch_days(record, sleep_day) ||
         sleep_day != context->sleep_day ||
-        !summary_record_contains_session(record,
+        !edf_str_summary_contains_session(record,
+                                         context->sleep_day,
                                          context->session_start_ms,
                                          context->session_end_ms,
                                          context->session_timezone_offset_minutes)) {

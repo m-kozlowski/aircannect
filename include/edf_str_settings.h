@@ -40,6 +40,11 @@ bool edf_str_apply_summary_record(const ReportSummaryRecord &record,
                                   EdfStrSettingsApplyResult &result);
 // Session times are raw device UTC; use the offset frozen during recording,
 // not the current AS11 or AirCANnect timezone.
+bool edf_str_summary_contains_session(const ReportSummaryRecord &record,
+                                      uint16_t sleep_day,
+                                      uint64_t session_start_ms,
+                                      uint64_t session_end_ms,
+                                      int32_t session_timezone_offset_minutes);
 bool edf_str_apply_summary_spool(const ReportSpoolResult &spool,
                                  uint16_t sleep_day,
                                  uint64_t session_start_ms,

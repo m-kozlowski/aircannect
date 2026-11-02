@@ -27,6 +27,7 @@
 namespace aircannect {
 
 class TimeSyncService;
+struct ReportSummaryRecord;
 
 static constexpr size_t AC_EDF_STREAM_FRAME_BUDGET = 8;
 static constexpr uint32_t AC_EDF_ATTACH_RETRY_MS = 1000;
@@ -224,7 +225,7 @@ private:
             awaiting_notification = false;
             waiting = false;
             discard_completion = false;
-            sleep_day = 0;
+            record_found = false;
             from_ms = 0;
             session_start_ms = 0;
             session_end_ms = 0;
@@ -238,7 +239,6 @@ private:
 
         OperationTicket ticket;
         uint32_t generation = 0;
-        uint16_t sleep_day = 0;
         int64_t from_ms = 0;
         uint64_t session_start_ms = 0;
         uint64_t session_end_ms = 0;
@@ -251,6 +251,7 @@ private:
         bool awaiting_notification = false;
         bool waiting = false;
         bool discard_completion = false;
+        bool record_found = false;
     };
 
     struct LocalSa2Sample {
@@ -354,6 +355,7 @@ private:
     bool ensure_str_session_started(uint32_t now_ms);
     bool begin_str_session_at(const EdfLocalDateTime &start,
                               uint32_t now_ms);
+    bool advance_str_day(const EdfLocalDateTime &time);
     bool finish_str_session(const SessionStatus &session,
                             uint32_t now_ms,
                             const char *recording_end_time = nullptr);
@@ -372,6 +374,8 @@ private:
                                 uint32_t now_ms);
     bool submit_str_summary_fetch(uint32_t now_ms);
     void poll_str_summary_fetch(uint32_t now_ms);
+    static bool apply_str_summary_record(void *context,
+                                         const ReportSummaryRecord &record);
     void observe_str_summary_event(const As11EventFrame &frame,
                                    uint32_t now_ms);
     void arm_str_summary_after_notification(uint32_t now_ms);
@@ -381,6 +385,7 @@ private:
     bool flush_pending_str_record(const char *reason);
     void handle_str_settings_response(RpcPayloadView payload);
     void handle_identification_response(RpcPayloadView payload);
+    bool publish_completed_str_days(bool release);
     bool write_str_day_record();
     bool write_str_day_record(const EdfStrSessionAccumulator &record,
                               bool replace_existing = false);

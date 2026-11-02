@@ -4,6 +4,7 @@
 
 #include "edf_bytes.h"
 #include "edf_str_file_layout.h"
+#include "edf_str_signal_table.h"
 #include "sleep_day_id.h"
 
 namespace aircannect {
@@ -120,6 +121,57 @@ bool EdfStrSessionAccumulator::begin_therapy(
     }
     current_therapy_start_minute_ = minute;
     therapy_open_ = true;
+    clear_summary();
+    return true;
+}
+
+void EdfStrSessionAccumulator::clear_summary() {
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const auto *signal = edf_str_signal_descriptor(i);
+        if (signal->source != EdfStrFieldSource::Summary) continue;
+
+        const size_t offset = edf_str_signal_sample_offset(i);
+        for (size_t j = 0; j < signal->spec.samples_per_record; ++j) {
+            samples_[offset + j] = -1;
+        }
+    }
+}
+
+bool EdfStrSessionAccumulator::roll_day(
+    const EdfLocalDateTime &boundary,
+    EdfStrSessionAccumulator &completed,
+    EdfStrSessionStatus &status) {
+    uint16_t day = 0;
+    uint16_t minute = 0;
+    if (!day_active_ || !edf_sleep_day_epoch_days(boundary, day) ||
+        !edf_sleep_day_minute(boundary, minute) || minute != 0 ||
+        boundary.second != 0 || day != day_epoch_days_ + 1) {
+        status = EdfStrSessionStatus::BadSleepDay;
+        return false;
+    }
+
+    completed = *this;
+    bool ready = false;
+    if (!completed.finish_mask_event(boundary, status) ||
+        !completed.finish_therapy(boundary, ready, status)) return false;
+
+    const bool therapy_open = therapy_open_;
+    const bool mask_open = mask_event_open_;
+    reset_day(day, boundary);
+
+    // The day changes, not the therapy settings or the explicit mask state.
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const auto *signal = edf_str_signal_descriptor(i);
+        if (signal->source != EdfStrFieldSource::SettingGet) continue;
+
+        const size_t offset = edf_str_signal_sample_offset(i);
+        for (size_t j = 0; j < signal->spec.samples_per_record; ++j) {
+            samples_[offset + j] = completed.samples_[offset + j];
+        }
+    }
+
+    therapy_open_ = therapy_open;
+    mask_event_open_ = mask_open;
     return true;
 }
 

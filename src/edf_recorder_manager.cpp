@@ -6,6 +6,7 @@
 #include <new>
 #include <stdio.h>
 #include <string.h>
+#include <vector>
 
 #include "as11_rpc.h"
 #include "debug_log.h"
@@ -20,6 +21,8 @@
 #include "edf_str_settings.h"
 #include "edf_time.h"
 #include "memory_manager.h"
+#include "large_allocator.h"
+#include "report_parser.h"
 #include "resmed_device_protocol.h"
 #include "string_util.h"
 #include "time_sync_service.h"
@@ -176,6 +179,12 @@ struct EdfStartupTiming {
 }  // namespace
 
 struct EdfRecorderManager::ColdState {
+    struct CompletedStrDay {
+        EdfStrSessionAccumulator record;
+        bool summary_found = false;
+        bool published = false;
+    };
+
     explicit ColdState(RpcRequestPort &rpc) : history(rpc) {}
 
     EdfSessionMetadataPublisher metadata_publisher;
@@ -187,6 +196,7 @@ struct EdfRecorderManager::ColdState {
     EdfSessionMetadataPublication metadata_open_publication;
     EdfCatalogRefreshHint latest_catalog_refresh_hint;
     EdfStrSessionAccumulator str_session_checkpoint;
+    std::vector<CompletedStrDay, LargeAllocator<CompletedStrDay>> str_completed_days;
     bool segment_metadata_active = false;
     bool pending_final_metadata_valid = false;
     bool str_session_checkpoint_valid = false;
@@ -273,6 +283,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     if (therapy_starting && str_refresh.status().active()) return;
 
     poll_rpc_completions();
+    (void)publish_completed_str_days(false);
     poll_str_summary_fetch(now_ms);
     if (str_record_pending_write_ && !str_summary_.active()) {
         (void)write_str_day_record();
@@ -670,6 +681,8 @@ void EdfRecorderManager::begin_mask_event(const char *start_time,
         return;
     }
 
+    if (!advance_str_day(start)) return;
+
     EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
     if (!str_.begin_mask_event(start, str_status)) {
         status_.mask_bad_events++;
@@ -711,6 +724,9 @@ void EdfRecorderManager::finish_mask_event(const char *end_time,
         set_error("bad_mask_off_time");
         return;
     }
+
+    if ((end.hour != 12 || end.minute != 0 || end.second != 0) &&
+        !advance_str_day(end)) return;
 
     EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
     if (!str_.finish_mask_event(end, str_status)) {
@@ -1186,6 +1202,7 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         if (cold_->str_session_checkpoint_valid) {
             str_ = cold_->str_session_checkpoint;
         }
+        decltype(cold_->str_completed_days){}.swap(cold_->str_completed_days);
         str_start_pending_ = false;
         pending_str_start_time_[0] = 0;
         pending_mask_event_start_time_[0] = 0;
@@ -2056,6 +2073,57 @@ bool EdfRecorderManager::begin_str_session_at(const EdfLocalDateTime &start,
     return true;
 }
 
+bool EdfRecorderManager::advance_str_day(const EdfLocalDateTime &time) {
+    if (!str_.active() || !str_.therapy_open()) return true;
+
+    uint16_t target_day = 0;
+    if (!edf_sleep_day_epoch_days(time, target_day)) return false;
+
+    while (str_.day_epoch_days() < target_day) {
+        SleepDayId next_day;
+        int64_t noon_ms = 0;
+        EdfLocalDateTime boundary;
+        if (!SleepDayId::from_epoch_days(str_.day_epoch_days() + 1, next_day) ||
+            !next_day.local_noon_epoch_ms(noon_ms) ||
+            !edf_epoch_ms_to_local_datetime(noon_ms, 0, boundary)) {
+            set_error("bad_str_rollover_day");
+            return false;
+        }
+
+        EdfStrSessionAccumulator next = str_;
+        ColdState::CompletedStrDay completed;
+        EdfStrSessionStatus result;
+        if (!next.roll_day(boundary, completed.record, result)) {
+            set_error("str_rollover_failed");
+            return false;
+        }
+
+        const bool retain = str_.therapy_open() &&
+            recorder_model(device_state_) == ResmedDeviceModel::AirSense11;
+        if (retain) {
+            try {
+                cold_->str_completed_days.push_back(completed);
+            } catch (const std::bad_alloc &) {
+                set_error("str_rollover_memory_failed");
+                return false;
+            }
+        }
+
+        // A busy publisher must not discard the MaskOff that triggered this
+        // rollover. Retained days are submitted by poll, then filled by Summary.
+        if (!retain && !write_str_day_record(completed.record)) {
+            return false;
+        }
+
+        str_ = next;
+        if (recorder_model(device_state_) != ResmedDeviceModel::AirMini) {
+            (void)request_str_settings();
+        }
+        (void)request_identification();
+    }
+    return true;
+}
+
 bool EdfRecorderManager::request_str_settings() {
     if (recorder_model(device_state_) == ResmedDeviceModel::AirMini) {
         return false;
@@ -2194,8 +2262,11 @@ bool EdfRecorderManager::begin_str_summary_wait(
         return true;
     }
 
+    const uint16_t first_day = cold_->str_completed_days.empty()
+        ? str_.day_epoch_days()
+        : cold_->str_completed_days.front().record.day_epoch_days();
     const int64_t local_day_start_ms =
-        static_cast<int64_t>(str_.day_epoch_days()) * AC_EDF_DAY_MS;
+        static_cast<int64_t>(first_day) * AC_EDF_DAY_MS;
     const int64_t timezone_offset_ms =
         static_cast<int64_t>(session_timezone_offset_minutes_) *
         AC_EDF_MINUTE_MS;
@@ -2203,7 +2274,6 @@ bool EdfRecorderManager::begin_str_summary_wait(
         AC_EDF_DAY_MS;
     if (from_ms <= 0) return false;
 
-    str_summary_.sleep_day = str_.day_epoch_days();
     str_summary_.from_ms = from_ms;
     str_summary_.session_start_ms =
         static_cast<uint64_t>(session_start_ms);
@@ -2254,6 +2324,48 @@ bool EdfRecorderManager::submit_str_summary_fetch(uint32_t now_ms) {
     return false;
 }
 
+bool EdfRecorderManager::apply_str_summary_record(
+    void *context, const ReportSummaryRecord &record) {
+    auto &self = *static_cast<EdfRecorderManager *>(context);
+    int32_t day = 0;
+    if (!report_summary_sleep_day_epoch_days(record, day)) return true;
+
+    EdfStrSessionAccumulator *target = nullptr;
+    bool *found = nullptr;
+    bool *published = nullptr;
+    if (day == self.str_.day_epoch_days()) {
+        target = &self.str_;
+        found = &self.str_summary_.record_found;
+    } else {
+        for (auto &completed : self.cold_->str_completed_days) {
+            if (day != completed.record.day_epoch_days()) continue;
+
+            target = &completed.record;
+            found = &completed.summary_found;
+            published = &completed.published;
+            break;
+        }
+    }
+    if (!target || *found) return true;
+
+    if (!edf_str_summary_contains_session(
+            record, target->day_epoch_days(), self.str_summary_.session_start_ms,
+            self.str_summary_.session_end_ms,
+            self.str_summary_.timezone_offset_minutes)) return true;
+
+    EdfStrSettingsApplyResult applied;
+    if (!edf_str_apply_summary_record(record, *target, applied)) return false;
+
+    *found = true;
+    if (published) *published = false;
+    Log::logf(CAT_EDF, LOG_DEBUG,
+              "STR summary sleep_day=%ld values=%lu missing=%lu unmapped=%lu\n",
+              static_cast<long>(day), static_cast<unsigned long>(applied.values),
+              static_cast<unsigned long>(applied.missing),
+              static_cast<unsigned long>(applied.unmapped));
+    return true;
+}
+
 void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
     if (recorder_model(device_state_) != ResmedDeviceModel::AirSense11 ||
         !str_summary_.active() || !report_spool_) {
@@ -2289,27 +2401,22 @@ void EdfRecorderManager::poll_str_summary_fetch(uint32_t now_ms) {
                 return;
             }
 
-            EdfStrSummaryApplyResult applied;
-            const bool parsed = edf_str_apply_summary_spool(
-                completion.result,
-                str_summary_.sleep_day,
-                str_summary_.session_start_ms,
-                str_summary_.session_end_ms,
-                str_summary_.timezone_offset_minutes,
-                str_,
-                applied);
+            char error[64] = {};
+            const bool parsed = report_parse_summary_spool(
+                completion.result, apply_str_summary_record, this,
+                error, sizeof(error));
             completion.clear();
             if (!parsed) {
                 str_summary_.clear();
-                finish_str_summary_without_data(applied.error);
+                finish_str_summary_without_data(error);
                 return;
             }
-            if (applied.record_found) {
-                Log::logf(CAT_EDF, LOG_DEBUG,
-                          "STR summary values=%lu missing=%lu unmapped=%lu\n",
-                          static_cast<unsigned long>(applied.values),
-                          static_cast<unsigned long>(applied.missing),
-                          static_cast<unsigned long>(applied.unmapped));
+
+            bool complete = str_summary_.record_found;
+            for (const auto &day : cold_->str_completed_days) {
+                complete = complete && day.summary_found;
+            }
+            if (complete) {
                 str_summary_.clear();
                 (void)write_str_day_record();
                 return;
@@ -2426,7 +2533,7 @@ void EdfRecorderManager::cancel_str_summary_fetch() {
 }
 
 bool EdfRecorderManager::flush_pending_str_record(const char *reason) {
-    if (!str_record_pending_write_) return true;
+    if (!str_record_pending_write_ && cold_->str_completed_days.empty()) return true;
 
     const bool summary_was_pending = str_summary_.active();
     cancel_str_summary_fetch();
@@ -2503,25 +2610,8 @@ bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
         return false;
     }
 
-    uint16_t end_day = 0;
-    uint16_t end_minute = 0;
-    EdfLocalDateTime end_day_start;
-    if (!edf_sleep_day_epoch_days(end, end_day) ||
-        !edf_sleep_day_minute(end, end_minute) ||
-        !edf_sleep_day_start(end, end_day_start)) {
-        set_error("bad_str_end_sleep_day");
-        return false;
-    }
-
-    if (end_day != str_.day_epoch_days()) {
-        if (!finish_str_session_at(end_day_start, now_ms, nullptr)) {
-            return false;
-        }
-        if (end_minute == 0) return true;
-        if (!begin_str_session_at(end_day_start, now_ms)) {
-            return false;
-        }
-    }
+    if ((end.hour != 12 || end.minute != 0 || end.second != 0) &&
+        !advance_str_day(end)) return false;
 
     return finish_str_session_at(end, now_ms, &session);
 }
@@ -2560,7 +2650,28 @@ bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
     return write_str_day_record();
 }
 
+bool EdfRecorderManager::publish_completed_str_days(bool release) {
+    if (status_.active && !status_.recording_start_time[0] &&
+        !cold_->str_completed_days.empty()) return false;
+
+    for (auto &day : cold_->str_completed_days) {
+        if (day.published) continue;
+        if (!write_str_day_record(day.record)) return false;
+
+        day.published = true;
+    }
+    if (release) {
+        decltype(cold_->str_completed_days){}.swap(cold_->str_completed_days);
+    }
+    return true;
+}
+
 bool EdfRecorderManager::write_str_day_record() {
+    if (!publish_completed_str_days(true)) {
+        str_record_pending_write_ = true;
+        return false;
+    }
+
     const bool accepted = write_str_day_record(str_);
     str_record_pending_write_ = !accepted;
     return accepted;
@@ -2966,28 +3077,16 @@ bool EdfRecorderManager::roll_segment_if_needed(
               static_cast<unsigned>(frame_day),
               frame.start_time);
 
+    if (!advance_str_day(boundary)) return false;
+
     if (!assembler_.end_session()) return false;
 
     if (!close_session_files()) return false;
-
-    if (!finish_str_session_at(boundary, now_ms, nullptr)) {
-        Log::logf(CAT_EDF, LOG_WARN,
-                  "STR rollover finish skipped id=%lu error=%s\n",
-                  static_cast<unsigned long>(status_.session_id),
-                  status_.last_error[0] ? status_.last_error : "--");
-    }
 
     finalize_segment_metadata_at(raw_boundary_ms,
                                  raw_boundary_ms,
                                  now_ms);
     status_.segment_rollovers++;
-
-    if (!begin_str_session_at(boundary, now_ms)) {
-        Log::logf(CAT_EDF, LOG_WARN,
-                  "STR rollover start skipped id=%lu error=%s\n",
-                  static_cast<unsigned long>(status_.session_id),
-                  status_.last_error[0] ? status_.last_error : "--");
-    }
 
     copy_cstr(status_.recording_start_time,
               sizeof(status_.recording_start_time),
