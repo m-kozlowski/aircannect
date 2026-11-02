@@ -26,7 +26,10 @@ struct PeriodNight {
     uint64_t duration_ms;
     uint64_t leak_ms;
     uint64_t leak_above_ms;
-    ReportNightMetrics metrics;
+    uint32_t valid_mask;
+    int32_t ahi_milli;
+    int32_t arousal_index_milli;
+    uint32_t csr_minutes;
     ReportEventCounts events;
     uint32_t flags;
     uint8_t available_event_mask;
@@ -38,7 +41,10 @@ struct PeriodNight {
         : duration_ms(night.closed_therapy_duration_ms),
           leak_ms(night.statistics.leak_recorded_ms),
           leak_above_ms(night.statistics.leak_above_threshold_ms),
-          metrics(night.metrics), events(night.events), flags(night.flags),
+          valid_mask(night.metrics.valid_mask), ahi_milli(night.metrics.ahi_milli),
+          arousal_index_milli(night.metrics.arousal_index_milli),
+          csr_minutes(night.metrics.csr_minutes),
+          events(night.events), flags(night.flags),
           available_event_mask(night.available_event_mask),
           missing_event_mask(night.missing_event_mask) {
         for (size_t i = 0; i < 4; ++i) {
@@ -144,6 +150,27 @@ struct ReportPeriodService::Cache {
     std::list<Entry, LargeAllocator<Entry>> entries;
     size_t bytes = 0;
     uint64_t serial = 0;
+    uint64_t current_run = 0;
+    size_t summary_slots = 0;
+
+    void begin(ReportPeriodKey key, const ReportSignalStoreCatalog *store) {
+        current_run = serial + 1;
+        size_t needed = 0;
+        if (store) {
+            for (int32_t d = key.first().epoch_days(); d <= key.end.epoch_days(); ++d) {
+                SleepDayId day;
+                SleepDayId::from_epoch_days(d, day);
+                const auto *saved = store->find(day);
+                if (saved && !(saved->flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
+                    ++needed;
+                }
+            }
+        }
+
+        const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
+        summary_slots = std::min(budget / EntryBytes, std::max(needed, entries.size()));
+        make_room(0, false);
+    }
 
     Entry *find(const ReportSignalStoreCatalogRecord &snapshot) {
         for (auto &entry : entries) {
@@ -159,11 +186,19 @@ struct ReportPeriodService::Cache {
         const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
         if (cost > budget) return false;
 
+        // Leave room for summaries before protecting this run's histogram hits.
+        const auto fits = [&]() {
+            const size_t count = entries.size() + (summary ? 1 : 0);
+            const size_t reserved = summary_slots > count
+                ? (summary_slots - count) * EntryBytes : 0;
+            return bytes + cost + reserved <= budget;
+        };
+
         // Histogram eviction leaves the smaller, more useful summary intact.
-        while (bytes + cost > budget) {
+        while (!fits()) {
             Entry *oldest = nullptr;
             for (auto &entry : entries) {
-                if (entry.histogram && (!oldest ||
+                if (entry.histogram && entry.histogram->used < current_run && (!oldest ||
                     entry.histogram->used < oldest->histogram->used)) {
                     oldest = &entry;
                 }
@@ -174,14 +209,20 @@ struct ReportPeriodService::Cache {
         }
 
         if (summary) {
-            while (bytes + cost > budget && !entries.empty()) {
-                const auto oldest = std::min_element(entries.begin(), entries.end(),
-                    [](const Entry &a, const Entry &b) { return a.used < b.used; });
+            while (!fits()) {
+                auto oldest = entries.end();
+                for (auto it = entries.begin(); it != entries.end(); ++it) {
+                    if (it->used < current_run &&
+                        (oldest == entries.end() || it->used < oldest->used)) {
+                        oldest = it;
+                    }
+                }
+                if (oldest == entries.end()) break;
                 bytes -= EntryBytes;
                 entries.erase(oldest);
             }
         }
-        return bytes + cost <= budget;
+        return fits();
     }
 
     void remember_summary(const ReportSignalStoreCatalogRecord &snapshot,
@@ -291,7 +332,12 @@ struct ReportPeriodService::Runtime {
         const auto *source = catalog->find(day);
         if (source && source->unresolved_history) source = nullptr;
         ReportNightMetrics m;
-        if (night) m = night->metrics;
+        if (night) {
+            m.valid_mask = night->valid_mask;
+            m.ahi_milli = night->ahi_milli;
+            m.arousal_index_milli = night->arousal_index_milli;
+            m.csr_minutes = night->csr_minutes;
+        }
         else if (source) report_night_metrics_from_catalog(source->metrics, m);
 
         const bool open = (night && (night->flags & REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION)) ||
@@ -527,6 +573,7 @@ bool ReportPeriodService::start(ReportPeriodKey key,
         cancel();
         return false;
     }
+    cache_->begin(key, r.store.get());
     return true;
 }
 
