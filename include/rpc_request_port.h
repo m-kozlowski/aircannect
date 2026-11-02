@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string>
 
+#include "as11_rpc.h"
 #include "operation_outcome.h"
 #include "rpc_payload.h"
 
@@ -47,9 +48,13 @@ struct RpcRequestCommand {
     RpcRequestAdmission admission = RpcRequestAdmission::Normal;
     RpcDispatchWindow dispatch_window;
 
+    // AS11 only; send method({}) and GetDateTime in one batch, not a real call.
+    bool probe_method = false;
+
     bool valid() const {
         return !method.empty() && timeout_ms != 0 && generation != 0 &&
-               dispatch_window.valid();
+               dispatch_window.valid() &&
+               (!probe_method || params_json.empty());
     }
 };
 
@@ -67,6 +72,7 @@ struct RpcRequestCompletion {
     RpcPayloadRef payload;
     std::string reason;
     bool response_error = false;
+    RpcMethodProbeResult method_probe = RpcMethodProbeResult::NotMatched;
     int64_t dispatch_utc_ms = 0;
     int64_t response_utc_ms = 0;
     uint32_t dispatch_ms = 0;

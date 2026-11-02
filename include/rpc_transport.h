@@ -106,6 +106,7 @@ private:
         uint32_t generation = 0;
         uint8_t ncp_command = 0;
         uint8_t ncp_tag = 0;
+        bool probe_method = false;
     };
 
     struct QueuedRequest {
@@ -117,6 +118,7 @@ private:
         uint32_t generation = 0;
         RpcRequestAdmission admission = RpcRequestAdmission::Normal;
         RpcDispatchWindow dispatch_window;
+        bool probe_method = false;
     };
 
     struct RawPassthroughRequest {
@@ -186,7 +188,9 @@ private:
                                  int64_t dispatch_utc_ms = 0,
                                  int64_t response_utc_ms = 0,
                                  uint32_t dispatch_ms = 0,
-                                 uint32_t response_ms = 0);
+                                 uint32_t response_ms = 0,
+                                 RpcMethodProbeResult method_probe =
+                                     RpcMethodProbeResult::NotMatched);
 
     void expire_raw_passthrough(uint32_t now);
     void remember_raw_passthrough(uint32_t id,

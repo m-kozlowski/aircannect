@@ -28,6 +28,20 @@ std::string json_escape(const std::string &text);
 std::string build_rpc_request(const std::string &method,
                               const std::string &params_json,
                               uint32_t id);
+
+// Only for methods requiring parameters: {} must not perform an operation.
+// The trailing GetDateTime response marks a completed synchronous batch.
+enum class RpcMethodProbeResult : uint8_t {
+    NotMatched,
+    Available,
+    Unavailable,
+    InvalidResponse,
+};
+
+std::string build_rpc_method_probe(const std::string &method, uint32_t id);
+RpcMethodProbeResult inspect_rpc_method_probe(
+    const char *json, size_t len, uint32_t id);
+
 std::string build_get_params(const std::string &names);
 std::string build_get_params(std::initializer_list<const char *> names);
 std::string build_set_datetime_params(const std::string &utc_datetime);

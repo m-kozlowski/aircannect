@@ -41,7 +41,6 @@ static constexpr size_t FirmwareDumpReadBytes = 4080;
 static constexpr uint64_t FirmwareDumpFreeReserveBytes = 1024 * 1024;
 static constexpr uint32_t FirmwareDumpIdentityTimeoutMs = 30000;
 static constexpr uint32_t FirmwareDumpRecoveryBootTimeoutMs = 30000;
-static constexpr int32_t RpcMethodNotFound = -32601;
 static constexpr size_t ResmedOtaKeyBytes = 32;
 
 bool valid_sha256(String value) {
@@ -128,6 +127,7 @@ const char *resmed_ota_phase_name(ResmedOtaPhase phase) {
         case ResmedOtaPhase::PreparingBootloader:
             return "preparing_bootloader";
         case ResmedOtaPhase::Erasing: return "erasing";
+        case ResmedOtaPhase::ProbingApply: return "probing_apply";
         case ResmedOtaPhase::Initiating: return "initiating";
         case ResmedOtaPhase::Ready: return "ready";
         case ResmedOtaPhase::Uploading: return "uploading";
@@ -436,8 +436,67 @@ bool ResmedOtaManager::begin_protocol(size_t total_size,
     sha_started_ = true;
     sha_finished_ = false;
 
+    if (apply_after_check_ && !ncp_upgrade_) return queue_apply_probe(false);
+    return queue_initiate();
+}
+
+bool ResmedOtaManager::queue_apply_probe(bool authenticated) {
+    const char *method = authenticated ? "ApplyAuthenticatedUpgrade"
+                                       : "ApplyUpgrade";
+    cold_->status.phase = ResmedOtaPhase::ProbingApply;
+    if (!queue_request(method, "", AC_RESMED_OTA_BLOCK_TIMEOUT_MS, true)) {
+        set_error("apply_probe_queue_failed");
+        return false;
+    }
+
+    Log::logf(CAT_OTA, LOG_INFO, "[RESMED] probing %s before upload\n", method);
+    return true;
+}
+
+void ResmedOtaManager::finish_apply_probe(RpcMethodProbeResult result) {
+    const bool authenticated = waiting_for_ == WaitingFor::ProbeAuthenticated;
+    waiting_for_ = WaitingFor::None;
+    cold_->status.waiting = false;
+
+    if (result == RpcMethodProbeResult::Unavailable) {
+        if (!authenticated) {
+            Log::logf(CAT_OTA, LOG_INFO,
+                      "[RESMED] plain apply unavailable; probing authenticated apply\n");
+            (void)queue_apply_probe(true);
+        } else {
+            set_error("apply_unavailable");
+        }
+        return;
+    }
+    if (result != RpcMethodProbeResult::Available) {
+        set_error("apply_probe_invalid_response");
+        return;
+    }
+
+    if (authenticated) {
+        if (!ota_key_ || !ota_key_->length()) {
+            set_error("ota_key_required");
+            return;
+        }
+        if (!sha256_text_valid(ota_key_->c_str())) {
+            set_error("ota_key_invalid");
+            return;
+        }
+    }
+
+    authenticated_apply_ = authenticated;
+    cold_->status.apply_mode = authenticated ? "authenticated" : "plain";
+    Log::logf(CAT_OTA, LOG_INFO, "[RESMED] apply mode=%s selected before upload\n",
+              cold_->status.apply_mode.c_str());
+    (void)queue_initiate();
+}
+
+bool ResmedOtaManager::queue_initiate() {
+    if (!guard_device_idle_for_upgrade()) return false;
+
+    cold_->status.phase = ResmedOtaPhase::Initiating;
     std::string params = "{\"upgradeFileSize\":";
-    params += std::to_string(total_size);
+    params += std::to_string(cold_->status.total_size);
     params += "}";
     if (!queue_request("InitiateUpgrade", params,
                        AC_RESMED_OTA_BLOCK_TIMEOUT_MS)) {
@@ -446,7 +505,8 @@ bool ResmedOtaManager::begin_protocol(size_t total_size,
     }
 
     Log::logf(CAT_OTA, LOG_INFO, "[RESMED] initiate size=%u file=%s\n",
-              static_cast<unsigned>(total_size), filename.c_str());
+              static_cast<unsigned>(cold_->status.total_size),
+              cold_->status.filename.c_str());
     return true;
 }
 
@@ -566,11 +626,10 @@ bool ResmedOtaManager::request_apply_plain(bool reset_settings,
         return false;
     }
 
-    return queue_plain_apply(reset_settings, false);
+    return queue_plain_apply(reset_settings);
 }
 
-bool ResmedOtaManager::queue_plain_apply(bool reset_settings,
-                                         bool allow_auth_fallback) {
+bool ResmedOtaManager::queue_plain_apply(bool reset_settings) {
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
@@ -589,10 +648,8 @@ bool ResmedOtaManager::queue_plain_apply(bool reset_settings,
     cold_->status.phase = ResmedOtaPhase::Applying;
     cold_->status.apply_mode = "plain";
     last_activity_ms_ = millis();
-    apply_auth_fallback_pending_ = allow_auth_fallback && !ncp_upgrade_;
     if (!queue_request("ApplyUpgrade", params,
                        AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
-        apply_auth_fallback_pending_ = false;
         set_error("apply_queue_failed");
         return false;
     }
@@ -643,12 +700,12 @@ bool ResmedOtaManager::queue_authenticated_apply(
     cold_->status.phase = ResmedOtaPhase::Applying;
     cold_->status.apply_mode = "authenticated";
     last_activity_ms_ = millis();
-    apply_auth_fallback_pending_ = false;
     if (!queue_request("ApplyAuthenticatedUpgrade", params,
                        AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
         set_error("apply_queue_failed");
         return false;
     }
+    apply_after_check_ = false;
 
     Log::logf(CAT_OTA, LOG_WARN,
               "[RESMED] ApplyAuthenticatedUpgrade queued\n");
@@ -715,6 +772,7 @@ bool ResmedOtaManager::active() const {
            cold_->status.phase == ResmedOtaPhase::BootloaderRequired ||
            cold_->status.phase == ResmedOtaPhase::PreparingBootloader ||
            cold_->status.phase == ResmedOtaPhase::Erasing ||
+           cold_->status.phase == ResmedOtaPhase::ProbingApply ||
            cold_->status.phase == ResmedOtaPhase::Initiating ||
            cold_->status.phase == ResmedOtaPhase::Ready ||
            cold_->status.phase == ResmedOtaPhase::Uploading ||
@@ -739,6 +797,7 @@ bool ResmedOtaManager::transport_active() const {
            cold_->status.phase == ResmedOtaPhase::Dumping ||
            cold_->status.phase == ResmedOtaPhase::Publishing ||
            cold_->status.phase == ResmedOtaPhase::Erasing ||
+           cold_->status.phase == ResmedOtaPhase::ProbingApply ||
            cold_->status.phase == ResmedOtaPhase::Initiating ||
            cold_->status.phase == ResmedOtaPhase::Ready ||
            cold_->status.phase == ResmedOtaPhase::Uploading ||
@@ -770,11 +829,16 @@ const char *ResmedOtaManager::phase_name() const {
 
 bool ResmedOtaManager::queue_request(const char *method,
                                      const std::string &params,
-                                     uint32_t timeout_ms) {
+                                     uint32_t timeout_ms,
+                                     bool probe_method) {
     if (!rpc_ || !method || rpc_ticket_.valid()) return false;
 
     WaitingFor waiting = WaitingFor::None;
-    if (!strcmp(method, "InitiateUpgrade")) {
+    if (probe_method && !strcmp(method, "ApplyUpgrade")) {
+        waiting = WaitingFor::ProbePlain;
+    } else if (probe_method && !strcmp(method, "ApplyAuthenticatedUpgrade")) {
+        waiting = WaitingFor::ProbeAuthenticated;
+    } else if (!strcmp(method, "InitiateUpgrade")) {
         waiting = WaitingFor::Initiate;
     } else if (!strcmp(method, "UpgradeDataBlock")) {
         waiting = WaitingFor::Block;
@@ -795,6 +859,7 @@ bool ResmedOtaManager::queue_request(const char *method,
     command.source = RpcSource::ResmedOta;
     command.timeout_ms = timeout_ms;
     command.generation = rpc_generation_;
+    command.probe_method = probe_method;
     const OperationSubmission submission = rpc_->request(command);
     if (!submission.accepted()) return false;
 
@@ -815,7 +880,12 @@ void ResmedOtaManager::poll_rpc_completion() {
 
     rpc_ticket_ = {};
     if (completion.cause == RpcCompletionCause::Response) {
-        handle_response(rpc_payload_view(completion.payload));
+        if (waiting_for_ == WaitingFor::ProbePlain ||
+            waiting_for_ == WaitingFor::ProbeAuthenticated) {
+            finish_apply_probe(completion.method_probe);
+        } else {
+            handle_response(rpc_payload_view(completion.payload));
+        }
         return;
     }
 
@@ -853,22 +923,7 @@ void ResmedOtaManager::handle_response(RpcPayloadView payload) {
     last_activity_ms_ = millis();
     if (json_member_present(payload.data(), payload.size(), "error")) {
         int32_t error_code = 0;
-        const bool method_unavailable =
-            waiting_for_ == WaitingFor::Apply &&
-            apply_auth_fallback_pending_ &&
-            cold_->status.apply_mode == "plain" &&
-            json_extract_rpc_error_code(payload.data(), payload.size(),
-                                        error_code) &&
-            error_code == RpcMethodNotFound;
-
         waiting_for_ = WaitingFor::None;
-        apply_auth_fallback_pending_ = false;
-        if (method_unavailable) {
-            cold_->status.phase = ResmedOtaPhase::Verified;
-            (void)queue_configured_authenticated_apply();
-            return;
-        }
-
         (void)json_extract_rpc_error_code(payload.data(), payload.size(),
                                           error_code);
         const std::string error = "rpc_error_" + std::to_string(error_code);
@@ -909,12 +964,15 @@ void ResmedOtaManager::handle_response(RpcPayloadView payload) {
             cold_->status.phase = ResmedOtaPhase::Verified;
             schedule_prepared_cleanup();
             if (apply_after_check_) {
-                (void)queue_plain_apply(false, true);
+                if (authenticated_apply_) {
+                    (void)queue_configured_authenticated_apply();
+                } else {
+                    (void)queue_plain_apply(false);
+                }
             }
             break;
 
         case WaitingFor::Apply:
-            apply_auth_fallback_pending_ = false;
             if (dump_recovery_install_) {
                 cold_->status.phase = ResmedOtaPhase::Resetting;
                 cold_->status.last_result = "waiting_for_application";
@@ -926,6 +984,8 @@ void ResmedOtaManager::handle_response(RpcPayloadView payload) {
             }
             break;
 
+        case WaitingFor::ProbePlain:
+        case WaitingFor::ProbeAuthenticated:
         case WaitingFor::None:
             break;
     }
@@ -2351,7 +2411,7 @@ void ResmedOtaManager::clear_session() {
     cold_->status.transport = AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     sha_started_ = false;
     sha_finished_ = false;
-    apply_auth_fallback_pending_ = false;
+    authenticated_apply_ = false;
     last_activity_ms_ = 0;
     cold_->prepared = {};
     prepared_transfer_ = false;
@@ -2426,7 +2486,7 @@ void ResmedOtaManager::finish_error(const char *error) {
     schedule_prepared_cleanup();
     prepared_transfer_ = false;
     apply_after_check_ = false;
-    apply_auth_fallback_pending_ = false;
+    authenticated_apply_ = false;
 
     cold_->status.phase = ResmedOtaPhase::Error;
     cold_->status.waiting = false;
