@@ -19,6 +19,35 @@ constexpr const char *Names[] = {"mask_pressure", "leak", "minute_ventilation",
     "respiratory_rate", "tidal_volume", "spo2", "pressure", "epap",
     "flow_limitation", "snore", "inspiration_time", "expiration_time",
     "ie_ratio", "target_ventilation", "pulse"};
+constexpr size_t DailyMeans[] = {6, 1, 4, 2};
+
+struct PeriodNight {
+    uint64_t duration_ms;
+    uint64_t leak_ms;
+    uint64_t leak_above_ms;
+    ReportNightMetrics metrics;
+    ReportEventCounts events;
+    uint32_t flags;
+    uint8_t available_event_mask;
+    uint8_t missing_event_mask;
+    uint8_t mean_mask = 0;
+    int32_t means[4] = {};
+
+    explicit PeriodNight(const ReportSignalStoreNight &night)
+        : duration_ms(night.closed_therapy_duration_ms),
+          leak_ms(night.statistics.leak_recorded_ms),
+          leak_above_ms(night.statistics.leak_above_threshold_ms),
+          metrics(night.metrics), events(night.events), flags(night.flags),
+          available_event_mask(night.available_event_mask),
+          missing_event_mask(night.missing_event_mask) {
+        for (size_t i = 0; i < 4; ++i) {
+            const auto &statistic = night.statistics.at(DailyMeans[i]);
+            if (!statistic.valid) continue;
+            mean_mask |= 1u << i;
+            means[i] = statistic.mean_milli;
+        }
+    }
+};
 
 struct PeriodHistogram {
     uint64_t bins[Bins] = {};
@@ -41,11 +70,7 @@ void append_metric(LargeTextBuffer &json, bool valid, double milli) {
 
 bool metadata_matches_snapshot(
     const ReportSignalStoreCatalogRecord &snapshot,
-    const ReportSignalStoreMetadata &metadata) {
-    if (!metadata.metadata) return false;
-
-    const ReportSignalStoreCatalogRecord projected =
-        ReportSignalStoreCatalogBuilder::project(metadata);
+    const ReportSignalStoreCatalogRecord &projected) {
     return projected.sleep_day == snapshot.sleep_day &&
         projected.source_revision == snapshot.source_revision &&
         projected.generation == snapshot.generation &&
@@ -97,43 +122,52 @@ uint64_t report_period_revision(ReportPeriodKey key, const NightCatalog &catalog
 
 struct ReportPeriodService::Cache {
     struct Entry {
+        ReportSignalStoreCatalogRecord snapshot;
+        PeriodNight night;
         std::shared_ptr<const LargeByteBuffer> bytes;
         ReportNightHistogramView view;
         uint64_t used = 0;
+
+        size_t storage_bytes() const {
+            return (bytes ? bytes->size() : 0) + EntryBytes;
+        }
     };
     static constexpr size_t EntryBytes = sizeof(Entry) + 2 * sizeof(void *);
     std::list<Entry, LargeAllocator<Entry>> entries;
     size_t bytes = 0;
     uint64_t serial = 0;
 
-    const Entry *find(const ReportSignalStoreNight &night) {
+    const Entry *find(const ReportSignalStoreCatalogRecord &snapshot) {
         for (auto &entry : entries) {
-            if (!entry.view.matches(night)) continue;
+            if (!metadata_matches_snapshot(snapshot, entry.snapshot)) continue;
             entry.used = ++serial;
             return &entry;
         }
         return nullptr;
     }
 
-    void remember(std::shared_ptr<const LargeByteBuffer> data,
+    void remember(const ReportSignalStoreCatalogRecord &snapshot,
+                  const ReportSignalStoreNight &night,
+                  std::shared_ptr<const LargeByteBuffer> data,
                   const ReportNightHistogramView &view) {
-        const size_t cost = data->size() + EntryBytes;
+        const size_t cost = (data ? data->size() : 0) + EntryBytes;
         const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
         if (cost > budget) return;
 
         for (auto it = entries.begin(); it != entries.end();) {
-            if (it->view.sleep_day != view.sleep_day) { ++it; continue; }
-            bytes -= it->bytes->size() + EntryBytes;
+            if (it->snapshot.sleep_day != snapshot.sleep_day) { ++it; continue; }
+            bytes -= it->storage_bytes();
             it = entries.erase(it);
         }
         while (bytes + cost > budget && !entries.empty()) {
             const auto oldest = std::min_element(entries.begin(), entries.end(),
                 [](const Entry &a, const Entry &b) { return a.used < b.used; });
-            bytes -= oldest->bytes->size() + EntryBytes;
+            bytes -= oldest->storage_bytes();
             entries.erase(oldest);
         }
         try {
-            entries.push_back({std::move(data), view, ++serial});
+            entries.push_back({snapshot, PeriodNight(night),
+                               std::move(data), view, ++serial});
             bytes += cost;
         } catch (const std::bad_alloc &) {
             // The current calculation owns its bytes; retention is optional.
@@ -207,18 +241,17 @@ struct ReportPeriodService::Runtime {
         phase = Phase::Night;
     }
 
-    void accept_metadata(SleepDayId day) {
+    void accept_metadata(SleepDayId day, const PeriodNight *night) {
         const auto *source = catalog->find(day);
         if (source && source->unresolved_history) source = nullptr;
         ReportNightMetrics m;
-        const auto *night = metadata.metadata ? &metadata.view.night : nullptr;
         if (night) m = night->metrics;
         else if (source) report_night_metrics_from_catalog(source->metrics, m);
 
         const bool open = (night && (night->flags & REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION)) ||
             (source && (source->source_flags & NIGHT_CATALOG_SOURCE_ACTIVE_CAPTURE));
         if (open) ++active_nights;
-        const double duration = night ? night->closed_therapy_duration_ms / 60000.0
+        const double duration = night ? night->duration_ms / 60000.0
             : source ? night_catalog_duration_minutes(*catalog, *source) : 0;
         const bool available = !open && duration > 0;
         if (saved && source && saved->source_revision != source->source_revision) ++outdated_nights;
@@ -233,10 +266,10 @@ struct ReportPeriodService::Runtime {
         else daily += "null";
         daily += ",\"means\":[";
         append_metric(daily, available && has(m, NightCatalogMetric::Ahi), m.ahi_milli);
-        for (size_t index : {size_t(6), size_t(1), size_t(4), size_t(2)}) {
+        for (size_t index = 0; index < 4; ++index) {
             daily += ',';
-            append_metric(daily, available && night && night->statistics.at(index).valid,
-                          night ? night->statistics.at(index).mean_milli : 0);
+            append_metric(daily, available && night && (night->mean_mask & (1u << index)),
+                          night ? night->means[index] : 0);
         }
         daily += "]}";
         if (!available) { saved = nullptr; return; }
@@ -258,8 +291,8 @@ struct ReportPeriodService::Runtime {
         }
         if (!night) return;
 
-        leak_ms += night->statistics.leak_recorded_ms;
-        leak_above_ms += night->statistics.leak_above_threshold_ms;
+        leak_ms += night->leak_ms;
+        leak_above_ms += night->leak_above_ms;
         if ((night->available_event_mask & REPORT_EVENT_SCORED) &&
             !(night->missing_event_mask & REPORT_EVENT_SCORED)) {
             ++event_nights;
@@ -271,33 +304,48 @@ struct ReportPeriodService::Runtime {
         }
     }
 
-    void start_night_work(Cache &cache,
-                          StorageBoundedFileLoader &loader,
-                          SleepDayId day) {
-        accept_metadata(day);
+    void start_night_work(Cache &cache, StorageBoundedFileLoader &loader,
+                          SleepDayId day, const Cache::Entry *cached = nullptr) {
+        const auto *snapshot = saved;
+        const PeriodNight night = cached ? cached->night : PeriodNight(metadata.view.night);
+        accept_metadata(day, cached || metadata.metadata ? &night : nullptr);
 
-        char path[AC_STORAGE_PATH_MAX];
         if (!saved) {
-            finish_night();
-            return;
-        }
-        if (!metadata.metadata) {
-            fail("report_store_metadata_missing");
-            return;
-        }
-        if (!metadata.view.night.checkpoint_slot ||
-            !ReportNightHistogramCodec::path(
-                metadata.view.night, path, sizeof(path))) {
-            ++checkpoint_missing;
+            if (snapshot && !cached &&
+                (!night.duration_ms || !snapshot->checkpoint_slot ||
+                 (night.flags & REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION))) {
+                cache.remember(*snapshot, metadata.view.night, {}, {});
+            }
             finish_night();
             return;
         }
 
-        if (const auto *cached = cache.find(metadata.view.night)) {
+        if (cached) {
+            if (!cached->bytes) {
+                ++checkpoint_missing;
+                finish_night();
+                return;
+            }
+
             histogram_bytes = cached->bytes;
             histogram = cached->view;
             metric = 0;
             phase = Phase::Metrics;
+            return;
+        }
+
+        if (!metadata.metadata) {
+            fail("report_store_metadata_missing");
+            return;
+        }
+
+        char path[AC_STORAGE_PATH_MAX];
+        if (!metadata.view.night.checkpoint_slot ||
+            !ReportNightHistogramCodec::path(
+                metadata.view.night, path, sizeof(path))) {
+            ++checkpoint_missing;
+            cache.remember(*saved, metadata.view.night, {}, {});
+            finish_night();
             return;
         }
 
@@ -457,6 +505,11 @@ bool ReportPeriodService::poll() {
         }
 
         if (r.saved) {
+            if (const auto *cached = cache_->find(*r.saved)) {
+                r.start_night_work(*cache_, loader_, day, cached);
+                return true;
+            }
+
             const ReportSignalStoreMetadata *cached = r.store->cached(day);
             if (cached) {
                 r.metadata = *cached;
@@ -494,7 +547,8 @@ bool ReportPeriodService::poll() {
 
         r.metadata = metadata_loader_.take_completed();
         metadata_loader_.reset();
-        if (!r.saved || !metadata_matches_snapshot(*r.saved, r.metadata)) {
+        if (!r.saved || !metadata_matches_snapshot(*r.saved,
+                ReportSignalStoreCatalogBuilder::project(r.metadata))) {
             r.fail("report_store_metadata_changed");
             return true;
         }
@@ -515,7 +569,8 @@ bool ReportPeriodService::poll() {
         if (r.histogram_bytes && ReportNightHistogramCodec::decode(
                 r.histogram_bytes->data(), r.histogram_bytes->size(), r.histogram) &&
             r.histogram.matches(r.metadata.view.night)) {
-            cache_->remember(r.histogram_bytes, r.histogram);
+            cache_->remember(*r.saved, r.metadata.view.night,
+                             r.histogram_bytes, r.histogram);
             r.metric = 0;
             r.phase = Phase::Metrics;
         } else if (status.state == StorageBoundedFileLoadState::Ready ||
@@ -619,7 +674,8 @@ bool ReportPeriodService::poll() {
             r.fail(completion.error[0] ? completion.error
                                        : "period_cache_write_failed");
         } else {
-            cache_->remember(r.histogram_bytes, r.histogram);
+            cache_->remember(*r.saved, r.metadata.view.night,
+                             r.histogram_bytes, r.histogram);
             r.metric = 0;
             r.phase = Phase::Metrics;
         }
