@@ -691,6 +691,15 @@ struct ReportTask::Runtime {
         if (next) {
             accept_store_catalog(std::move(next));
         } else {
+            // The file is already committed. Do not reuse the stale RAM copy
+            // on discovery; readers keep their previous published owner.
+            store_catalog.reset();
+            engine.publish_store_catalog({});
+            store_catalog_load_pending = catalog != nullptr;
+            store_catalog_load_generation = catalog_generation;
+            store_catalog_load_retry_at_ms = 0;
+            store_catalog_load_retry_attempt = 0;
+
             record_failure("publish_metadata", "report_store_catalog_alloc_failed",
                            metadata.view.night.sleep_day);
         }
@@ -716,7 +725,7 @@ struct ReportTask::Runtime {
         if (store_catalog) {
             std::shared_ptr<const ReportSignalStoreCatalog> reconciled =
                 ReportSignalStoreCatalogBuilder::reconcile(
-                    *store_catalog, *catalog);
+                    store_catalog, *catalog);
             if (reconciled) {
                 store_catalog = std::move(reconciled);
             } else {
@@ -1372,7 +1381,7 @@ struct ReportTask::Runtime {
         }
 
         const OperationAdmission admitted = store_catalog_loader.start(
-            catalog, store_catalog_load_generation);
+            catalog, store_catalog_load_generation, store_catalog);
         if (admitted == OperationAdmission::Busy) return false;
 
         if (admitted == OperationAdmission::Accepted) {
@@ -3506,6 +3515,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (catalog_load_allowed && runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
+        // A media reload must rediscover metadata even if its index read fails.
+        runtime.store_catalog.reset();
         const OperationAdmission admitted =
             runtime.catalog_store.request_load(CATALOG_STORE_GENERATION);
         if (admitted == OperationAdmission::Accepted) {

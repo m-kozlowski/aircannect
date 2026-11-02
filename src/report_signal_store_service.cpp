@@ -9,6 +9,10 @@
 #include "report_night_histogram.h"
 #include "string_util.h"
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -396,8 +400,23 @@ bool ReportSignalStoreService::encode_current() {
                 LargeObject::create<StorageWriteBuffers>(),
                 LargeObject::destroy<StorageWriteBuffers>);
             const size_t parts = encoded_lod_ ? 1 : block_count_;
-            if (!buffers || !buffers->allocate(parts) ||
-                (include_header && !block_bytes_)) {
+            const bool allocated_parts = buffers && buffers->allocate(parts);
+            if (!allocated_parts || (include_header && !block_bytes_)) {
+#ifdef ARDUINO
+                const MemoryStatus memory = Memory::status();
+                const char *site = !buffers ? "write_object" :
+                    !allocated_parts ? "write_parts" : "write_header";
+                const size_t bytes = !buffers ? sizeof(StorageWriteBuffers) :
+                    !allocated_parts ? parts * sizeof(std::shared_ptr<const LargeByteBuffer>) :
+                    ReportSignalStoreFileCodec::HeaderBytes;
+                Log::logf(CAT_REPORT, LOG_WARN,
+                          "alloc site=%s bytes=%u parts=%u free=%u largest=%u heap=%u\n",
+                          site, static_cast<unsigned>(bytes),
+                          static_cast<unsigned>(parts),
+                          static_cast<unsigned>(memory.psram_free),
+                          static_cast<unsigned>(memory.psram_max_alloc),
+                          static_cast<unsigned>(memory.heap_free));
+#endif
                 fail("report_signal_store_block_allocation_failed");
                 return true;
             }

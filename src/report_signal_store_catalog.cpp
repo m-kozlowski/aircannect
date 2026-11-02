@@ -154,23 +154,26 @@ ReportSignalStoreCatalogBuilder::upsert(
 
 std::shared_ptr<const ReportSignalStoreCatalog>
 ReportSignalStoreCatalogBuilder::reconcile(
-    const ReportSignalStoreCatalog &source,
+    std::shared_ptr<const ReportSignalStoreCatalog> source,
     const NightCatalog &night_catalog) {
+    if (!source) return {};
+
     // Stale metadata retains generation history, but ready() checks revision.
     size_t count = 0;
-    for (size_t i = 0; i < source.record_count_; ++i) {
-        const ReportSignalStoreCatalogRecord &record = source.records_[i];
+    for (size_t i = 0; i < source->record_count_; ++i) {
+        const ReportSignalStoreCatalogRecord &record = source->records_[i];
         const NightCatalogRecord *night = night_catalog.find(record.sleep_day);
         if (night) ++count;
     }
+    if (count == source->record_count_) return source;
 
     std::shared_ptr<ReportSignalStoreCatalog> catalog(
         new (std::nothrow) ReportSignalStoreCatalog());
     if (!catalog || !catalog->allocate(count)) return {};
 
     size_t output = 0;
-    for (size_t i = 0; i < source.record_count_; ++i) {
-        const ReportSignalStoreCatalogRecord &record = source.records_[i];
+    for (size_t i = 0; i < source->record_count_; ++i) {
+        const ReportSignalStoreCatalogRecord &record = source->records_[i];
         const NightCatalogRecord *night = night_catalog.find(record.sleep_day);
         if (!night) continue;
 

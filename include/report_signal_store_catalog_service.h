@@ -49,7 +49,8 @@ public:
 
     void begin(StorageReadPort &read_port);
     OperationAdmission start(std::shared_ptr<const NightCatalog> source,
-                             uint32_t generation);
+                             uint32_t generation,
+                             std::shared_ptr<const ReportSignalStoreCatalog> known = {});
     bool poll();
     void cancel();
     void reset();

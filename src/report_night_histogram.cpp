@@ -60,7 +60,7 @@ std::shared_ptr<const LargeByteBuffer> ReportNightHistogramCodec::encode(
         h.interval_ms = metric_interval(night, i);
         if (!h.interval_ms) continue;
 
-        for (size_t bin = 0; bin < Bins; ++bin) h.count += inputs[i].bins[bin] != 0;
+        for (size_t bin = 0; bin < Bins; ++bin) h.count += inputs[i].count(bin) != 0;
         h.sum_milli = inputs[i].sum_milli;
         h.samples = inputs[i].samples;
         h.minimum = inputs[i].minimum;
@@ -98,9 +98,9 @@ std::shared_ptr<const LargeByteBuffer> ReportNightHistogramCodec::encode(
         h.bins = p;
 
         for (size_t bin = 0; bin < Bins; ++bin) {
-            if (!inputs[i].bins[bin]) continue;
+            if (!inputs[i].count(bin)) continue;
             LittleEndian::put_le16(p, bin);
-            LittleEndian::put_le32(p + 2, inputs[i].bins[bin]);
+            LittleEndian::put_le32(p + 2, inputs[i].count(bin));
             p += BinBytes;
         }
     }

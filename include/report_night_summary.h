@@ -102,13 +102,20 @@ public:
     static constexpr size_t HistogramBins = 2048;
 
     struct Histogram {
+        // Stored window; count() addresses the full logical histogram.
         const uint32_t *bins = nullptr;
         size_t bin_count = 0;
+        size_t first_bin = 0;
         int64_t sum_milli = 0;
         uint64_t samples = 0;
         int32_t minimum = 0;
         int32_t maximum = 0;
         bool extrema_valid = false;
+
+        uint32_t count(size_t bin) const {
+            return bin >= first_bin && bin - first_bin < bin_count
+                ? bins[bin - first_bin] : 0;
+        }
     };
 
     ReportMetricAccumulator();
@@ -121,9 +128,9 @@ public:
     bool begin(uint32_t signal_mask);
     bool begin(const ReportReadPlan &plan,
                const uint8_t *checkpoint = nullptr, size_t checkpoint_size = 0);
-    void accept(ReportSignalId signal, int32_t value_milli,
+    bool accept(ReportSignalId signal, int32_t value_milli,
                 uint32_t duration_ms = 0);
-    void accept_expiration_time(int32_t value_milli);
+    bool accept_expiration_time(int32_t value_milli);
     ReportCalculatedMetrics finish() const;
 
     std::shared_ptr<const LargeByteBuffer> snapshot() const;

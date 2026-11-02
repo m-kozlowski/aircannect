@@ -61,7 +61,7 @@ public:
         const ReportSignalStoreCatalog &source,
         const ReportSignalStoreCatalogInput &input);
     static std::shared_ptr<const ReportSignalStoreCatalog> reconcile(
-        const ReportSignalStoreCatalog &source,
+        std::shared_ptr<const ReportSignalStoreCatalog> source,
         const NightCatalog &catalog);
 };
 

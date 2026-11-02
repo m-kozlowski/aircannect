@@ -20,6 +20,10 @@
 #include "report_night_histogram.h"
 #include "report_planner.h"
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -74,6 +78,7 @@ struct TrackWork {
     ReportMetricAccumulator *tail_metrics = nullptr;
     bool source_present = false;
     std::shared_ptr<LargeByteBuffer> raw_blocks[REPORT_SIGNAL_STORE_MAX_BLOCKS];
+    std::shared_ptr<LargeByteBuffer> spare_raw;
     uint8_t *sessions_seen = nullptr;
     uint8_t written_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
     int newest_slot = -1;
@@ -183,6 +188,7 @@ struct ReportSignalStoreBuilder::Runtime {
     bool flushing_partial = false;
 
     void release_track_blocks(TrackWork &track) {
+        track.spare_raw.reset();
         for (size_t slot = 0;
              slot < REPORT_SIGNAL_STORE_MAX_BLOCKS;
              ++slot) {
@@ -260,20 +266,56 @@ struct ReportSignalStoreBuilder::Runtime {
             work.tail_metrics->begin(report_signal_bit(work.track.signal));
     }
 
+    void trim_raw_spares(size_t incoming_bytes = 0) {
+        const size_t budget = Memory::buffer_budget(RAW_BUFFER_BUDGET, 192 * 1024);
+        while (buffered_raw_bytes + incoming_bytes > budget) {
+            TrackWork *smallest = nullptr;
+            for (size_t i = 0; i < track_count; ++i) {
+                auto &candidate = tracks[i];
+                if (candidate.spare_raw && (!smallest ||
+                    candidate.spare_raw->size() < smallest->spare_raw->size())) {
+                    smallest = &candidate;
+                }
+            }
+            if (!smallest) break;
+
+            buffered_raw_bytes -= smallest->spare_raw->size();
+            smallest->spare_raw.reset();
+        }
+    }
+
     bool ensure_raw_block(TrackWork &work,
                           size_t slot,
                           uint32_t samples_per_block,
                           const char *&failure) {
         if (work.raw_blocks[slot]) return true;
 
-        work.raw_blocks[slot] = LargeByteBuffer::allocate_shared(
-            static_cast<size_t>(samples_per_block) * sizeof(int16_t));
+        const size_t bytes = static_cast<size_t>(samples_per_block) * sizeof(int16_t);
+        if (work.spare_raw) {
+            work.raw_blocks[slot] = std::move(work.spare_raw);
+        } else {
+            trim_raw_spares(bytes);
+            work.raw_blocks[slot] = LargeByteBuffer::allocate_shared(bytes);
+            if (work.raw_blocks[slot]) buffered_raw_bytes += bytes;
+        }
         if (!work.raw_blocks[slot]) {
+#ifdef ARDUINO
+            const MemoryStatus memory = Memory::status();
+            Log::logf(CAT_REPORT, LOG_WARN,
+                      "alloc site=raw bytes=%u buffered=%u tracks=%u signal=%u "
+                      "slot=%u free=%u largest=%u heap=%u\n",
+                      static_cast<unsigned>(samples_per_block * sizeof(int16_t)),
+                      static_cast<unsigned>(buffered_raw_bytes),
+                      static_cast<unsigned>(track_count),
+                      static_cast<unsigned>(work.track.signal),
+                      static_cast<unsigned>(slot),
+                      static_cast<unsigned>(memory.psram_free),
+                      static_cast<unsigned>(memory.psram_max_alloc),
+                      static_cast<unsigned>(memory.heap_free));
+#endif
             failure = "report_signal_store_block_allocation_failed";
             return false;
         }
-        buffered_raw_bytes +=
-            static_cast<size_t>(samples_per_block) * sizeof(int16_t);
         std::fill_n(
             reinterpret_cast<int16_t *>(work.raw_blocks[slot]->data()),
             samples_per_block, work.track.missing_value);
@@ -367,10 +409,10 @@ struct ReportSignalStoreBuilder::Runtime {
                     series.sample_interval_ms,
                     plan->session(session_index)->output_window.end_ms - timestamp));
 
-                if (i < closed_count) {
-                    closed_metrics.accept(series.signal, canonical_value, duration);
-                } else {
-                    work.tail_metrics->accept(series.signal, canonical_value, duration);
+                auto &metrics = i < closed_count ? closed_metrics : *work.tail_metrics;
+                if (!metrics.accept(series.signal, canonical_value, duration)) {
+                    failure = "report_signal_store_metrics_allocation_failed";
+                    return false;
                 }
             }
         }
@@ -1003,12 +1045,16 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
 
         TrackWork &work = runtime_->tracks[runtime_->writing_track];
         work.tiles = store_->tile_progress();
+        store_->reset();
+
         for (size_t i = 0; i < runtime_->writing_count; ++i) {
             const size_t slot = runtime_->writing_slot + i;
-            work.raw_blocks[slot].reset();
-            runtime_->buffered_raw_bytes -=
-                (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
-                sizeof(int16_t);
+            if (!finish_tiles && !runtime_->flushing_partial && !work.spare_raw) {
+                work.spare_raw = std::move(work.raw_blocks[slot]);
+            } else {
+                runtime_->buffered_raw_bytes -= work.raw_blocks[slot]->size();
+                work.raw_blocks[slot].reset();
+            }
             work.written_blocks[slot / 8] |=
                 static_cast<uint8_t>(1u << (slot % 8));
         }
@@ -1016,7 +1062,6 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
         runtime_->writing_track = SIZE_MAX;
         runtime_->writing_slot = 0;
         runtime_->writing_count = 0;
-        store_->reset();
     }
 
     for (size_t i = 0; i < runtime_->track_count; ++i) {
@@ -1038,10 +1083,12 @@ bool ReportSignalStoreBuilder::flush_blocks(bool include_partial,
             const size_t raw_block_bytes =
                 (REPORT_SIGNAL_STORE_BLOCK_MS / work.track.sample_interval_ms) *
                 sizeof(int16_t);
-            const size_t batch_limit = std::min(
+            const size_t batch_bytes = Memory::buffer_budget(
+                AC_STORAGE_RANGE_WRITE_MAX_BYTES, 64 * 1024);
+            const size_t batch_limit = std::max<size_t>(1, std::min(
                 ReportSignalStoreService::MaxWriteBatchBlocks,
-                (AC_STORAGE_RANGE_WRITE_MAX_BYTES -
-                 ReportSignalStoreFileCodec::HeaderBytes) / raw_block_bytes);
+                (batch_bytes - ReportSignalStoreFileCodec::HeaderBytes) /
+                    raw_block_bytes));
             size_t block_count = 1;
             if (!existing_block) {
                 for (; block_count < batch_limit; ++block_count) {
@@ -1140,6 +1187,7 @@ bool ReportSignalStoreBuilder::ready(bool *progressed) {
     // Finish draining a pressure-triggered batch before accepting more input.
     // Otherwise freeing the first track drops below the threshold, leaving
     // other tracks pinned while that same first track is rewritten repeatedly.
+    runtime_->trim_raw_spares();
     runtime_->flushing_partial |= runtime_->buffered_raw_bytes >
         Memory::buffer_budget(RAW_BUFFER_BUDGET, 192 * 1024);
 
@@ -1188,14 +1236,20 @@ bool ReportSignalStoreBuilder::end_record() {
                     (static_cast<int64_t>(inspiration_ms) * 100000 + ratio / 2) / ratio;
                 if (expiration <= INT32_MAX) {
                     if (timestamp < runtime_->closed_before_ms) {
-                        runtime_->closed_metrics.accept_expiration_time(expiration);
+                        if (!runtime_->closed_metrics.accept_expiration_time(expiration)) {
+                            failure_reason_ = "report_signal_store_metrics_allocation_failed";
+                            return false;
+                        }
                     } else {
                         TrackWork &work = runtime_->tracks[inspiration[ti_span].track];
                         if (!runtime_->prepare_tail(work)) {
                             failure_reason_ = "report_signal_store_tail_allocation_failed";
                             return false;
                         }
-                        work.tail_metrics->accept_expiration_time(expiration);
+                        if (!work.tail_metrics->accept_expiration_time(expiration)) {
+                            failure_reason_ = "report_signal_store_metrics_allocation_failed";
+                            return false;
+                        }
                     }
                 }
             }

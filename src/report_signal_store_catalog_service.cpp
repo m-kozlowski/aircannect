@@ -11,6 +11,7 @@ namespace aircannect {
 
 struct ReportSignalStoreCatalogLoadService::Runtime {
     std::shared_ptr<const NightCatalog> source;
+    std::shared_ptr<const ReportSignalStoreCatalog> known;
     std::unique_ptr<LargeScratchArray<ReportSignalStoreCatalogInput>> inputs;
     std::shared_ptr<const ReportSignalStoreCatalog> completed;
     size_t cursor = 0;
@@ -28,12 +29,32 @@ void ReportSignalStoreCatalogLoadService::begin(StorageReadPort &read_port) {
 
 OperationAdmission ReportSignalStoreCatalogLoadService::start(
     std::shared_ptr<const NightCatalog> source,
-    uint32_t generation) {
+    uint32_t generation,
+    std::shared_ptr<const ReportSignalStoreCatalog> known) {
     if (!runtime_ || status_.active()) return OperationAdmission::Busy;
     if (!source || generation == 0) return OperationAdmission::Rejected;
 
     reset();
     runtime_->source = std::move(source);
+    status_.generation = generation;
+
+    if (known) {
+        runtime_->known = ReportSignalStoreCatalogBuilder::reconcile(
+            std::move(known), *runtime_->source);
+        if (!runtime_->known) {
+            fail("report_store_catalog_allocation_failed");
+            return OperationAdmission::Rejected;
+        }
+
+        if (runtime_->known->size() == runtime_->source->size()) {
+            runtime_->completed = std::move(runtime_->known);
+            status_.nights_checked = runtime_->source->size();
+            status_.nights_loaded = status_.nights_checked;
+            status_.state = ReportSignalStoreCatalogLoadState::Ready;
+            return OperationAdmission::Accepted;
+        }
+    }
+
     runtime_->inputs = std::make_unique<
         LargeScratchArray<ReportSignalStoreCatalogInput>>();
     if (!runtime_->inputs ||
@@ -43,7 +64,6 @@ OperationAdmission ReportSignalStoreCatalogLoadService::start(
     }
 
     status_.state = ReportSignalStoreCatalogLoadState::Loading;
-    status_.generation = generation;
     if (runtime_->source->size() == 0) {
         return finish_catalog() ? OperationAdmission::Accepted
                                 : OperationAdmission::Rejected;
@@ -59,6 +79,16 @@ bool ReportSignalStoreCatalogLoadService::start_current() {
 
     const NightCatalogRecord *night =
         runtime_->source->record(runtime_->cursor);
+    const auto *known = night && runtime_->known
+        ? runtime_->known->find(night->sleep_day) : nullptr;
+    if (known) {
+        *runtime_->inputs->append() = {known->metadata, known->view};
+        ++runtime_->cursor;
+        ++status_.nights_checked;
+        ++status_.nights_loaded;
+        return true;
+    }
+
     char path[AC_STORAGE_PATH_MAX] = {};
     if (!night || !night->sleep_day.valid() ||
         !report_signal_store_night_path(
@@ -195,6 +225,7 @@ ReportSignalStoreCatalogLoadService::take_completed() {
     std::shared_ptr<const ReportSignalStoreCatalog> completed =
         std::move(runtime_->completed);
     runtime_->source.reset();
+    runtime_->known.reset();
     runtime_->inputs.reset();
     runtime_->cursor = 0;
     status_ = {};
