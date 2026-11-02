@@ -111,7 +111,7 @@ public:
         char path[AC_STORAGE_PATH_MAX] = {};
         if (!next_dir_entry(path, sizeof(path), nullptr)) return {};
 
-        auto file = open_observed(_fs, path, mode);
+        auto file = open_observed(_fs, path, mode, nullptr);
         if (!*file) log_io_error("open", path, errno);
         return file;
     }
@@ -123,19 +123,26 @@ public:
     }
 
     static FileImplPtr open_observed(VFSImpl *fs, const char *path,
-                                     const char *mode) {
+                                     const char *mode,
+                                     struct stat *opened_stat) {
         errno = 0;
-        return std::make_shared<ObservedFile>(fs, path, mode);
+        auto file = std::make_shared<ObservedFile>(fs, path, mode);
+        if (opened_stat) {
+            *opened_stat = {};
+            if (static_cast<bool>(*file)) *opened_stat = file->_stat;
+        }
+        return file;
     }
 };
 
 }  // namespace
 
 File open_observed_file(const char *mount_point, const char *path,
-                         const char *mode) {
+                         const char *mode, struct stat *opened_stat) {
     static VFSImpl backend;
     backend.mountpoint(mount_point);
-    return File(ObservedFile::open_observed(&backend, path, mode));
+    return File(ObservedFile::open_observed(&backend, path, mode,
+                                            opened_stat));
 }
 
 }  // namespace aircannect::Storage

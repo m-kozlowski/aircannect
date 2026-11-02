@@ -533,6 +533,12 @@ bool rename(const char *from, const char *to) {
 }
 
 File open(const char *path, const char *mode) {
+    return open(path, mode, nullptr);
+}
+
+File open(const char *path, const char *mode, struct stat *opened_stat) {
+    if (opened_stat) *opened_stat = {};
+
     if (!initialized || !path || !*path || !mode || !*mode) return File();
     fs::FS *fs = active_fs();
     if (!fs) return File();
@@ -542,10 +548,12 @@ File open(const char *path, const char *mode) {
         release_write_handles();
     } else release_write_handle(path);
 
-    File file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode);
+    File file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode,
+                                   opened_stat);
     if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
         (release_read_handle() | release_write_handles())) {
-        file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode);
+        file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode,
+                                  opened_stat);
     }
 
     if (!file) log_io_error("open", path, errno);

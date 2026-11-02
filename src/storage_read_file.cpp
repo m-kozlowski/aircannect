@@ -11,7 +11,9 @@ bool StorageReadFile::open(const char *path, uint32_t generation) {
     if (file && generation_ == generation && strcmp(path_, path) == 0) return true;
 
     close();
-    file = Storage::open(path, "r");
+    struct stat opened_stat {};
+    file = Storage::open(path, "r", &opened_stat);
+
     if (!file || file.isDirectory()) {
         const int error = errno;
         close();
@@ -21,9 +23,10 @@ bool StorageReadFile::open(const char *path, uint32_t generation) {
 
     copy_cstr(path_, sizeof(path_), path);
     generation_ = generation;
-    size = file.size();
-    const time_t timestamp = file.getLastWrite();
-    modified = timestamp > 0 ? static_cast<uint64_t>(timestamp) : 0;
+
+    size = static_cast<size_t>(opened_stat.st_size);
+    modified = opened_stat.st_mtime > 0
+        ? static_cast<uint64_t>(opened_stat.st_mtime) : 0;
     return true;
 }
 

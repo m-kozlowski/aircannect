@@ -24,8 +24,11 @@ bool remove(const char *path);
 bool rmdir(const char *path);
 bool rename(const char *from, const char *to);
 File open(const char *path, const char *mode);
+// Optional output is the VFS constructor's path-stat snapshot. Request it
+// only for read-only opens; writes do not refresh it.
+File open(const char *path, const char *mode, struct stat *opened_stat);
 File open_observed_file(const char *mount_point, const char *path,
-                         const char *mode);
+                         const char *mode, struct stat *opened_stat = nullptr);
 int open_descriptor(const char *path, int flags);
 int close_descriptor(const char *path, int descriptor);
 
