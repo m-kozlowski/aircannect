@@ -131,7 +131,6 @@ struct ReportPeriodService::Cache {
     struct Histogram {
         std::shared_ptr<const LargeByteBuffer> bytes;
         ReportNightHistogramView view;
-        uint64_t used = 0;
 
         size_t storage_bytes() const {
             return bytes->size() + sizeof(Histogram);
@@ -141,7 +140,6 @@ struct ReportPeriodService::Cache {
     struct Entry {
         ReportSignalStoreCatalogRecord snapshot;
         PeriodNight night;
-        uint64_t used = 0;
         std::unique_ptr<Histogram, void (*)(Histogram *)> histogram{
             nullptr, LargeObject::destroy<Histogram>};
     };
@@ -149,57 +147,26 @@ struct ReportPeriodService::Cache {
     static constexpr size_t EntryBytes = sizeof(Entry) + 2 * sizeof(void *);
     std::list<Entry, LargeAllocator<Entry>> entries;
     size_t bytes = 0;
-    uint64_t serial = 0;
-    uint64_t current_run = 0;
-    size_t summary_slots = 0;
-
-    void begin(ReportPeriodKey key, const ReportSignalStoreCatalog *store) {
-        current_run = serial + 1;
-        size_t needed = 0;
-        if (store) {
-            for (int32_t d = key.first().epoch_days(); d <= key.end.epoch_days(); ++d) {
-                SleepDayId day;
-                SleepDayId::from_epoch_days(d, day);
-                const auto *saved = store->find(day);
-                if (saved && !(saved->flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
-                    ++needed;
-                }
-            }
-        }
-
-        const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
-        summary_slots = std::min(budget / EntryBytes, std::max(needed, entries.size()));
-        make_room(0, false);
-    }
 
     Entry *find(const ReportSignalStoreCatalogRecord &snapshot) {
         for (auto &entry : entries) {
             if (!metadata_matches_snapshot(snapshot, entry.snapshot)) continue;
-            entry.used = ++serial;
-            if (entry.histogram) entry.histogram->used = serial;
             return &entry;
         }
         return nullptr;
     }
 
-    bool make_room(size_t cost, bool summary) {
+    bool make_room(size_t cost, SleepDayId day, bool summary) {
         const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
         if (cost > budget) return false;
-
-        // Leave room for summaries before protecting this run's histogram hits.
-        const auto fits = [&]() {
-            const size_t count = entries.size() + (summary ? 1 : 0);
-            const size_t reserved = summary_slots > count
-                ? (summary_slots - count) * EntryBytes : 0;
-            return bytes + cost + reserved <= budget;
-        };
+        if (!summary && entries.size() * EntryBytes + cost > budget) return false;
 
         // Histogram eviction leaves the smaller, more useful summary intact.
-        while (!fits()) {
+        while (bytes + cost > budget) {
             Entry *oldest = nullptr;
             for (auto &entry : entries) {
-                if (entry.histogram && entry.histogram->used < current_run && (!oldest ||
-                    entry.histogram->used < oldest->histogram->used)) {
+                if (entry.histogram && (summary || entry.snapshot.sleep_day < day) &&
+                    (!oldest || entry.snapshot.sleep_day < oldest->snapshot.sleep_day)) {
                     oldest = &entry;
                 }
             }
@@ -209,11 +176,11 @@ struct ReportPeriodService::Cache {
         }
 
         if (summary) {
-            while (!fits()) {
+            while (bytes + cost > budget) {
                 auto oldest = entries.end();
                 for (auto it = entries.begin(); it != entries.end(); ++it) {
-                    if (it->used < current_run &&
-                        (oldest == entries.end() || it->used < oldest->used)) {
+                    if (it->snapshot.sleep_day < day && (oldest == entries.end() ||
+                        it->snapshot.sleep_day < oldest->snapshot.sleep_day)) {
                         oldest = it;
                     }
                 }
@@ -222,7 +189,7 @@ struct ReportPeriodService::Cache {
                 entries.erase(oldest);
             }
         }
-        return fits();
+        return bytes + cost <= budget;
     }
 
     void remember_summary(const ReportSignalStoreCatalogRecord &snapshot,
@@ -233,9 +200,9 @@ struct ReportPeriodService::Cache {
             it = entries.erase(it);
         }
 
-        if (!make_room(EntryBytes, true)) return;
+        if (!make_room(EntryBytes, snapshot.sleep_day, true)) return;
         try {
-            entries.push_back({snapshot, PeriodNight(night), ++serial});
+            entries.push_back({snapshot, PeriodNight(night)});
             bytes += EntryBytes;
         } catch (const std::bad_alloc &) {
             // Retention is optional; the current calculation owns its data.
@@ -253,10 +220,10 @@ struct ReportPeriodService::Cache {
             entry->histogram.reset();
         }
         const size_t cost = data->size() + sizeof(Histogram);
-        if (!make_room(cost, false)) return;
+        if (!make_room(cost, snapshot.sleep_day, false)) return;
 
         entry->histogram.reset(LargeObject::create<Histogram>(
-            Histogram{std::move(data), view, ++serial}));
+            Histogram{std::move(data), view}));
         if (entry->histogram) bytes += cost;
     }
 };
@@ -573,7 +540,6 @@ bool ReportPeriodService::start(ReportPeriodKey key,
         cancel();
         return false;
     }
-    cache_->begin(key, r.store.get());
     return true;
 }
 
