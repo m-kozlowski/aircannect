@@ -8,31 +8,45 @@
 #include "string_util.h"
 
 namespace aircannect {
+
+size_t json_escape_byte(unsigned char value, char output[6]) {
+    switch (value) {
+        case '"':
+        case '\\':
+            output[0] = '\\';
+            output[1] = static_cast<char>(value);
+            return 2;
+        case '\b': output[0] = '\\'; output[1] = 'b'; return 2;
+        case '\f': output[0] = '\\'; output[1] = 'f'; return 2;
+        case '\n': output[0] = '\\'; output[1] = 'n'; return 2;
+        case '\r': output[0] = '\\'; output[1] = 'r'; return 2;
+        case '\t': output[0] = '\\'; output[1] = 't'; return 2;
+        default:
+            if (value < 0x20) {
+                static constexpr char hex[] = "0123456789ABCDEF";
+                output[0] = '\\';
+                output[1] = 'u';
+                output[2] = '0';
+                output[3] = '0';
+                output[4] = hex[value >> 4];
+                output[5] = hex[value & 0x0F];
+                return 6;
+            }
+            output[0] = static_cast<char>(value);
+            return 1;
+    }
+}
+
 namespace {
 
 template <typename Out>
 void append_json_escaped_impl(Out &out, const char *value, size_t len) {
     if (!value) return;
     for (size_t i = 0; i < len; ++i) {
-        const unsigned char c = static_cast<unsigned char>(*value++);
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char buf[7];
-                    snprintf(buf, sizeof(buf), "\\u%04X", c);
-                    out += buf;
-                } else {
-                    out += static_cast<char>(c);
-                }
-                break;
-        }
+        char escaped[6];
+        const size_t escaped_length = json_escape_byte(
+            static_cast<unsigned char>(*value++), escaped);
+        for (size_t j = 0; j < escaped_length; ++j) out += escaped[j];
     }
 }
 

@@ -120,12 +120,15 @@ private:
     void append_console_log(const String &text);
     void clear_console_log();
     uint64_t console_log_begin_pos() const;
-    void append_console_log_json_range(LargeTextBuffer &json,
+    bool append_console_log_json_range(LargeTextBuffer &json,
                                        uint64_t from,
-                                       uint64_t to) const;
-    void build_console_json(LargeTextBuffer &json) const;
-    void build_console_sse_json(LargeTextBuffer &json) const;
-    void note_console_sse_sent();
+                                       uint64_t to,
+                                       uint64_t epoch) const;
+    bool build_console_sse_json(LargeTextBuffer &json,
+                                uint32_t &seq,
+                                uint64_t &end,
+                                uint64_t &epoch) const;
+    void note_console_sse_sent(uint32_t seq, uint64_t end, uint64_t epoch);
     void send_console_snapshot(AsyncWebServerRequest *request) const;
     void mark_snapshots_dirty(uint16_t mask);
     void request_sse_push();
@@ -236,7 +239,9 @@ private:
     size_t console_log_capacity_ = 0;
     size_t console_log_start_ = 0;
     size_t console_log_length_ = 0;
+    size_t console_log_escaped_length_ = 0;
     uint64_t console_log_write_pos_ = 0;
+    uint64_t console_log_epoch_ = 0;
     uint32_t console_seq_ = 0;
     uint32_t console_sse_seq_ = 0;
     uint64_t console_sse_pos_ = 0;
@@ -248,9 +253,11 @@ private:
     StaticSemaphore_t command_mutex_storage_ = {};
     StaticSemaphore_t cache_mutex_storage_ = {};
     StaticSemaphore_t sse_mutex_storage_ = {};
+    StaticSemaphore_t console_log_mutex_storage_ = {};
     SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
+    SemaphoreHandle_t console_log_mutex_ = nullptr;
 
     // HTTP/SSE server
     AsyncWebServer *server_ = nullptr;

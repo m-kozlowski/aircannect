@@ -2,10 +2,16 @@
 
 #include <ArduinoJson.h>
 #include "http_route_registry.h"
+#include <algorithm>
+#include <array>
+#include <memory>
+#include <new>
+#include <stdio.h>
 #include <string.h>
 #include <utility>
 
 #include "auth_utils.h"
+#include "async_prepared_response.h"
 #include "board.h"
 #include "config_http_controller.h"
 #include "debug_log.h"
@@ -13,7 +19,7 @@
 #include "export_http_controller.h"
 #include "http_route_module.h"
 #include "http_request_utils.h"
-#include "http_response_utils.h"
+#include "large_allocator.h"
 #include "json_util.h"
 #include "live_http_controller.h"
 #include "memory_manager.h"
@@ -88,7 +94,12 @@ bool WebUI::begin(StatusHttpController &status,
     if (!sse_mutex_) {
         sse_mutex_ = xSemaphoreCreateMutexStatic(&sse_mutex_storage_);
     }
-    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_) {
+    if (!console_log_mutex_) {
+        console_log_mutex_ =
+            xSemaphoreCreateMutexStatic(&console_log_mutex_storage_);
+    }
+    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_ ||
+        !console_log_mutex_) {
         stop();
         return false;
     }
@@ -229,6 +240,13 @@ WebUiMemoryStatus WebUI::memory_status() {
         out.live.length = live.live_length;
         out.live.capacity = live.live_capacity;
     }
+    if (console_log_mutex_ &&
+        xSemaphoreTake(console_log_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
+        out.console.length = console_log_length_;
+        out.console.capacity = console_log_capacity_;
+        out.console_log_length = console_log_length_;
+        xSemaphoreGive(console_log_mutex_);
+    }
 
     if (!cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
@@ -255,9 +273,6 @@ WebUiMemoryStatus WebUI::memory_status() {
         snapshot_channel(SnapshotChannelId::Report).cached);
     out.report_preferences = capture(
         snapshot_channel(SnapshotChannelId::ReportPreferences).cached);
-    out.console.length = console_log_length_;
-    out.console.capacity = console_log_capacity_;
-    out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
     return out;
 }
@@ -296,15 +311,23 @@ void WebUI::stop() {
     }
 
     sse_enforce_needed_ = false;
+    if (console_log_mutex_) {
+        xSemaphoreTake(console_log_mutex_, portMAX_DELAY);
+    }
     Memory::free(console_log_);
     console_log_ = nullptr;
     console_log_capacity_ = 0;
     console_log_start_ = 0;
     console_log_length_ = 0;
+    console_log_escaped_length_ = 0;
     console_log_write_pos_ = 0;
+    console_log_epoch_++;
     console_sse_pos_ = 0;
-    last_console_sse_ms_ = 0;
     console_sse_reset_pending_ = false;
+    if (console_log_mutex_) {
+        xSemaphoreGive(console_log_mutex_);
+    }
+    last_console_sse_ms_ = 0;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_status_revision_ = 0;
     for (SnapshotChannel &channel : snapshot_channels_) {
@@ -363,10 +386,15 @@ void WebUI::poll(ServicePendingWork service_pending_work) {
         sse_push_requested_.load(std::memory_order_acquire) ||
         static_cast<int32_t>(now_ms - last_sse_push_ms_) >=
             static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
-    const bool console_push_due =
-        console_sse_seq_ != console_seq_ &&
-        static_cast<int32_t>(now_ms - last_console_sse_ms_) >=
-            static_cast<int32_t>(AC_WEB_CONSOLE_PUSH_INTERVAL_MS);
+    bool console_push_due = false;
+    if (console_log_mutex_ &&
+        xSemaphoreTake(console_log_mutex_, 0) == pdTRUE) {
+        console_push_due =
+            console_sse_seq_ != console_seq_ &&
+            static_cast<int32_t>(now_ms - last_console_sse_ms_) >=
+                static_cast<int32_t>(AC_WEB_CONSOLE_PUSH_INTERVAL_MS);
+        xSemaphoreGive(console_log_mutex_);
+    }
     if (!status_push_due && !console_push_due) {
         if (service_pending_work) service_pending_work();
         return;
@@ -407,16 +435,21 @@ void WebUI::poll(ServicePendingWork service_pending_work) {
     if (console_push_due) {
         last_console_sse_ms_ = now_ms;
         LargeTextBuffer console_json;
-        build_console_sse_json(console_json);
-        const SseSendResult console_result =
-            console_json.overflowed()
-                ? SseSendResult::Failed
-                : send_sse_to_clients(console_json.c_str(), "console",
-                                      event_id, false);
-        if (console_result == SseSendResult::Failed) {
-            sse_backpressure = true;
-        } else if (console_result == SseSendResult::Sent) {
-            note_console_sse_sent();
+        uint32_t sent_seq = 0;
+        uint64_t sent_end = 0;
+        uint64_t sent_epoch = 0;
+        if (build_console_sse_json(console_json, sent_seq, sent_end,
+                                   sent_epoch)) {
+            const SseSendResult console_result =
+                console_json.overflowed()
+                    ? SseSendResult::Failed
+                    : send_sse_to_clients(console_json.c_str(), "console",
+                                          event_id, false);
+            if (console_result == SseSendResult::Failed) {
+                sse_backpressure = true;
+            } else if (console_result == SseSendResult::Sent) {
+                note_console_sse_sent(sent_seq, sent_end, sent_epoch);
+            }
         }
     }
     xSemaphoreGive(cache_mutex_);
@@ -706,6 +739,11 @@ void WebUI::handle_event(const RpcEvent &event) {
 
 void WebUI::append_console_log(const String &text) {
     if (!text.length()) return;
+
+    if (console_log_mutex_) {
+        xSemaphoreTake(console_log_mutex_, portMAX_DELAY);
+    }
+
     reserve_console_log();
     const char *data = text.c_str();
     const size_t original_len = text.length();
@@ -716,12 +754,22 @@ void WebUI::append_console_log(const String &text) {
             len = console_log_capacity_;
             console_log_start_ = 0;
             console_log_length_ = len;
+            console_log_escaped_length_ = json_escaped_length(data, len);
             memcpy(console_log_, data, len);
         } else {
             const size_t free_space =
                 console_log_capacity_ - console_log_length_;
             const size_t overflow = len > free_space ? len - free_space : 0;
             if (overflow) {
+                size_t removed_first =
+                    console_log_capacity_ - console_log_start_;
+                if (removed_first > overflow) removed_first = overflow;
+                const size_t removed_escaped =
+                    json_escaped_length(console_log_ + console_log_start_,
+                                        removed_first) +
+                    json_escaped_length(console_log_,
+                                        overflow - removed_first);
+                console_log_escaped_length_ -= removed_escaped;
                 console_log_start_ =
                     (console_log_start_ + overflow) % console_log_capacity_;
                 console_log_length_ -= overflow;
@@ -737,10 +785,15 @@ void WebUI::append_console_log(const String &text) {
                 memcpy(console_log_, data + first, len - first);
             }
             console_log_length_ += len;
+            console_log_escaped_length_ += json_escaped_length(data, len);
         }
     }
     console_log_write_pos_ += original_len;
     console_seq_++;
+
+    if (console_log_mutex_) {
+        xSemaphoreGive(console_log_mutex_);
+    }
 }
 
 void WebUI::reserve_console_log() {
@@ -753,111 +806,332 @@ void WebUI::reserve_console_log() {
 }
 
 void WebUI::clear_console_log() {
+    if (console_log_mutex_) {
+        xSemaphoreTake(console_log_mutex_, portMAX_DELAY);
+    }
+
     Memory::free(console_log_);
     console_log_ = nullptr;
     console_log_capacity_ = 0;
     console_log_start_ = 0;
     console_log_length_ = 0;
+    console_log_escaped_length_ = 0;
     console_log_write_pos_++;
+    console_log_epoch_++;
     console_seq_++;
     console_sse_reset_pending_ = true;
+
+    if (console_log_mutex_) {
+        xSemaphoreGive(console_log_mutex_);
+    }
 }
 
 uint64_t WebUI::console_log_begin_pos() const {
     return console_log_write_pos_ - console_log_length_;
 }
 
-void WebUI::append_console_log_json_range(LargeTextBuffer &json,
-                                          uint64_t from,
-                                          uint64_t to) const {
-    if (!console_log_ || !console_log_capacity_ || from >= to) return;
-    const uint64_t begin = console_log_begin_pos();
-    if (from < begin) from = begin;
-    if (to > console_log_write_pos_) to = console_log_write_pos_;
-    if (from >= to) return;
+bool WebUI::append_console_log_json_range(LargeTextBuffer &json,
+                                         uint64_t from,
+                                         uint64_t to,
+                                         uint64_t epoch) const {
+    static constexpr size_t CONSOLE_SSE_READ_CHUNK = 512;
+    char chunk[CONSOLE_SSE_READ_CHUNK];
 
-    const size_t offset = static_cast<size_t>(from - begin);
-    const size_t len = static_cast<size_t>(to - from);
-    const size_t read_at =
-        (console_log_start_ + offset) % console_log_capacity_;
-    size_t first = console_log_capacity_ - read_at;
-    if (first > len) first = len;
-    const size_t escaped = json_escaped_length(console_log_ + read_at, first) +
-        json_escaped_length(console_log_, len - first);
-    if (!json.reserve_exact(json.length() + escaped + 2)) return;
+    while (from < to) {
+        if (!console_log_mutex_ ||
+            xSemaphoreTake(console_log_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+            return false;
+        }
 
-    append_json_escaped(json, console_log_ + read_at, first);
-    if (len > first) {
-        append_json_escaped(json, console_log_, len - first);
+        const uint64_t begin = console_log_begin_pos();
+        if (console_log_epoch_ != epoch || from < begin ||
+            to > console_log_write_pos_ || !console_log_ ||
+            !console_log_capacity_) {
+            xSemaphoreGive(console_log_mutex_);
+            return false;
+        }
+
+        const size_t len = static_cast<size_t>(std::min<uint64_t>(
+            to - from, CONSOLE_SSE_READ_CHUNK));
+        const size_t offset = static_cast<size_t>(from - begin);
+        const size_t read_at =
+            (console_log_start_ + offset) % console_log_capacity_;
+        size_t first = console_log_capacity_ - read_at;
+        if (first > len) first = len;
+        memcpy(chunk, console_log_ + read_at, first);
+        if (len > first) memcpy(chunk + first, console_log_, len - first);
+
+        xSemaphoreGive(console_log_mutex_);
+
+        append_json_escaped(json, chunk, len);
+        if (json.overflowed()) return false;
+        from += len;
     }
+
+    return true;
 }
 
-void WebUI::build_console_json(LargeTextBuffer &json) const {
-    const uint64_t begin = console_log_begin_pos();
-    const uint64_t end = console_log_write_pos_;
-    json = "{";
-    json_add_uint64(json, "seq", console_seq_, false);
-    json_add_uint64(json, "begin", begin);
-    json_add_uint64(json, "end", end);
-    json += ",\"log\":\"";
-    append_console_log_json_range(json, begin, end);
-    json += "\"}";
-}
+bool WebUI::build_console_sse_json(LargeTextBuffer &json,
+                                   uint32_t &seq,
+                                   uint64_t &end,
+                                   uint64_t &epoch) const {
+    if (!console_log_mutex_ ||
+        xSemaphoreTake(console_log_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return false;
+    }
 
-void WebUI::build_console_sse_json(LargeTextBuffer &json) const {
     const uint64_t begin = console_log_begin_pos();
-    const uint64_t end = console_log_write_pos_;
-    const bool reset = console_sse_reset_pending_ ||
-                       console_sse_pos_ < begin ||
-                       console_sse_pos_ > end;
+    end = console_log_write_pos_;
+    seq = console_seq_;
+    epoch = console_log_epoch_;
+    const uint64_t sse_pos = console_sse_pos_;
+    const bool reset_pending = console_sse_reset_pending_;
+    const bool reset = reset_pending ||
+                       sse_pos < begin || sse_pos > end;
+
+    xSemaphoreGive(console_log_mutex_);
 
     json = "{";
-    json_add_uint64(json, "seq", console_seq_, false);
+    json_add_uint64(json, "seq", seq, false);
     if (reset) {
         json_add_bool(json, "reset", true);
         json_add_uint64(json, "begin", begin);
         json_add_uint64(json, "end", end);
         json += ",\"log\":\"";
-        append_console_log_json_range(json, begin, end);
+        if (!append_console_log_json_range(json, begin, end, epoch)) {
+            return false;
+        }
     } else {
-        json_add_uint64(json, "from", console_sse_pos_);
+        json_add_uint64(json, "from", sse_pos);
         json_add_uint64(json, "to", end);
         json += ",\"append\":\"";
-        append_console_log_json_range(json, console_sse_pos_, end);
+        if (!append_console_log_json_range(json, sse_pos, end, epoch)) {
+            return false;
+        }
     }
     json += "\"}";
+    return !json.overflowed();
 }
 
-void WebUI::note_console_sse_sent() {
-    console_sse_seq_ = console_seq_;
-    console_sse_pos_ = console_log_write_pos_;
-    console_sse_reset_pending_ = false;
+void WebUI::note_console_sse_sent(uint32_t seq,
+                                 uint64_t end,
+                                 uint64_t epoch) {
+    if (!console_log_mutex_ ||
+        xSemaphoreTake(console_log_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return;
+    }
+
+    console_sse_seq_ = seq;
+    console_sse_pos_ = end;
+    console_sse_reset_pending_ = epoch != console_log_epoch_;
+
+    xSemaphoreGive(console_log_mutex_);
 }
 
 void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
-    if (!cache_mutex_ ||
-        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+    struct ConsoleReaderState {
+        uint64_t end = 0;
+        uint64_t epoch = 0;
+        uint64_t cursor = 0;
+        size_t escaped_length = 0;
+        size_t response_length = 0;
+        std::array<char, 128> prefix = {};
+        size_t prefix_length = 0;
+        size_t encoded_cursor = 0;
+        std::array<char, 512> raw_chunk = {};
+        size_t raw_length = 0;
+        size_t raw_offset = 0;
+        std::array<char, 6> pending_escape = {};
+        size_t pending_length = 0;
+        size_t pending_offset = 0;
+    };
+
+    if (!console_log_mutex_ ||
+        xSemaphoreTake(console_log_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
         request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"cache busy\"}");
-        return;
-    }
-    LargeTextBuffer json;
-    build_console_json(json);
-    if (json.overflowed()) {
-        xSemaphoreGive(cache_mutex_);
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"console alloc\"}");
+                      "{\"ok\":false,\"error\":\"console busy\"}");
         return;
     }
 
-    AsyncWebServerResponse *response = nullptr;
-    if (!http_prepare_json_response(std::move(json), response)) {
-        xSemaphoreGive(cache_mutex_);
+    const uint64_t begin = console_log_begin_pos();
+    const uint64_t end = console_log_write_pos_;
+    const uint64_t epoch = console_log_epoch_;
+    const uint32_t seq = console_seq_;
+    const size_t escaped_length = console_log_escaped_length_;
+    xSemaphoreGive(console_log_mutex_);
+
+    std::shared_ptr<ConsoleReaderState> reader;
+    try {
+        reader = std::allocate_shared<ConsoleReaderState>(
+            LargeAllocator<ConsoleReaderState>());
+    } catch (const std::bad_alloc &) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response alloc\"}");
         return;
     }
-    xSemaphoreGive(cache_mutex_);
+
+    const int prefix_length = snprintf(
+        reader->prefix.data(), reader->prefix.size(),
+        "{\"seq\":%u,\"begin\":%llu,\"end\":%llu,\"log\":\"",
+        static_cast<unsigned>(seq),
+        static_cast<unsigned long long>(begin),
+        static_cast<unsigned long long>(end));
+    if (prefix_length < 0 ||
+        static_cast<size_t>(prefix_length) >= reader->prefix.size() ||
+        escaped_length > static_cast<size_t>(-1) -
+                             static_cast<size_t>(prefix_length) - 2) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"console length\"}");
+        return;
+    }
+
+    reader->end = end;
+    reader->epoch = epoch;
+    reader->cursor = begin;
+    reader->escaped_length = escaped_length;
+    reader->prefix_length = static_cast<size_t>(prefix_length);
+    reader->response_length = reader->prefix_length + escaped_length + 2;
+
+    AsyncPreparedResponse *response = nullptr;
+    try {
+        AwsResponseFiller content =
+            [this, reader](uint8_t *buffer,
+                           size_t capacity,
+                           size_t offset) -> size_t {
+            ConsoleReaderState &state = *reader;
+            if (offset >= state.response_length || !capacity) {
+                return 0;
+            }
+
+            size_t written = 0;
+            size_t position = offset;
+            if (position < state.prefix_length) {
+                const size_t count = std::min(
+                    capacity, state.prefix_length - position);
+                memcpy(buffer, state.prefix.data() + position, count);
+                written += count;
+                position += count;
+            }
+
+            if (position >= state.prefix_length &&
+                position < state.prefix_length + state.escaped_length) {
+                const size_t expected_encoded =
+                    position - state.prefix_length;
+                if (expected_encoded != state.encoded_cursor) {
+                    return 0;
+                }
+
+                const size_t prefix_written = written;
+                bool stale = false;
+                bool busy = false;
+                bool copied_chunk = state.raw_offset < state.raw_length;
+
+                while (state.encoded_cursor < state.escaped_length &&
+                       written < capacity) {
+                    if (state.pending_offset < state.pending_length) {
+                        const size_t count = std::min(
+                            capacity - written,
+                            state.pending_length - state.pending_offset);
+                        memcpy(buffer + written,
+                               state.pending_escape.data() +
+                                   state.pending_offset,
+                               count);
+                        state.pending_offset += count;
+                        written += count;
+                        state.encoded_cursor += count;
+                        if (state.pending_offset == state.pending_length) {
+                            state.pending_offset = 0;
+                            state.pending_length = 0;
+                        }
+                        continue;
+                    }
+
+                    if (state.raw_offset < state.raw_length) {
+                        state.pending_length = json_escape_byte(
+                            static_cast<unsigned char>(
+                                state.raw_chunk[state.raw_offset++]),
+                            state.pending_escape.data());
+                        continue;
+                    }
+
+                    if (copied_chunk || state.cursor >= state.end) break;
+
+                    if (!console_log_mutex_ ||
+                        xSemaphoreTake(console_log_mutex_, 0) != pdTRUE) {
+                        busy = true;
+                        break;
+                    }
+
+                    const uint64_t live_begin = console_log_begin_pos();
+                    stale = console_log_epoch_ != state.epoch ||
+                            state.cursor < live_begin ||
+                            state.cursor > state.end ||
+                            state.end > console_log_write_pos_ ||
+                            !console_log_ || !console_log_capacity_;
+                    if (!stale) {
+                        state.raw_length = static_cast<size_t>(
+                            std::min<uint64_t>(
+                                state.end - state.cursor,
+                                state.raw_chunk.size()));
+                        const size_t ring_offset =
+                            static_cast<size_t>(state.cursor - live_begin);
+                        const size_t ring_at =
+                            (console_log_start_ + ring_offset) %
+                            console_log_capacity_;
+                        size_t first = console_log_capacity_ - ring_at;
+                        if (first > state.raw_length) {
+                            first = state.raw_length;
+                        }
+                        memcpy(state.raw_chunk.data(),
+                               console_log_ + ring_at, first);
+                        if (state.raw_length > first) {
+                            memcpy(state.raw_chunk.data() + first,
+                                   console_log_, state.raw_length - first);
+                        }
+                        state.cursor += state.raw_length;
+                        state.raw_offset = 0;
+                        copied_chunk = true;
+                    }
+
+                    xSemaphoreGive(console_log_mutex_);
+                    if (stale) break;
+                }
+
+                position += written - prefix_written;
+                if (stale) return written;
+                if (busy && !written) return RESPONSE_TRY_AGAIN;
+            }
+
+            if (state.encoded_cursor == state.escaped_length &&
+                state.pending_offset == state.pending_length &&
+                written < capacity &&
+                position >= state.prefix_length + state.escaped_length) {
+                const size_t suffix_offset =
+                    position - state.prefix_length - state.escaped_length;
+                static constexpr char suffix[] = "\"}";
+                const size_t count = std::min(
+                    capacity - written,
+                    sizeof(suffix) - 1 - suffix_offset);
+                memcpy(buffer + written, suffix + suffix_offset, count);
+                written += count;
+            }
+
+            return written;
+        };
+
+        response = new (std::nothrow) AsyncPreparedResponse(
+            "application/json", reader->response_length,
+            std::move(content));
+    } catch (const std::bad_alloc &) {
+        response = nullptr;
+    }
+
+    if (!response || !response->_sourceValid()) {
+        delete response;
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response alloc\"}");
+        return;
+    }
 
     request->send(response);
 }

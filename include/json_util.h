@@ -20,6 +20,7 @@ class LargeTextBuffer;
 
 bool json_variant_to_string(JsonVariantConst value, std::string &out);
 bool json_variant_to_uint32(JsonVariantConst value, uint32_t &out);
+size_t json_escape_byte(unsigned char value, char output[6]);
 size_t json_escaped_length(const char *value, size_t len);
 void append_json_escaped(std::string &out, const char *value, size_t len);
 void append_json_escaped(std::string &out, std::string_view value);
