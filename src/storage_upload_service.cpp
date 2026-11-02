@@ -793,11 +793,14 @@ bool StorageUploadService::step() {
             ok = write_locked(error);
             worked = true;
             break;
-        case StorageUploadState::Publishing:
+        case StorageUploadState::Publishing: {
+            const bool ticket_was_valid =
+                job_->publication_ticket.valid();
             ok = poll_publication_locked(error);
-            worked = job_->publication_ticket.valid() ||
+            worked = job_->publication_ticket.valid() != ticket_was_valid ||
                      job_->status.state != StorageUploadState::Publishing;
             break;
+        }
         default:
             break;
     }
@@ -808,6 +811,7 @@ bool StorageUploadService::step() {
         }
         finish_locked(StorageUploadState::Error,
                       error ? error : "upload_failed");
+        worked = true;
     }
 
     const bool retain_maintenance =
