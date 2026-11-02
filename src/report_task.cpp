@@ -333,10 +333,24 @@ struct ReportTask::Runtime {
             }
         }
 
-        if (command.kind == ReportTaskCommandKind::Period && period_running &&
-            period_key == ReportPeriodKey{command.sleep_day, command.period_days}) {
-            unlock();
-            return OperationAdmission::Accepted;
+        if (command.kind == ReportTaskCommandKind::Period) {
+            const ReportPeriodKey key{command.sleep_day, command.period_days};
+            if (period_running && period_key == key) {
+                unlock();
+                return OperationAdmission::Accepted;
+            }
+
+            if (published && published->catalog) {
+                const auto revision = report_period_revision(
+                    key, *published->catalog, published->store_catalog.get());
+
+                for (const auto &cached : period_cache) {
+                    if (cached && cached->key == key && cached->revision == revision) {
+                        unlock();
+                        return OperationAdmission::Accepted;
+                    }
+                }
+            }
         }
 
         if (command.kind == ReportTaskCommandKind::Rebuild && rebuild.active) {
