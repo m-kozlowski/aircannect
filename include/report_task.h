@@ -262,7 +262,8 @@ public:
                ReportSpoolPort &spool_port,
                StorageRangeWritePort &range_write_port,
                StorageStatusPort &status_port,
-               StorageDeletePort *delete_port = nullptr);
+               StorageDeletePort *delete_port = nullptr,
+               StoragePathPort *path_port = nullptr);
     void set_storage_suspended(bool suspended);
     bool storage_quiesced() const;
     bool storage_available() const;

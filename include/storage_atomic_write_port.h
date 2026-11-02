@@ -53,6 +53,9 @@ class StorageAtomicWritePort {
 public:
     virtual ~StorageAtomicWritePort() = default;
 
+    // Directory migration must wait for recovery of old absolute target paths.
+    virtual bool recovery_complete() const = 0;
+
     // Admission and completion never wait for filesystem I/O. Busy leaves
     // submission with the caller; false completion leaves the ticket pending.
     virtual OperationSubmission request_write(const StorageAtomicWriteCommand &command) = 0;

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "little_endian.h"
+#include "storage_path.h"
 
 namespace aircannect {
 namespace {
@@ -179,10 +180,14 @@ bool ReportNightHistogramCodec::path(const ReportSignalStoreNight &night,
 
 bool ReportNightHistogramCodec::path(SleepDayId sleep_day, uint32_t generation,
                                      uint8_t slot, char *out, size_t size) {
-    char day[9];
-    if (!out || !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
-    const int length = snprintf(out, size, "%s/%s/g%08x/statistics.%u.bin",
-        REPORT_SIGNAL_STORE_ROOT, day, generation, slot);
+    char generation_path[AC_STORAGE_PATH_MAX] = {};
+    if (!out || !report_signal_store_generation_path(
+            sleep_day, generation, generation_path, sizeof(generation_path))) {
+        return false;
+    }
+
+    const int length = snprintf(out, size, "%s/statistics.%u.bin",
+                                generation_path, slot);
     return length > 0 && static_cast<size_t>(length) < size;
 }
 

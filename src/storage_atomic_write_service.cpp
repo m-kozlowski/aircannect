@@ -256,6 +256,14 @@ bool StorageAtomicWriteService::take_completion(OperationTicket ticket,
     return true;
 }
 
+bool StorageAtomicWriteService::recovery_complete() const {
+    if (!lock(0)) return false;
+
+    const bool complete = !recovery_needed_;
+    unlock();
+    return complete;
+}
+
 bool StorageAtomicWriteService::recover_transaction_locked(
     const char *&error) {
 

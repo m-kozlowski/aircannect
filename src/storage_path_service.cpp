@@ -302,10 +302,16 @@ StoragePathCompletion StoragePathService::execute_remove(
         completion.outcome = OperationOutcome::succeeded();
         return completion;
     }
-    if (!Storage::remove(job.source)) {
+    const bool removed =
+        job.operation == StoragePathOperation::RemoveEmptyDirectory
+            ? Storage::rmdir(job.source)
+            : Storage::remove(job.source);
+    if (!removed) {
         completion.outcome = OperationOutcome::failed();
         copy_cstr(completion.error, sizeof(completion.error),
-                  "remove_failed");
+                  job.operation == StoragePathOperation::RemoveEmptyDirectory
+                      ? "remove_directory_failed"
+                      : "remove_failed");
         return completion;
     }
 
@@ -330,7 +336,8 @@ StoragePathCompletion StoragePathService::execute(const JobSlot &job) const {
     if (job.operation == StoragePathOperation::EnsureDirectory) {
         return execute_ensure_directory(job);
     }
-    if (job.operation == StoragePathOperation::Remove) {
+    if (job.operation == StoragePathOperation::Remove ||
+        job.operation == StoragePathOperation::RemoveEmptyDirectory) {
         return execute_remove(job);
     }
     return execute_stat(job);

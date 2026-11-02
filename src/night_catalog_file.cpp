@@ -925,13 +925,9 @@ bool parse_header(const uint8_t *header,
 bool NightCatalogFileCodec::sources_path(SleepDayId sleep_day,
                                         char *out,
                                         size_t out_size) {
-    char day[9] = {};
     char directory[AC_STORAGE_PATH_MAX] = {};
-    if (!sleep_day.format_yyyymmdd(day, sizeof(day)) ||
-        !storage_append_child_path(REPORT_SIGNAL_STORE_ROOT,
-                                   day,
-                                   directory,
-                                   sizeof(directory))) {
+    if (!report_signal_store_night_directory(
+            sleep_day, directory, sizeof(directory))) {
         return false;
     }
 

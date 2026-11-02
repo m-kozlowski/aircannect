@@ -11,6 +11,8 @@
 #include "storage_delete_port.h"
 #include "storage_read_port.h"
 #include "storage_range_write_port.h"
+#include "storage_path_port.h"
+#include "storage_scan_port.h"
 
 namespace aircannect {
 
@@ -49,9 +51,14 @@ public:
                StorageRangeWritePort &range_write_port,
                StorageAtomicWritePort &write_port,
                StorageDeletePort *delete_port = nullptr);
-    bool poll();
+    bool poll(bool allow_layout_mutation = true);
     void cancel();
     void forget_media();
+
+    // Prepare the on-card directory layout before any report readers/writers.
+    void configure_layout(StorageScanPort &scans, StoragePathPort &paths);
+    OperationAdmission prepare_layout(uint32_t generation);
+    bool layout_ready() const;
 
     // Catalog reads.
     // Both load operations publish only after a complete, validated read.
@@ -105,6 +112,11 @@ private:
                                   StorageReadLane lane);
     void finish_load(std::shared_ptr<const NightCatalog> catalog);
 
+    // Directory migration uses storage-owned scans and non-replacing moves.
+    bool poll_layout_path(StoragePathOperation operation, const char *source,
+                          const char *destination, StoragePathCompletion &out);
+    void finish_layout();
+
     // Save admission and source baseline.
     bool prepare_index_stream(
         std::shared_ptr<const NightCatalog> compact_index);
@@ -121,6 +133,8 @@ private:
     StorageRangeWritePort *range_write_port_ = nullptr;
     StorageAtomicWritePort *write_port_ = nullptr;
     StorageDeletePort *delete_port_ = nullptr;
+    StorageScanPort *layout_scans_ = nullptr;
+    StoragePathPort *layout_paths_ = nullptr;
     NightCatalogStoreRuntime *runtime_ = nullptr;
     NightCatalogStoreStatus status_;
 

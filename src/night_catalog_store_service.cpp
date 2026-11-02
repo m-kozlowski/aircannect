@@ -11,6 +11,7 @@
 #include "large_allocator.h"
 #include "large_object.h"
 #include "night_catalog_builder.h"
+#include "report_signal_store.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -20,6 +21,8 @@ constexpr const char *CATALOG_STAGING_ROOT =
     "/aircannect/report/catalog-staging";
 constexpr const char *CATALOG_INDEX_STAGING_PATH =
     "/aircannect/report/catalog-staging/.index.bin";
+constexpr const char *FLAT_NIGHTS_ROOT =
+    "/aircannect/report/v9/nights-flat";
 
 enum class StoreWriteKind : uint8_t {
     None,
@@ -46,6 +49,13 @@ using StagedNightList =
 struct NightCatalogStoreRuntime {
     enum class Phase : uint8_t {
         Idle,
+        LayoutInspect,
+        LayoutScan,
+        LayoutRenameRoot,
+        LayoutSelectNight,
+        LayoutEnsureParent,
+        LayoutMoveNight,
+        LayoutRemoveRoot,
         CleanupStartDelete,
         CleanupWaitDelete,
         WaitHeader,
@@ -67,6 +77,17 @@ struct NightCatalogStoreRuntime {
     OperationTicket read_ticket;
     OperationTicket write_ticket;
     OperationTicket range_ticket;
+    OperationTicket layout_scan_ticket;
+    OperationTicket layout_path_ticket;
+    std::shared_ptr<const StorageScanSnapshot> layout_scan;
+    size_t layout_cursor = 0;
+    SleepDayId layout_day;
+    SleepDayId layout_parent_day;
+    uint8_t layout_parent_depth = 0;
+    bool layout_ready = false;
+    bool layout_backup_exists = false;
+    bool layout_unknown_entries = false;
+    uint8_t layout_root_index = 0;
     uint32_t delete_id = 0;
     bool cleanup_cancelled = false;
     StoragePreparedRead prepared;
@@ -174,6 +195,23 @@ void NightCatalogStoreService::reset_operation() {
     if (read_port_ && runtime_->prepared.valid()) {
         read_port_->release_prepared(runtime_->prepared);
     }
+    if (layout_scans_ && runtime_->layout_scan_ticket.valid()) {
+        (void)layout_scans_->abandon(runtime_->layout_scan_ticket);
+    }
+    if (layout_paths_ && runtime_->layout_path_ticket.valid()) {
+        (void)layout_paths_->abandon(runtime_->layout_path_ticket);
+    }
+
+    runtime_->layout_scan_ticket = {};
+    runtime_->layout_path_ticket = {};
+    runtime_->layout_scan.reset();
+    runtime_->layout_cursor = 0;
+    runtime_->layout_day = {};
+    runtime_->layout_parent_day = {};
+    runtime_->layout_parent_depth = 0;
+    runtime_->layout_backup_exists = false;
+    runtime_->layout_unknown_entries = false;
+    runtime_->layout_root_index = 0;
 
     runtime_->read_ticket = {};
     runtime_->write_ticket = {};
@@ -298,7 +336,7 @@ OperationAdmission NightCatalogStoreService::start_load(
     SleepDayId sleep_day,
     uint32_t generation,
     StorageReadLane lane) {
-    if (!runtime_ || !read_port_ || active() || staging()) {
+    if (!runtime_ || !read_port_ || active() || staging() || !layout_ready()) {
         return OperationAdmission::Busy;
     }
     if (generation == 0) return OperationAdmission::Rejected;
@@ -427,6 +465,7 @@ size_t find_staged_day(const StagedNightList &staged, SleepDayId day) {
 
 OperationAdmission NightCatalogStoreService::begin_staging(
     uint32_t generation) {
+    if (!layout_ready()) return OperationAdmission::Busy;
     if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_ ||
         !delete_port_ || generation == 0) {
         return reject_staging(generation, "night_catalog_staging_unavailable");
@@ -533,6 +572,7 @@ OperationAdmission NightCatalogStoreService::request_install(
 OperationAdmission NightCatalogStoreService::request_save(
     std::shared_ptr<const NightCatalog> catalog,
     uint32_t generation) {
+    if (!layout_ready()) return OperationAdmission::Busy;
     if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_) {
         return OperationAdmission::Rejected;
     }
@@ -580,10 +620,227 @@ PreparedByteRead read_exact(StorageReadPort &read_port,
 
 }  // namespace
 
-bool NightCatalogStoreService::poll() {
+void NightCatalogStoreService::configure_layout(
+    StorageScanPort &scans, StoragePathPort &paths) {
+    layout_scans_ = &scans;
+    layout_paths_ = &paths;
+    if (runtime_) runtime_->layout_ready = false;
+}
+
+bool NightCatalogStoreService::layout_ready() const {
+    return !layout_paths_ || (runtime_ && runtime_->layout_ready);
+}
+
+OperationAdmission NightCatalogStoreService::prepare_layout(uint32_t generation) {
+    if (!runtime_ || !layout_paths_ || !layout_scans_ || !generation) {
+        return OperationAdmission::Rejected;
+    }
+    if (active() || staging()) return OperationAdmission::Busy;
+
+    reset_operation();
+    runtime_->layout_ready = false;
+    runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutInspect;
+    status_ = {};
+    status_.state = NightCatalogStoreState::Loading;
+    status_.generation = generation;
+    return OperationAdmission::Accepted;
+}
+
+bool NightCatalogStoreService::poll_layout_path(
+    StoragePathOperation operation, const char *source, const char *destination,
+    StoragePathCompletion &out) {
+    if (!runtime_->layout_path_ticket.valid()) {
+        StoragePathCommand command;
+        command.operation = operation;
+        command.source = source;
+        if (destination) command.destination = destination;
+        command.generation = status_.generation;
+        const auto submitted = layout_paths_->request(command);
+        if (submitted.admission == OperationAdmission::Busy) return false;
+        if (!submitted.accepted()) {
+            fail("report_layout_path_rejected");
+            return false;
+        }
+        runtime_->layout_path_ticket = submitted.ticket;
+        return false;
+    }
+
+    if (!layout_paths_->take_completion(runtime_->layout_path_ticket, out)) return false;
+    runtime_->layout_path_ticket = {};
+    if (out.outcome.disposition != OperationDisposition::Succeeded) {
+        fail(out.error[0] ? out.error : "report_layout_path_failed");
+        return false;
+    }
+    return true;
+}
+
+void NightCatalogStoreService::finish_layout() {
+    reset_operation();
+    runtime_->layout_ready = true;
+    runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
+    status_.state = NightCatalogStoreState::Ready;
+    status_.error[0] = '\0';
+}
+
+bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
     if (!runtime_ || !read_port_) return false;
 
+    if (!layout_ready() && write_port_ &&
+        !write_port_->recovery_complete()) return false;
+
+    const bool layout_mutation =
+        runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutRenameRoot ||
+        runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutEnsureParent ||
+        runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutMoveNight ||
+        runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutRemoveRoot;
+
+    if (layout_mutation && !allow_layout_mutation) return false;
+
     switch (runtime_->phase) {
+        case NightCatalogStoreRuntime::Phase::LayoutInspect: {
+            StoragePathCompletion completion;
+            if (!poll_layout_path(StoragePathOperation::Stat, FLAT_NIGHTS_ROOT,
+                                  nullptr, completion)) return false;
+            if (completion.exists && !completion.directory) {
+                fail("report_layout_backup_not_directory");
+                return true;
+            }
+            runtime_->layout_backup_exists = completion.exists;
+            runtime_->layout_root_index = completion.exists ? 1 : 0;
+            runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutScan;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::LayoutScan: {
+            if (!runtime_->layout_scan_ticket.valid()) {
+                const StorageScanRoot roots[] = {
+                    {REPORT_SIGNAL_STORE_ROOT, false}, {FLAT_NIGHTS_ROOT, false}};
+                StorageScanCommand command;
+                command.roots = roots;
+                command.root_count = runtime_->layout_backup_exists ? 2 : 1;
+                command.include_directories = true;
+                command.generation = status_.generation;
+                const auto submitted = layout_scans_->request_scan(command);
+                if (submitted.admission == OperationAdmission::Busy) return false;
+                if (!submitted.accepted()) {
+                    fail("report_layout_scan_rejected");
+                    return true;
+                }
+                runtime_->layout_scan_ticket = submitted.ticket;
+                return true;
+            }
+
+            StorageScanCompletion completion;
+            if (!layout_scans_->take_completion(runtime_->layout_scan_ticket, completion)) return false;
+            runtime_->layout_scan_ticket = {};
+            if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+                !completion.snapshot) {
+                fail(completion.error[0] ? completion.error : "report_layout_scan_failed");
+                return true;
+            }
+
+            runtime_->layout_scan = std::move(completion.snapshot);
+            bool flat = false;
+            bool years = false;
+            for (size_t i = 0; i < runtime_->layout_scan->size(); ++i) {
+                StorageScanEntryView entry;
+                runtime_->layout_scan->entry(i, entry);
+                if (entry.root_index || strcmp(entry.path, REPORT_SIGNAL_STORE_ROOT) == 0) continue;
+                const char *name = storage_basename_from_path(entry.path);
+                SleepDayId day;
+                flat |= entry.directory && SleepDayId::from_yyyymmdd(name, day);
+                years |= entry.directory && strlen(name) == 4 && strspn(name, "0123456789") == 4;
+            }
+            if (flat && (years || runtime_->layout_backup_exists)) {
+                fail("report_layout_mixed_roots");
+            } else if (runtime_->layout_backup_exists) {
+                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+            } else if (flat) {
+                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutRenameRoot;
+            } else {
+                finish_layout();
+            }
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::LayoutRenameRoot: {
+            StoragePathCompletion completion;
+            if (!poll_layout_path(StoragePathOperation::Move, REPORT_SIGNAL_STORE_ROOT,
+                                  FLAT_NIGHTS_ROOT, completion)) return false;
+            runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::LayoutSelectNight: {
+            if (runtime_->layout_cursor == runtime_->layout_scan->size()) {
+                if (runtime_->layout_unknown_entries) finish_layout();
+                else runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutRemoveRoot;
+                return true;
+            }
+
+            StorageScanEntryView entry;
+            runtime_->layout_scan->entry(runtime_->layout_cursor++, entry);
+            if (entry.root_index != runtime_->layout_root_index ||
+                strcmp(entry.path, REPORT_SIGNAL_STORE_ROOT) == 0 ||
+                strcmp(entry.path, FLAT_NIGHTS_ROOT) == 0) return true;
+
+            if (!entry.directory || !SleepDayId::from_yyyymmdd(
+                    storage_basename_from_path(entry.path), runtime_->layout_day)) {
+                runtime_->layout_unknown_entries = true;
+                return true;
+            }
+            char previous[9] = {};
+            char current[9] = {};
+            runtime_->layout_parent_day.format_yyyymmdd(previous, sizeof(previous));
+            runtime_->layout_day.format_yyyymmdd(current, sizeof(current));
+            runtime_->layout_parent_depth = !previous[0] ? 0 :
+                (strncmp(previous, current, 4) == 0 ? 2 : 1);
+            runtime_->phase = previous[0] && strncmp(previous, current, 6) == 0
+                ? NightCatalogStoreRuntime::Phase::LayoutMoveNight
+                : NightCatalogStoreRuntime::Phase::LayoutEnsureParent;
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::LayoutEnsureParent:
+        case NightCatalogStoreRuntime::Phase::LayoutMoveNight: {
+            char destination[AC_STORAGE_PATH_MAX];
+            if (!report_signal_store_night_directory(runtime_->layout_day,
+                                                     destination, sizeof(destination))) {
+                fail("report_layout_path_invalid");
+                return true;
+            }
+
+            StoragePathCompletion completion;
+            if (runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutEnsureParent) {
+                const size_t suffix[] = {0, 5, 8};
+                destination[strlen(REPORT_SIGNAL_STORE_ROOT) +
+                    suffix[runtime_->layout_parent_depth]] = '\0';
+                if (!poll_layout_path(StoragePathOperation::EnsureDirectory, destination,
+                                      nullptr, completion)) return false;
+                if (++runtime_->layout_parent_depth == 3) {
+                    runtime_->layout_parent_day = runtime_->layout_day;
+                    runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutMoveNight;
+                }
+            } else {
+                char day[9];
+                char source[AC_STORAGE_PATH_MAX];
+                runtime_->layout_day.format_yyyymmdd(day, sizeof(day));
+                storage_append_child_path(FLAT_NIGHTS_ROOT, day, source, sizeof(source));
+                if (!poll_layout_path(StoragePathOperation::Move, source,
+                                      destination, completion)) return false;
+                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+            }
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::LayoutRemoveRoot: {
+            StoragePathCompletion completion;
+            if (!poll_layout_path(StoragePathOperation::RemoveEmptyDirectory,
+                                  FLAT_NIGHTS_ROOT, nullptr, completion)) return false;
+            finish_layout();
+            return true;
+        }
+
         case NightCatalogStoreRuntime::Phase::Idle:
         case NightCatalogStoreRuntime::Phase::Ready:
         case NightCatalogStoreRuntime::Phase::Error:
@@ -1399,6 +1656,8 @@ void NightCatalogStoreService::cancel() {
 
 void NightCatalogStoreService::forget_media() {
     cancel();
+
+    if (runtime_) runtime_->layout_ready = false;
 
     if (runtime_ && delete_port_) {
         runtime_->cleanup_pending = true;

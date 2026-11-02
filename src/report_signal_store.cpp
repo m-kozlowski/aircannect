@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "memory_manager.h"
+#include "storage_path.h"
 #include "storage_scan_port.h"
 
 namespace aircannect {
@@ -217,15 +218,53 @@ bool report_signal_store_night_path(SleepDayId sleep_day,
                                     char *out,
                                     size_t out_size,
                                     bool retained_history) {
+    char directory[AC_STORAGE_PATH_MAX] = {};
+    if (!out || !report_signal_store_night_directory(
+            sleep_day, directory, sizeof(directory))) {
+        return false;
+    }
+
+    const int written = snprintf(out,
+                                 out_size,
+                                 "%s/%s",
+                                 directory,
+                                 retained_history
+                                     ? "clock-conflict.meta"
+                                     : "night.meta");
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool report_signal_store_night_directory(SleepDayId sleep_day,
+                                         char *out,
+                                         size_t out_size) {
     char day[9] = {};
     if (!out || !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
 
     const int written = snprintf(out,
                                  out_size,
-                                 "%s/%s/%s",
+                                 "%s/%.4s/%.2s/%.2s",
                                  REPORT_SIGNAL_STORE_ROOT,
                                  day,
-                                 retained_history ? "clock-conflict.meta" : "night.meta");
+                                 day + 4,
+                                 day + 6);
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool report_signal_store_generation_path(SleepDayId sleep_day,
+                                         uint32_t generation,
+                                         char *out,
+                                         size_t out_size) {
+    char directory[AC_STORAGE_PATH_MAX] = {};
+    if (!out || generation == 0 || !report_signal_store_night_directory(
+            sleep_day, directory, sizeof(directory))) {
+        return false;
+    }
+
+    const int written = snprintf(out,
+                                 out_size,
+                                 "%s/g%08x",
+                                 directory,
+                                 static_cast<unsigned>(generation));
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
@@ -233,7 +272,7 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
                                      ReportSignalStoreLevel level,
                                      char *out,
                                      size_t out_size) {
-    char day[9] = {};
+    char generation_path[AC_STORAGE_PATH_MAX] = {};
     char cadence[24] = {};
     const char *name = report_signal_store_name(track.signal);
     const char *suffix = encoding_suffix(track.encoding);
@@ -246,7 +285,9 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
     }
 
     if (!out || !name || !name[0] || !suffix ||
-        !track.sleep_day.format_yyyymmdd(day, sizeof(day)) ||
+        !report_signal_store_generation_path(
+            track.sleep_day, track.generation,
+            generation_path, sizeof(generation_path)) ||
         !format_cadence(track.sample_interval_ms,
                         cadence,
                         sizeof(cadence))) {
@@ -256,20 +297,16 @@ bool report_signal_store_signal_path(const ReportSignalStoreTrack &track,
     const int written = track.track_index == 0
         ? snprintf(out,
                    out_size,
-                   "%s/%s/g%08x/signals/%s.%s.%s.%s",
-                   REPORT_SIGNAL_STORE_ROOT,
-                   day,
-                   track.generation,
+                   "%s/signals/%s.%s.%s.%s",
+                   generation_path,
                    name,
                    cadence,
                    plane,
                    suffix)
         : snprintf(out,
                    out_size,
-                   "%s/%s/g%08x/signals/%s.%s.%u.%s.%s",
-                   REPORT_SIGNAL_STORE_ROOT,
-                   day,
-                   track.generation,
+                   "%s/signals/%s.%s.%u.%s.%s",
+                   generation_path,
                    name,
                    cadence,
                    track.track_index,
@@ -282,16 +319,16 @@ bool report_signal_store_events_path(SleepDayId sleep_day,
                                      uint32_t generation,
                                      char *out,
                                      size_t out_size) {
-    char day[9] = {};
-    if (!out || generation == 0 ||
-        !sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
+    char generation_path[AC_STORAGE_PATH_MAX] = {};
+    if (!out || !report_signal_store_generation_path(
+            sleep_day, generation, generation_path, sizeof(generation_path))) {
+        return false;
+    }
 
     const int written = snprintf(out,
                                  out_size,
-                                 "%s/%s/g%08x/events.evt",
-                                 REPORT_SIGNAL_STORE_ROOT,
-                                 day,
-                                 generation);
+                                 "%s/events.evt",
+                                 generation_path);
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 

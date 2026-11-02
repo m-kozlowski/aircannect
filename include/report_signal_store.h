@@ -339,6 +339,14 @@ bool report_signal_store_night_path(SleepDayId sleep_day,
                                     char *out,
                                     size_t out_size,
                                     bool retained_history = false);
+// Both directory paths are returned without a trailing slash.
+bool report_signal_store_night_directory(SleepDayId sleep_day,
+                                         char *out,
+                                         size_t out_size);
+bool report_signal_store_generation_path(SleepDayId sleep_day,
+                                         uint32_t generation,
+                                         char *out,
+                                         size_t out_size);
 bool report_signal_store_generation_directory(const StorageScanEntryView &entry,
                                               const char *base,
                                               uint32_t &generation);

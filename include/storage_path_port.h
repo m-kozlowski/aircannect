@@ -14,6 +14,7 @@ enum class StoragePathOperation : uint8_t {
     Move,
     MoveReplacing,
     Remove,
+    RemoveEmptyDirectory,
 };
 
 struct StoragePathCommand {
@@ -30,7 +31,8 @@ struct StoragePathCommand {
             operation == StoragePathOperation::EnsureDirectory) {
             return destination.empty();
         }
-        if (operation == StoragePathOperation::Remove) {
+        if (operation == StoragePathOperation::Remove ||
+            operation == StoragePathOperation::RemoveEmptyDirectory) {
             return destination.empty() && source != "/";
         }
         return storage_user_path_valid(destination.c_str()) &&

@@ -2255,6 +2255,20 @@ struct ReportTask::Runtime {
             copy_cstr(out.error, sizeof(out.error), date_repair.status().error);
             return out;
         }
+        if (!catalog_store.layout_ready()) {
+            out.operation = ReportTaskOperation::LoadingCatalog;
+            if (catalog_store.status().state == NightCatalogStoreState::Error) {
+                out.condition = ReportTaskCondition::Waiting;
+                out.wait_reason = ReportTaskWaitReason::Retry;
+                out.retry_in_ms = deadline_remaining(last_step_ms, catalog_store_retry_at_ms);
+                copy_cstr(out.error, sizeof(out.error), catalog_store.status().error);
+            } else if (activity.therapy_active || activity.ota_install_active) {
+                out.condition = ReportTaskCondition::Waiting;
+                out.wait_reason = activity.therapy_active
+                    ? ReportTaskWaitReason::Therapy : ReportTaskWaitReason::Ota;
+            }
+            return out;
+        }
         if (period_running) {
             out.operation = ReportTaskOperation::Building;
             out.sleep_day = period_key.end;
@@ -2464,6 +2478,7 @@ struct ReportTask::Runtime {
         next.foreground_active = engine_status.foreground_active || period_running;
         next.background_active =
             date_repair.active() || period_running || rebuild_started || engine_status.queued > 0 ||
+            catalog_store.active() ||
             engine_status.state != ReportEngineState::Idle ||
             store_catalog_loader.status().active() ||
             catalog_refresh.active() || summary_acquisition.active() ||
@@ -2861,7 +2876,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
                        ReportSpoolPort &spool_port,
                        StorageRangeWritePort &range_write_port,
                        StorageStatusPort &status_port,
-                       StorageDeletePort *delete_port) {
+                       StorageDeletePort *delete_port,
+                       StoragePathPort *path_port) {
     if (runtime_) return runtime_->initialized;
 
 #ifdef ARDUINO
@@ -2887,6 +2903,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(
         read_port, range_write_port, write_port, delete_port);
+    if (path_port) runtime_->catalog_store.configure_layout(scan_port, *path_port);
     runtime_->capture_sources.begin(read_port);
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->summary_archive.begin(read_port, range_write_port, write_port, scan_port);
@@ -3449,6 +3466,33 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.period_service.clear_cache();
         runtime.schedule_reconcile(now_ms, false);
     }
+    // Recover old date-repair journals before moving paths they may reference.
+    // No report reader or writer may interpret an unfinished move as missing data.
+    if (!runtime.catalog_store.layout_ready()) {
+        if (summary_media_available) {
+            if (runtime.catalog_store.active()) {
+                worked = runtime.catalog_store.poll(
+                    !runtime.activity.therapy_active &&
+                    !runtime.activity.ota_install_active) || worked;
+                if (runtime.catalog_store.status().state == NightCatalogStoreState::Error) {
+                    runtime.catalog_store_retry_at_ms =
+                        now_ms + retry_delay(runtime.catalog_store_retry_attempt);
+                    advance_retry(runtime.catalog_store_retry_attempt);
+                    runtime.record_failure("layout", runtime.catalog_store.status().error, {},
+                        deadline_remaining(now_ms, runtime.catalog_store_retry_at_ms));
+                } else if (runtime.catalog_store.layout_ready()) {
+                    runtime.catalog_store_retry_at_ms = 0;
+                    runtime.catalog_store_retry_attempt = 0;
+                }
+            } else if (deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
+                worked = runtime.catalog_store.prepare_layout(CATALOG_STORE_GENERATION) ==
+                    OperationAdmission::Accepted || worked;
+            }
+        }
+        runtime.publish_status();
+        return worked;
+    }
+
     worked = runtime.apply_capture_session() || worked;
     const bool startup_allowed = runtime.startup_idle_allowed(now_ms);
     const bool local_blocked = runtime.local_background_work_blocked();

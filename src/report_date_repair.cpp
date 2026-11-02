@@ -343,9 +343,22 @@ struct ReportDateRepairService::Runtime {
             const auto &base = scan_roots[scan_batch_begin + entry.root_index];
 
             if (entry.directory) {
-                SleepDayId day;
-                const char *name = strrchr(entry.path, '/');
-                if (base == REPORT_SIGNAL_STORE_ROOT && name && SleepDayId::from_yyyymmdd(name + 1, day)) {
+                const size_t root_length = strlen(REPORT_SIGNAL_STORE_ROOT);
+                const char *relative = strncmp(entry.path, REPORT_SIGNAL_STORE_ROOT, root_length) == 0 &&
+                    entry.path[root_length] == '/' ? entry.path + root_length + 1 : nullptr;
+                const size_t length = relative ? strlen(relative) : 0;
+                char date[9] = "00000101";
+                bool branch = length == 4 || (length == 7 && relative[4] == '/') ||
+                    (length == 10 && relative[4] == '/' && relative[7] == '/');
+                if (branch) {
+                    memcpy(date, relative, 4);
+                    if (length >= 7) memcpy(date + 4, relative + 5, 2);
+                    if (length == 10) memcpy(date + 6, relative + 8, 2);
+                    SleepDayId day;
+                    branch = SleepDayId::from_yyyymmdd(date, day);
+                }
+
+                if (branch && base != entry.path) {
                     scan_roots.emplace_back(entry.path);
                 } else {
                     uint32_t generation = 0;
@@ -505,8 +518,9 @@ struct ReportDateRepairService::Runtime {
                 if (item.report.metadata) {
                     add(item.report_path, "", item.report.metadata->size());
                     char base[AC_STORAGE_PATH_MAX];
-                    snprintf(base, sizeof(base), "%s/%s/g%08x/", REPORT_SIGNAL_STORE_ROOT,
-                             from, item.report.view.night.generation);
+                    report_signal_store_generation_path(item.day,
+                        item.report.view.night.generation, base, sizeof(base));
+                    strcat(base, "/");
                     for (const auto &entry : files) {
                         if (entry.path.compare(0, strlen(base), base) == 0) add(entry.path, "", entry.size);
                     }
@@ -526,9 +540,11 @@ struct ReportDateRepairService::Runtime {
                     record.source_revision, generation);
                 if (!fixed.metadata) return fail("date_repair_report_patch");
                 char old_base[AC_STORAGE_PATH_MAX], new_base[AC_STORAGE_PATH_MAX];
-                snprintf(old_base, sizeof(old_base), "%s/%s/g%08x/", REPORT_SIGNAL_STORE_ROOT,
-                         from, item.report.view.night.generation);
-                snprintf(new_base, sizeof(new_base), "%s/%s/g%08x/", REPORT_SIGNAL_STORE_ROOT, to, generation);
+                report_signal_store_generation_path(item.day,
+                    item.report.view.night.generation, old_base, sizeof(old_base));
+                report_signal_store_generation_path(day, generation, new_base, sizeof(new_base));
+                strcat(old_base, "/");
+                strcat(new_base, "/");
 
                 for (const auto &entry : files) {
                     if (entry.path.compare(0, strlen(old_base), old_base) != 0) continue;

@@ -6,6 +6,7 @@
 #include "checked_size.h"
 #include "little_endian.h"
 #include "report_signal_store.h"
+#include "storage_path.h"
 
 namespace aircannect {
 namespace {
@@ -294,18 +295,17 @@ bool report_build_checkpoint_path(SleepDayId sleep_day,
                                   uint8_t slot,
                                   char *out,
                                   size_t out_size) {
-    char day[9] = {};
+    char generation_path[AC_STORAGE_PATH_MAX] = {};
     if (!out || generation == 0 || slot == 0 || slot > 2 ||
-        !sleep_day.format_yyyymmdd(day, sizeof(day))) {
+        !report_signal_store_generation_path(
+            sleep_day, generation, generation_path, sizeof(generation_path))) {
         return false;
     }
 
     const int written = snprintf(out,
                                  out_size,
-                                 "%s/%s/g%08x/build.%u.state",
-                                 REPORT_SIGNAL_STORE_ROOT,
-                                 day,
-                                 generation,
+                                 "%s/build.%u.state",
+                                 generation_path,
                                  static_cast<unsigned>(slot));
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
