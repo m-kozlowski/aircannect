@@ -201,6 +201,7 @@ OperationSubmission RpcTransport::request(const RpcRequestCommand &command) {
     request.generation = command.generation;
     request.admission = command.admission;
     request.dispatch_window = command.dispatch_window;
+    request.probe_method = command.probe_method;
     if (!request_allowed_while_unavailable(request)) {
         return OperationSubmission::rejected();
     }
@@ -277,7 +278,9 @@ bool RpcTransport::enqueue_request(QueuedRequest &request) {
         return false;
     }
 
-    request.id = ++next_rpc_id_;
+    if (++next_rpc_id_ == 0) ++next_rpc_id_;
+    request.id = next_rpc_id_;
+    if (request.probe_method) ++next_rpc_id_;
     if (!requests_.push(request)) {
         stats_.request_queue_drops++;
         push_text_event(RpcEventKind::Info,
@@ -671,7 +674,8 @@ void RpcTransport::complete_request(uint32_t id,
                                     int64_t dispatch_utc_ms,
                                     int64_t response_utc_ms,
                                     uint32_t dispatch_ms,
-                                    uint32_t response_ms) {
+                                    uint32_t response_ms,
+                                    RpcMethodProbeResult method_probe) {
     if (!generation) return;
 
     RpcRequestCompletion completion;
@@ -681,6 +685,7 @@ void RpcTransport::complete_request(uint32_t id,
     completion.payload = payload;
     completion.reason = reason ? reason : "";
     completion.response_error = response_error;
+    completion.method_probe = method_probe;
     completion.dispatch_utc_ms = dispatch_utc_ms;
     completion.response_utc_ms = response_utc_ms;
     completion.dispatch_ms = dispatch_ms;
@@ -827,6 +832,14 @@ void RpcTransport::dispatch_next_request() {
         }
     }
 
+    if (request.probe_method && device_model_ == ResmedDeviceModel::AirMini) {
+        cancel_queued_request(request, "method_probe_unsupported",
+                              RpcCompletionCause::DispatchFailure);
+        dispatch_retry_ = {};
+        dispatch_retry_active_ = false;
+        return;
+    }
+
     const uint8_t ncp_command = device_model_ == ResmedDeviceModel::AirMini
         ? airmini_ncp_command(request.method) : 0;
     const uint8_t ncp_tag = next_ncp_tag_;
@@ -840,6 +853,8 @@ void RpcTransport::dispatch_next_request() {
             dispatch_retry_active_ = false;
             return;
         }
+    } else if (request.probe_method) {
+        payload = build_rpc_method_probe(request.method, request.id);
     } else {
         payload = build_rpc_request(request.method, request.params_json,
                                     request.id);
@@ -888,6 +903,7 @@ void RpcTransport::dispatch_next_request() {
     pending_.generation = request.generation;
     pending_.ncp_command = ncp_command;
     pending_.ncp_tag = ncp_tag;
+    pending_.probe_method = request.probe_method;
     if (ncp_command && ++next_ncp_tag_ == 0xff) next_ncp_tag_ = 0;
     pending_.dispatch_ms = millis();
     pending_.deadline_ms = pending_.dispatch_ms + request.timeout_ms;
@@ -1022,6 +1038,16 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload,
     RpcEnvelope envelope;
     (void)inspect_rpc_envelope(view.data(), view.size(), envelope);
 
+    RpcMethodProbeResult method_probe = RpcMethodProbeResult::NotMatched;
+    if (pending_.active && pending_.probe_method && !from_ncp) {
+        method_probe = inspect_rpc_method_probe(view.data(), view.size(),
+                                                pending_.id);
+        if (method_probe != RpcMethodProbeResult::NotMatched) {
+            envelope.kind = RpcPayloadKind::Response;
+            envelope.id = pending_.id;
+        }
+    }
+
     switch (envelope.kind) {
         case RpcPayloadKind::Notification: {
             stats_.rpc_notifications++;
@@ -1062,6 +1088,8 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload,
             const bool has_response_id = true;
             if (pending_.active && has_response_id &&
                 (from_ncp == (pending_.ncp_command != 0)) &&
+                (pending_.probe_method ==
+                 (method_probe != RpcMethodProbeResult::NotMatched)) &&
                 response_id == pending_.id) {
                 const uint32_t matched_id = pending_.id;
                 const std::string matched_method = pending_.method;
@@ -1077,8 +1105,9 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload,
                     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix,
                                      view.data(), view.size());
                 }
-                const bool response_error =
-                    json_member_present(view.data(), view.size(), "error");
+                const bool response_error = pending_.probe_method
+                    ? method_probe == RpcMethodProbeResult::InvalidResponse
+                    : json_member_present(view.data(), view.size(), "error");
                 const uint32_t response_ms = millis();
                 int64_t response_epoch_ms = 0;
                 (void)current_epoch_ms(response_epoch_ms);
@@ -1089,7 +1118,7 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload,
                     RpcCompletionCause::Response, payload, "",
                     response_error, request_completions_,
                     pending_.dispatch_utc_ms, response_epoch_ms,
-                    pending_.dispatch_ms, response_ms);
+                    pending_.dispatch_ms, response_ms, method_probe);
                 set_presence_probe_active(false);
                 pending_ = {};
                 if (addressed_request) break;

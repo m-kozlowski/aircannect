@@ -45,6 +45,7 @@ enum class ResmedOtaPhase {
     BootloaderRequired,
     PreparingBootloader,
     Erasing,
+    ProbingApply,
     Initiating,
     Ready,
     Uploading,
@@ -134,6 +135,8 @@ private:
 
     enum class WaitingFor {
         None,
+        ProbePlain,
+        ProbeAuthenticated,
         Initiate,
         Block,
         Check,
@@ -163,12 +166,16 @@ private:
     bool begin_protocol(size_t total_size,
                         const String &expected_sha256,
                         const String &filename);
-    bool queue_plain_apply(bool reset_settings, bool allow_auth_fallback);
+    bool queue_apply_probe(bool authenticated);
+    void finish_apply_probe(RpcMethodProbeResult result);
+    bool queue_initiate();
+    bool queue_plain_apply(bool reset_settings);
     bool queue_authenticated_apply(const String &authentication);
     bool queue_configured_authenticated_apply();
     bool queue_request(const char *method,
                        const std::string &params,
-                       uint32_t timeout_ms);
+                       uint32_t timeout_ms,
+                       bool probe_method = false);
     void poll_rpc_completion();
     void cancel_rpc_request();
     void handle_response(RpcPayloadView payload);
@@ -257,7 +264,7 @@ private:
     size_t pending_block_bytes_ = 0;
     bool sha_started_ = false;
     bool sha_finished_ = false;
-    bool apply_auth_fallback_pending_ = false;
+    bool authenticated_apply_ = false;
     bool ncp_upgrade_ = false;
     uint32_t last_activity_ms_ = 0;
     mbedtls_sha256_context sha_ctx_;

@@ -25,6 +25,9 @@ public:
     bool finish_therapy(const EdfLocalDateTime &end,
                         bool &record_ready,
                         EdfStrSessionStatus &status);
+    bool roll_day(const EdfLocalDateTime &boundary,
+                   EdfStrSessionAccumulator &completed,
+                   EdfStrSessionStatus &status);
     bool begin_mask_event(const EdfLocalDateTime &start,
                           EdfStrSessionStatus &status);
     bool finish_mask_event(const EdfLocalDateTime &end,
@@ -47,6 +50,7 @@ public:
 
 private:
     bool reset_offsets_valid() const;
+    void clear_summary();
 
     bool day_active_ = false;
     bool therapy_open_ = false;

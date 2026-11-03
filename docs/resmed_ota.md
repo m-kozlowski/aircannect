@@ -33,16 +33,21 @@ verification. Applying the verified image depends on the connection:
 | `ApplyUpgrade` | CAN only | Not required |
 | `ApplyAuthenticatedUpgrade` | CAN and BLE | Required |
 
-AirCANnect tries `ApplyUpgrade` first. If it is unavailable and an OTA key is
-configured, it uses `ApplyAuthenticatedUpgrade`. Airbreak can also make
-`ApplyUpgrade` available over BLE, allowing installation without an OTA key.
+Before uploading to the device, AirCANnect probes `ApplyUpgrade` without an
+image hash. If unavailable, it probes `ApplyAuthenticatedUpgrade` and checks
+that an OTA key is configured. Airbreak can also make `ApplyUpgrade` available
+over BLE, allowing installation without an OTA key. After upload and
+verification, AirCANnect invokes only the selected apply method. An apply
+timeout does not cause another installation attempt.
 
 The OTA key is a device-specific 32-byte secret stored as 64 hexadecimal
 characters in `as11_ota_key`. See
 [Retrieving the local OTA key](https://github.com/m-kozlowski/airbreak-plus/blob/master/docs/as11/ota_protocol.md#retrieving-the-local-ota-key).
 
-Without an available apply method or the required OTA key, an image may upload
-and verify successfully but cannot be installed through Native RPC.
+Without an available apply method or the required OTA key, managed Native RPC
+installation stops before transferring the image to the device. The probe
+checks permissions and key format, not whether the key belongs to this device;
+authentication is verified by the device when applying the image.
 
 ## Firmware targets
 

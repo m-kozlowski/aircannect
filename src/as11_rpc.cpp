@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <ArduinoJson.h>
 #include <algorithm>
 
 #include "data_id_csv.h"
@@ -154,6 +155,58 @@ std::string build_rpc_request(const std::string &method,
     }
     req += "}";
     return req;
+}
+
+std::string build_rpc_method_probe(const std::string &method, uint32_t id) {
+    return "[" + build_rpc_request(method, "{}", id + 1) + "," +
+           build_rpc_request("GetDateTime", "", id) + "]";
+}
+
+RpcMethodProbeResult inspect_rpc_method_probe(
+    const char *json, size_t len, uint32_t id) {
+    JsonCursor cursor(json ? json : "", json ? len : 0);
+    if (!cursor.consume('[')) return RpcMethodProbeResult::NotMatched;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, json, len) || !doc.is<JsonArray>()) {
+        return RpcMethodProbeResult::NotMatched;
+    }
+
+    JsonObjectConst clock;
+    JsonObjectConst probe;
+    bool invalid = false;
+    for (JsonVariantConst item : doc.as<JsonArrayConst>()) {
+        if (!item.is<JsonObjectConst>() || !item["id"].is<uint32_t>()) {
+            invalid = true;
+            continue;
+        }
+
+        const uint32_t response_id = item["id"].as<uint32_t>();
+        if (response_id == id) {
+            invalid |= !clock.isNull();
+            clock = item.as<JsonObjectConst>();
+        } else if (response_id == id + 1) {
+            invalid |= !probe.isNull();
+            probe = item.as<JsonObjectConst>();
+        } else {
+            invalid = true;
+        }
+    }
+
+    if (clock.isNull()) return RpcMethodProbeResult::NotMatched;
+    if (invalid || !clock["error"].isNull() ||
+        !clock["result"]["dateTime"].is<const char *>()) {
+        return RpcMethodProbeResult::InvalidResponse;
+    }
+    if (probe.isNull()) return RpcMethodProbeResult::Unavailable;
+    if (!probe["result"].isNull() || !probe["error"]["code"].is<int32_t>()) {
+        return RpcMethodProbeResult::InvalidResponse;
+    }
+
+    const int32_t code = probe["error"]["code"].as<int32_t>();
+    if (code == -32602) return RpcMethodProbeResult::Available;
+    if (code == -32601) return RpcMethodProbeResult::Unavailable;
+    return RpcMethodProbeResult::InvalidResponse;
 }
 
 std::string build_get_params(const std::string &names) {

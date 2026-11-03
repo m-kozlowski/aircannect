@@ -600,6 +600,7 @@
         return "Preparing patched bootloader";
       }
       if (phase === "programming") return "Programming ResMed" + target;
+      if (phase === "probing_apply") return "Checking installation permissions";
       if (phase === "initiating") return "Starting device upload" + target;
       if (phase === "ready" || phase === "uploading") {
         return data.transport === "service" ?
