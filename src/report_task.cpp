@@ -4429,7 +4429,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
         if (runtime.period_completed && runtime.lock(0)) {
             if (!runtime.period_completed->error[0]) {
-                runtime.period_cache[runtime.period_cache_cursor++ % 5] = runtime.period_completed;
+                std::shared_ptr<const ReportPeriodResult> *slot = nullptr;
+                for (auto &cached : runtime.period_cache) {
+                    if (cached && cached->key == runtime.period_completed->key) {
+                        slot = &cached;
+                        break;
+                    }
+                }
+                if (!slot) slot = &runtime.period_cache[runtime.period_cache_cursor++ % 5];
+                *slot = runtime.period_completed;
             }
             runtime.period_latest = runtime.period_completed;
             runtime.period_serial = increment_generation(runtime.period_serial);
