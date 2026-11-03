@@ -270,6 +270,10 @@ bool StorageDeleteService::start_selected(const char *base_path,
             copy_cstr(error_out, error_out_size, "bad_child_path");
             return false;
         }
+        if (storage_path_retained_links(child_path, true)) {
+            copy_cstr(error_out, error_out_size, "protected_path");
+            return false;
+        }
     }
 
     const StorageAdmissionResult admission =

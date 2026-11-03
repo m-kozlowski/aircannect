@@ -3592,8 +3592,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.catalog_store_retry_attempt = 0;
                     runtime.generation_cleanup.publish_layout(
                         issues);
+                    if (runtime.catalog_store.snapshot()) {
+                        // Layout recovery already owns the persisted index.
+                        // Use the normal load completion without decoding it again.
+                        runtime.store_purpose = CatalogStorePurpose::Load;
+                    }
                     if (retried && runtime.catalog) {
-                        runtime.catalog_load_pending = true;
                         runtime.store_catalog_load_pending = true;
                         runtime.reset_background_pass();
                         runtime.schedule_reconcile(now_ms, false);

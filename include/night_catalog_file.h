@@ -60,10 +60,12 @@ public:
     bool append(const uint8_t *bytes, size_t length);
     std::shared_ptr<const NightCatalog> take_result();
     void reset();
+    bool allocation_failed() const;
 
 private:
     struct Runtime;
     Runtime *runtime_ = nullptr;
+    bool allocation_failed_ = false;
 };
 
 class NightCatalogFileIndexReader {

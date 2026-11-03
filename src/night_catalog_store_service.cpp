@@ -27,9 +27,6 @@ constexpr const char *CATALOG_INDEX_STAGING_PATH =
     "/aircannect/report/catalog-staging/.index.bin";
 constexpr const char *FLAT_NIGHTS_ROOT =
     "/aircannect/report/v9/nights-flat";
-// May contain aliases left by an interrupted FAT rename. Never traverse/delete.
-constexpr const char *LAYOUT_LINKS_ROOT =
-    "/aircannect/report/layout-links";
 
 enum class StoreWriteKind : uint8_t {
     None,
@@ -70,6 +67,14 @@ bool layout_year_directory(const char *name) {
     return name && strlen(name) == 4 && strspn(name, "0123456789") == 4;
 }
 
+bool layout_unusable_sources(const char *error) {
+    return strcmp(error, "read_not_found") == 0 ||
+        strcmp(error, "night_catalog_load_header_invalid") == 0 ||
+        strcmp(error, "night_catalog_load_decode_failed") == 0 ||
+        strcmp(error, "night_catalog_load_night_mismatch") == 0 ||
+        strcmp(error, "night_catalog_load_night_sources_external") == 0;
+}
+
 }  // namespace
 
 bool NightCatalogLayoutIssues::blocked(SleepDayId day) const {
@@ -97,6 +102,7 @@ struct NightCatalogStoreRuntime {
         LayoutMoveNight,
         LayoutLoadIndex,
         LayoutLoadRetained,
+        LayoutLoadFlat,
         LayoutCompareScan,
         LayoutCompareFiles,
         LayoutRestoreIndex,
@@ -139,6 +145,7 @@ struct NightCatalogStoreRuntime {
     bool layout_backup_exists = false;
     bool layout_unknown_entries = false;
     uint8_t layout_source_root_index = 0;
+    uint8_t layout_scan_root = 1;
 
     // One conflicting night; the index is restored before its flat entry moves.
     char layout_flat[AC_STORAGE_PATH_MAX] = {};
@@ -147,6 +154,7 @@ struct NightCatalogStoreRuntime {
     std::shared_ptr<const NightCatalog> layout_index;
     std::shared_ptr<const NightCatalog> layout_retained_catalog;
     bool layout_io_started = false;
+    bool layout_replace_retained = false;
     uint32_t layout_park_slot = 0;
 
     std::shared_ptr<const StorageScanSnapshot> layout_compare_scan;
@@ -183,7 +191,6 @@ struct NightCatalogStoreRuntime {
     size_t index_chunk_size = 0;
     bool index_stage_complete = false;
     bool index_stage_touched = false;
-    bool index_restore = false;
     std::shared_ptr<const NightCatalog> saving;
     std::shared_ptr<const NightCatalog> index;
     StagedNightList staged;
@@ -290,6 +297,7 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->layout_backup_exists = false;
     runtime_->layout_unknown_entries = false;
     runtime_->layout_source_root_index = 0;
+    runtime_->layout_scan_root = 1;
     runtime_->layout_flat[0] = runtime_->layout_retained[0] = runtime_->layout_park[0] = '\0';
     runtime_->layout_index.reset();
     runtime_->layout_retained_catalog.reset();
@@ -300,6 +308,7 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->layout_park_slot = 0;
     runtime_->layout_equal = false;
     runtime_->layout_io_started = false;
+    runtime_->layout_replace_retained = false;
 
     runtime_->read_ticket = {};
     runtime_->write_ticket = {};
@@ -322,7 +331,6 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->index_offset = 0;
     runtime_->index_chunk_size = 0;
     runtime_->index_stage_complete = false;
-    runtime_->index_restore = false;
     runtime_->saving.reset();
     runtime_->index.reset();
     runtime_->install_stage_index = 0;
@@ -460,7 +468,8 @@ OperationAdmission NightCatalogStoreService::start_load(
 void NightCatalogStoreService::finish_load(
     std::shared_ptr<const NightCatalog> catalog) {
     if (!catalog) {
-        fail("night_catalog_load_decode_failed");
+        fail(runtime_->decoder.allocation_failed()
+             ? "night_catalog_load_alloc_failed" : "night_catalog_load_decode_failed");
         return;
     }
 
@@ -856,22 +865,9 @@ void NightCatalogStoreService::skip_layout_conflict(const char *error) {
     }
 }
 
-bool NightCatalogStoreService::start_index_restore(
-    std::shared_ptr<const NightCatalog> index, uint32_t generation) {
-    reset_operation();
-    if (!prepare_index_stream(index)) return false;
-
-    runtime_->saving = std::move(index);
-    runtime_->index_restore = true;
-    runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareIndexChunk;
-    status_ = {};
-    status_.generation = generation;
-    status_.state = NightCatalogStoreState::Saving;
-    return true;
-}
-
 void NightCatalogStoreService::finish_layout() {
     reset_operation();
+    published_ = stored_;
     layout_issues_ = std::move(layout_issues_building_);
     runtime_->layout_ready = true;
     runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
@@ -966,6 +962,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             }
 
             runtime_->layout_cursor = 0;
+            runtime_->layout_scan_root = runtime_->layout_backup_exists ? 1 : 0;
             runtime_->layout_unknown_entries = false;
             if (!runtime_->layout_backup_exists && flat && !years) {
                 runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutRenameRoot;
@@ -998,6 +995,12 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
 
         case NightCatalogStoreRuntime::Phase::LayoutSelectNight: {
             if (runtime_->layout_cursor == runtime_->layout_scan->size()) {
+                if (runtime_->layout_scan_root == 1) {
+                    runtime_->layout_scan_root = 0;
+                    runtime_->layout_cursor = 0;
+                    return true;
+                }
+
                 if (runtime_->layout_unknown_entries ||
                     (layout_issues_building_ &&
                      !layout_issues_building_->days.empty())) {
@@ -1012,6 +1015,8 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
 
             StorageScanEntryView entry;
             runtime_->layout_scan->entry(runtime_->layout_cursor++, entry);
+            if (entry.root_index != runtime_->layout_scan_root) return true;
+
             const char *root = entry.root_index == 0
                 ? REPORT_SIGNAL_STORE_ROOT
                 : entry.root_index == 1 ? FLAT_NIGHTS_ROOT : nullptr;
@@ -1097,6 +1102,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                         copy_cstr(runtime_->layout_flat, sizeof(runtime_->layout_flat), source);
                         copy_cstr(runtime_->layout_retained, sizeof(runtime_->layout_retained), destination);
                         runtime_->layout_io_started = false;
+                        runtime_->layout_replace_retained = false;
                         runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutLoadIndex;
                         return true;
                     }
@@ -1116,14 +1122,24 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
         }
 
         case NightCatalogStoreRuntime::Phase::LayoutLoadIndex:
-        case NightCatalogStoreRuntime::Phase::LayoutLoadRetained: {
+        case NightCatalogStoreRuntime::Phase::LayoutLoadRetained:
+        case NightCatalogStoreRuntime::Phase::LayoutLoadFlat: {
             auto &loader = runtime_->history_loader;
             const bool index = runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutLoadIndex;
+            const bool flat = runtime_->phase == NightCatalogStoreRuntime::Phase::LayoutLoadFlat;
             if (!runtime_->layout_io_started) {
+                if (index && stored_) {
+                    runtime_->layout_index = stored_;
+                    runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutLoadRetained;
+                    return true;
+                }
+
                 loader.begin(*read_port_, *range_write_port_, *write_port_);
-                const auto admitted = index
-                    ? loader.request_load(status_.generation)
-                    : loader.request_load_night(runtime_->layout_day, status_.generation);
+                char path[AC_STORAGE_PATH_MAX];
+                storage_append_child_path(flat ? runtime_->layout_flat : runtime_->layout_retained,
+                                          "sources.bin", path, sizeof(path));
+                const auto admitted = index ? loader.request_load(status_.generation)
+                    : loader.start_load(path, runtime_->layout_day, status_.generation, StorageReadLane::Report);
                 if (admitted == OperationAdmission::Busy) return false;
                 if (admitted != OperationAdmission::Accepted) {
                     skip_layout_conflict("report_layout_read_rejected");
@@ -1135,6 +1151,20 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             const bool worked = loader.poll();
             if (loader.active()) return worked;
             if (loader.status().state != NightCatalogStoreState::Ready) {
+                if (!index && layout_unusable_sources(loader.status().error)) {
+                    loader.forget_media();
+                    runtime_->layout_io_started = false;
+                    if (!flat) {
+                        runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutLoadFlat;
+                    } else {
+                        // Neither directory is proven rebuildable. Preserve both
+                        // without keeping the night behind a migration retry gate.
+                        runtime_->layout_parent_depth = 0;
+                        runtime_->layout_park_slot = 0;
+                        runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutParkParent;
+                    }
+                    return true;
+                }
                 skip_layout_conflict(loader.status().error);
                 return true;
             }
@@ -1142,11 +1172,14 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             runtime_->layout_io_started = false;
             if (index) {
                 runtime_->layout_index = loader.take_snapshot();
+                stored_ = runtime_->layout_index;
                 runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutLoadRetained;
             } else {
                 runtime_->layout_retained_catalog = loader.take_snapshot();
                 loader.forget_media();
-                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutCompareScan;
+                runtime_->layout_replace_retained = flat;
+                runtime_->phase = flat ? NightCatalogStoreRuntime::Phase::LayoutRestoreIndex
+                                      : NightCatalogStoreRuntime::Phase::LayoutCompareScan;
             }
             return true;
         }
@@ -1287,8 +1320,16 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             if (!runtime_->layout_io_started) {
                 const auto restored = NightCatalogBuilder::upsert_night(
                     *runtime_->layout_index, *runtime_->layout_retained_catalog, runtime_->layout_day);
-                const auto index = restored ? NightCatalogBuilder::index(*restored) : nullptr;
-                if (!index || !writer.start_index_restore(index, status_.generation)) {
+
+                // The winning source is already durable. For a flat winner,
+                // its directory remains discoverable until the final move.
+                // Other legacy records still need request_save() externalization.
+                const auto retained_index = NightCatalogBuilder::index(*runtime_->layout_retained_catalog);
+                writer.stored_ = retained_index ? NightCatalogBuilder::upsert_night(
+                    *runtime_->layout_index, *retained_index, runtime_->layout_day) : nullptr;
+
+                if (!restored || !writer.stored_ ||
+                    writer.request_save(restored, status_.generation) != OperationAdmission::Accepted) {
                     skip_layout_conflict("report_layout_index_restore_failed");
                     return true;
                 }
@@ -1310,7 +1351,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             runtime_->layout_io_started = false;
             runtime_->layout_parent_depth = 0;
             runtime_->layout_park_slot = 0;
-            runtime_->phase = runtime_->layout_equal
+            runtime_->phase = runtime_->layout_equal || runtime_->layout_replace_retained
                 ? NightCatalogStoreRuntime::Phase::LayoutParkParent
                 : NightCatalogStoreRuntime::Phase::LayoutDeleteFlat;
             return true;
@@ -1348,7 +1389,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             char day[9];
             runtime_->layout_day.format_yyyymmdd(day, sizeof(day));
             snprintf(runtime_->layout_park, sizeof(runtime_->layout_park), "%s/%.4s/%.2s/%.2s/%lu",
-                     LAYOUT_LINKS_ROOT, day, day + 4, day + 6,
+                     AC_STORAGE_RETAINED_LINKS_ROOT, day, day + 4, day + 6,
                      static_cast<unsigned long>(runtime_->layout_park_slot));
 
             StoragePathCompletion completion;
@@ -1356,7 +1397,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             LayoutPathResult result;
             if (phase == NightCatalogStoreRuntime::Phase::LayoutParkParent) {
                 const size_t suffix[] = {0, 5, 8, 11};
-                runtime_->layout_park[strlen(LAYOUT_LINKS_ROOT) + suffix[runtime_->layout_parent_depth]] = '\0';
+                runtime_->layout_park[strlen(AC_STORAGE_RETAINED_LINKS_ROOT) + suffix[runtime_->layout_parent_depth]] = '\0';
                 result = poll_layout_path(StoragePathOperation::EnsureDirectory,
                     runtime_->layout_park, nullptr, completion);
             } else if (phase == NightCatalogStoreRuntime::Phase::LayoutParkInspect) {
@@ -1364,7 +1405,8 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                     runtime_->layout_park, nullptr, completion);
             } else {
                 result = poll_layout_path(StoragePathOperation::Move,
-                    runtime_->layout_flat, runtime_->layout_park, completion);
+                    runtime_->layout_replace_retained ? runtime_->layout_retained : runtime_->layout_flat,
+                    runtime_->layout_park, completion);
             }
             if (result == LayoutPathResult::Pending) return false;
             if (result == LayoutPathResult::Failed) {
@@ -1384,7 +1426,9 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 }
             } else {
                 runtime_->layout_parent_day = {};
-                runtime_->phase = NightCatalogStoreRuntime::Phase::LayoutSelectNight;
+                runtime_->phase = runtime_->layout_replace_retained
+                    ? NightCatalogStoreRuntime::Phase::LayoutMoveNight
+                    : NightCatalogStoreRuntime::Phase::LayoutSelectNight;
             }
             return true;
         }
@@ -1532,7 +1576,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                     }
                     fail(completion.error[0]
                              ? completion.error
-                             : "night_catalog_load_header_invalid");
+                             : "night_catalog_load_header_failed");
                     return true;
                 }
                 runtime_->prepared = completion.prepared;
@@ -1547,17 +1591,25 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
 
             read_port_->release_prepared(runtime_->prepared);
             runtime_->prepared = {};
-            if (read.state != PreparedByteReadState::Data ||
-                read.bytes != sizeof(runtime_->header) ||
-                !NightCatalogFileCodec::inspect(runtime_->header,
+            if (runtime_->read_file_size < sizeof(runtime_->header)) {
+                fail("night_catalog_load_header_invalid");
+                return true;
+            }
+            if (read.state != PreparedByteReadState::Data || read.bytes != sizeof(runtime_->header)) {
+                fail("night_catalog_load_header_failed");
+                return true;
+            }
+            if (!NightCatalogFileCodec::inspect(runtime_->header,
                                                 sizeof(runtime_->header),
-                                                runtime_->file_info)) {
+                                                runtime_->file_info) ||
+                runtime_->file_info.total_bytes != runtime_->read_file_size) {
                 fail("night_catalog_load_header_invalid");
                 return true;
             }
 
             if (!runtime_->decoder.begin(runtime_->header, sizeof(runtime_->header))) {
-                fail("night_catalog_load_decode_failed");
+                fail(runtime_->decoder.allocation_failed()
+                     ? "night_catalog_load_alloc_failed" : "night_catalog_load_decode_failed");
                 return true;
             }
             runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitBody;
@@ -1628,7 +1680,8 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             read_port_->release_prepared(runtime_->prepared);
             runtime_->prepared = {};
             if (!accepted) {
-                fail("night_catalog_load_decode_failed");
+                fail(runtime_->decoder.allocation_failed()
+                     ? "night_catalog_load_alloc_failed" : "night_catalog_load_decode_failed");
                 return true;
             }
             runtime_->read_offset += runtime_->read_length;
@@ -2162,14 +2215,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             }
 
             runtime_->index_stage_complete = true;
-            if (runtime_->index_restore) {
-                runtime_->write_kind = StoreWriteKind::Index;
-                copy_cstr(runtime_->path, sizeof(runtime_->path), NIGHT_CATALOG_STORE_PATH);
-                copy_cstr(runtime_->staged_path, sizeof(runtime_->staged_path), CATALOG_INDEX_STAGING_PATH);
-                runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
-            } else {
-                runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareWrite;
-            }
+            runtime_->phase = NightCatalogStoreRuntime::Phase::PrepareWrite;
             return true;
         }
     }

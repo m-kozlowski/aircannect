@@ -1203,6 +1203,7 @@ struct NightCatalogFileDecoder::Runtime {
     uint8_t scratch[512] = {};
     bool compact = false;
     bool failed = false;
+    bool allocation_failed = false;
 
     // Only one month's record headers are staged before its exact allocation.
     NightCatalogRecord month_records[31];
@@ -1258,7 +1259,10 @@ struct NightCatalogFileDecoder::Runtime {
         if (!month_count) return true;
         auto month = NightCatalog::create();
         if (!month || !month->allocate(month_count, month_sessions, month_masks,
-                                       0, 0, 0, 0, 0, 0)) return false;
+                                       0, 0, 0, 0, 0, 0)) {
+            allocation_failed = true;
+            return false;
+        }
 
         const uint32_t session_base = month_records[0].session_offset;
         const uint32_t mask_base = month_records[0].mask_window_offset;
@@ -1268,7 +1272,10 @@ struct NightCatalogFileDecoder::Runtime {
             record.session_offset -= session_base;
             record.mask_window_offset -= mask_base;
         }
-        if (!catalog->append_block(std::move(month))) return false;
+        if (!catalog->append_block(std::move(month))) {
+            allocation_failed = true;
+            return false;
+        }
         month_count = month_sessions = month_masks = 0;
         return true;
     }
@@ -1436,6 +1443,11 @@ NightCatalogFileDecoder::~NightCatalogFileDecoder() {
 void NightCatalogFileDecoder::reset() {
     LargeObject::destroy(runtime_);
     runtime_ = nullptr;
+    allocation_failed_ = false;
+}
+
+bool NightCatalogFileDecoder::allocation_failed() const {
+    return allocation_failed_ || (runtime_ && runtime_->allocation_failed);
 }
 
 bool NightCatalogFileDecoder::begin(const uint8_t *header, size_t length) {
@@ -1443,7 +1455,10 @@ bool NightCatalogFileDecoder::begin(const uint8_t *header, size_t length) {
     NightCatalogFileInfo info;
     if (!parse_header(header, length, info)) return false;
     runtime_ = LargeObject::create<Runtime>();
-    if (!runtime_) return false;
+    if (!runtime_) {
+        allocation_failed_ = true;
+        return false;
+    }
 
     auto &r = *runtime_;
     r.info = info;
@@ -1455,6 +1470,7 @@ bool NightCatalogFileDecoder::begin(const uint8_t *header, size_t length) {
             info.file_count, info.coverage_count, info.signal_layout_count,
             info.fallback_file_count, info.fallback_section_count, info.path_bytes))) {
         reset();
+        allocation_failed_ = true;
         return false;
     }
     return true;
@@ -1506,7 +1522,9 @@ std::shared_ptr<const NightCatalog> NightCatalogFileDecoder::take_result() {
     if (runtime_ && !runtime_->failed && runtime_->finish()) {
         result = std::move(runtime_->catalog);
     }
+    const bool allocation_failure = allocation_failed();
     reset();
+    allocation_failed_ = allocation_failure;
     return result;
 }
 

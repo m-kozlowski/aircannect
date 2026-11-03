@@ -1,6 +1,7 @@
 #include "storage_path.h"
 
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 
 namespace aircannect {
@@ -56,6 +57,22 @@ bool storage_user_path_valid(const char *path) {
         }
     }
     return true;
+}
+
+bool storage_path_retained_links(const char *path, bool include_ancestors) {
+    if (!path || !*path) return false;
+    size_t length = strlen(path);
+    while (length > 1 && path[length - 1] == '/') --length;
+
+    const size_t root_length = strlen(AC_STORAGE_RETAINED_LINKS_ROOT);
+    if (length >= root_length) {
+        return strncasecmp(path, AC_STORAGE_RETAINED_LINKS_ROOT, root_length) == 0 &&
+            (length == root_length || path[root_length] == '/');
+    }
+
+    return include_ancestors && (length == 1 ||
+        (strncasecmp(path, AC_STORAGE_RETAINED_LINKS_ROOT, length) == 0 &&
+         AC_STORAGE_RETAINED_LINKS_ROOT[length] == '/'));
 }
 
 bool storage_resolve_user_path(const char *base,

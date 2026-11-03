@@ -461,6 +461,10 @@ bool StorageArchiveService::start(const char *path,
         copy_cstr(error_out, error_out_size, "bad_path");
         return false;
     }
+    if (storage_path_retained_links(path)) {
+        copy_cstr(error_out, error_out_size, "protected_path");
+        return false;
+    }
     if (!lock(0)) {
         copy_cstr(error_out, error_out_size, "busy");
         return false;
@@ -510,10 +514,25 @@ bool StorageArchiveService::start_selected(const char *base_path,
         copy_cstr(error_out, error_out_size, "bad_selection");
         return false;
     }
+
+    char normalized_base[AC_STORAGE_PATH_MAX];
+    copy_cstr(normalized_base, sizeof(normalized_base), base_path);
+    storage_normalize_path(normalized_base);
+
     for (size_t i = 0; i < count; ++i) {
         if (!storage_valid_child_name(names[i]) ||
             strlen(names[i]) >= AC_STORAGE_ARCHIVE_NAME_MAX) {
             copy_cstr(error_out, error_out_size, "bad_name");
+            return false;
+        }
+
+        char child_path[AC_STORAGE_PATH_MAX];
+        if (!storage_append_child_path(normalized_base, names[i], child_path, sizeof(child_path))) {
+            copy_cstr(error_out, error_out_size, "bad_child_path");
+            return false;
+        }
+        if (storage_path_retained_links(child_path)) {
+            copy_cstr(error_out, error_out_size, "protected_path");
             return false;
         }
     }
@@ -923,6 +942,8 @@ bool StorageArchiveService::prepare_step_locked() {
             set_error_locked("bad_child_path");
             return false;
         }
+        if (storage_path_retained_links(child_path)) continue;
+
         if (child.is_dir) {
             if (status_.recursive) {
                 if (!append_entry_locked(child_path, 0, true,
