@@ -1,6 +1,7 @@
 #include "storage_delete_service.h"
 #include "storage_access.h"
 
+#include <errno.h>
 #include <new>
 #include <stdio.h>
 #include <string.h>
@@ -270,7 +271,7 @@ bool StorageDeleteService::start_selected(const char *base_path,
             copy_cstr(error_out, error_out_size, "bad_child_path");
             return false;
         }
-        if (storage_path_retained_links(child_path, true)) {
+        if (storage_path_retained_links(child_path)) {
             copy_cstr(error_out, error_out_size, "protected_path");
             return false;
         }
@@ -359,6 +360,23 @@ bool StorageDeleteService::status(StorageDeleteStatus &out,
 }
 
 bool StorageDeleteService::validate_base_locked() {
+    for (size_t i = 0; i < status_.roots; ++i) {
+        if (!storage_path_retained_links(path_bytes_ + root_offsets_[i], true)) continue;
+
+        struct stat info {};
+        errno = 0;
+        if (Storage::file_stat(AC_STORAGE_RETAINED_LINKS_ROOT, info)) {
+            set_error_locked("protected_path");
+            return false;
+        }
+        if (errno != ENOENT && errno != ENOTDIR) {
+            set_error_locked("protected_path_stat_failed");
+            return false;
+        }
+
+        break;
+    }
+
     File base_dir = Storage::open(status_.base_path, "r");
     const bool valid = base_dir && base_dir.isDirectory();
     if (base_dir) base_dir.close();
@@ -391,6 +409,7 @@ bool StorageDeleteService::step() {
         if (!lock(50)) return false;
 
         close_walk_locked();
+        base_checked_ = false;
         release_maintenance_locked();
         touch_status_locked();
         unlock();
@@ -514,6 +533,12 @@ bool StorageDeleteService::delete_dir_step_locked() {
         set_error_locked("bad_child_path");
         return false;
     }
+
+    if (storage_path_retained_links(child_path)) {
+        set_error_locked("protected_path");
+        return false;
+    }
+
     if (child.is_dir) {
         if (!push_dir_locked(child_path)) return false;
         return true;

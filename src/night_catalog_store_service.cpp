@@ -192,6 +192,8 @@ struct NightCatalogStoreRuntime {
     bool index_stage_complete = false;
     bool index_stage_touched = false;
     std::shared_ptr<const NightCatalog> saving;
+    std::shared_ptr<const NightCatalog> save_baseline;
+    SleepDayId durable_sources_day;
     std::shared_ptr<const NightCatalog> index;
     StagedNightList staged;
     size_t install_stage_index = 0;
@@ -332,6 +334,8 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->index_chunk_size = 0;
     runtime_->index_stage_complete = false;
     runtime_->saving.reset();
+    runtime_->save_baseline.reset();
+    runtime_->durable_sources_day = {};
     runtime_->index.reset();
     runtime_->install_stage_index = 0;
     runtime_->install_size = 0;
@@ -499,8 +503,15 @@ void NightCatalogStoreService::finish_load(
 
 bool NightCatalogStoreService::sources_stored(
     const NightCatalogRecord &record) const {
+    if (runtime_ && runtime_->durable_sources_day.valid() &&
+        runtime_->durable_sources_day == record.sleep_day) {
+        return true;
+    }
+
+    const auto &baseline = runtime_ && runtime_->save_baseline
+        ? runtime_->save_baseline : stored_;
     const NightCatalogRecord *previous =
-        stored_ ? stored_->find(record.sleep_day) : nullptr;
+        baseline ? baseline->find(record.sleep_day) : nullptr;
 
     // A legacy full snapshot does not prove that sources.bin exists yet.
     return previous && previous->sources_external &&
@@ -697,13 +708,16 @@ OperationAdmission NightCatalogStoreService::request_install(
 
 OperationAdmission NightCatalogStoreService::request_save(
     std::shared_ptr<const NightCatalog> catalog,
-    uint32_t generation) {
+    uint32_t generation,
+    SleepDayId durable_sources_day,
+    std::shared_ptr<const NightCatalog> persisted_index) {
     if (!layout_ready()) return OperationAdmission::Busy;
     if (!runtime_ || !read_port_ || !range_write_port_ || !write_port_) {
         return OperationAdmission::Rejected;
     }
     if (active() || staging()) return OperationAdmission::Busy;
-    if (!catalog || generation == 0) {
+    if (!catalog || generation == 0 ||
+        (durable_sources_day.valid() && !catalog->find(durable_sources_day))) {
         return reject_save(generation, "night_catalog_save_invalid");
     }
 
@@ -711,6 +725,9 @@ OperationAdmission NightCatalogStoreService::request_save(
     if (!blocked_layout_sources_unchanged(*catalog)) {
         return reject_save(generation, "report_layout_night_blocked");
     }
+
+    runtime_->save_baseline = persisted_index ? std::move(persisted_index) : stored_;
+    runtime_->durable_sources_day = durable_sources_day;
 
     // Reject dangling references before submitting any persistent writes.
     for (size_t i = 0; i < catalog->size(); ++i) {
@@ -1321,15 +1338,12 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 const auto restored = NightCatalogBuilder::upsert_night(
                     *runtime_->layout_index, *runtime_->layout_retained_catalog, runtime_->layout_day);
 
-                // The winning source is already durable. For a flat winner,
-                // its directory remains discoverable until the final move.
-                // Other legacy records still need request_save() externalization.
-                const auto retained_index = NightCatalogBuilder::index(*runtime_->layout_retained_catalog);
-                writer.stored_ = retained_index ? NightCatalogBuilder::upsert_night(
-                    *runtime_->layout_index, *retained_index, runtime_->layout_day) : nullptr;
-
-                if (!restored || !writer.stored_ ||
-                    writer.request_save(restored, status_.generation) != OperationAdmission::Accepted) {
+                // The winner stays discoverable until the final directory move.
+                // Other embedded legacy sources still need externalization.
+                if (!restored ||
+                    writer.request_save(restored, status_.generation,
+                                        runtime_->layout_day, runtime_->layout_index) !=
+                        OperationAdmission::Accepted) {
                     skip_layout_conflict("report_layout_index_restore_failed");
                     return true;
                 }
@@ -1748,13 +1762,14 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 return true;
             }
 
-            while ((!runtime_->staging || runtime_->installing) && stored_ &&
-                   runtime_->history_record < stored_->size()) {
-                const auto &old = *stored_->record(runtime_->history_record++);
+            const auto &baseline = runtime_->save_baseline ? runtime_->save_baseline : stored_;
+            while ((!runtime_->staging || runtime_->installing) && baseline &&
+                   runtime_->history_record < baseline->size()) {
+                const auto &old = *baseline->record(runtime_->history_record++);
                 if (!old.unresolved_history) continue;
                 if (old.sources_external) runtime_->history_sources_day = old.sleep_day;
 
-                auto history = NightCatalogBuilder::select_night(*stored_, old.sleep_day);
+                auto history = NightCatalogBuilder::select_night(*baseline, old.sleep_day);
                 runtime_->encoded = history ? NightCatalogFileCodec::encode(*history) : nullptr;
                 if (!runtime_->encoded) {
                     fail("night_catalog_history_preserve_failed");

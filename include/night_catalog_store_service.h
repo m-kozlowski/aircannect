@@ -84,9 +84,13 @@ public:
 
     // Catalog persistence.
     // Full sources are persisted first; the compact index is published last.
+    // Recovery may supply an accepted on-card index and one night whose
+    // sources are already durable. These apply only to this save operation.
     OperationAdmission request_save(
         std::shared_ptr<const NightCatalog> catalog,
-        uint32_t generation);
+        uint32_t generation,
+        SleepDayId durable_sources_day = {},
+        std::shared_ptr<const NightCatalog> persisted_index = {});
 
     // Full-refresh staging. Scratch files are never adopted across sessions.
     OperationAdmission begin_staging(uint32_t generation);

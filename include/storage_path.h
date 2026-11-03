@@ -18,7 +18,7 @@ bool storage_append_child_path(const char *parent,
                                size_t out_size);
 bool storage_valid_child_name(const char *name);
 bool storage_user_path_valid(const char *path);
-// Valid user paths only; ancestors are protected from recursive deletion too.
+// Lexical match on valid user paths; the storage owner checks existence.
 bool storage_path_retained_links(const char *path, bool include_ancestors = false);
 bool storage_resolve_user_path(const char *base,
                                const char *path,
