@@ -5,6 +5,7 @@
 #include "board_report.h"
 #include "management_console_utils.h"
 #include "report_task.h"
+#include "utc_time.h"
 
 namespace aircannect {
 namespace {
@@ -138,9 +139,13 @@ void print_report_stats(Print &out, const ReportTask &task) {
         status.durable_catalog_generation));
 
     const auto &archive = status.summary_archive;
-    out.printf("[Summary archive] active=%s segment=%lu sequence=%llu records=%u "
+    char from[32] = "--";
+    if (archive.from_ms) format_utc_iso8601_ms(archive.from_ms, from, sizeof(from));
+
+    out.printf("[Summary archive] active=%s reason=%s from=%s segment=%lu sequence=%llu records=%u "
                "changed=%u removed=%u dropped=%lu recovery=%s error=%s\n",
                archive.active ? "yes" : "no",
+               summary_fetch_reason_name(archive.reason), from,
                static_cast<unsigned long>(archive.segment),
                static_cast<unsigned long long>(archive.sequence),
                static_cast<unsigned>(archive.records),

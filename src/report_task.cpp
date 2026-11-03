@@ -20,6 +20,7 @@
 #include "report_spool_availability.h"
 #include "storage_service.h"
 #include "string_util.h"
+#include "utc_time.h"
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -3537,9 +3538,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 #ifdef ARDUINO
         const auto &archive = runtime.summary_archive.status();
         if (archive_active && !archive.active) {
+            char from[32] = "--";
+            format_utc_iso8601_ms(archive.from_ms, from, sizeof(from));
+
             Log::logf(CAT_REPORT, archive.error[0] ? LOG_WARN : LOG_INFO,
-                      "Summary archive segment=%lu sequence=%llu records=%u "
+                      "Summary archive reason=%s from=%s segment=%lu sequence=%llu records=%u "
                       "changed=%u removed=%u recovery=%s error=%s",
+                      summary_fetch_reason_name(archive.reason), from,
                       static_cast<unsigned long>(archive.segment),
                       static_cast<unsigned long long>(archive.sequence),
                       static_cast<unsigned>(archive.records),
@@ -4065,8 +4070,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             } else if (status.state == NightCatalogRefreshState::Ready) {
 #ifdef ARDUINO
                 if (status.warning[0]) {
-                    Log::logf(CAT_REPORT, LOG_WARN, "catalog refreshed warning=%s\n",
-                              status.warning);
+                    Log::logf(CAT_REPORT, LOG_WARN,
+                              "catalog refreshed warning=%s preserved_nights=%lu\n",
+                              status.warning, static_cast<unsigned long>(status.preserved_nights));
                 }
 #endif
                 publish_catalog(refreshed_catalog,

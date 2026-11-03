@@ -12,4 +12,14 @@ enum class SummaryFetchReason : uint8_t {
     ManualStr = 3,
 };
 
+inline const char *summary_fetch_reason_name(SummaryFetchReason reason) {
+    switch (reason) {
+        case SummaryFetchReason::Unspecified: return "unspecified";
+        case SummaryFetchReason::Catalog: return "catalog";
+        case SummaryFetchReason::PostTherapy: return "post_therapy";
+        case SummaryFetchReason::ManualStr: return "manual_str";
+    }
+    return "unknown";
+}
+
 }  // namespace aircannect

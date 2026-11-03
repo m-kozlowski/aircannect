@@ -48,6 +48,8 @@ struct SummaryObservation {
 
 struct SummaryArchiveStatus {
     bool active = false;
+    SummaryFetchReason reason = SummaryFetchReason::Unspecified;
+    int64_t from_ms = 0;
     uint32_t segment = 0;
     uint64_t sequence = 0;
     uint64_t committed_bytes = 0;

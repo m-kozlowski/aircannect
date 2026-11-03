@@ -271,6 +271,8 @@ struct SummaryArchive::Impl {
         observation = std::move(value);
         status = {};
         status.active = true;
+        status.reason = observation.reason;
+        status.from_ms = observation.from_ms;
         status.sequence = sequence;
         status.committed_bytes = end;
         status.records = mapping.size();
@@ -690,7 +692,11 @@ void SummaryArchive::forget_media() {
 }
 
 const SummaryArchiveStatus &SummaryArchive::status() const {
-    static const SummaryArchiveStatus unavailable{false, 0, 0, 0, 0, 0, 0, "summary_archive_memory"};
+    static const SummaryArchiveStatus unavailable = [] {
+        SummaryArchiveStatus status;
+        copy_cstr(status.error, sizeof(status.error), "summary_archive_memory");
+        return status;
+    }();
     return impl_ ? impl_->status : unavailable;
 }
 

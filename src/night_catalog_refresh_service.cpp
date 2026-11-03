@@ -24,6 +24,10 @@
 #include "memory_manager.h"
 #include "string_util.h"
 
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
+
 namespace aircannect {
 namespace {
 
@@ -1466,6 +1470,15 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
 void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
                            NightCatalogRefreshStatus &status,
                            const char *warning) {
+#ifdef ARDUINO
+    StorageScanEntryView entry;
+    if (runtime.scan && runtime.scan_index < runtime.fallback_scan_count &&
+        runtime.scan->entry(runtime.fallback_scan_indices[runtime.scan_index], entry)) {
+        Log::logf(CAT_REPORT, LOG_WARN, "catalog fallback skipped path=%s error=%s",
+                  entry.path, warning);
+    }
+#endif
+
     runtime.previous_sources.reset();
     runtime.previous_sources_requested = false;
 
@@ -2752,7 +2765,17 @@ bool NightCatalogRefreshService::poll() {
             }
 
             runtime_->preserve_days[runtime_->preserve_count++] = previous->sleep_day;
+            ++status_.preserved_nights;
             set_warning(status_, "night_catalog_previous_night_preserved");
+#ifdef ARDUINO
+            char day[9] = {};
+            char path[AC_STORAGE_PATH_MAX] = {};
+            previous->sleep_day.format_yyyymmdd(day, sizeof(day));
+            report_fallback_artifact_path(previous->sleep_day, path, sizeof(path));
+
+            Log::logf(CAT_REPORT, LOG_WARN,
+                      "catalog kept previous night=%s unavailable_fallback=%s", day, path);
+#endif
             return true;
         }
 

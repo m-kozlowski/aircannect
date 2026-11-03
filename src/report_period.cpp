@@ -121,7 +121,8 @@ uint64_t report_period_revision(ReportPeriodKey key, const NightCatalog &catalog
         const uint64_t values[] = {static_cast<uint64_t>(d),
             source ? source->source_revision.value() : 0,
             saved ? saved->source_revision.value() : 0,
-            saved ? saved->generation : 0};
+            saved ? saved->generation : 0,
+            saved ? saved->rejected_source_revision.value() : 0};
         for (uint64_t value : values) {
             revision = (revision ^ value) * 1099511628211ULL;
         }
@@ -253,6 +254,7 @@ struct ReportPeriodService::Runtime {
     uint16_t nights = 0;
     uint16_t active_nights = 0;
     uint16_t outdated_nights = 0;
+    uint16_t retained_nights = 0;
     uint16_t checkpoint_missing = 0;
     uint16_t layout_blocked = 0;
     uint16_t event_nights = 0;
@@ -321,7 +323,10 @@ struct ReportPeriodService::Runtime {
         const double duration = night ? night->duration_ms / 60000.0
             : source ? night_catalog_duration_minutes(*catalog, *source) : 0;
         const bool available = !open && duration > 0;
-        if (saved && source && saved->source_revision != source->source_revision) ++outdated_nights;
+        if (saved && source && saved->source_revision != source->source_revision) {
+            if (saved->rejected_source_revision == source->source_revision) ++retained_nights;
+            else ++outdated_nights;
+        }
 
         char id[9];
         day.format_yyyymmdd(id, sizeof(id));
@@ -455,6 +460,7 @@ struct ReportPeriodService::Runtime {
         json_add_int(json, "nights", nights);
         json_add_int(json, "active_nights", active_nights);
         json_add_int(json, "outdated_nights", outdated_nights);
+        json_add_int(json, "retained_nights", retained_nights);
         json_add_int(json, "checkpoint_missing", checkpoint_missing);
         json_add_int(json, "layout_blocked", layout_blocked);
         json_add_float(json, "duration_min", minutes);

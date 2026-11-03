@@ -2648,7 +2648,7 @@
       const controller = new AbortController();
       reportPeriodController = controller;
       const current = () => reportPeriodController === controller && !controller.signal.aborted;
-      const key = "period:v1:" + reportPeriodEnd + ":" + reportPeriodDays;
+      const key = "period:v2:" + reportPeriodEnd + ":" + reportPeriodDays;
       const url = "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays;
       let saved = null;
       AirCANnect.ui.message("reportMsg", "Loading period...", true, true);
@@ -2676,7 +2676,8 @@
         renderReportSummary();
         const notes = [];
         if (body.active_nights) notes.push(body.active_nights + " recording night(s) excluded");
-        if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) awaiting update");
+        if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) out of date");
+        if (body.retained_nights) notes.push(body.retained_nights + " saved report(s) kept: source data is incomplete");
         if (body.checkpoint_missing) notes.push(body.checkpoint_missing + " night(s) without saved distributions");
         if (body.layout_blocked) notes.push(body.layout_blocked + " night(s) skipped due to a storage layout conflict");
         AirCANnect.ui.message("reportMsg", notes.join("; ") || "Period loaded", true, !!notes.length);
