@@ -323,8 +323,10 @@ struct ReportPeriodService::Runtime {
         const double duration = night ? night->duration_ms / 60000.0
             : source ? night_catalog_duration_minutes(*catalog, *source) : 0;
         const bool available = !open && duration > 0;
-        if (saved && source && saved->source_revision != source->source_revision) {
-            if (saved->rejected_source_revision == source->source_revision) ++retained_nights;
+        const bool changed = saved && source && saved->source_revision != source->source_revision;
+        const bool retained = changed && saved->rejected_source_revision == source->source_revision;
+        if (changed) {
+            if (retained) ++retained_nights;
             else ++outdated_nights;
         }
 
@@ -333,6 +335,7 @@ struct ReportPeriodService::Runtime {
         if (cursor) daily += ',';
         daily += '{';
         json_add_string(daily, "id", id, false);
+        if (retained) json_add_bool(daily, "retained", true);
         daily += ",\"duration_min\":";
         if (available) append_json_float(daily, duration);
         else daily += "null";

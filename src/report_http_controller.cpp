@@ -1130,7 +1130,7 @@ void ReportHttpController::send_summary(
         }
         if (period->error[0]) { send_json_error(request, 503, period->error); return; }
         char etag[64];
-        snprintf(etag, sizeof(etag), "\"period-v2-%08ld-%u-%016llx\"",
+        snprintf(etag, sizeof(etag), "\"period-v3-%08ld-%u-%016llx\"",
                  static_cast<long>(end.epoch_days()), key.days,
                  static_cast<unsigned long long>(period->revision));
         if (request_etag_matches(request, etag)) { send_not_modified(request, etag, {}, 0); return; }
