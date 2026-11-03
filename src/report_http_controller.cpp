@@ -1118,11 +1118,14 @@ void ReportHttpController::send_summary(
             return;
         }
         const ReportPeriodKey key{end, static_cast<uint16_t>(days)};
-        const auto period = report_task_->period_snapshot(key);
+        std::shared_ptr<const ReportPeriodResult> period;
+        if (report_task_->request_period(key, &period) != OperationAdmission::Accepted) {
+            send_json_error(request, 503, "period_busy");
+            return;
+        }
+
         if (!period) {
-            if (report_task_->request_period(key) != OperationAdmission::Accepted) {
-                send_json_error(request, 503, "period_busy");
-            } else send_preparing(request);
+            send_preparing(request);
             return;
         }
         if (period->error[0]) { send_json_error(request, 503, period->error); return; }

@@ -282,7 +282,10 @@ public:
     ReportRebuildStatus rebuild_status() const;
     OperationAdmission request_date_repair(bool apply, uint32_t generation = 1);
     std::shared_ptr<const LargeByteBuffer> date_repair_preview() const;
-    OperationAdmission request_period(ReportPeriodKey key);
+    // Admission returns an existing result instead of waiting for another completion.
+    OperationAdmission request_period(
+        ReportPeriodKey key,
+        std::shared_ptr<const ReportPeriodResult> *ready = nullptr);
     std::shared_ptr<const ReportPeriodResult> period_snapshot(ReportPeriodKey key) const;
     std::shared_ptr<const ReportPeriodResult> period_completion(uint32_t &serial) const;
     OperationAdmission publish_session_ended(

@@ -298,7 +298,9 @@ struct ReportTask::Runtime {
 #endif
     }
 
-    OperationAdmission enqueue(ReportTaskCommand command) {
+    OperationAdmission enqueue(
+        ReportTaskCommand command,
+        std::shared_ptr<const ReportPeriodResult> *period_ready = nullptr) {
         if (!lock()) return OperationAdmission::Busy;
         if (storage_suspend_requested.load()) {
             unlock();
@@ -344,6 +346,7 @@ struct ReportTask::Runtime {
 
                 for (const auto &cached : period_cache) {
                     if (cached && cached->key == key && cached->revision == revision) {
+                        if (period_ready) *period_ready = cached;
                         unlock();
                         return OperationAdmission::Accepted;
                     }
@@ -3106,13 +3109,17 @@ ReportRebuildStatus ReportTask::rebuild_status() const {
     return result;
 }
 
-OperationAdmission ReportTask::request_period(ReportPeriodKey key) {
+OperationAdmission ReportTask::request_period(
+    ReportPeriodKey key,
+    std::shared_ptr<const ReportPeriodResult> *ready) {
+    if (ready) ready->reset();
     if (!runtime_ || !runtime_->initialized || !key.valid()) return OperationAdmission::Rejected;
+
     ReportTaskCommand command;
     command.kind = ReportTaskCommandKind::Period;
     command.sleep_day = key.end;
     command.period_days = key.days;
-    return runtime_->enqueue(command);
+    return runtime_->enqueue(command, ready);
 }
 
 std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeriodKey key) const {
