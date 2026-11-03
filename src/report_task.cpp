@@ -3449,7 +3449,8 @@ bool ReportTask::night_failure(SleepDayId sleep_day,
     const auto state = runtime_->published_state();
     if (state && state->layout_issues && state->layout_issues->blocked(sleep_day)) {
         failure = {};
-        failure.retryable = false;
+        failure.retryable = true;
+        failure.retry_after_ms = CATALOG_RECONCILE_IDLE_MS;
         copy_cstr(failure.error, sizeof(failure.error), "report_layout_night_blocked");
         return true;
     }
@@ -3592,6 +3593,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.generation_cleanup.publish_layout(
                         issues);
                     if (retried && runtime.catalog) {
+                        runtime.catalog_load_pending = true;
                         runtime.store_catalog_load_pending = true;
                         runtime.reset_background_pass();
                         runtime.schedule_reconcile(now_ms, false);

@@ -136,7 +136,11 @@ private:
         StoragePathOperation operation, const char *source,
         const char *destination, StoragePathCompletion &out);
     bool record_layout_issue(SleepDayId day, const char *error);
+    void release_layout_comparison();
+    void skip_layout_conflict(const char *error);
     void finish_layout();
+    bool start_index_restore(std::shared_ptr<const NightCatalog> index,
+                             uint32_t generation);
 
     // Save admission and source baseline.
     bool prepare_index_stream(
