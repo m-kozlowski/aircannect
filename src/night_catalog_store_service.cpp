@@ -134,7 +134,12 @@ struct NightCatalogStoreRuntime {
     char path[AC_STORAGE_PATH_MAX] = {};
     char staged_path[AC_STORAGE_PATH_MAX] = {};
     uint8_t header[NightCatalogFileCodec::HeaderBytes] = {};
-    std::unique_ptr<LargeByteBuffer> body;
+    NightCatalogFileDecoder decoder;
+    size_t read_offset = 0;
+    size_t read_length = 0;
+    uint64_t read_file_size = 0;
+    uint64_t read_modified = 0;
+    bool retained_read = false;
 
     std::shared_ptr<const LargeByteBuffer> encoded;
     NightCatalogFileIndexReader index_reader;
@@ -232,6 +237,7 @@ void NightCatalogStoreService::reset_operation() {
     if (read_port_ && runtime_->prepared.valid()) {
         read_port_->release_prepared(runtime_->prepared);
     }
+    if (read_port_ && runtime_->retained_read) read_port_->release_handle();
     if (layout_scans_ && runtime_->layout_scan_ticket.valid()) {
         (void)layout_scans_->abandon(runtime_->layout_scan_ticket);
     }
@@ -260,7 +266,10 @@ void NightCatalogStoreService::reset_operation() {
     runtime_->path[0] = '\0';
     runtime_->staged_path[0] = '\0';
     memset(runtime_->header, 0, sizeof(runtime_->header));
-    runtime_->body.reset();
+    runtime_->decoder.reset();
+    runtime_->read_offset = runtime_->read_length = 0;
+    runtime_->read_file_size = runtime_->read_modified = 0;
+    runtime_->retained_read = false;
     runtime_->encoded.reset();
     runtime_->index_reader.reset();
     runtime_->index_chunk.reset();
@@ -383,12 +392,14 @@ OperationAdmission NightCatalogStoreService::start_load(
     StorageReadCommand command;
     command.path = path;
     command.length = NightCatalogFileCodec::HeaderBytes;
+    command.retain_handle = true;
     command.lane = lane;
     command.generation = generation;
 
     const OperationSubmission submission = read_port_->request_read(command);
     if (!submission.accepted()) return submission.admission;
 
+    runtime_->retained_read = true;
     copy_cstr(runtime_->path, sizeof(runtime_->path), path);
     runtime_->loading_day = sleep_day;
     runtime_->read_lane = lane;
@@ -1154,6 +1165,8 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                     return true;
                 }
                 runtime_->prepared = completion.prepared;
+                runtime_->read_file_size = completion.file_size;
+                runtime_->read_modified = completion.modified;
             }
 
             const PreparedByteRead read = read_exact(
@@ -1172,28 +1185,27 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 return true;
             }
 
+            if (!runtime_->decoder.begin(runtime_->header, sizeof(runtime_->header))) {
+                fail("night_catalog_load_decode_failed");
+                return true;
+            }
             runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitBody;
             status_.bytes = runtime_->file_info.total_bytes;
             return true;
         }
 
         case NightCatalogStoreRuntime::Phase::SubmitBody: {
-            if (runtime_->file_info.body_bytes == 0) {
-                std::shared_ptr<const NightCatalog> catalog =
-                    NightCatalogFileCodec::decode(
-                        runtime_->header,
-                        sizeof(runtime_->header),
-                        nullptr,
-                        0);
-
-                finish_load(std::move(catalog));
+            if (runtime_->read_offset == runtime_->file_info.body_bytes) {
+                finish_load(runtime_->decoder.take_result());
                 return true;
             }
 
             StorageReadCommand command;
             command.path = runtime_->path;
-            command.offset = NightCatalogFileCodec::HeaderBytes;
-            command.length = runtime_->file_info.body_bytes;
+            command.offset = NightCatalogFileCodec::HeaderBytes + runtime_->read_offset;
+            command.length = std::min<size_t>(16 * 1024,
+                runtime_->file_info.body_bytes - runtime_->read_offset);
+            command.retain_handle = true;
             command.lane = runtime_->read_lane;
             command.generation = status_.generation;
 
@@ -1206,6 +1218,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             }
 
             runtime_->read_ticket = submission.ticket;
+            runtime_->read_length = command.length;
             runtime_->phase = NightCatalogStoreRuntime::Phase::WaitBody;
             return true;
         }
@@ -1222,8 +1235,9 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 if (completion.outcome.disposition !=
                         OperationDisposition::Succeeded ||
                     !completion.prepared.valid() ||
-                    completion.prepared.length !=
-                        runtime_->file_info.body_bytes) {
+                    completion.prepared.length != runtime_->read_length ||
+                    completion.file_size != runtime_->read_file_size ||
+                    completion.modified != runtime_->read_modified) {
                     if (completion.prepared.valid()) {
                         read_port_->release_prepared(completion.prepared);
                     }
@@ -1235,35 +1249,23 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
                 runtime_->prepared = completion.prepared;
             }
 
-            if (!runtime_->body) {
-                runtime_->body = LargeByteBuffer::allocate(
-                    runtime_->file_info.body_bytes);
-            }
-            if (!runtime_->body) {
-                fail("night_catalog_load_body_short");
-                return true;
-            }
-
-            const PreparedByteRead read = read_exact(
-                *read_port_, runtime_->prepared, runtime_->body->data(),
-                runtime_->body->size());
+            const auto read = read_port_->view_prepared(runtime_->prepared);
             if (read.state == PreparedByteReadState::Retry) return false;
 
+            const bool accepted = read.valid() && read.length == runtime_->read_length &&
+                runtime_->decoder.append(read.data, read.length);
             read_port_->release_prepared(runtime_->prepared);
             runtime_->prepared = {};
-            if (read.state != PreparedByteReadState::Data ||
-                read.bytes != runtime_->body->size()) {
-                fail("night_catalog_load_body_short");
+            if (!accepted) {
+                fail("night_catalog_load_decode_failed");
                 return true;
             }
-
-            std::shared_ptr<const NightCatalog> catalog =
-                NightCatalogFileCodec::decode(runtime_->header,
-                                              sizeof(runtime_->header),
-                                              runtime_->body->data(),
-                                              runtime_->body->size());
-
-            finish_load(std::move(catalog));
+            runtime_->read_offset += runtime_->read_length;
+            if (runtime_->read_offset == runtime_->file_info.body_bytes) {
+                finish_load(runtime_->decoder.take_result());
+            } else {
+                runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitBody;
+            }
             return true;
         }
 

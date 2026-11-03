@@ -47,6 +47,25 @@ public:
         size_t body_length);
 };
 
+// Incremental input boundary for the existing table-ordered wire format.
+// Owns the unpublished result; no input pointer survives append().
+class NightCatalogFileDecoder {
+public:
+    NightCatalogFileDecoder() = default;
+    ~NightCatalogFileDecoder();
+    NightCatalogFileDecoder(const NightCatalogFileDecoder &) = delete;
+    NightCatalogFileDecoder &operator=(const NightCatalogFileDecoder &) = delete;
+
+    bool begin(const uint8_t *header, size_t header_length);
+    bool append(const uint8_t *bytes, size_t length);
+    std::shared_ptr<const NightCatalog> take_result();
+    void reset();
+
+private:
+    struct Runtime;
+    Runtime *runtime_ = nullptr;
+};
+
 class NightCatalogFileIndexReader {
 public:
     bool start(std::shared_ptr<const NightCatalog> compact_index);
@@ -74,6 +93,8 @@ private:
 
     // Current record and range-table cursors.
     size_t record_cursor_ = 0;
+    uint32_t next_session_ = 0;
+    uint32_t next_mask_ = 0;
     size_t range_record_cursor_ = 0;
     const NightCatalogRecord *range_record_ = nullptr;
     const NightCatalogTimeRange *ranges_ = nullptr;

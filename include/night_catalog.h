@@ -4,7 +4,9 @@
 #include <stdint.h>
 
 #include <memory>
+#include <vector>
 
+#include "large_allocator.h"
 #include "edf_report_catalog.h"
 #include "report_artifact_key.h"
 #include "report_therapy_settings.h"
@@ -198,13 +200,14 @@ struct NightCatalogRecord {
 
 class NightCatalogBuilder;
 class NightCatalogFileCodec;
+class NightCatalogFileDecoder;
 struct ReportDailyMetrics;
 
 void night_catalog_copy_metrics(const NightCatalogMetrics &source,
                                 NightCatalogMetricSource selected,
                                 ReportDailyMetrics &target);
 
-class NightCatalog {
+class NightCatalog : public std::enable_shared_from_this<NightCatalog> {
 public:
     ~NightCatalog();
 
@@ -241,9 +244,19 @@ public:
     const char *path(const NightCatalogFallbackFile &file) const;
 
 private:
+    struct Block {
+        std::shared_ptr<const NightCatalog> owner;
+        size_t first_record = 0;
+    };
+
     NightCatalog() = default;
+    static std::shared_ptr<NightCatalog> create();
 
     void summarize();
+    bool append_block(std::shared_ptr<const NightCatalog> block);
+    const NightCatalog *record_owner(SleepDayId day) const;
+    template <typename File>
+    const NightCatalog *file_owner(const File &file) const;
 
     bool allocate(size_t record_count,
                   size_t session_count,
@@ -255,6 +268,8 @@ private:
                   size_t fallback_section_count,
                   size_t path_bytes);
 
+    // A root shares immutable month blocks. A leaf owns contiguous tables.
+    std::vector<Block, LargeAllocator<Block>> blocks_;
     uint8_t *storage_ = nullptr;
     size_t storage_bytes_ = 0;
     NightCatalogRecord *records_ = nullptr;
@@ -280,6 +295,7 @@ private:
 
     friend class NightCatalogBuilder;
     friend class NightCatalogFileCodec;
+    friend class NightCatalogFileDecoder;
 };
 
 uint32_t night_catalog_duration_minutes(

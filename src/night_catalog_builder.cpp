@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "checked_size.h"
+#include "calendar_utils.h"
 #include "incremental_sort.h"
 #include "large_allocator.h"
 #include "large_object.h"
@@ -22,6 +23,14 @@ namespace {
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
 constexpr int64_t SUMMARY_SESSION_EDGE_TOLERANCE_MS = 2LL * 60000LL;
+
+int catalog_month(SleepDayId day) {
+    int year = 0;
+    unsigned month = 0;
+    unsigned date = 0;
+    calendar_civil_from_days(day.epoch_days(), year, month, date);
+    return year * 12 + static_cast<int>(month);
+}
 
 enum class SessionOrigin : uint8_t {
     Edf,
@@ -1360,7 +1369,7 @@ struct NightCatalogBuilder::Runtime {
                         "night_catalog_output_count_invalid");
         }
 
-        catalog.reset(new (std::nothrow) NightCatalog());
+        catalog = NightCatalog::create();
         if (!catalog ||
             !catalog->allocate(nights.size(), final_sessions, 0, final_files,
                                final_files, final_signal_layouts, final_fallback_files,
@@ -1599,12 +1608,17 @@ struct NightCatalogBuilder::Runtime {
 };
 
 struct NightCatalogBuilder::IndexRuntime {
-    enum class Phase { Collecting, Sorting, CheckDuplicates, Flattening };
+    enum class Phase { Collecting, Packing, Done };
+    struct Month {
+        int key = 0;
+        std::vector<NightCatalogRecord, LargeAllocator<NightCatalogRecord>> records;
+        std::vector<NightCatalogTimeRange, LargeAllocator<NightCatalogTimeRange>> sessions;
+        std::vector<NightCatalogTimeRange, LargeAllocator<NightCatalogTimeRange>> masks;
+    };
 
-    std::vector<std::shared_ptr<const NightCatalog>,
-                LargeAllocator<std::shared_ptr<const NightCatalog>>> catalogs;
-    IncrementalSort sort;
-    size_t duplicate_cursor = 1;
+    std::vector<Month, LargeAllocator<Month>> months;
+    std::shared_ptr<NightCatalog> catalog;
+    size_t cursor = 0;
     Phase phase = Phase::Collecting;
 };
 
@@ -1618,11 +1632,6 @@ struct NightCatalogBuilder::ProjectionRuntime {
           days(selected), day_count(selected_count), status(result),
           externalize(mode == Projection::Index) {}
 
-    ProjectionRuntime(IndexRuntime &assembly, NightCatalogBuildStatus &result)
-        : index_assembly(&assembly), projection(Projection::Index),
-          replacement(nullptr), days(nullptr), day_count(0), status(result),
-          externalize(true) {}
-
     bool fail(NightCatalogBuildFailure failure) {
         status.failure = failure;
         status.detail = failure == NightCatalogBuildFailure::AllocationFailed
@@ -1630,33 +1639,11 @@ struct NightCatalogBuilder::ProjectionRuntime {
                             : "night_catalog_projection_invalid";
         phase = Phase::Done;
         catalog.reset();
+        result.reset();
         return false;
     }
 
     bool select_record(const NightCatalog *&from, const NightCatalogRecord *&record) {
-        if (index_assembly) {
-            auto &catalogs = index_assembly->catalogs;
-            while (source_catalog_index < catalogs.size()) {
-                const auto *catalog = catalogs[source_catalog_index].get();
-                if (catalog) {
-                    record = catalog->record(source_index);
-                    if (record) {
-                        from = catalog;
-                        ++source_index;
-                        return true;
-                    }
-
-                    if (phase == Phase::Copy) {
-                        catalogs[source_catalog_index].reset();
-                    }
-                }
-
-                ++source_catalog_index;
-                source_index = 0;
-            }
-            return false;
-        }
-
         if (projection == Projection::Night) {
             if (source_index++ > 0) return false;
             from = source;
@@ -1867,19 +1854,55 @@ struct NightCatalogBuilder::ProjectionRuntime {
         const NightCatalog *from = nullptr;
         const NightCatalogRecord *record = nullptr;
         switch (phase) {
-            case Phase::Count:
-                if (select_record(from, record)) {
-                    if (!count_record(*from, *record)) {
-                        fail(NightCatalogBuildFailure::InvariantViolation);
-                    }
-                } else if (phase != Phase::Done) {
-                    source_catalog_index = source_index = 0;
-                    phase = Phase::Allocate;
+            case Phase::Count: {
+                if (pending.record) {
+                    from = pending.owner;
+                    record = pending.record;
+                    pending = {};
+                } else if (!select_record(from, record)) {
+                    if (phase == Phase::Done) break;
+                    exhausted = true;
                 }
-                break;
 
-            case Phase::Allocate:
-                catalog.reset(new (std::nothrow) NightCatalog());
+                if (record && selected_count &&
+                    catalog_month(record->sleep_day) !=
+                        catalog_month(selected[0].record->sleep_day)) {
+                    pending = {from, record};
+                    phase = Phase::Allocate;
+                    break;
+                }
+
+                if (record) {
+                    if (selected_count == 31 || !count_record(*from, *record)) {
+                        return fail(NightCatalogBuildFailure::InvariantViolation);
+                    }
+                    selected[selected_count++] = {
+                        from->record_owner(record->sleep_day), record};
+                }
+                if (exhausted) phase = Phase::Allocate;
+                break;
+            }
+
+            case Phase::Allocate: {
+                if (!result) result = NightCatalog::create();
+                if (!result) return fail(NightCatalogBuildFailure::AllocationFailed);
+
+                const NightCatalog *shared = selected_count ? selected[0].owner : nullptr;
+                bool reusable = projection != Projection::Night && shared &&
+                    shared->size() == selected_count;
+                for (size_t i = 0; reusable && i < selected_count; ++i) {
+                    reusable = selected[i].owner == shared &&
+                        selected[i].record == shared->record(i) &&
+                        (!externalize || selected[i].record->sources_external);
+                }
+                if (reusable) {
+                    if (!result->append_block(shared->shared_from_this())) {
+                        return fail(NightCatalogBuildFailure::AllocationFailed);
+                    }
+                    next_month();
+                    break;
+                }
+                catalog = NightCatalog::create();
                 if (!catalog || !catalog->allocate(
                                     counts.records, counts.sessions,
                                     counts.mask_windows, counts.files, counts.coverage,
@@ -1887,14 +1910,15 @@ struct NightCatalogBuilder::ProjectionRuntime {
                                     counts.fallback_sections, counts.paths)) {
                     fail(NightCatalogBuildFailure::AllocationFailed);
                 } else {
-                    source_catalog_index = source_index = day_index = 0;
                     phase = Phase::Copy;
                 }
                 break;
+            }
 
             case Phase::Copy:
-                if (select_record(from, record)) {
-                    if (!append_record(*from, *record)) {
+                if (next_record < selected_count) {
+                    const auto item = selected[next_record];
+                    if (!append_record(*item.owner, *item.record)) {
                         fail(NightCatalogBuildFailure::InvariantViolation);
                     }
                 } else if (phase != Phase::Done) {
@@ -1919,8 +1943,26 @@ struct NightCatalogBuilder::ProjectionRuntime {
             return fail(NightCatalogBuildFailure::InvariantViolation);
         }
 
-        phase = Phase::Done;
+        catalog->summarize();
+        if (projection == Projection::Night) {
+            result = std::move(catalog);
+            phase = Phase::Done;
+            return true;
+        }
+        if (!result->append_block(std::move(catalog))) {
+            return fail(NightCatalogBuildFailure::AllocationFailed);
+        }
+        next_month();
         return true;
+    }
+
+    void next_month() {
+        counts = {};
+        selected_count = 0;
+        next_record = next_session = next_mask_window = next_file = 0;
+        next_coverage = next_signal_layout = next_fallback_file = 0;
+        next_fallback_section = next_path = 0;
+        phase = exhausted ? Phase::Done : Phase::Count;
     }
 
     struct CatalogCounts {
@@ -1936,7 +1978,6 @@ struct NightCatalogBuilder::ProjectionRuntime {
     };
 
     const NightCatalog *source = nullptr;
-    IndexRuntime *index_assembly = nullptr;
     Projection projection;
     SleepDayId sleep_day;
     const NightCatalog *replacement;
@@ -1945,11 +1986,19 @@ struct NightCatalogBuilder::ProjectionRuntime {
     NightCatalogBuildStatus &status;
     bool externalize;
     Phase phase = Phase::Count;
-    size_t source_catalog_index = 0;
     size_t source_index = 0;
     size_t day_index = 0;
     CatalogCounts counts;
+    struct SelectedRecord {
+        const NightCatalog *owner = nullptr;
+        const NightCatalogRecord *record = nullptr;
+    };
+    SelectedRecord selected[31];
+    SelectedRecord pending;
+    size_t selected_count = 0;
+    bool exhausted = false;
     std::shared_ptr<NightCatalog> catalog;
+    std::shared_ptr<NightCatalog> result;
     size_t next_record = 0;
     size_t next_session = 0;
     size_t next_mask_window = 0;
@@ -2062,7 +2111,7 @@ bool NightCatalogBuilder::fail_index(NightCatalogBuildFailure failure,
     return false;
 }
 
-bool NightCatalogBuilder::append_index(const NightCatalog &night_catalog) {
+bool NightCatalogBuilder::append_index(const NightCatalog &night_catalog) try {
     if (!index_runtime_ ||
         index_runtime_->phase != IndexRuntime::Phase::Collecting) {
         return false;
@@ -2084,31 +2133,31 @@ bool NightCatalogBuilder::append_index(const NightCatalog &night_catalog) {
                           "night_catalog_index_record_invalid");
     }
 
-    NightCatalogBuilder compact_builder;
-    if (!compact_builder.begin_projection(night_catalog, Projection::Index, {},
-                                          nullptr, nullptr, 0)) {
-        const auto failure = compact_builder.status().failure;
-        const char *detail = compact_builder.status().detail;
-        return fail_index(failure, detail);
+    auto &months = index_runtime_->months;
+    const int key = catalog_month(record->sleep_day);
+    auto where = std::lower_bound(months.begin(), months.end(), key,
+        [](const auto &month, int key) { return month.key > key; });
+    if (where == months.end() || where->key != key) {
+        where = months.insert(where, IndexRuntime::Month{});
+        where->key = key;
     }
 
-    while (compact_builder.active()) compact_builder.poll();
-
-    auto compact = compact_builder.take_result();
-    if (!compact) {
-        const auto failure = compact_builder.status().failure;
-        const char *detail = compact_builder.status().detail;
-        return fail_index(failure, detail);
-    }
-
-    try {
-        index_runtime_->catalogs.push_back(std::move(compact));
-    } catch (const std::bad_alloc &) {
-        return fail_index(NightCatalogBuildFailure::AllocationFailed,
-                          "night_catalog_index_alloc_failed");
-    }
-
+    auto copy = *record;
+    copy.session_offset = where->sessions.size();
+    copy.mask_window_offset = where->masks.size();
+    copy.file_offset = copy.fallback_file_offset = 0;
+    copy.file_count = copy.fallback_file_count = 0;
+    copy.sources_external = true;
+    size_t count = 0;
+    const auto *ranges = night_catalog.sessions(*record, count);
+    if (count) where->sessions.insert(where->sessions.end(), ranges, ranges + count);
+    ranges = night_catalog.mask_windows(*record, count);
+    if (count) where->masks.insert(where->masks.end(), ranges, ranges + count);
+    where->records.push_back(copy);
     return true;
+} catch (const std::bad_alloc &) {
+    return fail_index(NightCatalogBuildFailure::AllocationFailed,
+                      "night_catalog_index_alloc_failed");
 }
 
 bool NightCatalogBuilder::finish_index() {
@@ -2117,22 +2166,26 @@ bool NightCatalogBuilder::finish_index() {
         return false;
     }
 
-    index_runtime_->sort.reset();
-    index_runtime_->duplicate_cursor = 1;
-    index_runtime_->phase = IndexRuntime::Phase::Sorting;
+    index_runtime_->catalog = NightCatalog::create();
+    if (!index_runtime_->catalog) {
+        return fail_index(NightCatalogBuildFailure::AllocationFailed,
+                          "night_catalog_index_alloc_failed");
+    }
+    index_runtime_->phase = IndexRuntime::Phase::Packing;
     return true;
 }
 
 bool NightCatalogBuilder::active() const {
     return (runtime_ && runtime_->phase != Runtime::Phase::Done) ||
-           index_runtime_ != nullptr ||
+           (index_runtime_ && index_runtime_->phase != IndexRuntime::Phase::Done) ||
            (projection_ && projection_->phase != ProjectionRuntime::Phase::Done);
 }
 
 std::shared_ptr<const NightCatalog> NightCatalogBuilder::take_result() {
     if (active()) return {};
     auto result = runtime_ ? std::move(runtime_->catalog)
-                          : projection_ ? std::move(projection_->catalog) : nullptr;
+                 : projection_ ? std::move(projection_->result)
+                 : index_runtime_ ? std::move(index_runtime_->catalog) : nullptr;
     if (result) result->summarize();
     return result;
 }
@@ -2140,60 +2193,43 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::take_result() {
 bool NightCatalogBuilder::poll() {
     if (index_runtime_) {
         auto &assembly = *index_runtime_;
-        if (assembly.phase == IndexRuntime::Phase::Collecting) return false;
-
-        if (assembly.phase == IndexRuntime::Phase::Sorting) {
-            const bool sorted = assembly.sort.poll(
-                assembly.catalogs.data(), assembly.catalogs.size(),
-                [](const auto &lhs, const auto &rhs) {
-                    return rhs->record(0)->sleep_day < lhs->record(0)->sleep_day;
-                });
-            if (sorted) {
-                assembly.duplicate_cursor = 1;
-                assembly.phase = IndexRuntime::Phase::CheckDuplicates;
-            }
+        if (assembly.phase != IndexRuntime::Phase::Packing) return false;
+        if (assembly.cursor == assembly.months.size()) {
+            decltype(assembly.months)().swap(assembly.months);
+            assembly.phase = IndexRuntime::Phase::Done;
             return true;
         }
 
-        if (assembly.phase == IndexRuntime::Phase::CheckDuplicates) {
-            const size_t limit = std::min(assembly.duplicate_cursor + 32,
-                                          assembly.catalogs.size());
-            while (assembly.duplicate_cursor < limit) {
-                const auto *previous =
-                    assembly.catalogs[assembly.duplicate_cursor - 1]->record(0);
-                const auto *current =
-                    assembly.catalogs[assembly.duplicate_cursor]->record(0);
-                if (previous->sleep_day == current->sleep_day) {
-                    return fail_index(NightCatalogBuildFailure::InvalidInput,
-                                      "night_catalog_index_duplicate_day");
-                }
-                ++assembly.duplicate_cursor;
+        auto &month = assembly.months[assembly.cursor++];
+        std::sort(month.records.begin(), month.records.end(),
+            [](const auto &a, const auto &b) { return b.sleep_day < a.sleep_day; });
+        for (size_t i = 1; i < month.records.size(); ++i) {
+            if (month.records[i].sleep_day == month.records[i - 1].sleep_day) {
+                return fail_index(NightCatalogBuildFailure::InvalidInput,
+                                  "night_catalog_index_duplicate_day");
             }
-
-            if (assembly.duplicate_cursor >= assembly.catalogs.size()) {
-                projection_ = LargeObject::create<ProjectionRuntime>(
-                    assembly, status_);
-                if (!projection_) {
-                    return fail_index(
-                        NightCatalogBuildFailure::AllocationFailed,
-                        "night_catalog_projection_alloc_failed");
-                }
-                assembly.phase = IndexRuntime::Phase::Flattening;
-            }
-            return true;
         }
+        auto packed = NightCatalog::create();
+        if (!packed || !packed->allocate(month.records.size(), month.sessions.size(),
+                                         month.masks.size(), 0, 0, 0, 0, 0, 0)) {
+            return fail_index(NightCatalogBuildFailure::AllocationFailed,
+                              "night_catalog_index_alloc_failed");
+        }
+        std::copy(month.records.begin(), month.records.end(), packed->records_);
+        std::copy(month.sessions.begin(), month.sessions.end(), packed->sessions_);
+        std::copy(month.masks.begin(), month.masks.end(), packed->mask_windows_);
+        packed->summarize();
+        if (!assembly.catalog->append_block(std::move(packed))) {
+            return fail_index(NightCatalogBuildFailure::AllocationFailed,
+                              "night_catalog_index_alloc_failed");
+        }
+        month = {};
+        return true;
     }
 
     if (!active()) return false;
     if (projection_) {
-        const bool progressed = projection_->poll();
-        if (index_runtime_ &&
-            projection_->phase == ProjectionRuntime::Phase::Done) {
-            LargeObject::destroy(index_runtime_);
-            index_runtime_ = nullptr;
-            projection_->index_assembly = nullptr;
-        }
-        return progressed;
+        return projection_->poll();
     }
 
     Runtime &r = *runtime_;
@@ -2504,6 +2540,14 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
     int64_t last_write_ms) {
     if (!path || !path[0] || replacement.info.legacy_day_conflict) return {};
 
+    if (source.size() > 1 || !source.blocks_.empty()) {
+        const auto night = select_night(source, replacement.info.sleep_day);
+        if (!night) return {};
+        const auto restored = restore_fallback(*night, path, replacement, last_write_ms);
+        return restored ? upsert_night(source, *restored, replacement.info.sleep_day)
+                        : nullptr;
+    }
+
     const size_t path_length = strlen(path);
     if (path_length > UINT16_MAX) return {};
 
@@ -2606,7 +2650,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
         return {};
     }
 
-    std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
+    auto catalog = NightCatalog::create();
     if (!catalog ||
         !catalog->allocate(source.record_count_,
                            source.session_count_,

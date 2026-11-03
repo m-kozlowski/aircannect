@@ -182,7 +182,7 @@ public:
     bool begin_merge(const NightCatalog &catalog, const NightCatalog &replacement,
                      const SleepDayId *days, size_t day_count);
 
-    // Collect unordered single-night indexes; sort and flatten on finish.
+    // Collect unordered compact nights into months; pack each month on finish.
     bool begin_index();
     // Accept exactly one night. Its ownership order is resolved at finish.
     bool append_index(const NightCatalog &night_catalog);

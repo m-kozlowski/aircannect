@@ -162,9 +162,24 @@ NightCatalog::~NightCatalog() {
     Memory::free(storage_);
 }
 
+std::shared_ptr<NightCatalog> NightCatalog::create() try {
+    // Keep construction private while allocating the owner and control block together.
+    struct SharedCatalog : NightCatalog {};
+    return std::allocate_shared<SharedCatalog>(LargeAllocator<SharedCatalog>());
+} catch (const std::bad_alloc &) {
+    return {};
+}
+
 void NightCatalog::summarize() {
     time_conflict_nights_ = 0;
     unresolved_history_nights_ = 0;
+    if (!blocks_.empty()) {
+        for (const auto &block : blocks_) {
+            time_conflict_nights_ += block.owner->time_conflict_nights();
+            unresolved_history_nights_ += block.owner->unresolved_history_nights();
+        }
+        return;
+    }
     for (size_t i = 0; i < size(); ++i) {
         const auto &night = *record(i);
         if (night.source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT) {
@@ -172,6 +187,66 @@ void NightCatalog::summarize() {
         }
         if (night.unresolved_history) ++unresolved_history_nights_;
     }
+}
+
+bool NightCatalog::append_block(std::shared_ptr<const NightCatalog> block) try {
+    if (!block || block->size() == 0) return true;
+
+    blocks_.push_back({block, record_count_});
+    record_count_ += block->record_count_;
+    session_count_ += block->session_count_;
+    mask_window_count_ += block->mask_window_count_;
+    file_count_ += block->file_count_;
+    coverage_count_ += block->coverage_count_;
+    signal_layout_count_ += block->signal_layout_count_;
+    fallback_file_count_ += block->fallback_file_count_;
+    fallback_section_count_ += block->fallback_section_count_;
+    path_bytes_ += block->path_bytes_;
+    storage_bytes_ += block->storage_bytes();
+    time_conflict_nights_ += block->time_conflict_nights();
+    unresolved_history_nights_ += block->unresolved_history_nights();
+    return true;
+} catch (const std::bad_alloc &) {
+    return false;
+}
+
+const NightCatalog *NightCatalog::record_owner(SleepDayId day) const {
+    if (blocks_.empty()) return this;
+
+    size_t low = 0;
+    size_t high = blocks_.size();
+    while (low < high) {
+        const size_t mid = low + (high - low) / 2;
+        const auto &block = *blocks_[mid].owner;
+        if (day < block.record(block.size() - 1)->sleep_day) low = mid + 1;
+        else high = mid;
+    }
+    return low < blocks_.size() ? blocks_[low].owner.get() : nullptr;
+}
+
+template <typename File>
+const NightCatalog *NightCatalog::file_owner(const File &file) const {
+    if (blocks_.empty()) return this;
+
+    const uintptr_t address = reinterpret_cast<uintptr_t>(&file);
+    for (const auto &block : blocks_) {
+        const auto &owner = *block.owner;
+        const File *files;
+        size_t count;
+        if constexpr (std::is_same<File, NightCatalogSourceFile>::value) {
+            files = owner.files_;
+            count = owner.file_count_;
+        } else {
+            files = owner.fallback_files_;
+            count = owner.fallback_file_count_;
+        }
+
+        const uintptr_t first = reinterpret_cast<uintptr_t>(files);
+        if (address >= first && address - first < count * sizeof(file)) {
+            return &owner;
+        }
+    }
+    return nullptr;
 }
 
 bool NightCatalog::allocate(size_t record_count,
@@ -312,10 +387,26 @@ bool NightCatalog::allocate(size_t record_count,
 }
 
 const NightCatalogRecord *NightCatalog::record(size_t index) const {
+    if (!blocks_.empty()) {
+        if (index >= record_count_) return nullptr;
+        size_t low = 0;
+        size_t high = blocks_.size();
+        while (low + 1 < high) {
+            const size_t mid = low + (high - low) / 2;
+            if (blocks_[mid].first_record <= index) low = mid;
+            else high = mid;
+        }
+        const auto &block = blocks_[low];
+        return block.owner->record(index - block.first_record);
+    }
     return index < record_count_ ? &records_[index] : nullptr;
 }
 
 const NightCatalogRecord *NightCatalog::find(SleepDayId sleep_day) const {
+    if (!blocks_.empty()) {
+        const auto *owner = record_owner(sleep_day);
+        return owner ? owner->find(sleep_day) : nullptr;
+    }
     size_t low = 0;
     size_t high = record_count_;
     while (low < high) {
@@ -334,6 +425,11 @@ const NightCatalogRecord *NightCatalog::find(SleepDayId sleep_day) const {
 const NightCatalogTimeRange *NightCatalog::sessions(
     const NightCatalogRecord &record,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = record_owner(record.sleep_day);
+        count = 0;
+        return owner ? owner->sessions(record, count) : nullptr;
+    }
     count = record.session_count;
     if (record.session_offset > session_count_ ||
         count > session_count_ - record.session_offset) {
@@ -346,6 +442,11 @@ const NightCatalogTimeRange *NightCatalog::sessions(
 const NightCatalogTimeRange *NightCatalog::mask_windows(
     const NightCatalogRecord &record,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = record_owner(record.sleep_day);
+        count = 0;
+        return owner ? owner->mask_windows(record, count) : nullptr;
+    }
     count = record.mask_window_count;
     if (record.mask_window_offset > mask_window_count_ ||
         count > mask_window_count_ - record.mask_window_offset) {
@@ -358,6 +459,11 @@ const NightCatalogTimeRange *NightCatalog::mask_windows(
 const NightCatalogSourceFile *NightCatalog::files(
     const NightCatalogRecord &record,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = record_owner(record.sleep_day);
+        count = 0;
+        return owner ? owner->files(record, count) : nullptr;
+    }
     count = record.file_count;
     if (record.file_offset > file_count_ ||
         count > file_count_ - record.file_offset) {
@@ -370,6 +476,11 @@ const NightCatalogSourceFile *NightCatalog::files(
 const NightCatalogSourceCoverage *NightCatalog::coverage(
     const NightCatalogSourceFile &file,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = file_owner(file);
+        count = 0;
+        return owner ? owner->coverage(file, count) : nullptr;
+    }
     count = file.coverage_count;
     if (file.coverage_offset > coverage_count_ ||
         count > coverage_count_ - file.coverage_offset) {
@@ -382,6 +493,11 @@ const NightCatalogSourceCoverage *NightCatalog::coverage(
 const EdfReportSignalLayout *NightCatalog::signal_layouts(
     const NightCatalogSourceFile &file,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = file_owner(file);
+        count = 0;
+        return owner ? owner->signal_layouts(file, count) : nullptr;
+    }
     count = file.signal_layout_count;
     if (file.signal_layout_offset > signal_layout_count_ ||
         count > signal_layout_count_ - file.signal_layout_offset) {
@@ -392,6 +508,10 @@ const EdfReportSignalLayout *NightCatalog::signal_layouts(
 }
 
 const char *NightCatalog::path(const NightCatalogSourceFile &file) const {
+    if (!blocks_.empty()) {
+        const auto *owner = file_owner(file);
+        return owner ? owner->path(file) : nullptr;
+    }
     if (file.path_length == 0 || file.path_offset >= path_bytes_ ||
         file.path_length >= path_bytes_ - file.path_offset) {
         return nullptr;
@@ -402,6 +522,11 @@ const char *NightCatalog::path(const NightCatalogSourceFile &file) const {
 const NightCatalogFallbackFile *NightCatalog::fallback_files(
     const NightCatalogRecord &record,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = record_owner(record.sleep_day);
+        count = 0;
+        return owner ? owner->fallback_files(record, count) : nullptr;
+    }
     count = record.fallback_file_count;
     if (record.fallback_file_offset > fallback_file_count_ ||
         count > fallback_file_count_ - record.fallback_file_offset) {
@@ -416,6 +541,11 @@ const NightCatalogFallbackFile *NightCatalog::fallback_files(
 const NightCatalogFallbackSection *NightCatalog::fallback_sections(
     const NightCatalogFallbackFile &file,
     size_t &count) const {
+    if (!blocks_.empty()) {
+        const auto *owner = file_owner(file);
+        count = 0;
+        return owner ? owner->fallback_sections(file, count) : nullptr;
+    }
     count = file.section_count;
     if (file.section_offset > fallback_section_count_ ||
         count > fallback_section_count_ - file.section_offset) {
@@ -429,6 +559,10 @@ const NightCatalogFallbackSection *NightCatalog::fallback_sections(
 
 const char *NightCatalog::path(
     const NightCatalogFallbackFile &file) const {
+    if (!blocks_.empty()) {
+        const auto *owner = file_owner(file);
+        return owner ? owner->path(file) : nullptr;
+    }
     if (file.path_length == 0 || file.path_offset >= path_bytes_ ||
         file.path_length >= path_bytes_ - file.path_offset) {
         return nullptr;
