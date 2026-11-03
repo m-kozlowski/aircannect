@@ -2677,15 +2677,6 @@
         const notes = [];
         if (body.active_nights) notes.push(body.active_nights + " recording night(s) excluded");
         if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) out of date");
-        if (body.retained_nights) {
-          const dates = (body.nights_daily || []).filter(night => night.retained)
-            .map(night => reportDayLabel(night.id));
-          const listed = dates.slice(0, 3).join(", ");
-          const more = body.retained_nights - Math.min(dates.length, 3);
-          const which = listed ? listed + (more > 0 ? " + " + more + " more" : "")
-            : body.retained_nights + " night(s)";
-          notes.push("Using saved reports for " + which + "; current sources cannot rebuild them");
-        }
         if (body.checkpoint_missing) notes.push(body.checkpoint_missing + " night(s) without saved distributions");
         if (body.layout_blocked) notes.push(body.layout_blocked + " night(s) skipped due to a storage layout conflict");
         AirCANnect.ui.message("reportMsg", notes.join("; ") || "Period loaded", true, !!notes.length);
@@ -4261,19 +4252,17 @@
         }
 
         renderReportSummary();
+        const update = res.update === REPORT_RETAINED_REASON ? "" : res.update;
         AirCANnect.ui.message("reportMsg",
-          res.cached ? "Browser copy; freshness not verified" : res.update
-            ? res.update === "pending"
+          res.cached ? "Browser copy; freshness not verified" : update
+            ? update === "pending"
               ? "Showing saved report; update pending"
-              : res.update === REPORT_RETAINED_REASON
-              ? REPORT_RETAINED_NOTICE
-              : "Showing saved report; update failed: " + res.update
+              : "Showing saved report; update failed: " + update
             : reportResult.active
             ? "Recording - data through " + fmtReportClock(reportResult.end)
             : reportResult.state === "partial"
             ? "Report loaded (incomplete - some data missing)"
-            : "Report loaded", !res.update || res.update === "pending" ||
-              res.update === REPORT_RETAINED_REASON, !!res.update || res.cached);
+            : "Report loaded", !update || update === "pending", !!(update || res.cached));
       } catch (error) {
         if (token !== reportLoadToken) return;
         AirCANnect.ui.message("reportMsg", (reportOffline
@@ -4413,6 +4402,8 @@
         if (active && nightId === selectedNightId &&
             data.error !== "cancelled") {
           const retained = data.error === REPORT_RETAINED_REASON;
+          if (retained && reportResult && reportCurrentNightId === nightId && !data.forced) return;
+
           AirCANnect.ui.message(
             "reportMsg", retained ? REPORT_RETAINED_NOTICE :
               (reportResult ? "Report update failed: " : "") +

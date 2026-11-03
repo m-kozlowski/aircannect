@@ -2323,6 +2323,7 @@ struct ReportTask::Runtime {
     ReportTaskOperationalSnapshot operational(
         const ReportEngineStatus &engine_status, size_t queued_commands) const {
         ReportTaskOperationalSnapshot out;
+        out.preserved_source_nights = catalog_refresh.status().preserved_nights;
         copy_cstr(out.warning, sizeof(out.warning), catalog_refresh.status().warning);
         const auto issues = catalog_store.layout_issues();
         if (issues && !issues->days.empty()) {

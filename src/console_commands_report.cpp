@@ -72,6 +72,10 @@ void print_report_status(Print &out, const ReportTask &task) {
         out.print(" nights=");
         out.print(static_cast<unsigned long>(status.catalog_nights));
     }
+    if (status.preserved_source_nights) {
+        out.print(" preserved_source_nights=");
+        out.print(static_cast<unsigned long>(status.preserved_source_nights));
+    }
     if (status.error[0]) {
         out.print(" error=");
         out.print(status.error);

@@ -2766,14 +2766,13 @@ bool NightCatalogRefreshService::poll() {
 
             runtime_->preserve_days[runtime_->preserve_count++] = previous->sleep_day;
             ++status_.preserved_nights;
-            set_warning(status_, "night_catalog_previous_night_preserved");
 #ifdef ARDUINO
             char day[9] = {};
             char path[AC_STORAGE_PATH_MAX] = {};
             previous->sleep_day.format_yyyymmdd(day, sizeof(day));
             report_fallback_artifact_path(previous->sleep_day, path, sizeof(path));
 
-            Log::logf(CAT_REPORT, LOG_WARN,
+            Log::logf(CAT_REPORT, LOG_DEBUG,
                       "catalog kept previous night=%s unavailable_fallback=%s", day, path);
 #endif
             return true;

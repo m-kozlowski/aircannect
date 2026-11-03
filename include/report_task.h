@@ -86,6 +86,7 @@ struct ReportTaskOperationalSnapshot {
     SleepDayId sleep_day;
     size_t catalog_nights = 0;
     size_t materialized_nights = 0;
+    uint32_t preserved_source_nights = 0;
     uint32_t retry_in_ms = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
     char warning[AC_STORAGE_ERROR_MAX] = {};
