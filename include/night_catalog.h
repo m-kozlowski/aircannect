@@ -213,6 +213,8 @@ public:
 
     size_t size() const { return record_count_; }
     size_t storage_bytes() const { return storage_bytes_; }
+    size_t time_conflict_nights() const { return time_conflict_nights_; }
+    size_t unresolved_history_nights() const { return unresolved_history_nights_; }
 
     const NightCatalogRecord *record(size_t index) const;
     const NightCatalogRecord *find(SleepDayId sleep_day) const;
@@ -240,6 +242,8 @@ public:
 
 private:
     NightCatalog() = default;
+
+    void summarize();
 
     bool allocate(size_t record_count,
                   size_t session_count,
@@ -271,6 +275,8 @@ private:
     size_t fallback_file_count_ = 0;
     size_t fallback_section_count_ = 0;
     size_t path_bytes_ = 0;
+    size_t time_conflict_nights_ = 0;
+    size_t unresolved_history_nights_ = 0;
 
     friend class NightCatalogBuilder;
     friend class NightCatalogFileCodec;

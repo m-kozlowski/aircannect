@@ -2131,9 +2131,10 @@ bool NightCatalogBuilder::active() const {
 
 std::shared_ptr<const NightCatalog> NightCatalogBuilder::take_result() {
     if (active()) return {};
-    if (runtime_) return std::move(runtime_->catalog);
-    if (projection_) return std::move(projection_->catalog);
-    return {};
+    auto result = runtime_ ? std::move(runtime_->catalog)
+                          : projection_ ? std::move(projection_->catalog) : nullptr;
+    if (result) result->summarize();
+    return result;
 }
 
 bool NightCatalogBuilder::poll() {
@@ -2452,6 +2453,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::repair_date(
     }
 
     record.source_revision = SourceRevision(calculate_revision(*repaired, record));
+    repaired->summarize();
     return repaired;
 }
 
@@ -2768,6 +2770,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::restore_fallback(
         next_path != path_bytes) {
         return {};
     }
+    catalog->summarize();
     return catalog;
 }
 

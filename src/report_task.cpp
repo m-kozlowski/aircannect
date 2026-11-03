@@ -2520,10 +2520,9 @@ struct ReportTask::Runtime {
         out.catalog_files_indexed = catalog_status.files_indexed;
         out.catalog_sessions = catalog_status.sessions;
         out.summary_rejected_records = summary_acquisition.status().rejected_records;
-        for (size_t i = 0; catalog && i < catalog->size(); ++i) {
-            const auto &night = *catalog->record(i);
-            if (night.source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT) ++out.time_conflict_nights;
-            if (night.unresolved_history) ++out.unresolved_history_nights;
+        if (catalog) {
+            out.time_conflict_nights = catalog->time_conflict_nights();
+            out.unresolved_history_nights = catalog->unresolved_history_nights();
         }
         copy_cstr(out.catalog_error, sizeof(out.catalog_error),
                   pending_refresh.valid() && catalog_refresh_error[0]

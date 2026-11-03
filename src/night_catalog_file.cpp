@@ -1300,6 +1300,7 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
         decoded_layout.path_bytes != info.path_bytes) {
         return {};
     }
+    catalog->summarize();
     return catalog;
 }
 

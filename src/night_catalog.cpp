@@ -162,6 +162,18 @@ NightCatalog::~NightCatalog() {
     Memory::free(storage_);
 }
 
+void NightCatalog::summarize() {
+    time_conflict_nights_ = 0;
+    unresolved_history_nights_ = 0;
+    for (size_t i = 0; i < size(); ++i) {
+        const auto &night = *record(i);
+        if (night.source_flags & NIGHT_CATALOG_SOURCE_TIME_CONFLICT) {
+            ++time_conflict_nights_;
+        }
+        if (night.unresolved_history) ++unresolved_history_nights_;
+    }
+}
+
 bool NightCatalog::allocate(size_t record_count,
                             size_t session_count,
                             size_t mask_window_count,
