@@ -147,14 +147,14 @@ void print_report_stats(Print &out, const ReportTask &task) {
     if (archive.from_ms) format_utc_iso8601_ms(archive.from_ms, from, sizeof(from));
 
     out.printf("[Summary archive] active=%s reason=%s from=%s segment=%lu sequence=%llu records=%u "
-               "changed=%u removed=%u dropped=%lu recovery=%s error=%s\n",
+               "new=%u changed=%u dropped=%lu recovery=%s error=%s\n",
                archive.active ? "yes" : "no",
                summary_fetch_reason_name(archive.reason), from,
                static_cast<unsigned long>(archive.segment),
                static_cast<unsigned long long>(archive.sequence),
                static_cast<unsigned>(archive.records),
+               static_cast<unsigned>(archive.new_records),
                static_cast<unsigned>(archive.changed),
-               static_cast<unsigned>(archive.removed),
                static_cast<unsigned long>(status.summary_archive_drops),
                archive.recovery_reason[0] ? archive.recovery_reason : "--",
                archive.error[0] ? archive.error : "--");

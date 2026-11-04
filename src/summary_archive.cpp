@@ -130,7 +130,8 @@ struct SummaryArchive::Impl {
     uint32_t segment = 0;
     char recovery_reason[AC_STORAGE_ERROR_MAX] = {};
 
-    DayMap mapping;
+    DayMap known_days;
+    // Current response during replay; pending response until its head commits.
     DayMap next;
     BlobMap blobs;
     BlobMap added;
@@ -188,7 +189,7 @@ struct SummaryArchive::Impl {
         observation = {};
         input.clear();
         output.reset();
-        mapping.clear();
+        known_days.clear();
         next.clear();
         blobs.clear();
         added.clear();
@@ -199,7 +200,8 @@ struct SummaryArchive::Impl {
 
         cancel();
         input.clear();
-        mapping.clear();
+        known_days.clear();
+        next.clear();
         blobs.clear();
         sequence = end = cursor = replay_sequence = 0;
         loaded = false;
@@ -269,13 +271,14 @@ struct SummaryArchive::Impl {
         }
 
         observation = std::move(value);
+        const size_t records = loaded ? status.records : 0;
         status = {};
         status.active = true;
         status.reason = observation.reason;
         status.from_ms = observation.from_ms;
         status.sequence = sequence;
         status.committed_bytes = end;
-        status.records = mapping.size();
+        status.records = records;
         status.segment = segment;
         copy_cstr(status.recovery_reason, sizeof(status.recovery_reason), recovery_reason);
         if (++generation == 0) ++generation;
@@ -421,8 +424,15 @@ struct SummaryArchive::Impl {
         if (decoded ||
             doc["device"].as<std::string>() != serial ||
             doc["base"].as<uint64_t>() != replay_sequence ||
-            !doc["new"].is<JsonArray>() || !doc["put"].is<JsonArray>() ||
-            !doc["remove"].is<JsonArray>()) return continue_segment("summary_archive_metadata_invalid");
+            !doc["new"].is<JsonArray>() || !doc["put"].is<JsonArray>())
+            return continue_segment("summary_archive_metadata_invalid");
+
+        const unsigned format = doc["format"].isNull() ? 1 : doc["format"].as<unsigned>();
+        if ((!doc["format"].isNull() && !doc["format"].is<unsigned>()) ||
+            (format != 1 && format != 2)) return fail("summary_archive_format_unsupported");
+
+        if (!(format == 1 ? doc["remove"] : doc["days"]).is<JsonArray>())
+            return continue_segment("summary_archive_metadata_invalid");
 
         for (JsonArrayConst item : doc["new"].as<JsonArrayConst>()) {
             Digest key;
@@ -433,18 +443,55 @@ struct SummaryArchive::Impl {
                 return continue_segment("summary_archive_record_invalid");
             blobs.emplace(key, Blob{cursor + HEADER + offset, static_cast<uint32_t>(size)});
         }
-        for (JsonVariantConst day : doc["remove"].as<JsonArrayConst>()) {
-            if (!day.is<int32_t>()) return continue_segment("summary_archive_day_invalid");
-            mapping.erase(day.as<int32_t>());
+        if (format == 1) {
+            for (JsonVariantConst day : doc["remove"].as<JsonArrayConst>()) {
+                if (!day.is<int32_t>()) return continue_segment("summary_archive_day_invalid");
+                next.erase(day.as<int32_t>());
+            }
+        } else {
+            next.clear();
         }
+
         for (JsonArrayConst item : doc["put"].as<JsonArrayConst>()) {
             Digest key;
             if (item.size() != 2 || !item[0].is<int32_t>() || !decode_digest(item[1], key) ||
                 blobs.find(key) == blobs.end()) return continue_segment("summary_archive_reference_invalid");
-            mapping[item[0].as<int32_t>()] = key;
+
+            const int32_t day = item[0].as<int32_t>();
+            if (day >= 0) known_days[day] = key;
+            if (format == 1 || day < 0) next[day] = key;
         }
+
+        if (format == 2) {
+            int64_t previous_end = -1;
+            for (JsonArrayConst span : doc["days"].as<JsonArrayConst>()) {
+                if (span.size() != 2 || !span[0].is<int32_t>() || !span[1].is<int32_t>())
+                    return continue_segment("summary_archive_day_invalid");
+
+                int64_t day = span[0].as<int32_t>();
+                const int32_t last = span[1].as<int32_t>();
+                if (day <= previous_end || day > last)
+                    return continue_segment("summary_archive_day_invalid");
+
+                // Walk stored keys, not an unchecked integer range from disk.
+                auto known = known_days.lower_bound(static_cast<int32_t>(day));
+                for (; day <= last && known != known_days.end(); ++day, ++known) {
+                    if (known->first != day) break;
+                    next.emplace(*known);
+                }
+                if (day <= last) return continue_segment("summary_archive_reference_invalid");
+                previous_end = last;
+            }
+
+            for (JsonArrayConst item : doc["put"].as<JsonArrayConst>()) {
+                const int32_t day = item[0].as<int32_t>();
+                if (day >= 0 && !next.count(day))
+                    return continue_segment("summary_archive_reference_invalid");
+            }
+        }
+
         Digest expected;
-        if (!decode_digest(doc["mapping"], expected) || mapping_digest(mapping) != expected)
+        if (!decode_digest(doc["mapping"], expected) || mapping_digest(next) != expected)
             return continue_segment("summary_archive_mapping_invalid");
 
         cursor += frame_size;
@@ -456,7 +503,7 @@ struct SummaryArchive::Impl {
             loaded = true;
             status.sequence = sequence;
             status.committed_bytes = end;
-            status.records = mapping.size();
+            status.records = next.size();
             phase = Phase::Prepare;
         } else {
             if (end - cursor < HEADER) return continue_segment("summary_archive_truncated_header");
@@ -468,6 +515,7 @@ struct SummaryArchive::Impl {
     bool prepare() {
         LargeJsonAllocator allocator;
         JsonDocument doc(&allocator);
+        doc["format"] = 2;
         doc["base"] = sequence;
         doc["segment"] = segment;
         if (segment && !sequence) doc["recovery_reason"] = recovery_reason;
@@ -484,7 +532,7 @@ struct SummaryArchive::Impl {
         encode_clock(doc["finished"].to<JsonObject>(), observation.finished);
         auto additions = doc["new"].to<JsonArray>();
         auto changes = doc["put"].to<JsonArray>();
-        auto removals = doc["remove"].to<JsonArray>();
+        auto days = doc["days"].to<JsonArray>();
         ReportSpoolBuffer raw;
         next.clear();
         added.clear();
@@ -514,11 +562,12 @@ struct SummaryArchive::Impl {
                 item.add(length);
             }
 
-            const auto previous = mapping.find(day);
-            if (previous == mapping.end() || previous->second != key) {
+            const auto previous = known_days.find(day);
+            if (day < 0 || previous == known_days.end() || previous->second != key) {
                 auto item = changes.add<JsonArray>();
                 item.add(day);
                 item.add(hex(key));
+                if (day >= 0) ++status.changed;
             }
         };
 
@@ -533,10 +582,21 @@ struct SummaryArchive::Impl {
             add_record(payload->data(), payload->size());
         }
 
-        for (const auto &entry : mapping) if (!next.count(entry.first)) removals.add(entry.first);
+        JsonArray span;
+        int64_t previous_day = -2;
+        for (auto day = next.lower_bound(0); day != next.end(); ++day) {
+            if (day->first != previous_day + 1) {
+                span = days.add<JsonArray>();
+                span.add(day->first);
+                span.add(day->first);
+            } else {
+                span[1] = day->first;
+            }
+            previous_day = day->first;
+        }
+
         doc["mapping"] = hex(mapping_digest(next));
-        status.changed = changes.size();
-        status.removed = removals.size();
+        status.new_records = added.size();
         const size_t json_size = measureJson(doc);
         const size_t total = HEADER + raw.size() + json_size;
         if (doc.overflowed() || total > MAX_FRAME || end > UINT32_MAX - total || sequence == UINT64_MAX)
@@ -620,15 +680,17 @@ struct SummaryArchive::Impl {
 
         end += output->size();
         ++sequence;
-        mapping.swap(next);
+        for (auto day = next.lower_bound(0); day != next.end(); ++day)
+            known_days[day->first] = day->second;
+
         blobs.merge(added);
-        next.clear();
         added.clear();
         output.reset();
         status.active = false;
         status.sequence = sequence;
         status.committed_bytes = end;
-        status.records = mapping.size();
+        status.records = next.size();
+        next.clear();
         phase = Phase::Idle;
         return true;
     }

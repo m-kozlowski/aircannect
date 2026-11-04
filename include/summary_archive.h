@@ -54,8 +54,8 @@ struct SummaryArchiveStatus {
     uint64_t sequence = 0;
     uint64_t committed_bytes = 0;
     size_t records = 0;
+    size_t new_records = 0;
     size_t changed = 0;
-    size_t removed = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
     char recovery_reason[AC_STORAGE_ERROR_MAX] = {};
 };

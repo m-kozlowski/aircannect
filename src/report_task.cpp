@@ -3544,13 +3544,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
             Log::logf(CAT_REPORT, archive.error[0] ? LOG_WARN : LOG_INFO,
                       "Summary archive reason=%s from=%s segment=%lu sequence=%llu records=%u "
-                      "changed=%u removed=%u recovery=%s error=%s",
+                      "new=%u changed=%u recovery=%s error=%s",
                       summary_fetch_reason_name(archive.reason), from,
                       static_cast<unsigned long>(archive.segment),
                       static_cast<unsigned long long>(archive.sequence),
                       static_cast<unsigned>(archive.records),
+                      static_cast<unsigned>(archive.new_records),
                       static_cast<unsigned>(archive.changed),
-                      static_cast<unsigned>(archive.removed),
                       archive.recovery_reason[0] ? archive.recovery_reason : "--",
                       archive.error[0] ? archive.error : "--");
         }
