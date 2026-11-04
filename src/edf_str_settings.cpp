@@ -136,6 +136,7 @@ static constexpr int16_t STR_SENSITIVITY_CODES[] = {1, 2, 3, 4, 5, 6, 7};
 static constexpr int16_t STR_BOOL_CODES[] = {1, 2};
 static constexpr int16_t STR_THREE_OPTION_CODES[] = {1, 2, 3};
 static constexpr int16_t STR_SPONT_RESP_RATE_ENABLE_CODES[] = {1, 3};
+static constexpr int16_t STR_MASK_CODES[] = {2, 3, 4, 5};
 static constexpr int16_t STR_TUBE_TYPE_CODES[] = {3, 4, 1};
 
 // AS11/ResScan STR enum export maps. Labels resolve through the setting option
@@ -210,6 +211,9 @@ static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_ABF", STR_BOOL_CODES,
      sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
      EdfStrNumericInput::OptionIndex},
+    {"_MSK", STR_MASK_CODES,
+     sizeof(STR_MASK_CODES) / sizeof(STR_MASK_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
     {"_TBT", STR_TUBE_TYPE_CODES,
      sizeof(STR_TUBE_TYPE_CODES) / sizeof(STR_TUBE_TYPE_CODES[0]),
      EdfStrNumericInput::OptionIndex},
@@ -275,25 +279,6 @@ bool integer_from_json_value(JsonVariantConst value, int16_t &out) {
 
 bool text_equals(const char *a, const char *b) {
     return a && b && strcmp(a, b) == 0;
-}
-
-bool str_text_digital_from_json_value(JsonVariantConst value,
-                                      const char *rpc_name,
-                                      int16_t &digital) {
-    if (!text_equals(rpc_name, "_MSK") || !value.is<const char *>()) {
-        return false;
-    }
-
-    const char *text = value.as<const char *>();
-    if (text_equals(text, "Pillows")) {
-        digital = 2;
-        return true;
-    }
-    return false;
-}
-
-bool str_text_digital_map_is_exclusive(const char *rpc_name) {
-    return text_equals(rpc_name, "_MSK");
 }
 
 bool fallback_option_index_from_text(const char *text, int16_t &index) {
@@ -686,23 +671,10 @@ bool edf_str_apply_settings_response(RpcPayloadView payload,
             continue;
         }
 
-        int16_t digital = 0;
-        if (str_text_digital_from_json_value(value, rpc_name, digital)) {
-            if (session.set_signal_digital(i, digital)) {
-                result.values++;
-            } else {
-                result.unmapped++;
-            }
-            continue;
-        }
-        if (str_text_digital_map_is_exclusive(rpc_name)) {
-            result.unmapped++;
-            continue;
-        }
-
         const EdfStrDigitalRemap *remap =
             str_digital_remap_for_rpc_name(rpc_name);
         if (remap) {
+            int16_t digital = 0;
             if (str_digital_from_json_value(value, rpc_name, *remap, digital) &&
                 session.set_signal_digital(i, digital)) {
                 result.values++;
@@ -772,10 +744,6 @@ bool edf_str_apply_airmini_settings_profile(
             int16_t digital = 0;
             applied = str_digital_from_json_value(value, rpc_name, *remap,
                                                   digital) &&
-                      session.set_signal_digital(i, digital);
-        } else if (str_text_digital_map_is_exclusive(rpc_name)) {
-            int16_t digital = 0;
-            applied = str_text_digital_from_json_value(value, rpc_name, digital) &&
                       session.set_signal_digital(i, digital);
         } else {
             float physical = 0;
