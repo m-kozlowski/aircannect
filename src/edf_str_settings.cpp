@@ -107,16 +107,10 @@ bool physical_from_json_value(JsonVariantConst value,
     return false;
 }
 
-enum class EdfStrNumericInput : uint8_t {
-    OptionIndex,
-    DigitalCode,
-};
-
 struct EdfStrDigitalRemap {
     const char *rpc_name = nullptr;
     const int16_t *codes = nullptr;
     size_t code_count = 0;
-    EdfStrNumericInput numeric_input = EdfStrNumericInput::OptionIndex;
 };
 
 static constexpr int16_t STR_MODE_CODES[] = {
@@ -136,96 +130,70 @@ static constexpr int16_t STR_SENSITIVITY_CODES[] = {1, 2, 3, 4, 5, 6, 7};
 static constexpr int16_t STR_BOOL_CODES[] = {1, 2};
 static constexpr int16_t STR_THREE_OPTION_CODES[] = {1, 2, 3};
 static constexpr int16_t STR_SPONT_RESP_RATE_ENABLE_CODES[] = {1, 3};
+static constexpr int16_t STR_PATIENT_VIEW_CODES[] = {2, 1};
 static constexpr int16_t STR_MASK_CODES[] = {2, 3, 4, 5};
-static constexpr int16_t STR_TUBE_TYPE_CODES[] = {3, 4, 1};
+static constexpr int16_t STR_TUBE_TYPE_CODES[] = {3, 4, 5};
 
-// AS11/ResScan STR enum export maps. Labels resolve through the setting option
-// table; numeric DigitalCode values are already STR-native. Some tags are
-// proven by firmware maps, others by native EDF comparison for the current AS11
-// setting strings.
+// AS11 APPL maps take raw enum indexes. RPC symbols resolve through the
+// setting catalog before mapping; numeric input has the same raw-index domain.
 static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_MOP", STR_MODE_CODES,
-     sizeof(STR_MODE_CODES) / sizeof(STR_MODE_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_MODE_CODES) / sizeof(STR_MODE_CODES[0])},
     {"_XE6", STR_SENSITIVITY_CODES,
-     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0])},
     {"_XE7", STR_SENSITIVITY_CODES,
-     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0])},
     {"_Z11", STR_SENSITIVITY_CODES,
-     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0])},
     {"_Z12", STR_SENSITIVITY_CODES,
-     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0])},
     {"_ZU1", STR_SENSITIVITY_CODES,
-     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0])},
     {"_XAB", STR_SENSITIVITY_CODES,
-     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0])},
     {"_AFC", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_ZZ4", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_ZZ9", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_Z16", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_XAM", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_XB6", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_XA9", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_XB9", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_ZZ5", STR_SPONT_RESP_RATE_ENABLE_CODES,
      sizeof(STR_SPONT_RESP_RATE_ENABLE_CODES) /
-         sizeof(STR_SPONT_RESP_RATE_ENABLE_CODES[0]),
-     EdfStrNumericInput::DigitalCode},
+         sizeof(STR_SPONT_RESP_RATE_ENABLE_CODES[0])},
     {"_RMA", STR_THREE_OPTION_CODES,
-     sizeof(STR_THREE_OPTION_CODES) / sizeof(STR_THREE_OPTION_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_THREE_OPTION_CODES) / sizeof(STR_THREE_OPTION_CODES[0])},
     {"_EPA", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_EPX", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_EPT", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_SST", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
+    {"_ACC", STR_PATIENT_VIEW_CODES,
+     sizeof(STR_PATIENT_VIEW_CODES) / sizeof(STR_PATIENT_VIEW_CODES[0])},
     {"_ABF", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_MSK", STR_MASK_CODES,
-     sizeof(STR_MASK_CODES) / sizeof(STR_MASK_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_MASK_CODES) / sizeof(STR_MASK_CODES[0])},
     {"_TBT", STR_TUBE_TYPE_CODES,
-     sizeof(STR_TUBE_TYPE_CODES) / sizeof(STR_TUBE_TYPE_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_TUBE_TYPE_CODES) / sizeof(STR_TUBE_TYPE_CODES[0])},
     {"_CCO", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_HMX", STR_BOOL_CODES,
-     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0])},
     {"_HTX", STR_THREE_OPTION_CODES,
-     sizeof(STR_THREE_OPTION_CODES) / sizeof(STR_THREE_OPTION_CODES[0]),
-     EdfStrNumericInput::OptionIndex},
+     sizeof(STR_THREE_OPTION_CODES) / sizeof(STR_THREE_OPTION_CODES[0])},
 };
 
 // Mini exports the non-AS11 STR convention, not AS11's one-based enums.
@@ -294,23 +262,9 @@ bool fallback_option_index_from_text(const char *text, int16_t &index) {
     return false;
 }
 
-bool str_option_index_override_from_text(const char *rpc_name,
-                                         const char *text,
-                                         int16_t &index) {
-    if (!text_equals(rpc_name, "_ABF")) return false;
-
-    // The live setting catalog follows the firmware option order for ABF
-    // (Yes, No), while native STR exports use the common boolean digital order
-    // (No, Yes) before remapping to EDF codes.
-    return fallback_option_index_from_text(text, index);
-}
-
 bool option_index_from_text(const char *text,
                             const char *rpc_name,
                             int16_t &index) {
-    if (str_option_index_override_from_text(rpc_name, text, index)) {
-        return true;
-    }
     if (as11_setting_option_index_for_rpc_name(rpc_name, text, index)) {
         return true;
     }
@@ -355,14 +309,6 @@ bool digital_from_option_index(const EdfStrDigitalRemap &remap,
     return true;
 }
 
-bool digital_code_is_allowed(const EdfStrDigitalRemap &remap,
-                             int16_t code) {
-    for (size_t i = 0; i < remap.code_count; ++i) {
-        if (remap.codes[i] == code) return true;
-    }
-    return false;
-}
-
 bool str_digital_from_json_value(JsonVariantConst value,
                                  const char *rpc_name,
                                  const EdfStrDigitalRemap &remap,
@@ -375,11 +321,6 @@ bool str_digital_from_json_value(JsonVariantConst value,
 
     int16_t numeric_value = 0;
     if (integer_from_json_value(value, numeric_value)) {
-        if (remap.numeric_input == EdfStrNumericInput::DigitalCode) {
-            if (!digital_code_is_allowed(remap, numeric_value)) return false;
-            digital_value = numeric_value;
-            return true;
-        }
         return digital_from_option_index(remap, numeric_value, digital_value);
     }
 
@@ -387,11 +328,6 @@ bool str_digital_from_json_value(JsonVariantConst value,
 
     const char *text = value.as<const char *>();
     if (parse_integer_text(text, numeric_value)) {
-        if (remap.numeric_input == EdfStrNumericInput::DigitalCode) {
-            if (!digital_code_is_allowed(remap, numeric_value)) return false;
-            digital_value = numeric_value;
-            return true;
-        }
         return digital_from_option_index(remap, numeric_value, digital_value);
     }
 

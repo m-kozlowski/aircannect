@@ -41,10 +41,6 @@ const char *const TUBE_TYPE_WIRE_OPTIONS[] = {
     "15mmNonHeated", "19mmNonHeated", "3mNonHeated",
 };
 
-const char *const YES_NO_WIRE_ORDER_OPTIONS[] = {
-    "Yes", "No",
-};
-
 const char *const AUTO_MANUAL_OPTIONS[] = {
     "Auto", "Manual",
 };
@@ -556,7 +552,7 @@ const As11SettingDef SETTINGS[] = {
     feature_setting(
         "ABF", "CircuitFeature", "AntiBacterialFilter",
         "B/V Filter", "Circuit", "circuit", 0x07FFu,
-        enum_value(YES_NO_WIRE_ORDER_OPTIONS)),
+        enum_value(NO_YES_WIRE_ORDER_OPTIONS)),
     feature_setting(
         "CCO", "ClimateFeature", "ClimateControl",
         "Climate Control", "Comfort", "climate", 0x07FFu,
