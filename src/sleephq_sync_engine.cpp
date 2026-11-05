@@ -526,12 +526,12 @@ ExportStep SleepHqSyncEngine::step_load_inventory_locked() {
     }
     if (refreshing_inventory_) {
         refreshing_inventory_ = false;
-        if (replan_after_import_ && !followup_active_) {
+        if (replan_after_import_ || followup_active_) {
             if (!begin_export_planner_locked(error, sizeof(error))) {
                 fail_locked(error[0] ? error : "planner_failed");
                 return ExportStep::Idle;
             }
-            replan_after_import_ = false;
+            if (!followup_active_) replan_after_import_ = false;
         }
         phase_ = WorkPhase::NextFile;
         return ExportStep::Working;
@@ -1421,6 +1421,18 @@ bool SleepHqSyncEngine::defer_current_file_locked() {
 }
 
 bool SleepHqSyncEngine::next_deferred_file_locked() {
+    StorageExportPlannerItem item;
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const StorageExportPlannerResult metadata =
+        export_planner_.next_sleep_hq_root_file(item, error, sizeof(error));
+    if (metadata == StorageExportPlannerResult::Item) {
+        return plan_file_locked(item);
+    }
+    if (metadata == StorageExportPlannerResult::Error) {
+        fail_locked(error[0] ? error : "planner_failed");
+        return false;
+    }
+
     if (deferred_file_index_ == deferred_files_.size()) {
         // All newer versions are now journaled in their own import.
         decltype(deferred_files_)().swap(deferred_files_);
@@ -1431,6 +1443,17 @@ bool SleepHqSyncEngine::next_deferred_file_locked() {
     }
 
     const auto &file = deferred_files_[deferred_file_index_++];
+    status_.files_seen++;
+    status_.updated_ms = nonzero_millis(millis());
+
+    // The planner may have already supplied this root file from fresh inventory.
+    // A further change is handled by final validation, never a second version
+    // of the same path in this import.
+    if (find_staged_locked(file.path)) {
+        status_.files_skipped++;
+        return true;
+    }
+
     current_file_.configure(*stream_port_, file.path, file.sleep_path,
                             file.name, file.state_path, file.size, file.mtime,
                             file.state_write_mode, false);

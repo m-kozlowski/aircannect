@@ -64,6 +64,12 @@ public:
                                     char *error_out,
                                     size_t error_out_size);
 
+    // Root metadata shared by normal day batches and recovery follow-ups.
+    StorageExportPlannerResult next_sleep_hq_root_file(
+        StorageExportPlannerItem &out,
+        char *error_out,
+        size_t error_out_size);
+
     bool pending_datalog_day_inventory(char *day_out,
                                        size_t day_out_size) const;
     bool provide_datalog_day_inventory(

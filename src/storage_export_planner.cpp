@@ -449,6 +449,35 @@ StorageExportPlanner::select_next_datalog_day(char *error_out,
     return DatalogDaySelection::Done;
 }
 
+StorageExportPlannerResult StorageExportPlanner::next_sleep_hq_root_file(
+    StorageExportPlannerItem &out,
+    char *error_out,
+    size_t error_out_size) {
+    if (!started_ || !catalog_) {
+        set_error(error_out, error_out_size, "planner_not_started");
+        return StorageExportPlannerResult::Error;
+    }
+    if (error_out && error_out_size != 0) error_out[0] = '\0';
+
+    const size_t metadata_count =
+        sizeof(SLEEPHQ_ROOT_METADATA_FILES) /
+        sizeof(SLEEPHQ_ROOT_METADATA_FILES[0]);
+    while (day_metadata_index_ < metadata_count) {
+        const char *path = SLEEPHQ_ROOT_METADATA_FILES[day_metadata_index_++];
+        StorageExportInventoryEntryView entry;
+        if (!catalog_->find_file(path, entry)) continue;
+
+        if (build_file_item(entry, day_name_, true,
+                            out, error_out, error_out_size)) {
+            return StorageExportPlannerResult::Item;
+        }
+        if (error_out && error_out[0]) {
+            return StorageExportPlannerResult::Error;
+        }
+    }
+    return StorageExportPlannerResult::Done;
+}
+
 StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
     StorageExportPlannerItem &out,
     char *error_out,
@@ -482,28 +511,12 @@ StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
                 day_name_, error_out, error_out_size);
         }
 
-        const size_t metadata_count =
-            sizeof(SLEEPHQ_ROOT_METADATA_FILES) /
-            sizeof(SLEEPHQ_ROOT_METADATA_FILES[0]);
-        while (day_metadata_index_ < metadata_count && budget > 0) {
-            const char *path =
-                SLEEPHQ_ROOT_METADATA_FILES[day_metadata_index_++];
-            budget--;
-
-            StorageExportInventoryEntryView entry;
-            if (!catalog_->find_file(path, entry)) continue;
-            if (build_file_item(entry,
-                                day_name_,
-                                true,
-                                out,
-                                error_out,
-                                error_out_size)) {
-                return StorageExportPlannerResult::Item;
-            }
-            if (error_out && error_out[0]) {
-                return StorageExportPlannerResult::Error;
-            }
+        const StorageExportPlannerResult metadata =
+            next_sleep_hq_root_file(out, error_out, error_out_size);
+        if (metadata != StorageExportPlannerResult::Done) {
+            return metadata;
         }
+        budget--;
 
         while (day_source_index_ < day_inventory_->source_size() &&
                budget > 0) {
