@@ -34,6 +34,8 @@ struct StorageReadCommand {
     uint32_t generation = 0;
     // Advisory reuse between this producer's range reads, until release_handle.
     bool retain_handle = false;
+    // May omit mtime only when this range contains the entire file.
+    bool whole_file_size_only = false;
 
     bool valid() const {
         if (path.empty() || path.front() != '/' || length == 0 ||

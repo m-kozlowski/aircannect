@@ -40,7 +40,8 @@ OperationAdmission StorageBoundedFileLoader::start(
     const char *path,
     size_t maximum_size,
     uint32_t generation,
-    StorageReadLane lane) {
+    StorageReadLane lane,
+    bool whole_file_size_only) {
     if (status_.state != StorageBoundedFileLoadState::Idle) {
         return OperationAdmission::Busy;
     }
@@ -53,6 +54,7 @@ OperationAdmission StorageBoundedFileLoader::start(
 
     generation_ = generation;
     maximum_size_ = maximum_size;
+    whole_file_size_only_ = whole_file_size_only;
     copy_cstr(path_, sizeof(path_), path);
     status_ = {};
     status_.state = StorageBoundedFileLoadState::Submitting;
@@ -69,6 +71,7 @@ bool StorageBoundedFileLoader::submit() {
     command.lane = status_.lane;
     command.generation = generation_;
     command.retain_handle = true;
+    command.whole_file_size_only = whole_file_size_only_ && copied_ == 0;
 
     const OperationSubmission submission = read_port_->request_read(command);
     if (submission.admission == OperationAdmission::Busy) return false;
@@ -238,6 +241,7 @@ void StorageBoundedFileLoader::clear_operation() {
     completed_.reset();
     generation_ = 0;
     maximum_size_ = 0;
+    whole_file_size_only_ = false;
     copied_ = 0;
     prepared_copied_ = 0;
     path_[0] = '\0';

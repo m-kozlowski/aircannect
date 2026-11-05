@@ -146,6 +146,7 @@ struct ReadJob {
     bool cancel_requested = false;
     bool abandon_requested = false;
     bool retain_handle = false;
+    bool whole_file_size_only = false;
     OperationTicket ticket;
     StorageReadMode mode = StorageReadMode::Range;
     StorageReadLane lane = StorageReadLane::Report;
@@ -232,7 +233,6 @@ PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
 ReadCompletionSlot read_completions[AC_STORAGE_PREPARED_READ_CAPACITY];
 EdfStrCompletionSlot edf_str_completion;
 StorageReadFile active_read;
-File &active_read_file = active_read.file;
 size_t active_read_index = SIZE_MAX;
 uint64_t &active_read_position = active_read.position;
 std::atomic<bool> read_release_requested{false};
@@ -893,6 +893,8 @@ OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
     free_job->tail_lines = command.tail_lines;
     free_job->retain_handle = command.retain_handle &&
         command.mode == StorageReadMode::Range;
+    free_job->whole_file_size_only = command.whole_file_size_only &&
+        command.mode == StorageReadMode::Range && command.offset == 0;
     copy_cstr(free_job->path, sizeof(free_job->path), command.path.c_str());
     read_job_count++;
     unlock_queue();
@@ -2198,7 +2200,8 @@ bool open_read_job(size_t index, const char *&error) {
     if (active_read_index != index) {
         active_read_index = SIZE_MAX;
         errno = 0;
-        if (!active_read.open(job.path, job.ticket.generation)) {
+        if (!active_read.open(job.path, job.ticket.generation,
+                              job.whole_file_size_only ? job.requested_length : 0)) {
             const bool missing = errno == ENOENT;
             error = missing ? "read_not_found" : "read_open_failed";
             return false;
@@ -2261,7 +2264,7 @@ bool open_read_job(size_t index, const char *&error) {
     const uint64_t position = job.offset + job.bytes_read;
     if (position > UINT32_MAX ||
         (position != active_read_position &&
-         !active_read_file.seek(static_cast<uint32_t>(position)))) {
+         !active_read.seek(static_cast<uint32_t>(position)))) {
         error = "read_seek_failed";
         return false;
     }
@@ -2309,13 +2312,13 @@ bool scan_tail_step(ReadJob &job, const char *&error) {
     const size_t block_start = job.tail_scan_position - requested;
 
     if (block_start > UINT32_MAX ||
-        !active_read_file.seek(static_cast<uint32_t>(block_start))) {
+        !active_read.seek(static_cast<uint32_t>(block_start))) {
         error = "read_seek_failed";
         return false;
     }
 
     active_read_position = block_start;
-    const int read = active_read_file.read(job.bytes, requested);
+    const int read = active_read.read(job.bytes, requested);
     if (read > 0) active_read_position += static_cast<size_t>(read);
     if (read != static_cast<int>(requested)) {
         error = "read_short_file";
@@ -2420,8 +2423,7 @@ bool process_read_step() {
     const size_t requested = std::min(remaining, step_bytes);
     size_t received = 0;
     {
-        const int read = active_read_file.read(job.bytes + job.bytes_read,
-                                               requested);
+        const int read = active_read.read(job.bytes + job.bytes_read, requested);
         if (read > 0) received = static_cast<size_t>(read);
     }
     if (received == 0) {

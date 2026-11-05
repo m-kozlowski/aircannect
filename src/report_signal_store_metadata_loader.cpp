@@ -14,7 +14,8 @@ void ReportSignalStoreMetadataLoader::begin(StorageReadPort &read_port) {
 OperationAdmission ReportSignalStoreMetadataLoader::start(
     SleepDayId sleep_day,
     uint32_t generation,
-    StorageReadLane lane) {
+    StorageReadLane lane,
+    bool whole_file_size_only) {
     if (status_.state != StorageBoundedFileLoadState::Idle) {
         return OperationAdmission::Busy;
     }
@@ -26,7 +27,8 @@ OperationAdmission ReportSignalStoreMetadataLoader::start(
     }
 
     const OperationAdmission admitted = loader_.start(
-        path, ReportSignalStoreNightCodec::MaxBytes, generation, lane);
+        path, ReportSignalStoreNightCodec::MaxBytes, generation, lane,
+        whole_file_size_only);
     if (admitted == OperationAdmission::Accepted) {
         sleep_day_ = sleep_day;
         status_ = loader_.status();

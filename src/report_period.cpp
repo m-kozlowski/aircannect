@@ -410,7 +410,7 @@ struct ReportPeriodService::Runtime {
         }
 
         if (loader.start(path, ReportNightHistogramCodec::MaxBytes, 1,
-                         StorageReadLane::Report) != OperationAdmission::Accepted) {
+                         StorageReadLane::Report, true) != OperationAdmission::Accepted) {
             fail("period_read_rejected");
         } else {
             phase = Phase::ReadingHistogram;
@@ -419,7 +419,7 @@ struct ReportPeriodService::Runtime {
 
     bool read_metadata(ReportSignalStoreMetadataLoader &loader, Phase resume) {
         const OperationAdmission admitted = loader.start(
-            saved->sleep_day, 1, StorageReadLane::Report);
+            saved->sleep_day, 1, StorageReadLane::Report, true);
         if (admitted == OperationAdmission::Busy) return false;
 
         if (admitted != OperationAdmission::Accepted) {

@@ -18,7 +18,8 @@ public:
     void begin(StorageReadPort &read_port);
     OperationAdmission start(SleepDayId sleep_day,
                              uint32_t generation,
-                             StorageReadLane lane);
+                             StorageReadLane lane,
+                             bool whole_file_size_only = false);
     bool poll();
     void reset();
     void cancel();

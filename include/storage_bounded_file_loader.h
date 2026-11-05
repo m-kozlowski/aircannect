@@ -45,7 +45,8 @@ public:
     OperationAdmission start(const char *path,
                              size_t maximum_size,
                              uint32_t generation,
-                             StorageReadLane lane);
+                             StorageReadLane lane,
+                             bool whole_file_size_only = false);
     bool poll();
     void cancel();
     void reset();
@@ -71,6 +72,7 @@ private:
     size_t copied_ = 0;
     size_t prepared_copied_ = 0;
     bool handle_requested_ = false;
+    bool whole_file_size_only_ = false;
     char path_[AC_STORAGE_PATH_MAX] = {};
     StorageBoundedFileLoadStatus status_;
 };
