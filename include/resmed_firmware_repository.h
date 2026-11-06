@@ -7,7 +7,10 @@
 #include <stdint.h>
 
 #include "resmed_firmware_catalog.h"
+#include "resmed_firmware_image.h"
 #include "runtime_snapshots.h"
+#include "storage_atomic_write_port.h"
+#include "storage_bounded_file_loader.h"
 #include "storage_path_port.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
@@ -44,7 +47,8 @@ public:
 
     bool begin(StorageScanPort &scan_port,
                StorageReadPort &read_port,
-               StoragePathPort &path_port);
+               StoragePathPort &path_port,
+               StorageAtomicWritePort &write_port);
     void poll();
     bool set_storage_suspended(bool suspended);
 
@@ -67,18 +71,18 @@ private:
         EnsureDirectory,
         Scan,
         InspectPublishedPath,
-        ReadPublishedBootId,
         EnsureBootloaderRoot,
         EnsureBootloaderDirectory,
         StoreBootloader,
+        WriteBootloader,
         Remove,
     };
 
     enum class PublicationPhase : uint8_t {
         None,
         InspectPath,
-        ReadBootId,
-        DecodeBootId,
+        ReadBootloader,
+        InspectBootloader,
         EnsureBootloaderRoot,
         EnsureBootloaderDirectory,
         StoreBootloader,
@@ -96,12 +100,13 @@ private:
                         const char *error = nullptr);
     void fail_action(const char *error);
     void finish_publication();
-    void decode_published_boot_id();
+    void inspect_published_bootloader();
+    void bootloader_stored();
     bool direct_repository_file(const char *path) const;
 
     StorageScanPort *scan_port_ = nullptr;
-    StorageReadPort *read_port_ = nullptr;
     StoragePathPort *path_port_ = nullptr;
+    StorageAtomicWritePort *write_port_ = nullptr;
 
     mutable StaticSemaphore_t mutex_storage_ = {};
     mutable SemaphoreHandle_t mutex_ = nullptr;
@@ -122,7 +127,10 @@ private:
     char bootloader_version_[16] = {};
     char bootloader_directory_[AC_STORAGE_PATH_MAX] = {};
     char bootloader_destination_[AC_STORAGE_PATH_MAX] = {};
-    StoragePreparedRead publication_prepared_;
+    uint64_t publication_size_ = 0;
+    StorageBoundedFileLoader bootloader_loader_;
+    std::shared_ptr<const LargeByteBuffer> bootloader_bytes_;
+    ResmedBootloaderInspector bootloader_inspector_;
 
     Action action_ = Action::None;
     OperationTicket ticket_;

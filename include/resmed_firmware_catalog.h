@@ -30,6 +30,16 @@ struct ResmedFirmwareEntryView {
 const char *resmed_firmware_name_hint_name(ResmedFirmwareNameHint hint);
 ResmedFirmwareNameHint resmed_firmware_name_hint_for_filename(
     const char *filename);
+
+enum class ResmedBootloaderKind : uint8_t;
+
+bool resmed_firmware_bootloader_path(
+    const char *bootloader_version,
+    ResmedBootloaderKind kind,
+    char *directory_out,
+    size_t directory_out_size,
+    char *path_out,
+    size_t path_out_size);
 bool resmed_firmware_patched_bootloader_path(
     const char *bootloader_version,
     char *directory_out,

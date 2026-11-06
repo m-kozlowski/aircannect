@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "memory_manager.h"
+#include "resmed_firmware_image.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -52,13 +53,16 @@ ResmedFirmwareNameHint resmed_firmware_name_hint_for_filename(
     return ResmedFirmwareNameHint::Unsupported;
 }
 
-bool resmed_firmware_patched_bootloader_path(
+bool resmed_firmware_bootloader_path(
     const char *bootloader_version,
+    ResmedBootloaderKind kind,
     char *directory_out,
     size_t directory_out_size,
     char *path_out,
     size_t path_out_size) {
-    if (!bootloader_version || !bootloader_version[0] || !directory_out ||
+    if ((kind != ResmedBootloaderKind::Stock &&
+         kind != ResmedBootloaderKind::Patched) ||
+        !bootloader_version || !bootloader_version[0] || !directory_out ||
         directory_out_size == 0 || !path_out || path_out_size == 0) {
         return false;
     }
@@ -80,10 +84,22 @@ bool resmed_firmware_patched_bootloader_path(
         return false;
     }
 
-    const int path_length = snprintf(path_out, path_out_size, "%s/patched.bin",
-                                     directory_out);
+    const int path_length = snprintf(
+        path_out, path_out_size, "%s/%s.bin", directory_out,
+        kind == ResmedBootloaderKind::Stock ? "stock" : "patched");
     return path_length > 0 &&
            static_cast<size_t>(path_length) < path_out_size;
+}
+
+bool resmed_firmware_patched_bootloader_path(
+    const char *bootloader_version,
+    char *directory_out,
+    size_t directory_out_size,
+    char *path_out,
+    size_t path_out_size) {
+    return resmed_firmware_bootloader_path(
+        bootloader_version, ResmedBootloaderKind::Patched,
+        directory_out, directory_out_size, path_out, path_out_size);
 }
 
 ResmedFirmwareCatalogSnapshot::~ResmedFirmwareCatalogSnapshot() {

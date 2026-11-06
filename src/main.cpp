@@ -1367,7 +1367,8 @@ void setup() {
 
     if (!resmed_firmware_repository.begin(StorageService::scan_port(),
                                           StorageService::read_port(),
-                                          StorageService::path_port())) {
+                                          StorageService::path_port(),
+                                          StorageService::atomic_write_port())) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] ResMed firmware repository failed to start\n");
     }

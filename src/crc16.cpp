@@ -27,8 +27,7 @@ constexpr auto CRC16_CCITT_FALSE_TABLE =
 
 }  // namespace
 
-uint16_t crc16_ccitt_false(const uint8_t *data, size_t len) {
-    uint16_t crc = 0xffff;
+uint16_t crc16_ccitt_false(const uint8_t *data, size_t len, uint16_t crc) {
     if (!data && len) return crc;
 
     for (size_t i = 0; i < len; ++i) {

@@ -74,8 +74,15 @@ The repository stores reusable images under:
 Use **Add** to upload raw `.bin`/`.img` images or ready `.abc` containers. The
 repository recognizes supported image layouts and makes entries available for
 installation. Clicking an entry downloads it; rename and delete actions manage
-the stored file. A recognized bootloader-only image is filed as
-`bootloaders/<bootloader-version>/patched.bin` for service-mode recovery.
+the stored file. Recognized bootloader-only images are moved into
+`bootloaders/<bootloader-version>/`: stock bootloaders become `stock.bin`, and
+bootloaders with the Airbreak service extension become `patched.bin` for
+service-mode recovery. Stock identification uses the boot ID and a known CRC16;
+unrecognized images stay at their uploaded path. Uploading a raw 2 MiB Air11
+full image also extracts its recognized bootloader into that directory while
+keeping the full image unchanged. If the matching `stock.bin` or `patched.bin`
+already exists, it is left unchanged. To replace it, upload the bootloader-only
+image.
 
 The **Install another image** control uploads and installs one file without
 requiring it to be added to the repository first.

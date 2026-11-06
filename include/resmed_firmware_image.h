@@ -143,6 +143,30 @@ bool resmed_firmware_target_range_for_profile(
     uint32_t &flash_start,
     uint64_t &payload_size);
 
+enum class ResmedBootloaderKind : uint8_t {
+    Unknown,
+    Stock,
+    Patched,
+};
+
+// The caller retains the immutable FGBL bytes until inspection completes.
+class ResmedBootloaderInspector {
+public:
+    bool begin(const uint8_t *data, size_t size);
+    bool poll();
+
+    ResmedBootloaderKind kind() const { return kind_; }
+    const char *version() const { return version_; }
+
+private:
+    const uint8_t *data_ = nullptr;
+    size_t offset_ = 0;
+    uint16_t crc_ = 0xffff;
+    bool service_cookie_ = false;
+    ResmedBootloaderKind kind_ = ResmedBootloaderKind::Unknown;
+    char version_[16] = {};
+};
+
 class ResmedFirmwareInspector {
 public:
     bool begin(uint64_t input_size,

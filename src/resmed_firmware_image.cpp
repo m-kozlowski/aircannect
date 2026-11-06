@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "crc16.h"
 #include "crc32.h"
 #include "large_allocator.h"
 #include "little_endian.h"
@@ -372,6 +373,58 @@ bool resmed_firmware_identify_fgbl(
     memcpy(identifier, boot_id, AC_RESMED_FGBL_BOOT_ID_BYTES);
     return resmed_firmware_bootloader_version_from_text(
         identifier, version_out, version_out_size);
+}
+
+bool ResmedBootloaderInspector::begin(const uint8_t *data, size_t size) {
+    *this = {};
+
+    if (!data || size != AC_RESMED_FGBL_BYTES ||
+        !resmed_firmware_identify_fgbl(
+            size, data + AC_RESMED_FGBL_BOOT_ID_OFFSET,
+            AC_RESMED_FGBL_BOOT_ID_BYTES, version_, sizeof(version_))) {
+        return false;
+    }
+
+    data_ = data;
+    return true;
+}
+
+bool ResmedBootloaderInspector::poll() {
+    if (!data_) return true;
+
+    constexpr uint8_t ServiceCookie[] = {0x53, 0x52, 0x56, 0x43};
+    constexpr size_t PayloadBytes = AC_RESMED_FGBL_BYTES - 2;
+    const size_t length = std::min<size_t>(4096, PayloadBytes - offset_);
+    crc_ = crc16_ccitt_false(data_ + offset_, length, crc_);
+
+    // Include the following bytes so a cookie split across steps is found.
+    const uint8_t *end = data_ + std::min<size_t>(
+        AC_RESMED_FGBL_BYTES, offset_ + length + sizeof(ServiceCookie) - 1);
+    service_cookie_ = service_cookie_ ||
+        std::search(data_ + offset_, end,
+                    ServiceCookie, ServiceCookie + sizeof(ServiceCookie)) != end;
+
+    offset_ += length;
+    if (offset_ < PayloadBytes) return false;
+
+    // Original FGBL shared by the Air11 14.8.3.0, 15.8.4.0 and 17.8.6.0
+    // reference images. This is identification, not authentication.
+    constexpr char StockBootId[] = "1.1.0.736edbdfd";
+    constexpr uint16_t StockCrc = 0x2871;
+    const uint16_t stored_crc =
+        (static_cast<uint16_t>(data_[PayloadBytes]) << 8) |
+        data_[PayloadBytes + 1];
+
+    if (service_cookie_) {
+        kind_ = ResmedBootloaderKind::Patched;
+    } else if (memcmp(data_ + AC_RESMED_FGBL_BOOT_ID_OFFSET,
+                      StockBootId, sizeof(StockBootId)) == 0 &&
+               crc_ == StockCrc && stored_crc == StockCrc) {
+        kind_ = ResmedBootloaderKind::Stock;
+    }
+
+    data_ = nullptr;
+    return true;
 }
 
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind) {
