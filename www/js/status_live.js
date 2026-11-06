@@ -157,7 +157,7 @@
       const recording = data.edf || {};
       const issues = [
         {tab: "storage", active: !!data.storage_low_space,
-          text: "SD low: " + Math.floor(free / (1024 * 1024)) + " MiB free"},
+          text: "SD low: " + AirCANnect.format.bytes(free) + " free"},
         {tab: "edf", active: !!recording.storage_blocked,
           text: "EDF recording suspended", detail: recording.storage_error || ""},
       ];
@@ -189,6 +189,7 @@
           item = document.createElement("li");
           item.dataset.subsystem = issue.tab;
           const link = document.createElement("a");
+          link.className = "badge warn subsystem-issue";
           link.href = "#" + issue.tab;
           link.dataset.action = "app.show-tab";
           link.dataset.value = issue.tab;

@@ -258,15 +258,13 @@
 
     .system-issues {
       padding: 0;
-      margin: 12px 0 0;
+      margin: 10px 0 0;
       list-style: none;
     }
 
     .system-issues li + li { margin-top: 6px; }
 
-    .system-issues a, .subsystem-issue {
-      color: var(--orange);
-      overflow-wrap: anywhere;
+    .system-issues a {
       text-decoration: none;
     }
 
@@ -392,6 +390,26 @@
       letter-spacing: .8px;
       color: var(--muted);
     }
+
+    .subsystem-head { flex-wrap: wrap; }
+
+    .card-status {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 0;
+      max-width: 100%;
+      margin-left: auto;
+    }
+
+    .subsystem-issue {
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+
+    .subsystem-issue[hidden] { display: none; }
 
     .headline {
       font-size: 20px;
