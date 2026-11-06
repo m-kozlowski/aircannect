@@ -39,7 +39,8 @@ public:
                         size_t count,
                         uint32_t *id_out = nullptr,
                         char *error_out = nullptr,
-                        size_t error_out_size = 0) override;
+                        size_t error_out_size = 0,
+                        uint64_t stop_at_free_bytes = 0) override;
 
     // status
     bool status(StorageDeleteStatus &out,
@@ -91,6 +92,7 @@ private:
     uint32_t next_id_ = 1;
     bool base_checked_ = false;
     bool cancel_requested_ = false;
+    uint64_t stop_at_free_bytes_ = 0;
 
     // requested roots
     uint32_t root_offsets_[AC_STORAGE_MAX_SELECTIONS] = {};

@@ -38,20 +38,6 @@ void ReportSignalTileBackfill::remember_error(const char *error) {
     copy_cstr(error_, sizeof(error_), error);
 }
 
-bool ReportSignalTileBackfill::level_supported(
-    const ReportSignalStoreTrack &track,
-    ReportSignalStoreLevel level) const {
-    switch (level) {
-        case ReportSignalStoreLevel::Raw:
-            return true;
-        case ReportSignalStoreLevel::OneSecond:
-            return (track.lod_mask & REPORT_SIGNAL_STORE_LOD_1S) != 0;
-        case ReportSignalStoreLevel::TenSeconds:
-            return (track.lod_mask & REPORT_SIGNAL_STORE_LOD_10S) != 0;
-    }
-    return false;
-}
-
 bool ReportSignalTileBackfill::start_next_level() {
     static constexpr ReportSignalStoreLevel levels[LevelCount] = {
         ReportSignalStoreLevel::Raw,
@@ -73,7 +59,7 @@ bool ReportSignalTileBackfill::start_next_level() {
         }
 
         const ReportSignalStoreLevel level = levels[level_index_++];
-        if (!level_supported(track_, level)) {
+        if (!track_.has_level(level)) {
             continue;
         }
 

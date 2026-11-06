@@ -72,6 +72,7 @@
 #include "storage_http_controller.h"
 #include "storage_upload_http_controller.h"
 #include "storage_manager.h"
+#include "storage_space_policy.h"
 #include "storage_service.h"
 #include "storage_usb.h"
 #include "storage_usb_device.h"
@@ -824,8 +825,8 @@ static void configure_alerts(const AppConfigData &config, uint32_t now_ms) {
     storage.scope = AlertScope::System;
     storage.direction = AlertDirection::Below;
     // TODO should be configurable or calculated
-    storage.raise_threshold = 64;
-    storage.clear_threshold = 96;
+    storage.raise_threshold = StorageSpacePolicy::WarnBelow / StorageSpacePolicy::MiB;
+    storage.clear_threshold = StorageSpacePolicy::ClearWarningAt / StorageSpacePolicy::MiB;
     storage.reminder_interval_ms = 24UL * 60 * 60 * 1000;
     storage.enabled = true;
     if (!alert_manager.configure_threshold(storage, now_ms)) {

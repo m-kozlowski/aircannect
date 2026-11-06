@@ -16,6 +16,37 @@
 
 namespace aircannect {
 
+uint64_t ReportSignalTile::storage_upper_bound(
+    const ReportSignalStoreNightView &night, const StorageSpaceSnapshot &space) {
+    if (!space.known || !space.allocation_unit_bound) return UINT64_MAX;
+
+    uint64_t bytes = space.allocation_unit_bound; // signals/http
+    for (size_t i = 0; i < night.night.track_count; ++i) {
+        ReportSignalStoreTrack track;
+        if (!night.track(i, track)) return UINT64_MAX;
+
+        for (auto level : {ReportSignalStoreLevel::Raw,
+                           ReportSignalStoreLevel::OneSecond,
+                           ReportSignalStoreLevel::TenSeconds}) {
+            if (!track.has_level(level)) continue;
+
+            bytes += space.allocation_unit_bound; // per-plane directory
+            for (size_t slot = 0; slot < track.block_slot_count;) {
+                ReportSignalTile tile;
+                if (!describe(track, level, slot, tile)) return UINT64_MAX;
+                slot = tile.first_slot + tile.block_count;
+                if (tile.range.length < MinRawBytes) continue;
+
+                // The encoder discards output larger than its input. Include
+                // cluster rounding and directory growth for each output file.
+                bytes += space.allocation_bytes(tile.range.length) +
+                         space.allocation_unit_bound;
+            }
+        }
+    }
+    return bytes;
+}
+
 bool ReportSignalTile::whole_track(uint32_t interval_ms, bool envelope) {
     return interval_ms >= (envelope ? 10000u : 1000u);
 }

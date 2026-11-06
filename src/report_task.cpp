@@ -16,6 +16,7 @@
 #include "night_catalog_capture.h"
 #include "report_fallback_artifact.h"
 #include "report_generation_cleanup.h"
+#include "storage_space_policy.h"
 #include "report_signal_tile_backfill.h"
 #include "report_spool_availability.h"
 #include "storage_service.h"
@@ -1119,7 +1120,11 @@ struct ReportTask::Runtime {
             !signal_tile_backfill_started &&
             !store_catalog_loader.status().active();
 
-        return generation_cleanup.poll(allowed, now_ms);
+        const auto space = storage_status ? storage_status->space_snapshot() : StorageSpaceSnapshot{};
+        const bool worked = generation_cleanup.poll(allowed, now_ms, space);
+        auto metadata = generation_cleanup.take_published_metadata();
+        if (metadata.metadata) accept_store_metadata(metadata);
+        return worked;
     }
 
     void cancel_signal_tile_backfill() {
@@ -1816,9 +1821,13 @@ struct ReportTask::Runtime {
             store_catalog->ready(night->sleep_day, night->source_revision)) {
             const ReportSignalStoreCatalogRecord *stored =
                 store_catalog->find(night->sleep_day);
-            if (activity.storage_low_space ||
-                (stored && stored->compression_version ==
-                              ReportSignalTile::CompressionVersion)) {
+            if (stored && stored->compression_version == ReportSignalTile::CompressionVersion) {
+                ++idle_cursor;
+                return true;
+            }
+            const auto space = storage_status ? storage_status->space_snapshot() : StorageSpaceSnapshot{};
+            if (activity.storage_low_space || !space.fits(1, StorageSpacePolicy::CompressionReserve)) {
+                defer_compression(StorageSpacePolicy::CompressionReserve + 1);
                 ++idle_cursor;
                 return true;
             }
@@ -1830,6 +1839,13 @@ struct ReportTask::Runtime {
                     night->sleep_day, night->source_revision),
                     ReportRequestPriority::Idle, idle_generation).status !=
                         ReportRequestEnqueueStatus::Full;
+            }
+            const uint64_t cost = ReportSignalTile::storage_upper_bound(metadata->view, space);
+            if (!space.fits(cost, StorageSpacePolicy::CompressionReserve)) {
+                defer_compression(cost > UINT64_MAX - StorageSpacePolicy::CompressionReserve
+                    ? UINT64_MAX : cost + StorageSpacePolicy::CompressionReserve);
+                ++idle_cursor;
+                return true;
             }
             if (!signal_tile_backfill.start(*metadata, idle_generation)) {
                 ++idle_cursor;
@@ -1886,13 +1902,33 @@ struct ReportTask::Runtime {
 
         signal_tile_backfill_started = false;
         ++idle_cursor;
-        if (!succeeded) {
+        if (signal_tile_backfill.deferred()) {
+            const auto space = storage_status ? storage_status->space_snapshot() : StorageSpaceSnapshot{};
+            defer_compression(space.known
+                ? std::max(StorageSpacePolicy::CompressionReserve, space.free_bytes) +
+                  std::max<uint32_t>(space.allocation_unit_bound, 1)
+                : StorageSpacePolicy::CompressionReserve + 1);
+        } else if (!succeeded) {
             idle_pass_failed = true;
             idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
             record_failure("compress_background", signal_tile_backfill.error(),
                            signal_tile_backfill.sleep_day(), MATERIALIZE_RETRY_MS);
         }
         signal_tile_backfill.reset();
+        return true;
+    }
+
+    void defer_compression(uint64_t needed) {
+        if (!compression_wait_bytes || needed < compression_wait_bytes) compression_wait_bytes = needed;
+    }
+
+    bool resume_compression() {
+        if (!compression_wait_bytes || signal_tile_backfill_started || !storage_status) return false;
+        const auto space = storage_status->space_snapshot();
+        if (!space.known || space.free_bytes < compression_wait_bytes) return false;
+
+        compression_wait_bytes = 0;
+        reset_background_pass();
         return true;
     }
 
@@ -2721,6 +2757,7 @@ struct ReportTask::Runtime {
             summary_archive.forget_media();
             spool_availability_probe.cancel();
             signal_tile_backfill.reset();
+            compression_wait_bytes = 0;
             store_catalog_loader.cancel();
             store_catalog_loader.reset();
             storage_pause_started = true;
@@ -2938,6 +2975,7 @@ struct ReportTask::Runtime {
 
     size_t idle_cursor = 0;
     bool signal_tile_backfill_started = false;
+    uint64_t compression_wait_bytes = 0;
     uint32_t idle_generation = 0x80000000u;
     uint32_t idle_retry_at_ms = 0;
     bool idle_pass_failed = false;
@@ -3041,7 +3079,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->store_catalog_loader.begin(read_port);
     runtime_->period_service.begin(read_port, write_port);
     if (delete_port) {
-        runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port);
+        runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port, &write_port);
         runtime_->date_repair.begin(read_port, write_port, range_write_port, scan_port, *delete_port);
     }
     runtime_->signal_tile_backfill.begin(read_port, range_write_port, write_port);
@@ -4406,6 +4444,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required();
 
+    worked = runtime.resume_compression() || worked;
+
     if (runtime.activity.storage_low_space) {
         worked = runtime.poll_generation_cleanup(
             catalog_current, startup_allowed, now_ms) || worked;
@@ -4413,10 +4453,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     const bool cleanup_first = runtime.activity.storage_low_space &&
         runtime.generation_cleanup.pending();
 
-    if (catalog_current && !runtime.rebuild_started && !local_blocked &&
-        startup_allowed && !cleanup_first) {
-        worked = runtime.schedule_post_therapy_build() || worked;
-        if (runtime.store_purpose == CatalogStorePurpose::None &&
+    if (catalog_current && !runtime.rebuild_started && !local_blocked && startup_allowed) {
+        // Source preservation and report deferral release post-therapy exports;
+        // they must not wait for the emergency tile reclamation pass.
+        if (!runtime.activity.storage_low_space ||
+            !runtime.generation_cleanup.pending_generations()) {
+            worked = runtime.schedule_post_therapy_build() || worked;
+        }
+        if (!cleanup_first && runtime.store_purpose == CatalogStorePurpose::None &&
             !runtime.pending_catalog_save && !runtime.store_catalog_load_pending &&
             !runtime.store_catalog_loader.status().active()) {
             worked = runtime.start_spool_probe(now_ms) || worked;
@@ -4568,7 +4612,8 @@ void ReportTask::run() {
         } else {
             const ReportTaskControlSnapshot status = control_snapshot();
             ulTaskNotifyTake(pdTRUE,
-                             pdMS_TO_TICKS(status.background_active
+                             pdMS_TO_TICKS((status.background_active ||
+                                            runtime_->generation_cleanup.waiting_for_storage())
                                  ? AC_REPORT_TASK_WAIT_TICK_MS
                                  : AC_REPORT_TASK_IDLE_TICK_MS));
         }

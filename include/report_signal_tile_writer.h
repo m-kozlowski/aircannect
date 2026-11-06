@@ -25,6 +25,7 @@ public:
 
     bool active() const { return phase_ != Phase::Idle; }
     bool succeeded() const { return succeeded_; }
+    bool deferred() const { return deferred_; }
     const char *error() const { return error_; }
     size_t next_slot() const { return cursor_; }
 
@@ -35,6 +36,7 @@ private:
     void advance(bool success = true, const char *error = nullptr);
     void remember_error(const char *error);
     void release_read();
+    void defer();
 
     StorageReadPort *read_ = nullptr;
     StorageRangeWritePort *write_ = nullptr;
@@ -49,6 +51,7 @@ private:
     uint32_t generation_ = 0;
     StorageAtomicWriteLane lane_ = StorageAtomicWriteLane::Maintenance;
     bool succeeded_ = true;
+    bool deferred_ = false;
     char error_[AC_STORAGE_ERROR_MAX] = {};
 
     size_t memory_offset_ = 0;

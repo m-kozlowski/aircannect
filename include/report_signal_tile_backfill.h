@@ -26,6 +26,7 @@ public:
 
     bool active() const { return active_; }
     bool succeeded() const { return succeeded_; }
+    bool deferred() const { return writer_.deferred(); }
     const char *error() const { return error_; }
     SleepDayId sleep_day() const { return night_.night.sleep_day; }
     ReportSignalStoreMetadata take_published_metadata();
@@ -34,8 +35,6 @@ private:
     static constexpr size_t LevelCount = 3;
 
     bool start_next_level();
-    bool level_supported(const ReportSignalStoreTrack &track,
-                         ReportSignalStoreLevel level) const;
     void remember_error(const char *error);
 
     ReportSignalTileWriter writer_;

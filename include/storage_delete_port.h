@@ -38,12 +38,15 @@ public:
     virtual bool cancel(uint32_t id) = 0;
 
     // delete requests
+    // Nonzero stop_at_free_bytes ends reclamation after a file when capacity
+    // reaches the target, leaving any remaining files/directories in place.
     virtual bool start_selected(const char *base_path,
                                 const char *const *names,
                                 size_t count,
                                 uint32_t *id_out = nullptr,
                                 char *error_out = nullptr,
-                                size_t error_out_size = 0) = 0;
+                                size_t error_out_size = 0,
+                                uint64_t stop_at_free_bytes = 0) = 0;
 
     // status
     virtual bool status(StorageDeleteStatus &out,

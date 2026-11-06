@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <esp_vfs_fat.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -215,6 +216,7 @@ bool mount_sdmmc() {
         owner_status.actual_hz = static_cast<uint32_t>(real_freq_khz) * 1000;
     }
 
+    owner_status.allocation_unit_bound = 128 * SD_MMC.sectorSize();
     update_sdmmc_capacity();
     set_state(StorageType::SdMmc, StorageState::Mounted);
     return true;
@@ -256,6 +258,7 @@ bool mount_spi_sd() {
         return false;
     }
 
+    owner_status.allocation_unit_bound = 128 * SD.sectorSize();
     update_spi_sd_capacity();
     set_state(StorageType::SpiSd, StorageState::Mounted);
     return true;
@@ -391,6 +394,29 @@ void unmount() {
 
     set_state(owner_status.type, StorageState::NotPresent, "USB owns SD");
     publish_status();
+}
+
+StorageSpaceSnapshot refresh_space() {
+    static_assert(FF_FS_EXFAT == 0, "revisit the allocation bound for exFAT");
+    uint64_t total = 0;
+    uint64_t free = 0;
+    if (!owner_status.mounted ||
+        esp_vfs_fat_info(owner_status.mount_point, &total, &free) != ESP_OK) {
+        return {};
+    }
+
+    owner_status.total_bytes = total;
+    owner_status.free_bytes = free;
+    owner_status.used_bytes = total - free;
+    owner_status.last_checked_ms = millis();
+    publish_status();
+    return {true, free, owner_status.allocation_unit_bound};
+}
+
+StorageSpaceSnapshot space_snapshot() {
+    const auto current = status();
+    return {current.mounted && current.total_bytes != 0,
+            current.free_bytes, current.allocation_unit_bound};
 }
 
 StorageStatus status() {

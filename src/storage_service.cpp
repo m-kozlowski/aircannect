@@ -318,6 +318,9 @@ public:
 class ServiceStatusPort final : public StorageStatusPort {
 public:
     bool mounted() const override { return Storage::mounted(); }
+    StorageSpaceSnapshot space_snapshot() const override {
+        return Storage::space_snapshot();
+    }
     StorageWorkloadSnapshot workload_snapshot() const override {
         return StorageService::workload_snapshot();
     }

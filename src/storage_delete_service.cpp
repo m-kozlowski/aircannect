@@ -232,7 +232,8 @@ bool StorageDeleteService::start_selected(const char *base_path,
                                           size_t count,
                                           uint32_t *id_out,
                                           char *error_out,
-                                          size_t error_out_size) {
+                                          size_t error_out_size,
+                                          uint64_t stop_at_free_bytes) {
     if (id_out) *id_out = 0;
     copy_cstr(error_out, error_out_size, "");
     if (!ready()) {
@@ -310,6 +311,7 @@ bool StorageDeleteService::start_selected(const char *base_path,
     active_.store(false);
     base_checked_ = false;
     cancel_requested_ = false;
+    stop_at_free_bytes_ = stop_at_free_bytes;
     path_bytes_len_ = 0;
     current_root_ = 0;
     memset(root_offsets_, 0, sizeof(root_offsets_));
@@ -437,6 +439,18 @@ bool StorageDeleteService::step() {
     const uint32_t slice_started_us = micros();
 
     while (status_.state == StorageDeleteState::Deleting) {
+        if (stop_at_free_bytes_) {
+            const auto space = Storage::refresh_space();
+            if (!space.known) {
+                set_error_locked("capacity_unavailable");
+                break;
+            }
+            if (space.free_bytes >= stop_at_free_bytes_) {
+                finish_done_locked();
+                break;
+            }
+        }
+
         if (streams_ && current_root_ < status_.roots &&
             !streams_->try_begin_write(this,
                 path_bytes_ + root_offsets_[current_root_], 0, UINT64_MAX, true)) {
@@ -554,6 +568,7 @@ bool StorageDeleteService::delete_dir_step_locked() {
 
 bool StorageDeleteService::finish_done_locked() {
     close_walk_locked();
+    (void)Storage::refresh_space();
     active_.store(false);
     release_maintenance_locked();
     status_.state = StorageDeleteState::Done;

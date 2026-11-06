@@ -26,6 +26,9 @@ struct StorageStatus {
     uint64_t used_bytes = 0;
     uint64_t free_bytes = 0;
     uint64_t card_size_bytes = 0;
+    // FAT12/16/32 allow at most 128 sectors per allocation unit.
+    // Conservative bound, not the card's measured cluster size.
+    uint32_t allocation_unit_bound = 0;
     uint32_t last_checked_ms = 0;
     uint8_t max_open_files = 0;
     uint8_t width = 0;
@@ -37,11 +40,30 @@ struct StorageStatus {
     char last_error[96] = {};
 };
 
+struct StorageSpaceSnapshot {
+    bool known = false;
+    uint64_t free_bytes = 0;
+    uint32_t allocation_unit_bound = 0;
+
+    bool fits(uint64_t bytes, uint64_t reserve) const {
+        return known && free_bytes >= reserve && bytes <= free_bytes - reserve;
+    }
+
+    uint64_t allocation_bytes(uint64_t bytes) const {
+        if (!allocation_unit_bound || bytes > UINT64_MAX - allocation_unit_bound) {
+            return UINT64_MAX;
+        }
+        return ((bytes + allocation_unit_bound - 1) / allocation_unit_bound) *
+               allocation_unit_bound;
+    }
+};
+
 namespace Storage {
 
 void begin();
 
 StorageStatus status();
+StorageSpaceSnapshot space_snapshot();
 bool try_status(StorageStatus &out);
 bool mounted();
 

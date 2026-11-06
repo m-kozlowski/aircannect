@@ -1,5 +1,7 @@
 #pragma once
 
+#include "storage_manager.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <memory>
@@ -145,6 +147,7 @@ public:
 
     virtual bool mounted() const = 0;
     virtual StorageWorkloadSnapshot workload_snapshot() const = 0;
+    virtual StorageSpaceSnapshot space_snapshot() const { return {}; }
 
     virtual std::shared_ptr<const EdfStorageProgress>
     edf_progress_snapshot() const { return {}; }

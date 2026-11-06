@@ -1,6 +1,7 @@
 #pragma once
 
 #include "report_signal_store.h"
+#include "storage_manager.h"
 
 namespace aircannect {
 
@@ -27,6 +28,8 @@ struct ReportSignalTile {
     uint8_t header[HeaderBytes] = {};
 
     static bool whole_track(uint32_t interval_ms, bool envelope);
+    static uint64_t storage_upper_bound(const ReportSignalStoreNightView &night,
+                                        const StorageSpaceSnapshot &space);
     static size_t blocks(uint32_t interval_ms, bool envelope);
     static bool describe(const ReportSignalStoreTrack &track,
                          ReportSignalStoreLevel level, size_t slot,

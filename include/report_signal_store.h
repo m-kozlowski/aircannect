@@ -74,6 +74,15 @@ struct ReportSignalStoreTrack {
     uint64_t valid_sample_count = 0;
     uint64_t expected_sample_count = 0;
     uint8_t present_blocks[REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES] = {};
+
+    bool has_level(ReportSignalStoreLevel level) const {
+        switch (level) {
+            case ReportSignalStoreLevel::Raw: return true;
+            case ReportSignalStoreLevel::OneSecond: return (lod_mask & REPORT_SIGNAL_STORE_LOD_1S) != 0;
+            case ReportSignalStoreLevel::TenSeconds: return (lod_mask & REPORT_SIGNAL_STORE_LOD_10S) != 0;
+        }
+        return false;
+    }
 };
 
 struct ReportSignalStoreFilePayload {

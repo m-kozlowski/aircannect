@@ -154,6 +154,8 @@ bool StorageRangeWriteService::take_completion(
 
 const char *StorageRangeWriteService::open_locked() {
     const StorageRangeWriteCommand &command = job_->command;
+    if (!reserve_available()) return "storage_reserve";
+
     const int flags = O_RDWR | (command.offset == 0 ? O_CREAT : 0) |
                       (command.truncate ? O_TRUNC : 0);
 
@@ -215,6 +217,8 @@ const char *StorageRangeWriteService::open_locked() {
 }
 
 const char *StorageRangeWriteService::write_locked() {
+    if (!reserve_available()) return "storage_reserve";
+
     const size_t size = job_->command.size();
     const size_t count = std::min(size - job_->written,
                                   AC_STORAGE_RANGE_WRITE_STEP_BYTES);
@@ -229,6 +233,27 @@ const char *StorageRangeWriteService::write_locked() {
     }
 
     return nullptr;
+}
+
+StorageSpaceSnapshot StorageRangeWriteService::space_snapshot() const {
+    return Storage::space_snapshot();
+}
+
+bool StorageRangeWriteService::reserve_available() const {
+    const auto &command = job_->command;
+    if (!command.free_reserve_bytes) return true;
+
+    const auto space = Storage::refresh_space();
+    uint64_t overhead = 0;
+    if (job_->phase == Phase::Open) {
+        // Parent preparation creates at most one directory per turn. Reserve
+        // its allocation plus growth of the containing directory. Recheck on
+        // every turn instead of walking all parents a second time.
+        overhead = 2 * uint64_t(space.allocation_unit_bound);
+    }
+    const uint64_t data = space.allocation_bytes(command.size() - job_->written);
+    return data <= UINT64_MAX - overhead &&
+           space.fits(data + overhead, command.free_reserve_bytes);
 }
 
 void StorageRangeWriteService::release_write_reservation() {

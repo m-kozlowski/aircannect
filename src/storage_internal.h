@@ -88,4 +88,8 @@ size_t write_buffer(File &file, const uint8_t *data, size_t size,
 bool poll(bool allow_capacity_update);
 bool retry_mount();
 
+// Storage task only: refresh FAT free space after deletion or before a
+// reserve-limited write. Other tasks consume space_snapshot(), without I/O.
+StorageSpaceSnapshot refresh_space();
+
 }  // namespace aircannect::Storage

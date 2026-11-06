@@ -2,6 +2,7 @@
 
 #include "storage_atomic_write_port.h"
 #include "large_scratch_array.h"
+#include "storage_manager.h"
 
 namespace aircannect {
 
@@ -17,6 +18,9 @@ struct StorageRangeWriteCommand {
     // Optional buffers following bytes, in order. No copy into a flat payload.
     std::shared_ptr<const StorageWriteBuffers> buffers;
     uint64_t offset = 0;
+    // Optional, checked against live capacity by the storage owner before
+    // opening/truncating and between bounded writes. Zero disables the guard.
+    uint64_t free_reserve_bytes = 0;
     bool truncate = false;
     // Discardable files may skip the close-time fsync.
     bool sync_on_close = true;
@@ -99,6 +103,7 @@ struct StorageRangeWriteCompletion {
 class StorageRangeWritePort {
 public:
     virtual ~StorageRangeWritePort() = default;
+    virtual StorageSpaceSnapshot space_snapshot() const { return {}; }
 
     // One request or unconsumed completion occupies the port. Accepted bytes
     // remain shared and immutable until completion or owner-side abandonment.

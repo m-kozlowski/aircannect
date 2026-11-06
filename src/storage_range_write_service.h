@@ -24,6 +24,7 @@ public:
     // Called only by the StorageService task, below EDF work.
     bool step(StorageAtomicWriteLane lane);
     bool release_media();
+    StorageSpaceSnapshot space_snapshot() const override;
 
     OperationSubmission request_write(
         const StorageRangeWriteCommand &command) override;
@@ -58,6 +59,7 @@ private:
     // Owner-task execution and completion
     const char *open_locked();
     const char *write_locked();
+    bool reserve_available() const;
     void release_write_reservation();
     void finish_locked(OperationOutcome outcome, const char *error = nullptr);
 

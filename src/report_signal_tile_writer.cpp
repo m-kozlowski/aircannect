@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "string_util.h"
+#include "storage_space_policy.h"
 
 namespace aircannect {
 
@@ -78,6 +79,14 @@ void ReportSignalTileWriter::advance(bool success, const char *error) {
     if (!active()) memory_ = {};
 }
 
+void ReportSignalTileWriter::defer() {
+    advance(false, "storage_reserve");
+    deferred_ = true;
+    cursor_ = end_slot_;
+    phase_ = Phase::Idle;
+    memory_ = {};
+}
+
 bool ReportSignalTileWriter::poll() {
     if (!active()) return false;
 
@@ -106,6 +115,13 @@ bool ReportSignalTileWriter::poll() {
         }
         if (tile_.range.length < ReportSignalTile::MinRawBytes) {
             advance();
+            return true;
+        }
+
+        const auto space = write_->space_snapshot();
+        if (!space.fits(space.allocation_bytes(tile_.range.length),
+                        StorageSpacePolicy::CompressionReserve)) {
+            defer();
             return true;
         }
 
@@ -300,6 +316,7 @@ bool ReportSignalTileWriter::poll() {
         command.lane = lane_;
         command.truncate = true;
         command.sync_on_close = false;
+        command.free_reserve_bytes = StorageSpacePolicy::CompressionReserve;
         const auto submitted = write_->request_write(command);
         if (submitted.admission == OperationAdmission::Busy) return false;
         if (!submitted.accepted()) {
@@ -314,7 +331,9 @@ bool ReportSignalTileWriter::poll() {
     StorageRangeWriteCompletion completion;
     if (!write_->take_completion(write_ticket_, completion)) return false;
     write_ticket_ = {};
-    if (completion.outcome.disposition == OperationDisposition::Cancelled) {
+    if (strcmp(completion.error, "storage_reserve") == 0) {
+        defer();
+    } else if (completion.outcome.disposition == OperationDisposition::Cancelled) {
         advance(false, "report_signal_tile_write_cancelled");
     } else if (completion.outcome.disposition !=
                    OperationDisposition::Succeeded) {
@@ -340,6 +359,7 @@ void ReportSignalTileWriter::reset() {
     copied_ = 0;
     phase_ = Phase::Idle;
     succeeded_ = true;
+    deferred_ = false;
     error_[0] = '\0';
 }
 
