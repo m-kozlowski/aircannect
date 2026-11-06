@@ -73,6 +73,11 @@ bool ReportGenerationCleanup::forget_media() {
     return true;
 }
 
+bool ReportGenerationCleanup::pending() const {
+    return deleting() || (scans_ && deletes_ && catalog_ &&
+        !tracking_failed_ && night_cursor_ < pending_.size());
+}
+
 void ReportGenerationCleanup::release_readers() {
     const size_t count = retired_.size();
     retired_.erase(std::remove_if(retired_.begin(), retired_.end(),

@@ -675,6 +675,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     const bool supports_as11_spools =
         as11_device_service.state().model() == ResmedDeviceModel::AirSense11;
     const bool edf_finalization_pending = edf_recorder_manager.finalization_pending();
+    const bool storage_low_space = alert_manager.active(AlertKind::LowStorage);
     const bool changed =
         !runtime_activity_published ||
         storage_activity.foreground_report_demand != foreground_report_demand ||
@@ -685,6 +686,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
         ota_storage_upload_active_published != ota_storage_upload_active ||
         storage_activity.therapy_active != therapy_active ||
         storage_activity.edf_finalization_pending != edf_finalization_pending ||
+        storage_activity.storage_low_space != storage_low_space ||
         storage_activity.as11_rpc_available != as11_rpc_available ||
         storage_activity.supports_as11_spools != supports_as11_spools;
     if (!changed) return;
@@ -696,6 +698,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.manual_update_check_active = manual_update_check_active;
     storage_activity.therapy_active = therapy_active;
     storage_activity.edf_finalization_pending = edf_finalization_pending;
+    storage_activity.storage_low_space = storage_low_space;
     storage_activity.as11_rpc_available = as11_rpc_available;
     storage_activity.supports_as11_spools = supports_as11_spools;
     ota_storage_upload_active_published = ota_storage_upload_active;

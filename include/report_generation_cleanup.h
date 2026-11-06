@@ -25,6 +25,9 @@ public:
     void publish_layout(std::shared_ptr<const NightCatalogLayoutIssues> issues);
     bool poll(bool allowed, uint32_t now_ms);
 
+    // Reader-deferred nights do not hold up new background work.
+    bool pending() const;
+
     // The writer must not reuse an orphan path until storage has stopped
     // deleting it, even after requesting cancellation.
     bool deleting() const { return delete_id_ != 0; }

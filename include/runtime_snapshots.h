@@ -14,6 +14,7 @@ struct ActivitySnapshot {
     bool ota_install_active = false;
     bool manual_update_check_active = false;
     bool export_work_claimed = false;
+    bool storage_low_space = false;
     bool as11_rpc_available = true;
     bool supports_as11_spools = true;
     uint32_t generation = 0;

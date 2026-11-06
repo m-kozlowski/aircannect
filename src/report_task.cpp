@@ -1099,6 +1099,21 @@ struct ReportTask::Runtime {
                engine.status().foreground_active || period_running;
     }
 
+    bool poll_generation_cleanup(bool catalog_current, bool startup_allowed,
+                                 uint32_t now_ms) {
+        const auto status = engine.status();
+        const bool allowed = catalog_current && startup_allowed &&
+            !local_background_work_blocked() &&
+            status.state == ReportEngineState::Idle && status.queued == 0 &&
+            !rebuild_started && !capture_build.valid() &&
+            (activity.storage_low_space || !post_therapy_build.valid()) &&
+            (activity.storage_low_space || !store_catalog_load_pending) &&
+            !signal_tile_backfill_started &&
+            !store_catalog_loader.status().active();
+
+        return generation_cleanup.poll(allowed, now_ms);
+    }
+
     void cancel_signal_tile_backfill() {
         signal_tile_backfill.reset();
         signal_tile_backfill_started = false;
@@ -4367,7 +4382,16 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.catalog_refresh.active() &&
         !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required();
-    if (catalog_current && !runtime.rebuild_started && !local_blocked && startup_allowed) {
+
+    if (runtime.activity.storage_low_space) {
+        worked = runtime.poll_generation_cleanup(
+            catalog_current, startup_allowed, now_ms) || worked;
+    }
+    const bool cleanup_first = runtime.activity.storage_low_space &&
+        runtime.generation_cleanup.pending();
+
+    if (catalog_current && !runtime.rebuild_started && !local_blocked &&
+        startup_allowed && !cleanup_first) {
         worked = runtime.schedule_post_therapy_build() || worked;
         if (runtime.store_purpose == CatalogStorePurpose::None &&
             !runtime.pending_catalog_save && !runtime.store_catalog_load_pending &&
@@ -4389,7 +4413,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.engine.catalog_update_required() ||
             runtime.rebuild_started ||
             runtime.capture_build.valid() ||
-            runtime.post_therapy_build.valid();
+            runtime.post_therapy_build.valid() || cleanup_first;
         if (competing_work) {
             runtime.cancel_signal_tile_backfill();
             worked = true;
@@ -4399,14 +4423,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = runtime.observe_signal_tile_backfill(now_ms) || worked;
     }
 
-    const auto engine_status = runtime.engine.status();
-    const bool cleanup_allowed = catalog_current && startup_allowed &&
-        !local_blocked && engine_status.state == ReportEngineState::Idle &&
-        engine_status.queued == 0 && !runtime.rebuild_started &&
-        !runtime.post_therapy_build.valid() && !runtime.capture_build.valid() &&
-        !runtime.signal_tile_backfill_started && !runtime.store_catalog_load_pending &&
-        !runtime.store_catalog_loader.status().active();
-    worked = runtime.generation_cleanup.poll(cleanup_allowed, now_ms) || worked;
+    if (!runtime.activity.storage_low_space) {
+        worked = runtime.poll_generation_cleanup(
+            catalog_current, startup_allowed, now_ms) || worked;
+    }
 
     if (!runtime.generation_cleanup.deleting() &&
         (!runtime.activity.therapy_active || runtime.capture_storage_ready())) {
