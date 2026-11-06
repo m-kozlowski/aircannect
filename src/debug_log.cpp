@@ -2,6 +2,7 @@
 
 #include <IPAddress.h>
 #include <WiFiUdp.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stdarg.h>
@@ -297,8 +298,18 @@ void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size) {
     time_t seconds = static_cast<time_t>(seconds_part);
     tm local = {};
     tm utc = {};
-    if (!localtime_r(&seconds, &local) || !gmtime_r(&seconds, &utc)) {
-        snprintf(out, out_size, "1970-01-01T00:00:00.000+00:00");
+
+    // Use the same valid-clock floor as TimeSyncService, regardless of source.
+    if (seconds_part < 1609459200LL ||
+        !localtime_r(&seconds, &local) || !gmtime_r(&seconds, &utc)) {
+        const uint64_t uptime_ms =
+            static_cast<uint64_t>(esp_timer_get_time()) / 1000;
+        char relative[FILE_LOG_TIMESTAMP_BYTES + 1] = {};
+        snprintf(relative, sizeof(relative), "[boot +%03llu.%03us]",
+                 static_cast<unsigned long long>(uptime_ms / 1000),
+                 static_cast<unsigned>(uptime_ms % 1000));
+        snprintf(out, out_size, "%-*s",
+                 static_cast<int>(FILE_LOG_TIMESTAMP_BYTES), relative);
         return;
     }
 
