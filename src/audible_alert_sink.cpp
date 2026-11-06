@@ -85,6 +85,9 @@ void AudibleAlertSink::set_volume(uint8_t percent) {
 }
 
 void AudibleAlertSink::accept(const AlertEvent &event) {
+    if (event.kind == AlertKind::LowStorage ||
+        event.state == AlertState::Reminder) return;
+
     const uint8_t kind = static_cast<uint8_t>(event.kind);
     if (kind >= 32) return;
 

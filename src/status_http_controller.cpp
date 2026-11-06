@@ -61,6 +61,7 @@ bool build_status_json(LargeTextBuffer &json,
                     Storage::state_name(storage.state));
     json_add_uint64(json, "storage_total", storage.total_bytes);
     json_add_uint64(json, "storage_used", storage.used_bytes);
+    json_add_bool(json, "storage_low_space", snap.storage_low_space);
     json_add_uint64(json, "storage_requested_hz", storage.requested_hz);
     json_add_uint64(json, "storage_actual_hz", storage.actual_hz);
     json_add_string_view(json, "wifi_state", wifi.state);

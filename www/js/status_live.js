@@ -141,6 +141,13 @@
       const total = Number(data.storage_total || 0);
       const used = Number(data.storage_used || 0);
       const free = Math.max(0, total - used);
+      const notice = document.getElementById("storageNotice");
+      if (notice) {
+        notice.hidden = !data.storage_low_space;
+        notice.textContent = data.storage_low_space
+          ? "SD low: " + Math.floor(free / (1024 * 1024)) + " MiB free" : "";
+      }
+
       if (data.storage_state === "mounted" && total > 0) {
         text = AirCANnect.format.bytes(free) + " / " + AirCANnect.format.bytes(total);
         percent = Math.max(0, Math.min(100, used / total * 100));

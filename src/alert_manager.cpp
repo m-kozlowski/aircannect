@@ -83,6 +83,15 @@ void AlertManager::observe(AlertMetric metric,
     }
 }
 
+bool AlertManager::active(AlertKind kind) const {
+    for (const RuleSlot &slot : rules_) {
+        if (slot.occupied && slot.config.kind == kind) {
+            return state_has_active_incident(slot.state);
+        }
+    }
+    return false;
+}
+
 bool AlertManager::state_has_active_incident(RuleState state) {
     return state == RuleState::Active || state == RuleState::PendingClear;
 }
@@ -161,7 +170,16 @@ void AlertManager::evaluate(RuleSlot &slot,
             return;
 
         case RuleState::Active:
-            if (!should_clear) return;
+            if (!should_clear) {
+                if (slot.config.reminder_interval_ms != 0 &&
+                    now_ms - slot.last_notice_ms >=
+                        slot.config.reminder_interval_ms) {
+                    slot.last_notice_ms = now_ms;
+                    publish(slot, AlertState::Reminder,
+                            AlertClearReason::None, now_ms);
+                }
+                return;
+            }
             slot.state = RuleState::PendingClear;
             slot.transition_ms = now_ms;
             if (slot.config.clear_delay_ms == 0) {
@@ -187,41 +205,33 @@ void AlertManager::raise(RuleSlot &slot,
     slot.state = RuleState::Active;
     slot.incident_id = next_incident_id_++;
     if (next_incident_id_ == 0) next_incident_id_ = 1;
-
-    AlertEvent event;
-    event.kind = slot.config.kind;
-    event.metric = slot.config.metric;
-    event.scope = slot.config.scope;
-    event.severity = slot.config.severity;
-    event.state = AlertState::Raised;
-    event.incident_id = slot.incident_id;
-    event.occurred_ms = now_ms;
-    event.value = value;
-    event.threshold = slot.config.raise_threshold;
-    publish(event);
+    slot.last_value = value;
+    slot.last_notice_ms = now_ms;
+    publish(slot, AlertState::Raised, AlertClearReason::None, now_ms);
 }
 
 void AlertManager::clear(RuleSlot &slot,
                          AlertClearReason reason,
                          uint32_t now_ms) {
+    publish(slot, AlertState::Cleared, reason, now_ms);
+    slot.state = RuleState::Idle;
+    slot.incident_id = 0;
+}
+
+void AlertManager::publish(const RuleSlot &slot, AlertState state,
+                           AlertClearReason reason, uint32_t now_ms) {
     AlertEvent event;
     event.kind = slot.config.kind;
     event.metric = slot.config.metric;
     event.scope = slot.config.scope;
     event.severity = slot.config.severity;
-    event.state = AlertState::Cleared;
+    event.state = state;
     event.clear_reason = reason;
     event.incident_id = slot.incident_id;
     event.occurred_ms = now_ms;
     event.value = slot.last_value;
     event.threshold = slot.config.raise_threshold;
-    publish(event);
 
-    slot.state = RuleState::Idle;
-    slot.incident_id = 0;
-}
-
-void AlertManager::publish(const AlertEvent &event) {
     for (size_t i = 0; i < sink_count_; ++i) {
         sinks_[i]->accept(event);
     }
@@ -231,6 +241,7 @@ const char *alert_kind_name(AlertKind kind) {
     switch (kind) {
         case AlertKind::HighLeak: return "high_leak";
         case AlertKind::LowSpo2: return "low_spo2";
+        case AlertKind::LowStorage: return "low_storage";
         case AlertKind::Count: break;
     }
     return "unknown";

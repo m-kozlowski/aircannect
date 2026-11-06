@@ -9,12 +9,14 @@ enum class AlertMetric : uint8_t {
     Leak,
     Spo2,
     Pulse,
+    StorageFreeMiB,
     Count,
 };
 
 enum class AlertKind : uint8_t {
     HighLeak,
     LowSpo2,
+    LowStorage,
     Count,
 };
 
@@ -39,6 +41,7 @@ enum class AlertDirection : uint8_t {
 enum class AlertState : uint8_t {
     Raised,
     Cleared,
+    Reminder,
 };
 
 enum class AlertClearReason : uint8_t {
@@ -80,6 +83,7 @@ struct AlertThresholdRule {
     float clear_threshold = 0.0f;
     uint32_t raise_delay_ms = 0;
     uint32_t clear_delay_ms = 0;
+    uint32_t reminder_interval_ms = 0;
     bool enabled = false;
 };
 
@@ -98,6 +102,7 @@ public:
                  bool valid,
                  float value,
                  uint32_t now_ms);
+    bool active(AlertKind kind) const;
 
 private:
     enum class RuleState : uint8_t {
@@ -112,6 +117,7 @@ private:
         RuleState state = RuleState::Idle;
         uint32_t transition_ms = 0;
         uint32_t incident_id = 0;
+        uint32_t last_notice_ms = 0;
         float last_value = 0.0f;
         bool occupied = false;
     };
@@ -135,7 +141,8 @@ private:
     void clear(RuleSlot &slot,
                AlertClearReason reason,
                uint32_t now_ms);
-    void publish(const AlertEvent &event);
+    void publish(const RuleSlot &slot, AlertState state,
+                 AlertClearReason reason, uint32_t now_ms);
 
     RuleSlot rules_[MAX_RULES];
     AlertSink *sinks_[MAX_SINKS] = {};

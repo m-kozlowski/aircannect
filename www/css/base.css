@@ -228,11 +228,14 @@
     }
 
     .topbar {
-      height: 54px;
+      min-height: 54px;
+      flex-shrink: 0;
       display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
       align-items: center;
       justify-content: space-between;
-      padding: 0 22px;
+      padding: 8px 22px;
       background: var(--surface);
       border-bottom: 1px solid var(--line);
       font-size: 12px;
@@ -243,6 +246,24 @@
       display: flex;
       gap: 14px;
       align-items: center;
+    }
+
+    .topbar > div:first-child {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      min-width: 0;
+    }
+
+    .storage-notice {
+      color: var(--orange);
+      white-space: nowrap;
+      text-decoration: none;
+    }
+
+    .storage-notice:hover {
+      text-decoration: underline;
     }
 
     .wifi-signal {

@@ -528,6 +528,16 @@ void DisplayManager::render(const DisplaySnapshot &snapshot, bool force) {
     if (snapshot.therapy_active) render_therapy(snapshot, page, count);
     else render_idle(snapshot, page);
 
+    if (snapshot.storage_low_space) {
+        char text[24];
+        snprintf(text, sizeof(text), "SD LOW %luM",
+                 static_cast<unsigned long>(snapshot.storage_free_mib));
+        const int16_t margin = device_->width() / 20;
+        draw_text(margin, device_->height() - 10,
+                  device_->width() - margin * 2 - 24,
+                  text, COLOR_PENDING, 1);
+    }
+
     flush_fields(force || state.therapy != snapshot.therapy_active ||
                  state.page != page);
     state.therapy = snapshot.therapy_active;

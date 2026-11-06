@@ -131,6 +131,9 @@ DisplaySnapshot compose_display_snapshot(
     out.smb = display_state(exports.endpoint(ExportEndpoint::Smb));
     out.sleephq = display_state(exports.endpoint(ExportEndpoint::SleepHq));
 
+    out.storage_low_space = system.storage_low_space;
+    out.storage_free_mib = system.storage.free_bytes / (1024 * 1024);
+
     apply_display_therapy_telemetry(out, telemetry, therapy_mode);
     out.reports = reports;
 

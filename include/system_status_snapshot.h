@@ -80,6 +80,7 @@ struct SystemStatusSnapshot {
     bool onboarding_complete = false;
     MemoryStatus memory;
     StorageStatus storage;
+    bool storage_low_space = false;
     EdfRecordingOverviewSnapshot edf;
     WifiStatusSnapshot wifi;
     WireguardStatus vpn;

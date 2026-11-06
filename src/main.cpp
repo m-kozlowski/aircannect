@@ -103,10 +103,22 @@ namespace {
 class AlertLogSink final : public AlertSink {
 public:
     void accept(const AlertEvent &event) override {
-        if (event.state == AlertState::Raised) {
+        if (event.kind == AlertKind::LowStorage) {
+            if (event.state != AlertState::Cleared) {
+                Log::logf(CAT_STORAGE, LOG_WARN,
+                          "low space free_mib=%.1f\n", event.value);
+            } else if (event.clear_reason == AlertClearReason::Recovered) {
+                Log::logf(CAT_STORAGE, LOG_INFO,
+                          "space recovered free_mib=%.1f\n", event.value);
+            }
+            return;
+        }
+
+        if (event.state != AlertState::Cleared) {
             Log::logf(CAT_GENERAL, LOG_WARN,
-                      "[ALERT] raised kind=%s incident=%lu value=%.1f "
+                      "[ALERT] %s kind=%s incident=%lu value=%.1f "
                       "threshold=%.1f\n",
+                      event.state == AlertState::Raised ? "raised" : "reminder",
                       alert_kind_name(event.kind),
                       static_cast<unsigned long>(event.incident_id),
                       event.value, event.threshold);
@@ -803,6 +815,21 @@ static void configure_oximetry(const AppConfigData &config) {
 }
 
 static void configure_alerts(const AppConfigData &config, uint32_t now_ms) {
+    AlertThresholdRule storage;
+    storage.kind = AlertKind::LowStorage;
+    storage.metric = AlertMetric::StorageFreeMiB;
+    storage.scope = AlertScope::System;
+    storage.direction = AlertDirection::Below;
+    // TODO should be configurable or calculated
+    storage.raise_threshold = 64;
+    storage.clear_threshold = 96;
+    storage.reminder_interval_ms = 24UL * 60 * 60 * 1000;
+    storage.enabled = true;
+    if (!alert_manager.configure_threshold(storage, now_ms)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[ALERT] failed to configure low storage rule\n");
+    }
+
     AlertThresholdRule leak;
     leak.kind = AlertKind::HighLeak;
     leak.metric = AlertMetric::Leak;
@@ -1136,6 +1163,13 @@ static void refresh_status_presentations(uint32_t now_ms) {
             plx_peripheral,
         },
         drain_can_rx);
+
+    alert_manager.observe(
+        AlertMetric::StorageFreeMiB,
+        snapshot.storage.mounted && snapshot.storage.total_bytes != 0,
+        static_cast<float>(snapshot.storage.free_bytes) / (1024 * 1024),
+        now_ms);
+    snapshot.storage_low_space = alert_manager.active(AlertKind::LowStorage);
 
     snapshot.vpn = wireguard_service.status();
     snapshot.as11.transport = rpc_link_selector.selected();

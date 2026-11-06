@@ -59,6 +59,9 @@ struct DisplaySnapshot {
     DisplayExportState smb = DisplayExportState::Disabled;
     DisplayExportState sleephq = DisplayExportState::Disabled;
 
+    bool storage_low_space = false;
+    uint32_t storage_free_mib = 0;
+
     DisplayPressureSnapshot pressure;
 
     bool leak_valid = false;
