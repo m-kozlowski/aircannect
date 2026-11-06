@@ -34,11 +34,13 @@ struct ReportEngineCompletion {
     ReportExecutorError executor_error = ReportExecutorError::None;
     ReportSourceId fallback_source = ReportSourceId::Summary;
     uint32_t store_generation = 0;
+    bool source_preservation_failed = false;
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }
     // Rebuild declined before replacing report data; metadata records the refusal.
     bool retained_for_missing_sources() const;
+    bool deferred_for_low_space() const;
 };
 
 struct ReportEngineStatus {
@@ -70,6 +72,7 @@ public:
     void publish_spool_availability(
         const ReportSpoolAvailability &availability,
         bool complete);
+    void publish_storage_low_space(bool low_space);
     bool catalog_update_required() const;
     std::shared_ptr<const NightCatalog> catalog_replacement() const;
     void catalog_update_failed(const char *error);
@@ -119,6 +122,7 @@ private:
                      std::shared_ptr<const NightCatalog> sources = {});
     bool finish_checkpoint_load(uint32_t now_ms);
     bool start_execution(uint32_t now_ms);
+    bool defer_build_for_low_space();
     bool finish_fallback_acquisition();
     bool finish_execution(uint32_t now_ms);
     bool finish_publication();
@@ -164,6 +168,7 @@ private:
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog_;
     ReportSpoolAvailability spool_availability_;
     bool spool_availability_complete_ = false;
+    bool storage_low_space_ = false;
     std::shared_ptr<const ReportReadPlan> active_plan_;
     ReportArtifactRequest active_request_;
     ReportEngineCompletion last_completion_;

@@ -102,11 +102,12 @@ void send_night_failure(AsyncWebServerRequest *request,
                         const ReportNightFailureStatus &failure) {
     if (!request || !failure.valid()) return;
 
-    char body[192] = {};
+    char body[256] = {};
     snprintf(body,
              sizeof(body),
-             "{\"ok\":false,\"state\":\"failed\",\"error\":\"%s\"}",
-             failure.error);
+             "{\"ok\":false,\"state\":\"failed\",\"error\":\"%s\","
+             "\"source_preservation_failed\":%s}",
+             failure.error, failure.source_preservation_failed ? "true" : "false");
     const int status = failure.retryable ? 503 : 404;
     AsyncWebServerResponse *response = request->beginResponse(
         status, "application/json", body);
@@ -491,6 +492,11 @@ bool begin_missing_night(AsyncWebServerRequest *request,
     ReportNightFailureStatus failure;
     if (report_task.night_failure(sleep_day, failure, 20, intent)) {
         send_night_failure(request, failure);
+        return false;
+    }
+
+    if (!metadata_pending && report_task.control_snapshot().builds_deferred) {
+        send_json_error(request, 507, "report_storage_low_space");
         return false;
     }
 
@@ -1212,8 +1218,10 @@ void ReportHttpController::send_result(AsyncWebServerRequest *request) {
 
     ReportNightFailureStatus failure;
     const bool failed = report_task_->night_failure(sleep_day, failure);
-    const char *update = failed ? failure.error : query.outdated ? "pending" : "";
-    if (query.outdated && !failed) {
+    const bool deferred = report_task_->control_snapshot().builds_deferred;
+    const char *update = failed ? failure.error : query.outdated
+        ? deferred ? "report_storage_low_space" : "pending" : "";
+    if (query.outdated && !failed && !deferred) {
         (void)report_task_->request_night(
             sleep_day, ReportRequestPriority::Foreground, next_generation(), false);
     }
@@ -1555,6 +1563,8 @@ void ReportHttpController::publish_completion() {
     json_add_string(completion_json_, "night", day);
     json_add_string(completion_json_, "kind", "night");
     json_add_bool(completion_json_, "success", success);
+    json_add_bool(completion_json_, "source_preservation_failed",
+                  completion.source_preservation_failed);
     json_add_bool(completion_json_,
                   "forced",
                   completion.request.force_rebuild);

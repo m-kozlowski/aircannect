@@ -39,6 +39,7 @@ public:
     static constexpr size_t NightCacheBytes = 512 * 1024;
 
     void begin(StorageReadPort &port, StorageAtomicWritePort &writes);
+    void publish_storage_low_space(bool low_space) { storage_low_space_ = low_space; }
     bool start(ReportPeriodKey key,
                std::shared_ptr<const NightCatalog> catalog,
                std::shared_ptr<const ReportSignalStoreCatalog> store,
@@ -60,6 +61,7 @@ private:
     StorageBoundedFileLoader loader_;
     StorageAtomicWritePort *write_port_ = nullptr;
     OperationTicket write_ticket_;
+    bool storage_low_space_ = false;
 };
 
 uint64_t report_period_revision(ReportPeriodKey key,

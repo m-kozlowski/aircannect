@@ -112,6 +112,11 @@ bool ReportEngineCompletion::retained_for_missing_sources() const {
         strcmp(error, "report_source_changed_incomplete") == 0;
 }
 
+bool ReportEngineCompletion::deferred_for_low_space() const {
+    return outcome.disposition == OperationDisposition::Cancelled &&
+        strcmp(error, "report_storage_low_space") == 0;
+}
+
 ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
                            size_t queue_capacity) :
     queue_(queue_slots, queue_capacity) {}
@@ -169,6 +174,10 @@ void ReportEngine::publish_spool_availability(
     spool_availability_ = availability;
     spool_availability_complete_ = complete;
     fallback_acquisition_.publish_spool_availability(availability);
+}
+
+void ReportEngine::publish_storage_low_space(bool low_space) {
+    storage_low_space_ = low_space;
 }
 
 bool ReportEngine::catalog_update_required() const {
@@ -833,6 +842,7 @@ bool ReportEngine::start_build(
             read_lane(active_request_.priority),
             write_lane(active_request_.priority),
             spool_availability_);
+        phase_ = ActivePhase::AcquiringFallback;
         if (admitted != OperationAdmission::Accepted) {
             const ReportFallbackAcquisitionStatus status =
                 fallback_acquisition_.status();
@@ -845,9 +855,10 @@ bool ReportEngine::start_build(
             return true;
         }
 
-        phase_ = ActivePhase::AcquiringFallback;
         return true;
     }
+
+    if (defer_build_for_low_space()) return true;
 
     if (previous_metadata_.metadata) {
         const auto &previous = previous_metadata_.view;
@@ -959,7 +970,18 @@ bool ReportEngine::finish_fallback_metadata_load(uint32_t now_ms) {
     return start_build(now_ms, restored);
 }
 
+bool ReportEngine::defer_build_for_low_space() {
+    if (!storage_low_space_ || active_request_.force_rebuild) return false;
+
+    // The owner retries on capacity recovery, not on the ordinary error timer.
+    complete_active(OperationOutcome::cancelled(), ReportPlanStatus::Ready,
+                    ReportExecutorError::None, "report_storage_low_space");
+    return true;
+}
+
 bool ReportEngine::start_execution(uint32_t now_ms) {
+    if (defer_build_for_low_space()) return true;
+
     std::shared_ptr<const ReportReadPlan> execution_plan = active_plan_;
     if (previous_checkpoint_.bytes) {
         const auto &checkpoint = previous_checkpoint_.view;
@@ -1291,6 +1313,10 @@ void ReportEngine::complete_active(OperationOutcome outcome,
     last_completion_.plan_status = plan_status;
     last_completion_.executor_error = executor_error;
     last_completion_.fallback_source = fallback_source;
+    last_completion_.source_preservation_failed =
+        outcome.disposition == OperationDisposition::Failed &&
+        (phase_ == ActivePhase::AcquiringFallback ||
+         phase_ == ActivePhase::WaitingForCatalog);
     copy_cstr(last_completion_.error,
               sizeof(last_completion_.error),
               completion_error(outcome,

@@ -744,6 +744,13 @@ bool ReportPeriodService::poll() {
     }
     if (r.phase == Phase::WriteHistogram) {
         if (!write_ticket_.valid()) {
+            if (storage_low_space_) {
+                cache_->remember_histogram(*r.saved, r.histogram_bytes, r.histogram);
+                r.metric = 0;
+                r.phase = Phase::Metrics;
+                return true;
+            }
+
             char path[AC_STORAGE_PATH_MAX];
             ReportNightHistogramCodec::path(
                 r.metadata.view.night, path, sizeof(path));

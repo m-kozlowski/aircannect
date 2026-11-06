@@ -1,5 +1,20 @@
 (() => {
     const REPORT_RETAINED_REASON = "report_source_changed_incomplete";
+    const REPORT_LOW_SPACE_REASON = "report_storage_low_space";
+    const REPORT_LOW_SPACE_NOTICE = "Report deferred: SD space low";
+
+    function reportFailureMessage(value) {
+      let data = value;
+      if (typeof value === "string") {
+        try { data = JSON.parse(value); } catch (_) { data = {error: value}; }
+      }
+      const error = data && data.error || "Report unavailable";
+      if (data && data.source_preservation_failed) {
+        return "Source preservation failed; data may expire: " + error;
+      }
+      return error === REPORT_LOW_SPACE_REASON ? REPORT_LOW_SPACE_NOTICE : error;
+    }
+
     const REPORT_RETAINED_NOTICE =
       "Showing saved report; sources no longer cover a full rebuild.";
 
@@ -3273,7 +3288,7 @@
           if (response.status === 503 && isTransientReportError(text)) {
             return {done: false};
           }
-          throw new Error(text || "report metadata request failed");
+          throw new Error(reportFailureMessage(text || "report metadata request failed"));
         },
       });
     }
@@ -3587,7 +3602,7 @@
             if (response.status === 503 && isTransientReportError(text)) {
               return {done: false};
             }
-            throw new Error(text || "report signal request failed");
+            throw new Error(reportFailureMessage(text || "report signal request failed"));
           }
 
           const revision = reportArtifactRevision(response);
@@ -3883,7 +3898,7 @@
             if (response.status === 503 && isTransientReportError(text)) {
               return {done: false};
             }
-            throw new Error(text || "report events request failed");
+            throw new Error(reportFailureMessage(text || "report events request failed"));
           }
           const decoded = decodeSignalStoreEvents(body, context);
           void writeReportCache([{key, value: body, bytes: body.byteLength}]);
@@ -4257,12 +4272,15 @@
           res.cached ? "Browser copy; freshness not verified" : update
             ? update === "pending"
               ? "Showing saved report; update pending"
+              : update === REPORT_LOW_SPACE_REASON
+              ? REPORT_LOW_SPACE_NOTICE
               : "Showing saved report; update failed: " + update
             : reportResult.active
             ? "Recording - data through " + fmtReportClock(reportResult.end)
             : reportResult.state === "partial"
             ? "Report loaded (incomplete - some data missing)"
-            : "Report loaded", !update || update === "pending", !!(update || res.cached));
+            : "Report loaded", !update || update === "pending" ||
+                update === REPORT_LOW_SPACE_REASON, !!(update || res.cached));
       } catch (error) {
         if (token !== reportLoadToken) return;
         AirCANnect.ui.message("reportMsg", (reportOffline
@@ -4402,12 +4420,13 @@
         if (active && nightId === selectedNightId &&
             data.error !== "cancelled") {
           const retained = data.error === REPORT_RETAINED_REASON;
+          const deferred = data.error === REPORT_LOW_SPACE_REASON;
           if (retained && reportResult && reportCurrentNightId === nightId && !data.forced) return;
 
           AirCANnect.ui.message(
             "reportMsg", retained ? REPORT_RETAINED_NOTICE :
-              (reportResult ? "Report update failed: " : "") +
-                (data.error || "Report failed"), retained, true);
+              (reportResult && !deferred ? "Report update failed: " : "") +
+                reportFailureMessage(data), retained || deferred, true);
         }
         return;
       }

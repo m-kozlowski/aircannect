@@ -52,6 +52,7 @@ const char *report_wait_reason_name(ReportTaskWaitReason reason) {
         case ReportTaskWaitReason::Export: return "export";
         case ReportTaskWaitReason::As11Unavailable: return "as11_unavailable";
         case ReportTaskWaitReason::StorageUnavailable: return "storage_unavailable";
+        case ReportTaskWaitReason::StorageLowSpace: return "storage_low_space";
         case ReportTaskWaitReason::None:
         default: return "--";
     }
@@ -113,6 +114,7 @@ struct ReportNightFailureEntry {
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint32_t retry_at_ms = 0;
     bool retryable = true;
+    bool source_preservation_failed = false;
 
     bool valid() const {
         return sleep_day.valid() && source_revision.valid() && error[0];
@@ -252,7 +254,7 @@ struct ReportTask::Runtime {
 
     void record_failure(const char *operation, const char *error,
                         SleepDayId sleep_day = {}, uint32_t retry_ms = 0,
-                        bool log = true) {
+                        bool log = true, bool source_preservation_failed = false) {
         ++command_failures;
         copy_cstr(last_failure.operation, sizeof(last_failure.operation), operation);
         copy_cstr(last_failure.error, sizeof(last_failure.error),
@@ -266,12 +268,15 @@ struct ReportTask::Runtime {
             char day[9] = "--";
             if (sleep_day.valid()) sleep_day.format_yyyymmdd(day, sizeof(day));
             Log::logf(CAT_REPORT, LOG_WARN,
-                      "failed op=%s night=%s error=%s retry_ms=%lu",
+                      "failed op=%s night=%s error=%s retry_ms=%lu%s",
                       last_failure.operation, day, last_failure.error,
-                      static_cast<unsigned long>(retry_ms));
+                      static_cast<unsigned long>(retry_ms),
+                      source_preservation_failed
+                          ? " source_preservation=failed risk=spool_expiration" : "");
         }
 #else
         (void)log;
+        (void)source_preservation_failed;
 #endif
     }
 
@@ -573,7 +578,8 @@ struct ReportTask::Runtime {
     }
 
     bool schedule_capture(uint32_t now_ms) {
-        if (!activity.therapy_active || !capture_session.raw_segment_start_ms ||
+        if (activity.storage_low_space ||
+            !activity.therapy_active || !capture_session.raw_segment_start_ms ||
             layout_blocked(capture_session.canonical_sleep_day) ||
             capture_build.valid() || catalog_load_pending ||
             store_purpose != CatalogStorePurpose::None ||
@@ -1023,6 +1029,7 @@ struct ReportTask::Runtime {
         entry->source_revision =
             completion.request.artifact.source_revision;
         copy_cstr(entry->error, sizeof(entry->error), completion.error);
+        entry->source_preservation_failed = completion.source_preservation_failed;
         entry->retryable =
             strcmp(completion.error, "report_source_expired") != 0 &&
             strcmp(completion.error, "report_source_changed_incomplete") != 0 &&
@@ -1071,6 +1078,7 @@ struct ReportTask::Runtime {
 
             copy_cstr(out.error, sizeof(out.error), entry.error);
             out.retryable = entry.retryable;
+            out.source_preservation_failed = entry.source_preservation_failed;
             out.retry_after_ms = entry.retryable
                 ? deadline_remaining(last_step_ms, entry.retry_at_ms) : 0;
             unlock();
@@ -1161,6 +1169,7 @@ struct ReportTask::Runtime {
             !activity.as11_rpc_available && next.as11_rpc_available;
         const bool spool_support_changed =
             activity.supports_as11_spools != next.supports_as11_spools;
+        const bool storage_recovered = activity.storage_low_space && !next.storage_low_space;
 
         if (therapy_ended || next.ota_install_active ||
             next.manual_update_check_active || next.export_work_claimed) {
@@ -1178,6 +1187,8 @@ struct ReportTask::Runtime {
         }
 
         activity = next;
+        engine.publish_storage_low_space(activity.storage_low_space);
+        period_service.publish_storage_low_space(activity.storage_low_space);
         if (capture_sources_pending &&
             (!next.therapy_active || next.ota_install_active ||
              next.manual_update_check_active ||
@@ -1193,7 +1204,7 @@ struct ReportTask::Runtime {
             activity.export_work_claimed;
 
         if (therapy_ended || spool_support_changed) invalidate_spool_availability();
-        if (rpc_became_available) reset_background_pass();
+        if (rpc_became_available || storage_recovered) reset_background_pass();
         if (!became_blocked) return true;
 
         (void)engine.cancel_background();
@@ -1805,8 +1816,9 @@ struct ReportTask::Runtime {
             store_catalog->ready(night->sleep_day, night->source_revision)) {
             const ReportSignalStoreCatalogRecord *stored =
                 store_catalog->find(night->sleep_day);
-            if (stored && stored->compression_version ==
-                              ReportSignalTile::CompressionVersion) {
+            if (activity.storage_low_space ||
+                (stored && stored->compression_version ==
+                              ReportSignalTile::CompressionVersion)) {
                 ++idle_cursor;
                 return true;
             }
@@ -2165,6 +2177,7 @@ struct ReportTask::Runtime {
         }
 
         const bool retained = completion.retained_for_missing_sources();
+        const bool deferred = completion.deferred_for_low_space();
         bool rebuilding = false;
         if (rebuild_started) {
             if (!lock()) {
@@ -2204,20 +2217,20 @@ struct ReportTask::Runtime {
         const bool post_therapy = completion.request.artifact == post_therapy_build;
         const bool capture = completion.request.artifact == capture_build;
         if (capture) {
-            if (succeeded || retained) {
+            if (succeeded || retained || deferred) {
                 // A refusal consumes this input revision, not the saved report.
                 // New closed data or a rewrite can trigger the next attempt.
                 capture_evaluated_end_ms = capture_attempt_end_ms;
                 capture_progress = std::move(capture_attempt_progress);
             }
-            capture_retry_at_ms = succeeded || retained
+            capture_retry_at_ms = succeeded || retained || deferred
                 ? 0 : now_ms + CATALOG_RETRY_MAX_MS;
-            if (!succeeded && !retained) capture_checked_revision = 0;
+            if (!succeeded && !retained && !deferred) capture_checked_revision = 0;
             capture_build = {};
         }
 
-        if (completion.request.artifact == post_therapy_build &&
-            completion.outcome.disposition != OperationDisposition::Cancelled) {
+        if (post_therapy && (deferred ||
+            completion.outcome.disposition != OperationDisposition::Cancelled)) {
             post_therapy_build = {};
 #ifdef ARDUINO
             char day[9] = {};
@@ -2225,6 +2238,9 @@ struct ReportTask::Runtime {
             if (succeeded) {
                 Log::logf(CAT_REPORT, LOG_INFO,
                           "post-therapy report ready night=%s error=--", day);
+            } else if (deferred) {
+                Log::logf(CAT_REPORT, LOG_INFO,
+                          "post-therapy report deferred night=%s reason=storage_low_space", day);
             }
 #endif
         }
@@ -2254,14 +2270,15 @@ struct ReportTask::Runtime {
                 const uint32_t retry_ms = capture && failure.retryable
                     ? CATALOG_RETRY_MAX_MS : failure.retry_after_ms;
                 record_failure(operation, completion.error,
-                               completed_day, retry_ms);
+                               completed_day, retry_ms, true,
+                               completion.source_preservation_failed);
             }
         }
 
         if (completion.request.priority !=
                 ReportRequestPriority::Foreground &&
-            completion.outcome.disposition !=
-                OperationDisposition::Cancelled) {
+            (deferred || completion.outcome.disposition !=
+                OperationDisposition::Cancelled)) {
             const NightCatalogRecord *current =
                 catalog && idle_cursor < catalog->size()
                     ? catalog->record(idle_cursor) : nullptr;
@@ -2272,7 +2289,7 @@ struct ReportTask::Runtime {
                     ++idle_cursor;
                 }
             }
-            if (!succeeded && !retained) {
+            if (!succeeded && !retained && !deferred) {
                 idle_pass_failed = true;
                 idle_retry_at_ms = now_ms + MATERIALIZE_RETRY_MS;
             }
@@ -2487,6 +2504,11 @@ struct ReportTask::Runtime {
             return out;
         }
 
+        if (activity.storage_low_space) {
+            out.wait_reason = ReportTaskWaitReason::StorageLowSpace;
+            return out;
+        }
+
         out.condition = ReportTaskCondition::Complete;
         out.wait_reason = ReportTaskWaitReason::None;
         return out;
@@ -2571,6 +2593,7 @@ struct ReportTask::Runtime {
         next.task_started = task_started;
         next.catalog_generation = catalog_generation;
         next.durable_catalog_generation = durable_catalog_generation;
+        next.builds_deferred = activity.storage_low_space;
         next.catalog_refresh_state = catalog_refresh.status().state;
         next.catalog_refresh_generation =
             catalog_refresh.status().generation;
@@ -4413,7 +4436,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.engine.catalog_update_required() ||
             runtime.rebuild_started ||
             runtime.capture_build.valid() ||
-            runtime.post_therapy_build.valid() || cleanup_first;
+            runtime.post_therapy_build.valid() || runtime.activity.storage_low_space;
         if (competing_work) {
             runtime.cancel_signal_tile_backfill();
             worked = true;

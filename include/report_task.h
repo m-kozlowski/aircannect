@@ -75,6 +75,7 @@ enum class ReportTaskWaitReason : uint8_t {
     Export,
     As11Unavailable,
     StorageUnavailable,
+    StorageLowSpace,
 };
 
 const char *report_wait_reason_name(ReportTaskWaitReason reason);
@@ -101,6 +102,7 @@ struct ReportTaskControlSnapshot {
     bool foreground_active = false;
     bool background_active = false;
     bool post_therapy_settle_pending = false;
+    bool builds_deferred = false;
     NightCatalogRefreshState catalog_refresh_state =
         NightCatalogRefreshState::Idle;
     uint32_t catalog_refresh_generation = 0;
@@ -224,6 +226,7 @@ struct ReportNightFailureStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint32_t retry_after_ms = 0;
     bool retryable = true;
+    bool source_preservation_failed = false;
 
     bool valid() const { return error[0] != '\0'; }
 };
