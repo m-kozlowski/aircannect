@@ -16,6 +16,7 @@ namespace {
 static constexpr size_t FILE_LOG_TIMESTAMP_BYTES = 29;
 static constexpr size_t FILE_LOG_LINE_MAX =
     FILE_LOG_TIMESTAMP_BYTES + 1 + AC_LOG_LINE_MAX + 2;
+static constexpr uint32_t FILE_LOG_RETRY_MS = 300000;
 
 bool format_archive_path(uint8_t index, char *out, size_t out_size) {
     if (!out || out_size == 0 || index == 0) return false;
@@ -74,7 +75,7 @@ bool StorageFileLogSink::configure(bool enabled) {
     desired_enabled_ = enabled;
     if (!enabled && queue_) {
         queue_->clear();
-        written_sequence_.store(accepted_sequence_, std::memory_order_release);
+        settled_sequence_.store(accepted_sequence_, std::memory_order_release);
     }
     update_queue_status_locked();
     unlock();
@@ -104,7 +105,10 @@ bool StorageFileLogSink::enqueue(const char *line, size_t length) {
     if (!lock(0)) return false;
 
     bool accepted = false;
-    if (desired_enabled_ && queue_ && storage_local_requests_enabled.load()) {
+    const bool retry_due = retry_at_ms_ == 0 ||
+        static_cast<int32_t>(millis() - retry_at_ms_) >= 0;
+    if (!retry_due) status_.drops++;
+    if (retry_due && desired_enabled_ && queue_ && storage_local_requests_enabled.load()) {
         Line item;
         item.sequence = next_sequence_;
         item.length = static_cast<uint16_t>(length);
@@ -135,11 +139,18 @@ bool StorageFileLogSink::pop_line(Line &line) {
     return available;
 }
 
-void StorageFileLogSink::restore_line(const Line &line) {
-    if (!lock()) return;
-    if (desired_enabled_ && queue_ && !queue_->push_front(line)) {
-        status_.drops++;
-    }
+void StorageFileLogSink::write_failed(uint32_t lost_lines) {
+    close_file(false);
+    directory_ready_ = false;
+    if (!lock_) return;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    status_.errors++;
+    status_.drops += lost_lines + (queue_ ? queue_->count() : 0);
+    if (queue_) queue_->clear();
+    settled_sequence_.store(accepted_sequence_, std::memory_order_release);
+    retry_at_ms_ = millis() + FILE_LOG_RETRY_MS;
     update_queue_status_locked();
     unlock();
 }
@@ -160,16 +171,17 @@ bool StorageFileLogSink::ensure_directory() {
     return true;
 }
 
-void StorageFileLogSink::close_file(bool flush) {
-    if (!file_) return;
+bool StorageFileLogSink::close_file(bool flush) {
+    if (!file_) return true;
 
-    if (flush) file_.flush();
+    const bool ok = !flush || Storage::flush_file(file_);
     file_.close();
     last_flush_ms_ = 0;
+    return ok;
 }
 
 bool StorageFileLogSink::rotate_file() {
-    close_file(true);
+    if (!close_file(true)) return false;
     if (!ensure_directory()) return false;
 
     char source[AC_STORAGE_WRITE_PATH_MAX + 8] = {};
@@ -279,7 +291,7 @@ bool StorageFileLogSink::write_line(const Line &line) {
     if (written != line.length) return false;
 
     file_size_ += written;
-    written_sequence_.store(line.sequence, std::memory_order_release);
+    settled_sequence_.store(line.sequence, std::memory_order_release);
 
     return true;
 }
@@ -291,7 +303,10 @@ bool StorageFileLogSink::flush_if_due() {
         return false;
     }
 
-    file_.flush();
+    if (!Storage::flush_file(file_)) {
+        write_failed();
+        return true;
+    }
     last_flush_ms_ = millis();
     return true;
 }
@@ -322,13 +337,13 @@ uint32_t StorageFileLogSink::capture_tail_fence() const {
 
 bool StorageFileLogSink::prepare_tail_read(uint32_t fence_sequence) {
 #if AC_FILE_LOG_ENABLED
-    const uint32_t written_sequence =
-        written_sequence_.load(std::memory_order_acquire);
+    const uint32_t settled_sequence =
+        settled_sequence_.load(std::memory_order_acquire);
     const bool fence_reached =
-        static_cast<int32_t>(written_sequence - fence_sequence) >= 0;
+        static_cast<int32_t>(settled_sequence - fence_sequence) >= 0;
     if (!fence_reached) return false;
 
-    if (file_) close_file(true);
+    if (!close_file(true)) write_failed();
     return true;
 #else
     return false;
@@ -341,12 +356,16 @@ bool StorageFileLogSink::step() {
 
     bool enabled = false;
     bool rotation_allowed = true;
+    bool retry_due = false;
     if (lock()) {
         enabled = desired_enabled_;
         rotation_allowed = rotation_allowed_;
+        retry_due = retry_at_ms_ == 0 ||
+            static_cast<int32_t>(millis() - retry_at_ms_) >= 0;
+        if (retry_due) retry_at_ms_ = 0;
         unlock();
     }
-    if (!enabled) return false;
+    if (!enabled || !retry_due) return false;
 
     if (!Storage::mounted()) {
         close_file(false);
@@ -359,20 +378,13 @@ bool StorageFileLogSink::step() {
     if (pop_line(line)) {
         if (write_line(line)) return true;
 
-        restore_line(line);
-        if (lock()) {
-            status_.errors++;
-            unlock();
-        }
-        return false;
+        write_failed(1);
+        return true;
     }
 
     if (rotation_allowed && rotation_pending_) {
         const bool rotated = rotate_file();
-        if (!rotated && lock()) {
-            status_.errors++;
-            unlock();
-        }
+        if (!rotated) write_failed();
         return rotated;
     }
     return flush_if_due();

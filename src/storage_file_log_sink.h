@@ -36,13 +36,13 @@ private:
     bool lock(uint32_t timeout_ms = 10) const;
     void unlock() const;
     bool pop_line(Line &line);
-    void restore_line(const Line &line);
+    void write_failed(uint32_t lost_lines = 0);
     void update_queue_status_locked();
 
     // File lifecycle, used only by the storage task
     bool ensure_directory();
     bool open_file(size_t next_write_length);
-    void close_file(bool flush);
+    bool close_file(bool flush);
     bool rotate_file();
     bool write_line(const Line &line);
     bool flush_if_due();
@@ -55,7 +55,9 @@ private:
     bool rotation_allowed_ = true;
     uint32_t next_sequence_ = 1;
     uint32_t accepted_sequence_ = 0;
-    std::atomic<uint32_t> written_sequence_{0};
+    // A settled line was written or deliberately dropped, so fences can finish.
+    std::atomic<uint32_t> settled_sequence_{0};
+    uint32_t retry_at_ms_ = 0;
     FileLogSinkStatus status_;
 
     File file_;

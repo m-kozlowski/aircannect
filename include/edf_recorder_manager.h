@@ -32,6 +32,7 @@ struct ReportSummaryRecord;
 static constexpr size_t AC_EDF_STREAM_FRAME_BUDGET = 8;
 static constexpr uint32_t AC_EDF_ATTACH_RETRY_MS = 1000;
 static constexpr uint32_t AC_EDF_SESSION_RETRY_MS = 5000;
+static constexpr uint32_t AC_EDF_STORAGE_RETRY_MS = 60000;
 static constexpr size_t AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH = 32;
 static constexpr size_t AC_EDF_LOCAL_SA2_QUEUE_DEPTH = 64;
 
@@ -103,6 +104,8 @@ struct EdfRecorderStatus {
     uint32_t numeric_open_buffer_drops = 0;
     uint32_t local_sa2_queue_drops = 0;
     bool local_sa2_active = false;
+    bool storage_blocked = false;
+    char storage_error[AC_STORAGE_ERROR_MAX] = {};
 
     // recording gate and mask faults
     uint32_t recording_gate_recoveries = 0;
@@ -292,6 +295,7 @@ private:
     void begin_recording_gate(const char *start_time, uint32_t now_ms);
     void close_recording_gate(const char *end_time, uint32_t now_ms);
     bool close_recording_segment();
+    void poll_capture_storage(uint32_t now_ms);
 
     // session clock provenance
     bool ensure_segment_metadata_published(const char *start_time,
@@ -466,6 +470,11 @@ private:
     bool recording_gate_closed_ = false;
     bool recording_gate_recovery_pending_ = false;
     bool segment_close_pending_ = false;
+    bool segment_restart_pending_ = false;
+    EdfCaptureFault capture_fault_;
+    uint32_t next_storage_retry_ms_ = 0;
+    bool storage_issue_active_ = false;
+    bool metadata_write_failed_ = false;
     bool annotation_open_pending_ = false;
     bool str_start_pending_ = false;
     char pending_str_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};

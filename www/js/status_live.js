@@ -141,13 +141,6 @@
       const total = Number(data.storage_total || 0);
       const used = Number(data.storage_used || 0);
       const free = Math.max(0, total - used);
-      const notice = document.getElementById("storageNotice");
-      if (notice) {
-        notice.hidden = !data.storage_low_space;
-        notice.textContent = data.storage_low_space
-          ? "SD low: " + Math.floor(free / (1024 * 1024)) + " MiB free" : "";
-      }
-
       if (data.storage_state === "mounted" && total > 0) {
         text = AirCANnect.format.bytes(free) + " / " + AirCANnect.format.bytes(total);
         percent = Math.max(0, Math.min(100, used / total * 100));
@@ -156,6 +149,56 @@
       summary.textContent = text;
       meter.style.width = percent.toFixed(1) + "%";
       meter.title = percent.toFixed(1) + "% used";
+    }
+
+    function renderSystemIssues(data) {
+      const free = Math.max(0, Number(data.storage_total || 0) -
+        Number(data.storage_used || 0));
+      const recording = data.edf || {};
+      const issues = [
+        {tab: "storage", active: !!data.storage_low_space,
+          text: "SD low: " + Math.floor(free / (1024 * 1024)) + " MiB free"},
+        {tab: "edf", active: !!recording.storage_blocked,
+          text: "EDF recording suspended", detail: recording.storage_error || ""},
+      ];
+
+      const list = document.getElementById("systemIssues");
+      issues.forEach((issue) => {
+        document.querySelectorAll('.nav[data-tab="' + issue.tab + '"]')
+          .forEach((link) => {
+            link.toggleAttribute("data-fault", issue.active);
+            link.title = issue.active ? issue.text : "";
+          });
+
+        const notice = document.getElementById(issue.tab + "Fault");
+        if (notice) {
+          notice.hidden = !issue.active;
+          const text = issue.active ? issue.text +
+            (issue.detail ? ": " + issue.detail : "") : "";
+          if (notice.textContent !== text) notice.textContent = text;
+        }
+        if (!list) return;
+
+        let item = list.querySelector('[data-subsystem="' + issue.tab + '"]');
+        if (!issue.active) {
+          if (item) item.remove();
+          return;
+        }
+
+        if (!item) {
+          item = document.createElement("li");
+          item.dataset.subsystem = issue.tab;
+          const link = document.createElement("a");
+          link.href = "#" + issue.tab;
+          link.dataset.action = "app.show-tab";
+          link.dataset.value = issue.tab;
+          item.appendChild(link);
+          list.appendChild(item);
+        }
+        const link = item.firstElementChild;
+        if (link.textContent !== issue.text) link.textContent = issue.text;
+      });
+      if (list) list.hidden = !list.childElementCount;
     }
 
     function renderOximetryRuntime(data) {
@@ -537,6 +580,7 @@
         data.device_datetime_age_ms));
       AirCANnect.ui.text("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
+      renderSystemIssues(data);
       AirCANnect.ui.text("timeSync", fmtSync(data));
       const timeToResmed = document.getElementById("timeToResmed");
       if (timeToResmed) timeToResmed.disabled = !data.resmed_time_write_supported;

@@ -38,6 +38,7 @@
 #include "storage_read_file.h"
 #include "storage_scan_service.h"
 #include "storage_stream_service.h"
+#include "storage_space_policy.h"
 #include "storage_upload_service.h"
 #include "string_util.h"
 
@@ -121,6 +122,8 @@ struct OpenFile {
     File file;
     uint32_t request_id = 0;
     uint32_t record_count = 0;
+    uint32_t committed_count = 0;
+    uint32_t record_duration_ms = 0;
     size_t header_size = 0;
     size_t record_size = 0;
     bool resumed = false;
@@ -188,7 +191,7 @@ struct EdfStrCompletionSlot {
     StorageEdfStrWriteCompletion completion;
 };
 
-void close_file(OpenFile &state);
+bool close_file(OpenFile &state, bool patch = true);
 bool lock_queue(uint32_t timeout_ms = 10);
 void unlock_queue();
 
@@ -196,6 +199,8 @@ void publish_edf_progress();
 std::shared_ptr<const EdfStorageProgress> read_edf_progress_snapshot();
 
 StorageServiceState service_state;
+EdfCaptureFault capture_fault;
+std::atomic<bool> capture_paused{false};
 SemaphoreHandle_t queue_lock = nullptr;
 TaskHandle_t task = nullptr;
 JobSlot *slots = nullptr;
@@ -352,6 +357,7 @@ size_t file_log_burst = 0;
 size_t foreground_turn = 0;
 std::atomic<bool> mount_retry_requested{false};
 std::atomic<bool> capacity_update_allowed{true};
+std::atomic<bool> delete_work_allowed{true};
 bool storage_resources_ready = false;
 uint32_t storage_resource_retry_at_ms = 0;
 uint8_t storage_resource_retry_attempt = 0;
@@ -1389,8 +1395,7 @@ bool patch_record_count(OpenFile &state) {
         !state.file.seek(0)) return false;
 
     if (state.file.write(header, sizeof(header)) != sizeof(header)) return false;
-    state.file.flush();
-    return state.file.seek(state.file.size());
+    return Storage::flush_file(state.file) && state.file.seek(state.file.size());
 }
 
 bool render_resume_header(const JobSlot &job,
@@ -1470,6 +1475,9 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     state.kind = job.kind;
     state.request_id = job.request_id;
     state.record_count = plan.record_count;
+    state.committed_count = plan.record_count;
+    state.record_duration_ms = is_annotation_kind(job.kind) ? 0
+        : job.numeric_schema.record_duration_seconds * 1000;
     state.header_size = header_size;
     state.record_size = job.record_size;
     state.resumed = true;
@@ -1478,15 +1486,7 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     state.open = true;
     if ((plan.patch_header_record_count && !patch_record_count(state)) ||
         !state.file.seek(state.file.size())) {
-        state.file.close();
-        state.open = false;
-        state.request_id = 0;
-        state.record_count = 0;
-        state.header_size = 0;
-        state.record_size = 0;
-        state.resumed = false;
-        state.path[0] = 0;
-        state.header.reset();
+        close_file(state, false);
         return false;
     }
     return true;
@@ -1536,21 +1536,15 @@ bool write_open_header(OpenFile &state, const JobSlot &job) {
     return write_header(state, job);
 }
 
-void close_file(OpenFile &state) {
-    if (!state.open) return;
+bool close_file(OpenFile &state, bool patch) {
+    const uint32_t errors = Storage::io_error_count();
+    bool ok = true;
     if (state.file) {
-        (void)patch_record_count(state);
-        state.file.flush();
+        if (patch && state.open) ok = patch_record_count(state);
         state.file.close();
     }
-    state.open = false;
-    state.request_id = 0;
-    state.record_count = 0;
-    state.header_size = 0;
-    state.record_size = 0;
-    state.resumed = false;
-    state.path[0] = 0;
-    state.header.reset();
+    state = {};
+    return ok && Storage::io_error_count() == errors;
 }
 
 bool write_recording_start(OpenFile &state) {
@@ -1672,7 +1666,7 @@ bool process_open(JobSlot &job) {
 
     next_phase(&timing.close_us);
     OpenFile &state = open_files[file_index(job.kind)];
-    close_file(state);
+    if (!close_file(state)) return fail("close_failed");
     mark_progress_closed(job.kind);
     refresh_open_file_count();
     next_phase(&timing.resume_us);
@@ -1717,32 +1711,26 @@ bool process_open(JobSlot &job) {
     plan_request.requested_record_count = job.record_count;
     const EdfStorageOpenPlan plan = edf_storage_plan_open(plan_request);
     state.record_count = plan.record_count;
+    state.record_duration_ms = is_annotation_kind(job.kind) ? 0
+        : job.numeric_schema.record_duration_seconds * 1000;
     state.header_size = open_header_size(job);
     state.record_size = job.record_size;
     state.resumed = false;
     copy_cstr(state.path, sizeof(state.path), job.path);
     next_phase(&timing.header_us);
     if (!write_open_header(state, job)) {
-        state.file.close();
+        close_file(state, false);
         log_worker_failure(LOG_WARN, "header_write_failed", job.path);
         return fail("header_write_failed");
     }
     state.open = true;
     if (plan.write_recording_start && !write_recording_start(state)) {
-        state.file.close();
-        state.open = false;
-        state.request_id = 0;
-        state.record_count = 0;
-        state.header_size = 0;
-        state.record_size = 0;
-        state.resumed = false;
-        state.path[0] = 0;
-        state.header.reset();
+        close_file(state, false);
         log_worker_failure(LOG_WARN, "recording_start_write_failed", job.path);
         return fail("recording_start_write_failed");
     }
     next_phase(&timing.flush_us);
-    state.file.flush();
+    if (!Storage::flush_file(state.file)) return fail("flush_failed");
     next_phase(&timing.progress_us);
     refresh_open_file_count();
     mark_progress_open(state);
@@ -1763,7 +1751,10 @@ bool process_record(const JobSlot &job) {
         return false;
     }
 
-    state.file.seek(state.file.size());
+    if (!state.file.seek(state.file.size())) {
+        set_error("seek_failed");
+        return false;
+    }
     const size_t written = state.file.write(job.bytes, job.len);
     if (written != job.len) {
         set_error("short_write");
@@ -1776,7 +1767,10 @@ bool process_record(const JobSlot &job) {
                   static_cast<unsigned>(job.len));
         return false;
     }
-    state.file.flush();
+    if (!Storage::flush_file(state.file)) {
+        set_error("flush_failed");
+        return false;
+    }
     state.record_count++;
     if (!patch_record_count(state)) {
         service_state.patch_errors++;
@@ -1911,7 +1905,7 @@ bool process_numeric_record(JobSlot &job) {
                               state.record_size;
         if (!write_bytes(offset, job.len)) return fail("short_write");
 
-        state.file.flush();
+        if (!Storage::flush_file(state.file)) return fail("flush_failed");
         mark_progress_write(state, true, record.record_index);
         service_state.last_error[0] = 0;
         return true;
@@ -1942,13 +1936,14 @@ bool process_numeric_record(JobSlot &job) {
     if (!write_bytes(offset, job.len)) return fail("short_write");
 
     state.record_count++;
-    state.file.flush();
+    if (!Storage::flush_file(state.file)) return fail("flush_failed");
     if (!patch_record_count(state)) {
         service_state.patch_errors++;
         return fail("record_count_patch_failed");
     }
 
     mark_progress_write(state, false, 0);
+    state.committed_count = state.record_count;
     service_state.last_error[0] = 0;
     return true;
 }
@@ -2058,23 +2053,24 @@ bool process_identification_files(const JobSlot &job) {
 
 bool process_close(const JobSlot &job) {
     OpenFile &state = open_files[file_index(job.kind)];
-    close_file(state);
+    const bool ok = close_file(state);
     mark_progress_closed(job.kind);
     refresh_open_file_count();
-    service_state.last_error[0] = 0;
-    return true;
+    set_error(ok ? "" : "close_failed");
+    return ok;
 }
 
 bool process_close_all() {
+    bool ok = true;
     for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
         OpenFile &state = open_files[i];
-        close_file(state);
+        if (!close_file(state)) ok = false;
         mark_progress_closed(static_cast<StoredFileKind>(i));
     }
 
     refresh_open_file_count();
-    service_state.last_error[0] = 0;
-    return true;
+    set_error(ok ? "" : "close_failed");
+    return ok;
 }
 
 bool close_active_read_file(const char *path = nullptr) {
@@ -2500,7 +2496,41 @@ bool process_foreground_step() {
     return false;
 }
 
+bool capture_job(JobType type) {
+    return type == JobType::Open || type == JobType::Record ||
+           type == JobType::NumericRecord;
+}
+
+void stop_capture(const char *error) {
+    uint64_t duration_ms = 0;
+    for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
+        auto &file = open_files[i];
+        duration_ms = std::max(duration_ms,
+            static_cast<uint64_t>(file.committed_count) * file.record_duration_ms);
+        close_file(file, false);
+        mark_progress_closed(static_cast<StoredFileKind>(i));
+    }
+    refresh_open_file_count();
+    (void)Storage::refresh_space();
+
+    xSemaphoreTake(queue_lock, portMAX_DELAY);
+    if (++capture_fault.sequence == 0) ++capture_fault.sequence;
+    capture_fault.active = true;
+    capture_fault.paused = true;
+    capture_fault.committed_duration_ms = duration_ms;
+    copy_cstr(capture_fault.error, sizeof(capture_fault.error), error);
+    capture_paused.store(true);
+    unlock_queue();
+}
+
 bool process_job(JobSlot &job, char *str_error = nullptr) {
+    if (capture_paused.load() && capture_job(job.type)) {
+        if (job.type == JobType::Open) {
+            mark_open_result(job, false, nullptr, "recording_paused");
+        }
+        return false;
+    }
+
     switch (job.type) {
         case JobType::Open:
             return process_open(job);
@@ -2598,7 +2628,12 @@ bool process_usb_mode() {
         release(6, atomic_write_service);
         release(7, range_write_service);
         release(8, path_service);
+        // File logging is best effort, including during SD handoff. Its lost
+        // lines must not prevent a host from freeing space on a full card.
+        const uint32_t log_errors_before = Storage::io_error_count();
         release(9, file_log_sink);
+        if (!(released & (1u << 9))) (void)file_log_sink.step();
+        initial_io_errors += Storage::io_error_count() - log_errors_before;
 
         if (released != 0x3ff) {
             if (!(released & (1u << 6))) {
@@ -2610,7 +2645,6 @@ bool process_usb_mode() {
                 (void)range_write_service.step(StorageAtomicWriteLane::Maintenance);
             }
             if (!(released & (1u << 8))) (void)path_service.step();
-            if (!(released & (1u << 9))) (void)file_log_sink.step();
             return true;
         }
         const bool flushed = Storage::finish_write_handles();
@@ -2660,6 +2694,10 @@ void task_entry(void *) {
 
     for (;;) {
         bool did_work = false;
+        const bool capture_running = storage_therapy_active.load() &&
+                                      !capture_paused.load();
+        delete_service.set_paused(!delete_work_allowed.load() || capture_running);
+
         if (read_release_requested.exchange(false, std::memory_order_acq_rel)) {
             if (active_read_index != SIZE_MAX) {
                 read_jobs[active_read_index].retain_handle = false;
@@ -2708,12 +2746,29 @@ void task_entry(void *) {
                 char str_error[AC_STORAGE_ERROR_MAX] = {};
                 const bool is_str_record =
                     slots[slot_index].type == JobType::StrRecord;
+                const auto type = slots[slot_index].type;
+                const bool capturing = !capture_paused.load() &&
+                    (capture_job(type) || type == JobType::Close ||
+                     type == JobType::CloseAll);
                 const bool completed = process_job(
                     slots[slot_index], is_str_record ? str_error : nullptr);
+                if (capturing && !completed) {
+                    char error[AC_STORAGE_ERROR_MAX];
+                    copy_cstr(error, sizeof(error), service_state.last_error);
+                    stop_capture(error);
+                }
                 if (completed && slots[slot_index].type == JobType::StrRecord) {
                     queue_report_source_change(slots[slot_index]);
                 }
                 xSemaphoreTake(queue_lock, portMAX_DELAY);
+                if (completed &&
+                    slots[slot_index].type == JobType::NumericRecord) {
+                    if (++capture_fault.write_sequence == 0) {
+                        ++capture_fault.write_sequence;
+                    }
+                    capture_fault.active = false;
+                    capture_fault.error[0] = 0;
+                }
                 bool str_completion_published = false;
                 if (is_str_record &&
                     edf_str_completion.completion.ticket ==
@@ -2772,7 +2827,8 @@ void task_entry(void *) {
                            file_log_sink.step()) {
                     did_work = true;
                     file_log_burst++;
-                } else if (Storage::poll(capacity_update_allowed.load())) {
+                } else if (Storage::poll(capacity_update_allowed.load() &&
+                                         !capture_running)) {
                     did_work = true;
                 }
             }
@@ -2849,6 +2905,12 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
         unlock_queue();
         set_error(prepare_error);
         log_worker_failure(LOG_WARN, prepare_error, job.path);
+        return EdfStorageEnqueueResult::Rejected;
+    }
+
+    if (capture_paused.load() && capture_job(job.type)) {
+        clear_slot(job);
+        unlock_queue();
         return EdfStorageEnqueueResult::Rejected;
     }
 
@@ -3268,8 +3330,7 @@ void publish_activity(const ActivitySnapshot &activity,
 
     storage_therapy_active.store(activity.therapy_active,
                                  std::memory_order_release);
-    capacity_update_allowed.store(!activity.therapy_active &&
-                                  !activity.realtime_stream_active &&
+    capacity_update_allowed.store(!activity.realtime_stream_active &&
                                   !activity.ota_install_active);
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
@@ -3292,7 +3353,9 @@ void publish_activity(const ActivitySnapshot &activity,
     upload_service.set_paused(upload_paused);
     scan_service.set_paused(scan_paused);
     archive_service.set_paused(maintenance_paused);
-    delete_service.set_paused(maintenance_paused);
+    delete_work_allowed.store(!activity.realtime_stream_active &&
+        !activity.ota_install_active && !activity.foreground_report_demand &&
+        !activity.manual_update_check_active && !activity.export_work_claimed);
     wake_service_task();
 }
 
@@ -3316,10 +3379,16 @@ StorageWorkloadSnapshot workload_snapshot() {
 StorageAdmissionResult storage_request_admission(
     StorageAdmissionKind kind) {
     if (StorageUsb::suspended()) return StorageAdmissionResult::Busy;
+
+    const bool recovery_access = capture_paused.load() &&
+        (kind == StorageAdmissionKind::BrowserRead ||
+         kind == StorageAdmissionKind::BrowserDownload ||
+         kind == StorageAdmissionKind::Maintenance);
     const StorageAdmissionResult availability =
         storage_request_availability(
             Storage::mounted(),
-            storage_therapy_active.load(std::memory_order_acquire));
+            storage_therapy_active.load(std::memory_order_acquire) &&
+                !recovery_access);
     if (availability != StorageAdmissionResult::Accepted) {
         return availability;
     }
@@ -3367,6 +3436,30 @@ StorageEdfStatusSnapshot edf_status_snapshot() {
     copy_cstr(out.last_error, sizeof(out.last_error), service_state.last_error);
     unlock_queue();
     return out;
+}
+
+bool try_edf_capture_fault(EdfCaptureFault &out) {
+    if (!lock_queue(0)) return false;
+
+    out = capture_fault;
+    unlock_queue();
+    return true;
+}
+
+bool retry_edf_capture(uint32_t fault_sequence) {
+    const auto space = Storage::space_snapshot();
+    if (!space.known || space.free_bytes < StorageSpacePolicy::EdfRecoveryReserve ||
+        delete_service.active() || !lock_queue(0)) return false;
+
+    const bool ready = capture_fault.sequence == fault_sequence &&
+        capture_fault.paused && queued == 0 && !processing_job &&
+        service_state.open_file_count == 0 && storage_local_requests_enabled.load();
+    if (ready) {
+        capture_fault.paused = false;
+        capture_paused.store(false);
+    }
+    unlock_queue();
+    return ready;
 }
 
 #if AC_STACK_PROFILE_ENABLED

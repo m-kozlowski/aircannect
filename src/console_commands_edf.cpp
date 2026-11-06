@@ -16,6 +16,7 @@ const char *recording_gate_name(const EdfRecorderStatus &status) {
 const char *last_edf_error(const EdfRecorderStatus &status,
                            const EdfStreamAssemblerStatus &assembly,
                            const StorageEdfStatusSnapshot &storage) {
+    if (status.storage_blocked) return status.storage_error;
     if (status.last_error[0]) return status.last_error;
     if (assembly.last_error[0]) return assembly.last_error;
     if (storage.last_error[0]) return storage.last_error;
@@ -29,7 +30,8 @@ void print_edf_recorder_summary(Print &out,
     out.print("[EDF] enabled=");
     out.print(status.enabled ? "yes" : "no");
     out.print(" state=");
-    out.print(status.active ? "recording" : "idle");
+    out.print(status.storage_blocked ? "suspended" :
+              status.active ? "recording" : "idle");
     out.println();
 }
 
@@ -45,6 +47,8 @@ void print_edf_recorder_status(Print &out,
     out.print(status.enabled ? "yes" : "no");
     out.print(" active=");
     out.print(status.active ? "yes" : "no");
+    out.print(" storage_blocked=");
+    out.print(status.storage_blocked ? "yes" : "no");
     out.print(" stream=");
     out.print(status.stream_attached ? "attached" : "idle");
     out.print(" files=");

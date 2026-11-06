@@ -300,6 +300,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         return;
     }
     poll_airmini_history(now_ms);
+    poll_capture_storage(now_ms);
     dispatch_session_edges(now_ms);
 
     if (segment_close_pending_ && close_recording_segment()) {
@@ -322,12 +323,17 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     }
     apply_pending_mask_event(now_ms);
 
+    if (capture_fault_.paused || segment_close_pending_) {
+        release_stream();
+        return;
+    }
+
     if (!recording_gate_open_ && !recording_gate_recovery_pending_) {
         release_stream();
         return;
     }
 
-    if (annotation_open_pending_) {
+    if (annotation_open_pending_ && !segment_restart_pending_) {
         (void)ensure_annotation_files_open(now_ms);
     }
 
@@ -583,6 +589,13 @@ const EdfRecorderStatus &EdfRecorderManager::status() const {
     status_.annotation_open_is_pending = annotation_open_pending_;
     status_.local_sa2_active =
         active_sa2_input_ == EdfSa2Input::LocalOximetry;
+    status_.storage_blocked = storage_issue_active_;
+    if (capture_fault_.active) {
+        copy_cstr(status_.storage_error, sizeof(status_.storage_error),
+                  capture_fault_.error);
+    } else if (!storage_issue_active_) {
+        status_.storage_error[0] = 0;
+    }
     status_.event_coverage_session_gap_count =
         event_coverage_session_gaps();
     return status_;
@@ -760,6 +773,7 @@ void EdfRecorderManager::finish_mask_event(const char *end_time,
 }
 
 bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
+    if (capture_fault_.paused || segment_restart_pending_) return false;
     if (!status_.active || !status_.recording_start_time[0]) return false;
     if (!annotation_open_pending_ && files_open_) return true;
     if (static_cast<int32_t>(now_ms - next_annotation_open_ms_) < 0) {
@@ -903,6 +917,70 @@ bool EdfRecorderManager::close_recording_segment() {
     local_sa2_queue_.clear();
     local_sa2_clock_ = {};
     return true;
+}
+
+void EdfRecorderManager::poll_capture_storage(uint32_t now_ms) {
+    EdfCaptureFault fault;
+    if (!StorageService::try_edf_capture_fault(fault)) return;
+
+    const bool failed = fault.sequence != capture_fault_.sequence;
+    const bool written = fault.write_sequence != capture_fault_.write_sequence;
+    capture_fault_ = fault;
+
+    if (failed) {
+        // Drop only volatile work. Storage has already closed the damaged files.
+        release_stream();
+        assembler_.reset();
+        local_sa2_queue_.clear();
+        segment_close_pending_ = !close_recording_segment();
+        segment_restart_pending_ = status_.active;
+        next_storage_retry_ms_ = now_ms + AC_EDF_STORAGE_RETRY_MS;
+    }
+
+    if (fault.paused && cold_->segment_metadata_active) {
+        if (fault.committed_duration_ms != 0) {
+            const int64_t end = cold_->segment_metadata.raw_segment_start_ms +
+                                static_cast<int64_t>(fault.committed_duration_ms);
+            (void)finalize_segment_metadata_at(end, end, now_ms);
+        } else {
+            // No numeric record was committed. Keep the original provenance
+            // file, without inventing an end time for an empty segment.
+            cold_->segment_metadata_active = false;
+            cold_->metadata_open_publication = {};
+        }
+    }
+
+    const bool metadata_failed = status_.active && cold_->segment_metadata_active &&
+        !cold_->metadata_publisher.completed(cold_->metadata_open_publication) &&
+        cold_->metadata_publisher.last_error()[0];
+    if (metadata_failed) {
+        metadata_write_failed_ = true;
+        copy_cstr(status_.storage_error, sizeof(status_.storage_error),
+                  cold_->metadata_publisher.last_error());
+    } else if (written) {
+        metadata_write_failed_ = false;
+    }
+    const bool blocked = fault.active || metadata_write_failed_;
+    if (blocked && !storage_issue_active_) {
+        Log::logf(CAT_EDF, LOG_WARN, "recording suspended error=%s\n",
+                  fault.active ? fault.error : cold_->metadata_publisher.last_error());
+    } else if (!blocked && storage_issue_active_) {
+        Log::logf(CAT_EDF, LOG_INFO, "recording resumed in new files\n");
+    }
+    storage_issue_active_ = blocked;
+
+    if (!fault.paused || !status_.active ||
+        (!recording_gate_open_ && !recording_gate_recovery_pending_) ||
+        segment_close_pending_ || cold_->segment_metadata_active ||
+        static_cast<int32_t>(now_ms - next_storage_retry_ms_) < 0) return;
+
+    next_storage_retry_ms_ = now_ms + AC_EDF_STORAGE_RETRY_MS;
+    if (StorageService::retry_edf_capture(fault.sequence)) {
+        capture_fault_.paused = false;
+        segment_restart_pending_ = true;
+        next_attach_ms_ = now_ms;
+        next_numeric_open_ms_ = now_ms;
+    }
 }
 
 bool EdfRecorderManager::ensure_segment_metadata_published(
@@ -1154,6 +1232,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     recording_gate_open_ = false;
     recording_gate_closed_ = false;
     segment_close_pending_ = false;
+    segment_restart_pending_ = false;
     recording_gate_recovery_pending_ =
         session.recovered_active_start ||
         (reason && (strcmp(reason, "enabled_active") == 0 ||
@@ -1534,8 +1613,9 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         timing.stream_ms = millis() - timing.started_ms;
     }
 
-    if (!recording_gate_open_ || !status_.recording_start_time[0]) {
-        if (!recording_gate_recovery_pending_) {
+    if (segment_restart_pending_ ||
+        !recording_gate_open_ || !status_.recording_start_time[0]) {
+        if (!segment_restart_pending_ && !recording_gate_recovery_pending_) {
             StreamFrameRef discarded;
             while (stream_->next_frame(status_.stream_handle, discarded)) {
             }
@@ -1556,11 +1636,13 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         }
 
         StreamFrameRef recovery_frame = pending_stream_frame_;
+        const bool restarting = segment_restart_pending_;
+        segment_restart_pending_ = false;
         recording_gate_recovery_pending_ = false;
-        status_.recording_gate_recoveries++;
+        if (!restarting) status_.recording_gate_recoveries++;
         begin_recording_gate(recovery_frame->start_time, now_ms);
         pending_stream_frame_ = recovery_frame;
-        Log::logf(CAT_EDF, LOG_INFO,
+        Log::logf(CAT_EDF, restarting ? LOG_DEBUG : LOG_INFO,
                   "recording gate recovered id=%lu start=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.recording_start_time[0]

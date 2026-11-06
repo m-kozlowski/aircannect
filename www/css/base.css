@@ -256,14 +256,39 @@
       min-width: 0;
     }
 
-    .storage-notice {
+    .system-issues {
+      padding: 0;
+      margin: 12px 0 0;
+      list-style: none;
+    }
+
+    .system-issues li + li { margin-top: 6px; }
+
+    .system-issues a, .subsystem-issue {
       color: var(--orange);
-      white-space: nowrap;
+      overflow-wrap: anywhere;
       text-decoration: none;
     }
 
-    .storage-notice:hover {
+    .system-issues a:hover {
       text-decoration: underline;
+    }
+
+    .nav .ico { position: relative; }
+
+    .nav[data-fault] .ico::after {
+      content: "!";
+      position: absolute;
+      top: -4px;
+      right: -7px;
+      width: 13px;
+      height: 13px;
+      line-height: 13px;
+      border-radius: 50%;
+      color: var(--bg);
+      background: var(--orange);
+      font: bold 11px/13px sans-serif;
+      text-align: center;
     }
 
     .wifi-signal {

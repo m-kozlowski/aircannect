@@ -1175,6 +1175,11 @@ static void refresh_status_presentations(uint32_t now_ms) {
         now_ms);
     snapshot.storage_low_space = alert_manager.active(AlertKind::LowStorage);
 
+    const auto &recording = edf_recorder_manager.status();
+    snapshot.edf_storage_blocked = recording.storage_blocked;
+    copy_cstr(snapshot.edf_storage_error, sizeof(snapshot.edf_storage_error),
+              recording.storage_error);
+
     snapshot.vpn = wireguard_service.status();
     snapshot.as11.transport = rpc_link_selector.selected();
     if (snapshot.as11.transport == As11Transport::Ble) {

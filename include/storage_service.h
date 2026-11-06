@@ -141,6 +141,15 @@ struct StorageEdfStatusSnapshot {
     char last_error[AC_STORAGE_ERROR_MAX] = {};
 };
 
+struct EdfCaptureFault {
+    uint32_t sequence = 0;
+    uint64_t committed_duration_ms = 0;
+    bool active = false;
+    bool paused = false;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    uint32_t write_sequence = 0;
+};
+
 class StorageStatusPort {
 public:
     virtual ~StorageStatusPort() = default;
@@ -233,6 +242,9 @@ void publish_activity(const ActivitySnapshot &activity,
 StorageStatusPort &status_port();
 StorageWorkloadSnapshot workload_snapshot();
 StorageEdfStatusSnapshot edf_status_snapshot();
+bool try_edf_capture_fault(EdfCaptureFault &out);
+// Reopens admission only after the failed queue has drained and space returned.
+bool retry_edf_capture(uint32_t fault_sequence);
 bool try_edf_overview_snapshot(EdfRecordingOverviewSnapshot &out);
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();

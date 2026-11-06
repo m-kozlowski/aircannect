@@ -95,9 +95,9 @@ bool publish_replacement(const char *path,
     }
     const bool wrote = write_exact(output, header, header_size) &&
                        write_exact(output, records, records_size);
-    output.flush();
+    const bool flushed = Storage::flush_file(output);
     output.close();
-    if (!wrote) {
+    if (!wrote || !flushed) {
         (void)Storage::remove(temporary);
         return fail(result,
                     EdfStrStorageErrorKind::Write,
@@ -527,7 +527,10 @@ bool edf_str_storage_write(const EdfStrStorageWriteRequest &request,
                     }
                 }
                 if (file) {
-                    file.flush();
+                    if (!Storage::flush_file(file)) {
+                        ok = fail(result, EdfStrStorageErrorKind::Write,
+                                  "str_flush_failed");
+                    }
                     file.close();
                 }
             }

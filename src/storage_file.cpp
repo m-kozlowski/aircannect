@@ -137,6 +137,14 @@ public:
 
 }  // namespace
 
+bool flush_file(File &file) {
+    if (!file) return false;
+
+    const uint32_t errors = io_error_count();
+    file.flush();
+    return io_error_count() == errors;
+}
+
 File open_observed_file(const char *mount_point, const char *path,
                          const char *mode, struct stat *opened_stat) {
     static VFSImpl backend;

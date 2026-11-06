@@ -85,6 +85,9 @@ uint64_t file_modified(const char *path);
 size_t write_buffer(File &file, const uint8_t *data, size_t size,
                     WriteStagingBuffer &staging);
 
+// Storage owner only. Arduino's void flush() hides fflush/fsync failures.
+bool flush_file(File &file);
+
 bool poll(bool allow_capacity_update);
 bool retry_mount();
 

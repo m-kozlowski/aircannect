@@ -13,6 +13,9 @@ constexpr uint64_t ReclaimTarget = WarnBelow;
 constexpr uint64_t ClearWarningAt = 96 * MiB;
 constexpr uint64_t CompressionReserve = 128 * MiB;
 
+// Admission after a recording failure, not a limit on ongoing capture.
+constexpr uint64_t EdfRecoveryReserve = 128 * 1024;
+
 static_assert(ReclaimBelow < ReclaimTarget &&
               ReclaimTarget < ClearWarningAt &&
               ClearWarningAt < CompressionReserve);

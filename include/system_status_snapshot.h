@@ -82,6 +82,8 @@ struct SystemStatusSnapshot {
     StorageStatus storage;
     bool storage_low_space = false;
     EdfRecordingOverviewSnapshot edf;
+    bool edf_storage_blocked = false;
+    char edf_storage_error[96] = {};
     WifiStatusSnapshot wifi;
     WireguardStatus vpn;
     bool ota_active = false;

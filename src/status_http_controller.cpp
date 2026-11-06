@@ -113,6 +113,8 @@ bool build_status_json(LargeTextBuffer &json,
     json_add_int(json, "file_count", snap.edf.file_count);
     json_add_uint64(json, "bytes", snap.edf.bytes);
     json_add_string(json, "error", snap.edf.error);
+    json_add_bool(json, "storage_blocked", snap.edf_storage_blocked);
+    json_add_string(json, "storage_error", snap.edf_storage_error);
     json += '}';
 
     json += ",\"oximetry\":{";

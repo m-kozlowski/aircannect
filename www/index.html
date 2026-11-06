@@ -122,8 +122,6 @@
         <div>
           <span id="title">Dashboard</span>
           <span class="msg" id="reportMsg"></span>
-          <a id="storageNotice" class="storage-notice" href="#storage" hidden
-             data-action="app.show-tab" data-value="storage" aria-live="polite"></a>
         </div>
         <div class="right">
           <span id="uptime">Up: --</span>
@@ -216,6 +214,7 @@
                 <div class="storage-meter-fill" id="storageMeter"></div>
               </div>
               <div class="msg" id="timeMsg"></div>
+              <ul id="systemIssues" class="system-issues" aria-live="polite" hidden></ul>
             </div>
 
             <div class="card">
@@ -435,6 +434,7 @@
         </section>
 
         <section class="pane" id="p-edf">
+          <p id="edfFault" class="subsystem-issue" role="status" hidden></p>
           <div class="grid edf-grid">
             <div class="card">
               <div class="card-head">
@@ -535,6 +535,7 @@
         </section>
 
         <section class="pane" id="p-storage">
+          <p id="storageFault" class="subsystem-issue" role="status" hidden></p>
           <div class="card">
             <div class="card-head">
               <span class="label">Storage</span>
