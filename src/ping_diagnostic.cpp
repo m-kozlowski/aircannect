@@ -15,6 +15,8 @@ bool PingDiagnostic::start(const char *host, uint16_t count) {
     if (!host || !*host || count == 0 || count > MaxCount) return false;
 
     result_ = {};
+    reply_count_.store(0);
+    reply_index_ = 0;
     count_ = count;
     cancelled_.store(false);
     phase_.store(Phase::Resolving);
@@ -72,11 +74,27 @@ void PingDiagnostic::reply(esp_ping_handle_t handle, void *arg) {
     self.result_.min_ms = std::min(self.result_.min_ms, elapsed);
     self.result_.max_ms = std::max(self.result_.max_ms, elapsed);
     self.result_.sum_ms += elapsed;
-    timeout(handle, arg); // this will honor cancellation even after a successful reply.
+    self.record_reply(true, elapsed);
+    if (self.cancelled_.load()) esp_ping_stop(handle);
 }
 
 void PingDiagnostic::timeout(esp_ping_handle_t handle, void *arg) {
-    if (static_cast<PingDiagnostic *>(arg)->cancelled_.load()) esp_ping_stop(handle);
+    auto &self = *static_cast<PingDiagnostic *>(arg);
+    self.record_reply(false, 0);
+    if (self.cancelled_.load()) esp_ping_stop(handle);
+}
+
+void PingDiagnostic::record_reply(bool received, uint32_t elapsed_ms) {
+    const uint16_t index = reply_count_.load();
+    if (index >= MaxCount) return;
+    replies_[index] = {static_cast<uint16_t>(index + 1), received, elapsed_ms};
+    reply_count_.store(index + 1);
+}
+
+bool PingDiagnostic::take_reply(Reply &reply) {
+    if (reply_index_ == reply_count_.load()) return false;
+    reply = replies_[reply_index_++];
+    return true;
 }
 
 void PingDiagnostic::done(esp_ping_handle_t handle, void *arg) {

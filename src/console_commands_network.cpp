@@ -210,7 +210,19 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
 
 bool poll_ping(Print &out, PingDiagnostic &ping, uint32_t elapsed_ms) {
     ping.poll();
-    if (!ping.finished()) {
+    // cache finished state to avoid out of order printing
+    const bool finished = ping.finished();
+    PingDiagnostic::Reply reply;
+    if (ping.take_reply(reply)) {
+        if (reply.received) {
+            out.printf("[PING] seq=%u time=%lums\n", unsigned(reply.sequence),
+                       static_cast<unsigned long>(reply.elapsed_ms));
+        } else {
+            out.printf("[PING] seq=%u timeout\n", unsigned(reply.sequence));
+        }
+        return false;
+    }
+    if (!finished) {
         if (!ping.resolving() || elapsed_ms < PingDiagnostic::ResolveTimeoutMs) {
             return false;
         }
