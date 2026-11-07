@@ -208,6 +208,73 @@ void handle_wifi(Print &out, String rest, WifiManager &wifi) {
                           "clear, restart");
 }
 
+bool poll_ping(Print &out, PingDiagnostic &ping, uint32_t elapsed_ms) {
+    ping.poll();
+    if (!ping.finished()) {
+        if (!ping.resolving() || elapsed_ms < PingDiagnostic::ResolveTimeoutMs) {
+            return false;
+        }
+        out.println("[PING] DNS timed out; resolver will finish in the background");
+        ping.cancel();
+        return true;
+    }
+
+    const auto &status = ping.result();
+    if (status.error) {
+        out.printf("[PING] failed: %s\n", status.error);
+    } else if (status.sent == 0) {
+        out.println("[PING] no packets sent; check network connectivity");
+    } else {
+        char address[16] = {};
+        ipaddr_ntoa_r(&status.address, address, sizeof(address));
+        out.printf("[PING] target=%s sent=%lu received=%lu loss=%lu%%",
+                   address, static_cast<unsigned long>(status.sent),
+                   static_cast<unsigned long>(status.received),
+                   static_cast<unsigned long>(
+                       (status.sent - status.received) * 100 / status.sent));
+        if (status.received) {
+            out.printf(" rtt_min/avg/max=%lu/%lu/%lums",
+                       static_cast<unsigned long>(status.min_ms),
+                       static_cast<unsigned long>(status.sum_ms / status.received),
+                       static_cast<unsigned long>(status.max_ms));
+        }
+        out.println();
+    }
+    return true;
+}
+
+void handle_ping(Print &out, const String &rest, PingDiagnostic &ping,
+                 const ConsoleCommandSession &session,
+                 NetworkPendingCommand &pending_command,
+                 uint32_t &pending_session_id, uint32_t &started_ms) {
+    int position = 0;
+    String host, count_text, extra;
+    uint16_t count = PingDiagnostic::DefaultCount;
+    bool valid = parse_console_arg(rest, position, host) && host.length();
+    const bool has_count = parse_console_arg(rest, position, count_text);
+    if (!has_count && count_text.length()) valid = false;
+    if (has_count && !parse_uint16_arg(count_text, count)) valid = false;
+    if (parse_console_arg(rest, position, extra) || extra.length() ||
+        host.length() > 253 || count == 0 || count > PingDiagnostic::MaxCount) {
+        valid = false;
+    }
+    if (!valid) {
+        out.println("[PING] usage: ping HOST [COUNT] (IPv4; default 4, range 1-10)");
+        return;
+    }
+
+    if (pending_command != NetworkPendingCommand::None ||
+        !ping.start(host.c_str(), count)) {
+        out.println("[PING] another probe is running or finishing; try again shortly");
+        return;
+    }
+    pending_command = NetworkPendingCommand::Ping;
+    pending_session_id = session.id;
+    started_ms = millis();
+    out.printf("[PING] resolving %s; count=%u timeout=1000ms interval=1000ms\n",
+               host.c_str(), unsigned(count));
+}
+
 }  // namespace
 
 NetworkConsoleCommands::NetworkConsoleCommands(WifiManager &wifi)
@@ -217,16 +284,59 @@ bool NetworkConsoleCommands::execute(const String &command,
                                      const String &rest_arg,
                                      Print &out,
                                      ConsoleCommandSession &session) {
-    (void)session;
-    if (command != "wifi") return false;
-
     String rest = rest_arg;
 
     if (command == "wifi") {
         handle_wifi(out, rest, wifi_);
         return true;
     }
+    if (command == "ping") {
+        handle_ping(out, rest, ping_, session, pending_command_,
+                    pending_session_id_, pending_started_ms_);
+        return true;
+    }
     return false;
+}
+
+void NetworkConsoleCommands::poll_pending(Print &out,
+                                          ConsoleCommandSession &session) {
+    if (!pending_output(session)) return;
+    bool complete = false;
+    switch (pending_command_) {
+        case NetworkPendingCommand::Ping:
+            complete = poll_ping(out, ping_, millis() - pending_started_ms_);
+            break;
+        case NetworkPendingCommand::None:
+            return;
+    }
+    if (complete) {
+        pending_command_ = NetworkPendingCommand::None;
+        pending_session_id_ = 0;
+        pending_started_ms_ = 0;
+    }
+}
+
+bool NetworkConsoleCommands::pending_output(const ConsoleCommandSession &session) const {
+    return pending_command_ != NetworkPendingCommand::None &&
+        pending_session_id_ != 0 && pending_session_id_ == session.id;
+}
+
+void NetworkConsoleCommands::cancel_pending(ConsoleCommandSession &session) {
+    if (!pending_output(session)) return;
+    switch (pending_command_) {
+        case NetworkPendingCommand::Ping:
+            ping_.cancel();
+            break;
+        case NetworkPendingCommand::None:
+            break;
+    }
+    pending_command_ = NetworkPendingCommand::None;
+    pending_session_id_ = 0;
+    pending_started_ms_ = 0;
+}
+
+void NetworkConsoleCommands::stop(ConsoleCommandSession &session) {
+    cancel_pending(session);
 }
 
 }  // namespace aircannect

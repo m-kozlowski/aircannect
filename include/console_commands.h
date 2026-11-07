@@ -4,6 +4,7 @@
 #include "console_command_router.h"
 #include "factory_reset.h"
 #include "large_scratch_array.h"
+#include "ping_diagnostic.h"
 #include "sleep_day_id.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
@@ -338,6 +339,8 @@ private:
     ExportCoordinator &exports_;
 };
 
+enum class NetworkPendingCommand : uint8_t { None, Ping };
+
 class NetworkConsoleCommands final : public ConsoleCommandGroup {
 public:
     explicit NetworkConsoleCommands(WifiManager &wifi);
@@ -346,9 +349,17 @@ public:
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
+    void poll_pending(Print &out, ConsoleCommandSession &session) override;
+    bool pending_output(const ConsoleCommandSession &session) const override;
+    void cancel_pending(ConsoleCommandSession &session) override;
+    void stop(ConsoleCommandSession &session) override;
 
 private:
     WifiManager &wifi_;
+    PingDiagnostic ping_;
+    NetworkPendingCommand pending_command_ = NetworkPendingCommand::None;
+    uint32_t pending_session_id_ = 0;
+    uint32_t pending_started_ms_ = 0;
 };
 
 class ConfigConsoleCommands final : public ConsoleCommandGroup {

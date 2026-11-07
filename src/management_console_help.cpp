@@ -23,6 +23,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 #endif
         out.println("  config            persistent app configuration");
         out.println("  wifi              Wi-Fi profiles, scan, and reconnect");
+        out.println("  ping              IPv4 reachability and latency test");
         out.println("  log               log levels and sink status");
         out.println("  as11              AS11 state, RPC, BLE, and therapy control");
         out.println("  time              ESP and AS11 clock sync commands");
@@ -55,6 +56,13 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config keybindings reset  restore hardware defaults");
         out.println("  config keybindings BUTTON[+BUTTON] short|long ACTION|default");
         out.println("  keys are not aliased or normalized: use the NVS key exactly");
+        return;
+    }
+
+    if (topic == "ping") {
+        out.println("[HELP ping]");
+        out.println("  ping HOST [COUNT]         IPv4 address or DNS name; default 4, max 10");
+        out.println("  One probe at a time; 1s reply timeout and interval.");
         return;
     }
 
