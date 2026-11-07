@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <vector>
+#include "large_allocator.h"
 #include "large_text_buffer.h"
 #include "report_signal_store_catalog.h"
 #include "report_signal_store_metadata_loader.h"
@@ -10,15 +12,29 @@
 namespace aircannect {
 
 struct NightCatalogLayoutIssues;
+using ReportSessionSelection = std::vector<uint16_t, LargeAllocator<uint16_t>>;
 
 struct ReportPeriodKey {
+    ReportPeriodKey() = default;
+    ReportPeriodKey(SleepDayId end_day, uint16_t day_count,
+        std::shared_ptr<const ReportSessionSelection> selection = {},
+        SourceRevision revision = {}, uint32_t version = 0)
+        : end(end_day), days(day_count), sessions(std::move(selection)),
+          source_revision(revision), generation(version) {}
+
     SleepDayId end;
     uint16_t days = 0;
+    std::shared_ptr<const ReportSessionSelection> sessions;
+    SourceRevision source_revision;
+    uint32_t generation = 0;
 
     bool valid() const;
     SleepDayId first() const;
     bool operator==(const ReportPeriodKey &other) const {
-        return end == other.end && days == other.days;
+        return end == other.end && days == other.days && source_revision == other.source_revision &&
+            generation == other.generation &&
+            ((!sessions && !other.sessions) ||
+             (sessions && other.sessions && *sessions == *other.sessions));
     }
 };
 
@@ -62,6 +78,7 @@ private:
     StorageAtomicWritePort *write_port_ = nullptr;
     OperationTicket write_ticket_;
     bool storage_low_space_ = false;
+    StorageReadPort *read_port_ = nullptr;
 };
 
 uint64_t report_period_revision(ReportPeriodKey key,

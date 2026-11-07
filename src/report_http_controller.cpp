@@ -1115,15 +1115,61 @@ void ReportHttpController::send_summary(
     AsyncWebServerRequest *request) const {
     if (!report_task_ || !report_task_available(request, *report_task_)) return;
 
-    if (request->hasArg("days")) {
+    if (request->hasArg("days") || request->hasArg("sessions")) {
         uint64_t days = 0;
         SleepDayId end;
-        if (!parse_uint64_arg(request, "days", 365, days) || !parse_sleep_day(request, end) ||
-            !ReportPeriodKey{end, static_cast<uint16_t>(days)}.valid()) {
+        if (!parse_sleep_day(request, end)) {
             send_json_error(request, 400, "bad_period");
             return;
         }
-        const ReportPeriodKey key{end, static_cast<uint16_t>(days)};
+        ReportPeriodKey key;
+        key.end = end;
+        if (request->hasArg("sessions")) {
+            if (request->hasArg("days") || !request->hasArg("v")) {
+                send_json_error(request, 400, "bad_session_selection");
+                return;
+            }
+            const auto night = report_task_->query_night(end);
+            if (night.state != ReportStoreQueryState::Ready) {
+                send_json_error(request, 409, "session_statistics_report_unavailable");
+                return;
+            }
+            if (!plot_version_matches(request, night.source_revision, night.generation)) return;
+
+            key.days = 1;
+            key.source_revision = night.source_revision;
+            key.generation = night.generation;
+            try {
+                auto selection = std::make_shared<ReportSessionSelection>();
+                const String value = request->arg("sessions");
+                const char *p = value.c_str();
+                while (*p) {
+                    char *end = nullptr;
+                    if (*p < '0' || *p > '9') break;
+                    const unsigned long index = strtoul(p, &end, 10);
+                    if (index > UINT16_MAX || (*end && *end != ',') ||
+                        (*end == ',' && !end[1]) ||
+                        (!selection->empty() && index <= selection->back())) break;
+                    selection->push_back(index);
+                    p = *end ? end + 1 : end;
+                }
+                if (*p || selection->empty()) {
+                    send_json_error(request, 400, "bad_session_selection");
+                    return;
+                }
+                key.sessions = std::move(selection);
+            } catch (const std::bad_alloc &) {
+                send_json_error(request, 503, "session_statistics_alloc");
+                return;
+            }
+        } else {
+            if (!parse_uint64_arg(request, "days", 365, days)) {
+                send_json_error(request, 400, "bad_period");
+                return;
+            }
+            key.days = days;
+        }
+        if (!key.valid()) { send_json_error(request, 400, "bad_period"); return; }
         std::shared_ptr<const ReportPeriodResult> period;
         if (report_task_->request_period(key, &period) != OperationAdmission::Accepted) {
             send_json_error(request, 503, "period_busy");
@@ -1521,9 +1567,22 @@ void ReportHttpController::publish_completion() {
         period->key.end.format_yyyymmdd(day, sizeof(day));
         completion_json_ = "{";
         json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
-        json_add_string(completion_json_, "kind", "period");
+        json_add_string(completion_json_, "kind", period->key.sessions ? "sessions" : "period");
         json_add_string(completion_json_, "night", day);
         json_add_int(completion_json_, "days", period->key.days);
+        if (period->key.sessions) {
+            char version[32];
+            snprintf(version, sizeof(version), "%lu.%016llx",
+                static_cast<unsigned long>(period->key.generation),
+                static_cast<unsigned long long>(period->key.source_revision.value()));
+            json_add_string(completion_json_, "version", version);
+            completion_json_ += ",\"sessions\":[";
+            for (size_t i = 0; i < period->key.sessions->size(); ++i) {
+                if (i) completion_json_ += ',';
+                completion_json_ += (*period->key.sessions)[i];
+            }
+            completion_json_ += ']';
+        }
         json_add_bool(completion_json_, "success", !period->error[0]);
         json_add_string(completion_json_, "error", period->error);
         completion_json_ += '}';

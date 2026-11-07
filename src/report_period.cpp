@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits.h>
 #include <list>
+#include <cmath>
 #include "json_util.h"
 #include "large_allocator.h"
 #include "large_object.h"
@@ -10,6 +11,8 @@
 #include "night_catalog_store_service.h"
 #include "report_build_checkpoint.h"
 #include "report_night_histogram.h"
+#include "report_session_statistics.h"
+#include "little_endian.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -96,6 +99,12 @@ bool metadata_matches_snapshot(
 }  // namespace
 
 bool ReportPeriodKey::valid() const {
+    if (sessions) {
+        return end.valid() && days == 1 && !sessions->empty() &&
+            source_revision.valid() && generation &&
+            std::adjacent_find(sessions->begin(), sessions->end(),
+                std::greater_equal<uint16_t>()) == sessions->end();
+    }
     return end.valid() && first().valid() &&
         (days == 7 || days == 30 || days == 90 || days == 180 || days == 365);
 }
@@ -113,6 +122,10 @@ uint64_t report_period_revision(ReportPeriodKey key, const NightCatalog &catalog
                                const NightCatalogLayoutIssues *layout_issues) {
     // The cache identity contains only source/publication versions in this range.
     uint64_t revision = 1469598103934665603ULL;
+    if (key.sessions) {
+        revision = (revision ^ 0x53455353494f4e31ULL) * 1099511628211ULL;
+        for (uint16_t index : *key.sessions) revision = (revision ^ index) * 1099511628211ULL;
+    }
     for (int32_t d = key.first().epoch_days(); d <= key.end.epoch_days(); ++d) {
         SleepDayId day;
         SleepDayId::from_epoch_days(d, day);
@@ -154,6 +167,15 @@ struct ReportPeriodService::Cache {
     static constexpr size_t EntryBytes = sizeof(Entry) + 2 * sizeof(void *);
     std::list<Entry, LargeAllocator<Entry>> entries;
     size_t bytes = 0;
+    std::shared_ptr<const LargeByteBuffer> session_statistics;
+
+    void remember_sessions(std::shared_ptr<const LargeByteBuffer> data) {
+        if (session_statistics) bytes -= session_statistics->size();
+        session_statistics.reset();
+        if (bytes + data->size() > Memory::buffer_budget(NightCacheBytes, 64 * 1024)) return;
+        bytes += data->size();
+        session_statistics = std::move(data);
+    }
 
     Entry *find(const ReportSignalStoreCatalogRecord &snapshot) {
         for (auto &entry : entries) {
@@ -167,6 +189,11 @@ struct ReportPeriodService::Cache {
         const size_t budget = Memory::buffer_budget(NightCacheBytes, 64 * 1024);
         if (cost > budget) return false;
         if (!summary && entries.size() * EntryBytes + cost > budget) return false;
+
+        if (bytes + cost > budget && session_statistics) {
+            bytes -= session_statistics->size();
+            session_statistics.reset();
+        }
 
         // Histogram eviction leaves the smaller, more useful summary intact.
         while (bytes + cost > budget) {
@@ -271,8 +298,17 @@ struct ReportPeriodService::Runtime {
     uint64_t csr_minutes = 0;
     uint64_t leak_ms = 0;
     uint64_t leak_above_ms = 0;
+    uint64_t session_csr_ms = 0;
+    size_t session_offset = ReportSessionStatistics::HeaderBytes;
+    size_t event_cursor = 0;
+    ReportSessionStatistics::Entry session_entry;
+    ReportSignalStoreEventFileView event_view;
+    std::vector<NightCatalogTimeRange, LargeAllocator<NightCatalogTimeRange>> selected_ranges;
+    std::unique_ptr<ReportSessionStatisticsReader> session_reader;
     enum class Phase { Night, ReadingMetadata, ReadingHistogram,
                        ReadCheckpoint, Reading, Tails, WriteHistogram,
+                       SessionLoad, SessionRead, SessionRecover,
+                       SessionEntries, SessionMetrics, SessionEventsRead, SessionEvents,
                        Metrics, Finish, Done } phase = Phase::Night;
     Phase after_metadata = Phase::Night;
 
@@ -284,6 +320,7 @@ struct ReportPeriodService::Runtime {
         histogram_bytes.reset();
         drop_metadata();
         saved = nullptr;
+        session_reader.reset();
         phase = Phase::Done;
     }
 
@@ -431,24 +468,60 @@ struct ReportPeriodService::Runtime {
         return true;
     }
 
+    bool select_sessions() {
+        const auto &night = metadata.view.night;
+        if (night.source_revision != result->key.source_revision ||
+            night.generation != result->key.generation) {
+            fail("session_selection_changed");
+            return false;
+        }
+        if (night.flags & REPORT_SIGNAL_STORE_NIGHT_OPEN_SESSION) {
+            fail("session_statistics_recording");
+            return false;
+        }
+        if (result->key.sessions->back() >= night.session_count) {
+            fail("session_selection_changed");
+            return false;
+        }
+
+        try {
+            for (uint16_t index : *result->key.sessions) {
+                NightCatalogTimeRange range;
+                metadata.view.session(index, range);
+                selected_ranges.push_back(range);
+                minutes += (range.end_ms - range.start_ms) / 60000.0;
+            }
+        } catch (const std::bad_alloc &) { fail("session_statistics_alloc"); return false; }
+
+        nights = 1;
+        return true;
+    }
+
+    template<class Bin>
+    void merge_histogram(size_t index, int64_t sum, uint64_t samples,
+                         uint32_t interval, int32_t minimum, int32_t maximum,
+                         bool extrema, size_t count, Bin bin_at) {
+        if (!samples) return;
+        auto &out = histograms[index];
+        for (size_t i = 0; i < count; ++i) {
+            uint16_t bin;
+            uint32_t value;
+            bin_at(i, bin, value);
+            out.bins[bin] += static_cast<uint64_t>(value) * interval;
+        }
+        out.sum += static_cast<double>(sum) * interval;
+        out.weight += samples * interval;
+        out.minimum = std::min(out.minimum, minimum);
+        out.maximum = std::max(out.maximum, maximum);
+        out.extrema &= extrema;
+        ++out.nights;
+    }
+
     void accept_histogram(size_t index) {
         const auto &h = histogram.metrics[index];
-        if (!h.samples) return;
-        const uint32_t interval = h.interval_ms;
-
-        auto &out = histograms[index];
-        for (size_t i = 0; i < h.count; ++i) {
-            uint16_t bin;
-            uint32_t samples;
-            h.bin(i, bin, samples);
-            out.bins[bin] += static_cast<uint64_t>(samples) * interval;
-        }
-        out.sum += static_cast<double>(h.sum_milli) * interval;
-        out.weight += h.samples * interval;
-        out.minimum = std::min(out.minimum, h.minimum);
-        out.maximum = std::max(out.maximum, h.maximum);
-        out.extrema &= h.extrema_valid;
-        ++out.nights;
+        merge_histogram(index, h.sum_milli, h.samples, h.interval_ms, h.minimum,
+            h.maximum, h.extrema_valid, h.count,
+            [&h](size_t i, uint16_t &bin, uint32_t &samples) { h.bin(i, bin, samples); });
     }
 
     void finish() {
@@ -460,6 +533,11 @@ struct ReportPeriodService::Runtime {
         result->key.end.format_yyyymmdd(day, sizeof(day));
         json_add_string(json, "end", day);
         json_add_int(json, "days", result->key.days);
+        if (result->key.sessions) {
+            json_add_string(json, "scope", "sessions");
+            json_add_int(json, "selected_sessions", result->key.sessions->size());
+            json_add_int(json, "total_sessions", metadata.view.night.session_count);
+        }
         json_add_int(json, "nights", nights);
         json_add_int(json, "active_nights", active_nights);
         json_add_int(json, "outdated_nights", outdated_nights);
@@ -473,7 +551,8 @@ struct ReportPeriodService::Runtime {
         json += ",\"rdi\":";
         append_metric(json, rdi_minutes > 0, rdi_minutes ? rdi_sum / rdi_minutes : 0);
         json += ",\"csr_minutes\":";
-        if (csr_nights) append_json_float(json, csr_minutes);
+        if (result->key.sessions && csr_nights) append_json_float(json, session_csr_ms / 60000.0);
+        else if (csr_nights) append_json_float(json, csr_minutes);
         else json += "null";
         json_add_int(json, "csr_nights", csr_nights);
         json += ",\"leak_duration\":{";
@@ -493,7 +572,7 @@ struct ReportPeriodService::Runtime {
             if (index) json += ',';
             json += '"'; json += Names[index]; json += "\":{";
             const auto &h = histograms[index];
-            json_add_int(json, "nights", h.nights, false);
+            json_add_int(json, "nights", result->key.sessions ? (h.weight ? 1 : 0) : h.nights, false);
             json_add_uint64(json, "recorded_ms", h.weight);
             json += ",\"min\":";
             append_metric(json, h.weight && h.extrema, h.minimum);
@@ -534,6 +613,7 @@ void ReportPeriodService::begin(StorageReadPort &port, StorageAtomicWritePort &w
     clear_cache();
     metadata_loader_.begin(port);
     loader_.begin(port);
+    read_port_ = &port;
     write_port_ = &writes;
 }
 
@@ -598,6 +678,15 @@ bool ReportPeriodService::poll() {
         }
 
         if (r.saved) {
+            if (r.result->key.sessions) {
+                const auto *cached = r.store->cached(day);
+                if (cached) {
+                    r.metadata = *cached;
+                    if (r.select_sessions()) r.phase = Phase::SessionLoad;
+                    return true;
+                }
+                return r.read_metadata(metadata_loader_, Phase::SessionLoad);
+            }
             if (const auto *cached = cache_->find(*r.saved)) {
                 r.start_night_work(*cache_, loader_, day, cached);
                 return true;
@@ -609,6 +698,11 @@ bool ReportPeriodService::poll() {
             } else {
                 return r.read_metadata(metadata_loader_, Phase::Night);
             }
+        }
+
+        if (r.result->key.sessions) {
+            r.fail("session_statistics_report_unavailable");
+            return true;
         }
 
         r.start_night_work(*cache_, loader_, day);
@@ -642,11 +736,171 @@ bool ReportPeriodService::poll() {
             r.phase = Phase::ReadCheckpoint;
             return true;
         }
+        if (r.after_metadata == Phase::SessionLoad) {
+            if (r.select_sessions()) r.phase = Phase::SessionLoad;
+            return true;
+        }
 
         SleepDayId day;
         SleepDayId::from_epoch_days(
             r.result->key.first().epoch_days() + r.cursor, day);
         r.start_night_work(*cache_, loader_, day);
+        return true;
+    }
+    if (r.phase == Phase::SessionLoad) {
+        if (cache_->session_statistics && ReportSessionStatistics::matches(
+                *cache_->session_statistics, r.metadata.view.night)) {
+            r.histogram_bytes = cache_->session_statistics;
+            r.phase = Phase::SessionEntries;
+            return true;
+        }
+
+        char path[AC_STORAGE_PATH_MAX];
+        if (!ReportSessionStatistics::path(r.metadata.view.night, path, sizeof(path))) {
+            r.fail("session_statistics_path");
+            return true;
+        }
+        const auto admitted = loader_.start(path, ReportSessionStatistics::MaxBytes, 1,
+                                            StorageReadLane::Report, true);
+        if (admitted == OperationAdmission::Busy) return false;
+        if (admitted != OperationAdmission::Accepted) r.fail("session_statistics_read_rejected");
+        else r.phase = Phase::SessionRead;
+        return true;
+    }
+    if (r.phase == Phase::SessionRead) {
+        const bool worked = loader_.poll();
+        if (loader_.status().active()) return worked;
+        const auto status = loader_.status();
+        r.histogram_bytes = loader_.take_completed();
+        loader_.reset();
+
+        if (r.histogram_bytes && ReportSessionStatistics::matches(
+                *r.histogram_bytes, r.metadata.view.night)) {
+            cache_->remember_sessions(r.histogram_bytes);
+            r.phase = Phase::SessionEntries;
+        } else if (status.state == StorageBoundedFileLoadState::Ready ||
+                   status.state == StorageBoundedFileLoadState::Missing ||
+                   strcmp(status.error, "storage_file_size_invalid") == 0) {
+            r.histogram_bytes.reset();
+            r.session_reader.reset(new (std::nothrow) ReportSessionStatisticsReader(*read_port_));
+            if (!r.session_reader || !r.session_reader->start(r.metadata)) r.fail("session_statistics_alloc");
+            else r.phase = Phase::SessionRecover;
+        } else r.fail(status.error[0] ? status.error : "session_statistics_read_failed");
+        return true;
+    }
+    if (r.phase == Phase::SessionRecover) {
+        const bool worked = r.session_reader->poll();
+        if (r.session_reader->active()) return worked;
+        if (r.session_reader->error()[0]) {
+            r.fail(r.session_reader->error());
+            return true;
+        }
+        r.histogram_bytes = r.session_reader->take_completed();
+        r.session_reader.reset();
+        if (!r.histogram_bytes) r.fail("session_statistics_alloc");
+        else r.phase = Phase::WriteHistogram;
+        return true;
+    }
+    if (r.phase == Phase::SessionEntries) {
+        if (r.session_offset == r.histogram_bytes->size()) {
+            r.night_metrics.clear();
+            r.histogram_bytes.reset();
+            const auto &night = r.metadata.view.night;
+            if (!night.available_event_mask) { r.phase = Phase::Finish; return true; }
+
+            char path[AC_STORAGE_PATH_MAX];
+            size_t size = 0;
+            if (!ReportSignalStoreEventCodec::file_size(REPORT_SIGNAL_STORE_MAX_BLOCKS,
+                    night.event_count, size) || !report_signal_store_events_path(night.sleep_day,
+                    night.generation, path, sizeof(path)) ||
+                loader_.start(path, size, 1, StorageReadLane::Report, true) != OperationAdmission::Accepted) {
+                r.fail("session_events_read_rejected");
+            } else r.phase = Phase::SessionEventsRead;
+            return true;
+        }
+
+        if (!ReportSessionStatistics::next(*r.histogram_bytes, r.session_offset, r.session_entry)) {
+            r.fail("session_statistics_invalid");
+            return true;
+        }
+        const auto &selection = *r.result->key.sessions;
+        if (!std::binary_search(selection.begin(), selection.end(), r.session_entry.session)) return true;
+        if (!r.night_metrics.restore(r.session_entry.metrics, r.session_entry.size)) {
+            r.fail("session_statistics_invalid");
+            return true;
+        }
+        const auto calculated = r.night_metrics.finish();
+        r.leak_ms += calculated.leak_recorded_ms;
+        r.leak_above_ms += calculated.leak_above_threshold_ms;
+        r.metric = 0;
+        r.phase = Phase::SessionMetrics;
+        return true;
+    }
+    if (r.phase == Phase::SessionMetrics) {
+        ReportMetricAccumulator::Histogram h;
+        const size_t index = r.metric++;
+        if (r.night_metrics.histogram(index, h)) {
+            r.merge_histogram(index, h.sum_milli, h.samples, r.session_entry.interval_ms,
+                h.minimum, h.maximum, h.extrema_valid, h.bin_count,
+                [&h](size_t i, uint16_t &bin, uint32_t &samples) {
+                    bin = h.first_bin + i;
+                    samples = h.bins[i];
+                });
+        }
+        if (r.metric == MetricCount) r.phase = Phase::SessionEntries;
+        return true;
+    }
+    if (r.phase == Phase::SessionEventsRead) {
+        const bool worked = loader_.poll();
+        if (loader_.status().active()) return worked;
+        const auto status = loader_.status();
+        r.bytes = loader_.take_completed();
+        loader_.reset();
+        const auto &night = r.metadata.view.night;
+        if (!r.bytes) r.fail(status.error[0] ? status.error : "session_events_unavailable");
+        else if (!ReportSignalStoreEventCodec::inspect(r.bytes->data(), r.bytes->size(), r.event_view) ||
+                 r.event_view.sleep_day != night.sleep_day || r.event_view.generation != night.generation ||
+                 r.event_view.source_revision != night.source_revision) r.fail("session_events_changed");
+        else r.phase = Phase::SessionEvents;
+        return true;
+    }
+    if (r.phase == Phase::SessionEvents) {
+        ReportEventCounts counts;
+        const size_t end = std::min<size_t>(r.event_view.event_count, r.event_cursor + 256);
+        for (; r.event_cursor < end; ++r.event_cursor) {
+            ReportEventRecord event;
+            ReportSignalStoreEventCodec::event(r.event_view, r.event_cursor, event);
+            for (const auto &range : r.selected_ranges) {
+                if (event.start_ms >= range.start_ms && event.start_ms < range.end_ms) {
+                    report_night_count_event(counts, event);
+                }
+                if (event.code == static_cast<uint16_t>(ReportEventCode::Csr)) {
+                    r.session_csr_ms += std::max<int64_t>(0,
+                        std::min(range.end_ms, event.start_ms + event.duration_ms) -
+                        std::max(range.start_ms, event.start_ms));
+                }
+            }
+        }
+        r.events[0] += counts.central_apnea;
+        r.events[1] += counts.obstructive_apnea;
+        r.events[2] += counts.unknown_apnea;
+        r.events[3] += counts.hypopnea;
+        r.events[4] += counts.arousal;
+        if (r.event_cursor == r.event_view.event_count) {
+            const auto &night = r.metadata.view.night;
+            r.event_nights = (night.available_event_mask & REPORT_EVENT_SCORED) &&
+                !(night.missing_event_mask & REPORT_EVENT_SCORED);
+            r.csr_nights = (night.available_event_mask & REPORT_EVENT_CSR) &&
+                !(night.missing_event_mask & REPORT_EVENT_CSR);
+            if (r.event_nights) {
+                r.ahi_nights = 1;
+                r.ahi_minutes = r.rdi_minutes = r.minutes;
+                r.ahi_sum = (r.events[0] + r.events[1] + r.events[2] + r.events[3]) * 60000.0;
+                r.rdi_sum = r.ahi_sum + r.events[4] * 60000.0;
+            }
+            r.bytes.reset();
+            r.phase = Phase::Finish;
+        }
         return true;
     }
     if (r.phase == Phase::ReadingHistogram) {
@@ -743,17 +997,22 @@ bool ReportPeriodService::poll() {
         return true;
     }
     if (r.phase == Phase::WriteHistogram) {
+        const bool sessions = bool(r.result->key.sessions);
+        const auto ready = [&]() {
+            if (sessions) cache_->remember_sessions(r.histogram_bytes);
+            else cache_->remember_histogram(*r.saved, r.histogram_bytes, r.histogram);
+            r.metric = 0;
+            r.phase = sessions ? Phase::SessionEntries : Phase::Metrics;
+        };
         if (!write_ticket_.valid()) {
             if (storage_low_space_) {
-                cache_->remember_histogram(*r.saved, r.histogram_bytes, r.histogram);
-                r.metric = 0;
-                r.phase = Phase::Metrics;
+                ready();
                 return true;
             }
 
             char path[AC_STORAGE_PATH_MAX];
-            ReportNightHistogramCodec::path(
-                r.metadata.view.night, path, sizeof(path));
+            if (sessions) ReportSessionStatistics::path(r.metadata.view.night, path, sizeof(path));
+            else ReportNightHistogramCodec::path(r.metadata.view.night, path, sizeof(path));
             StorageAtomicWriteCommand command;
             command.path = path;
             command.bytes = r.histogram_bytes;
@@ -777,9 +1036,7 @@ bool ReportPeriodService::poll() {
             r.fail(completion.error[0] ? completion.error
                                        : "period_cache_write_failed");
         } else {
-            cache_->remember_histogram(*r.saved, r.histogram_bytes, r.histogram);
-            r.metric = 0;
-            r.phase = Phase::Metrics;
+            ready();
         }
         return true;
     }

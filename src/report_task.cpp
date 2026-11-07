@@ -87,6 +87,9 @@ struct ReportTaskCommand {
     SleepDayId first_day;
     SleepDayId last_day;
     uint16_t period_days = 0;
+    std::shared_ptr<const ReportSessionSelection> period_sessions;
+    SourceRevision period_source_revision;
+    uint32_t period_generation = 0;
 };
 
 struct PendingCatalogRefresh {
@@ -340,7 +343,8 @@ struct ReportTask::Runtime {
         }
 
         if (command.kind == ReportTaskCommandKind::Period) {
-            const ReportPeriodKey key{command.sleep_day, command.period_days};
+            const ReportPeriodKey key{command.sleep_day, command.period_days, command.period_sessions,
+                command.period_source_revision, command.period_generation};
             if (period_running && period_key == key) {
                 unlock();
                 return OperationAdmission::Accepted;
@@ -388,6 +392,11 @@ struct ReportTask::Runtime {
             ReportTaskCommand &queued = commands[i];
             if (queued.kind != command.kind) continue;
             if (queued.period_days != command.period_days) continue;
+            if (queued.kind == ReportTaskCommandKind::Period &&
+                !(ReportPeriodKey{queued.sleep_day, queued.period_days, queued.period_sessions,
+                    queued.period_source_revision, queued.period_generation} ==
+                  ReportPeriodKey{command.sleep_day, command.period_days, command.period_sessions,
+                    command.period_source_revision, command.period_generation})) continue;
             if (queued.sleep_day == command.sleep_day) {
                 if (queued.intent == ReportRequestIntent::Build &&
                     command.intent == ReportRequestIntent::LoadMetadata) {
@@ -493,7 +502,8 @@ struct ReportTask::Runtime {
         commands[--command_count] = {};
         if (command.kind == ReportTaskCommandKind::Period) {
             period_running = true;
-            period_key = {command.sleep_day, command.period_days};
+            period_key = {command.sleep_day, command.period_days, command.period_sessions,
+                command.period_source_revision, command.period_generation};
         }
         unlock();
         return true;
@@ -3197,6 +3207,9 @@ OperationAdmission ReportTask::request_period(
     command.kind = ReportTaskCommandKind::Period;
     command.sleep_day = key.end;
     command.period_days = key.days;
+    command.period_sessions = key.sessions;
+    command.period_source_revision = key.source_revision;
+    command.period_generation = key.generation;
     return runtime_->enqueue(command, ready);
 }
 
