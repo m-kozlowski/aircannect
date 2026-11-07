@@ -681,6 +681,24 @@ void ReportMetricAccumulator::clear() {
     if (runtime_) runtime_->clear();
 }
 
+void ReportMetricAccumulator::retain_signals(uint32_t signal_mask) {
+    if (!runtime_) return;
+
+    for (size_t i = 0; i < METRIC_HISTOGRAM_COUNT; ++i) {
+        const auto signal = i == static_cast<size_t>(MetricHistogramId::ExpirationTime)
+            ? ReportSignalId::InspiratoryDuration : metric_signal(i);
+        if (signal_mask & report_signal_bit(signal)) continue;
+        runtime_->histograms[i] = {};
+        runtime_->incomplete_mask &= ~(1u << i);
+    }
+
+    if (!(signal_mask & report_signal_bit(ReportSignalId::Leak))) {
+        runtime_->leak_recorded_ms = 0;
+        runtime_->leak_above_threshold_ms = 0;
+        runtime_->leak_duration_incomplete = false;
+    }
+}
+
 bool ReportMetricAccumulator::histogram(size_t index, Histogram &out) const {
     out = {};
     if (!runtime_ || index >= METRIC_HISTOGRAM_COUNT ||

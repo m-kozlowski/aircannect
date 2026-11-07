@@ -299,7 +299,7 @@ struct ReportPeriodService::Runtime {
     uint64_t leak_ms = 0;
     uint64_t leak_above_ms = 0;
     uint64_t session_csr_ms = 0;
-    size_t session_offset = ReportSessionStatistics::HeaderBytes;
+    size_t session_offset = 0;
     size_t event_cursor = 0;
     ReportSessionStatistics::Entry session_entry;
     ReportSignalStoreEventFileView event_view;
@@ -802,6 +802,10 @@ bool ReportPeriodService::poll() {
         return true;
     }
     if (r.phase == Phase::SessionEntries) {
+        if (!r.session_offset) {
+            r.session_offset = ReportSessionStatistics::entries_offset(*r.histogram_bytes);
+        }
+
         if (r.session_offset == r.histogram_bytes->size()) {
             r.night_metrics.clear();
             r.histogram_bytes.reset();

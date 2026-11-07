@@ -46,16 +46,17 @@ bool ReportSessionStatistics::pack_parts() {
 }
 
 bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
-    ReportSignalId signal, int32_t value_milli, bool expiration) {
+    ReportSignalId signal, int32_t value_milli, bool expiration, bool closed) {
     if (!interval_ms) return true;
 
     if (current_ == SIZE_MAX || parts_[current_].session != session ||
-        parts_[current_].interval_ms != interval_ms || signal_ != signal) {
+        parts_[current_].interval_ms != interval_ms || parts_[current_].closed != closed ||
+        signal_ != signal) {
         if (!account_current()) return false;
         size_t index = 0;
         for (; index < parts_.size(); ++index) {
             if (parts_[index].metrics && parts_[index].session == session &&
-                parts_[index].interval_ms == interval_ms) break;
+                parts_[index].interval_ms == interval_ms && parts_[index].closed == closed) break;
         }
         if (index == parts_.size()) {
             auto metrics = std::unique_ptr<ReportMetricAccumulator>(
@@ -63,7 +64,7 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
 
             if (!metrics || !metrics->begin(UINT32_MAX)) return false;
             try {
-                parts_.push_back({session, interval_ms, std::move(metrics)});
+                parts_.push_back({session, interval_ms, std::move(metrics), 0, {}, closed});
             } catch (const std::bad_alloc &) { return false; }
         }
         current_ = index;
@@ -75,8 +76,41 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
         : metrics.accept(signal, value_milli, interval_ms);
 }
 
+bool ReportSessionStatistics::resume(std::shared_ptr<const LargeByteBuffer> previous,
+    uint32_t retained_signals, bool close_retained_tail) {
+    clear();
+    size_t offset = entries_offset(*previous);
+    while (offset < previous->size()) {
+        Entry entry;
+        if (!next(*previous, offset, entry)) return false;
+        if (!entry.closed && !retained_signals) continue;
+
+        std::shared_ptr<const LargeByteBuffer> packed;
+        if (entry.closed) {
+            packed = LargeByteBuffer::slice(previous, entry.metrics - previous->data(), entry.size);
+        } else {
+            ReportMetricAccumulator retained;
+            if (!retained.restore(entry.metrics, entry.size)) return false;
+            retained.retain_signals(retained_signals);
+            packed = retained.snapshot();
+        }
+        if (!packed) return false;
+
+        const size_t size = packed->size();
+        if (packed_bytes_ > MaxBytes - EntryBytes ||
+            size > MaxBytes - packed_bytes_ - EntryBytes) return false;
+
+        try {
+            parts_.push_back({entry.session, entry.interval_ms, {}, 0, std::move(packed),
+                              entry.closed || close_retained_tail});
+        } catch (const std::bad_alloc &) { return false; }
+        packed_bytes_ += EntryBytes + size;
+    }
+    return true;
+}
+
 std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
-    const ReportSignalStoreNight &night) {
+    const ReportSignalStoreNight &night, int64_t closed_before_ms) {
     if (!pack_parts()) return {};
 
     auto bytes = LargeByteBuffer::allocate(packed_bytes_);
@@ -84,7 +118,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
 
     auto *p = bytes->data();
     memset(p, 0, HeaderBytes);
-    put_le16(p, 1);
+    put_le16(p, 2);
     put_le16(p + 2, HeaderBytes);
     put_le32(p + 4, packed_bytes_);
     put_le32(p + 8, night.sleep_day.epoch_days());
@@ -92,6 +126,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
     put_le64(p + 16, night.source_revision.value());
     put_le16(p + 24, night.session_count);
     p[26] = night.checkpoint_slot;
+    put_le64(p + 32, static_cast<uint64_t>(closed_before_ms));
     p += HeaderBytes;
 
     for (size_t i = 0; i < parts_.size(); ++i) {
@@ -99,6 +134,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
         const auto &metrics = part.packed;
         memset(p, 0, EntryBytes);
         put_le16(p, part.session);
+        p[2] = part.closed ? 1 : 0;
         put_le32(p + 4, part.interval_ms);
         put_le32(p + 8, metrics->size());
         p += EntryBytes;
@@ -119,14 +155,27 @@ void ReportSessionStatistics::clear() {
 
 bool ReportSessionStatistics::matches(const LargeByteBuffer &bytes,
                                       const ReportSignalStoreNight &night) {
-    if (bytes.size() < HeaderBytes || bytes.size() > MaxBytes) return false;
+    if (bytes.size() < 32 || bytes.size() > MaxBytes) return false;
     const auto *p = bytes.data();
-    return get_le16(p) == 1 && get_le16(p + 2) == HeaderBytes &&
+    const auto version = get_le16(p);
+    const size_t header = version == 1 ? 32 : HeaderBytes;
+    return (version == 1 || version == 2) && bytes.size() >= header &&
+        get_le16(p + 2) == header &&
         get_le32(p + 4) == bytes.size() &&
         get_le32(p + 8) == uint32_t(night.sleep_day.epoch_days()) &&
         get_le32(p + 12) == night.generation &&
         get_le64(p + 16) == night.source_revision.value() &&
         get_le16(p + 24) == night.session_count && p[26] == night.checkpoint_slot;
+}
+
+bool ReportSessionStatistics::resumable(const LargeByteBuffer &bytes,
+    const ReportSignalStoreNight &night, int64_t closed_before_ms) {
+    return matches(bytes, night) && get_le16(bytes.data()) == 2 &&
+        static_cast<int64_t>(get_le64(bytes.data() + 32)) == closed_before_ms;
+}
+
+size_t ReportSessionStatistics::entries_offset(const LargeByteBuffer &bytes) {
+    return get_le16(bytes.data() + 2);
 }
 
 bool ReportSessionStatistics::next(const LargeByteBuffer &bytes, size_t &offset,
@@ -136,7 +185,9 @@ bool ReportSessionStatistics::next(const LargeByteBuffer &bytes, size_t &offset,
     entry.session = get_le16(p);
     entry.interval_ms = get_le32(p + 4);
     entry.size = get_le32(p + 8);
+    entry.closed = get_le16(bytes.data()) == 2 && p[2] == 1;
     if (entry.session >= get_le16(bytes.data() + 24) || !entry.interval_ms ||
+        (get_le16(bytes.data()) == 2 && p[2] > 1) ||
         entry.interval_ms > REPORT_SIGNAL_STORE_BLOCK_MS ||
         entry.size > bytes.size() - offset - EntryBytes) return false;
 
@@ -166,6 +217,7 @@ struct ReportSessionStatisticsReader::Runtime {
     size_t slot = 0;
     size_t sample = 0;
     size_t session = 0;
+    int64_t closed_before_ms = 0;
     bool paired = false;
     OperationTicket ticket;
     StoragePreparedRead prepared;
@@ -208,7 +260,7 @@ struct ReportSessionStatisticsReader::Runtime {
 
     bool select() {
         if (track_index == metadata.view.night.track_count) {
-            completed = statistics.finish(metadata.view.night);
+            completed = statistics.finish(metadata.view.night, closed_before_ms);
             if (!completed) fail("session_statistics_alloc");
             phase = Phase::Done;
             port.release_handle();
@@ -334,7 +386,8 @@ struct ReportSessionStatisticsReader::Runtime {
 
             const uint32_t duration = std::min<int64_t>(track.sample_interval_ms,
                 sessions[session].end_ms - timestamp);
-            if (!statistics.accept(session, duration, track.signal, value)) {
+            if (!statistics.accept(session, duration, track.signal, value, false,
+                                   timestamp < closed_before_ms)) {
                 fail("session_statistics_alloc");
                 return true;
             }
@@ -347,7 +400,8 @@ struct ReportSessionStatisticsReader::Runtime {
                     ratio_value <= 0) continue;
                 const int64_t expiration = (int64_t(value) * 100000 + ratio_value / 2) / ratio_value;
                 if (expiration <= INT32_MAX && !statistics.accept(session, duration,
-                        ReportSignalId::InspiratoryDuration, expiration, true)) {
+                        ReportSignalId::InspiratoryDuration, expiration, true,
+                        timestamp < closed_before_ms)) {
                     fail("session_statistics_alloc");
                     return true;
                 }
@@ -369,7 +423,7 @@ ReportSessionStatisticsReader::ReportSessionStatisticsReader(StorageReadPort &po
 
 ReportSessionStatisticsReader::~ReportSessionStatisticsReader() { LargeObject::destroy(runtime_); }
 
-bool ReportSessionStatisticsReader::start(ReportSignalStoreMetadata metadata) {
+bool ReportSessionStatisticsReader::start(ReportSignalStoreMetadata metadata, int64_t closed_before_ms) {
     if (!runtime_ || !metadata.metadata || active()) return false;
     auto &r = *runtime_;
     r.metadata = std::move(metadata);
@@ -377,6 +431,14 @@ bool ReportSessionStatisticsReader::start(ReportSignalStoreMetadata metadata) {
         r.sessions.resize(r.metadata.view.night.session_count);
     } catch (const std::bad_alloc &) { return false; }
     for (size_t i = 0; i < r.sessions.size(); ++i) r.metadata.view.session(i, r.sessions[i]);
+    r.closed_before_ms = closed_before_ms;
+    if (!r.closed_before_ms) {
+        for (const auto &session : r.sessions) {
+            r.closed_before_ms = std::max(r.closed_before_ms,
+                session.end_ms - session.end_ms % REPORT_SIGNAL_STORE_BLOCK_MS);
+        }
+    }
+
     r.phase = Runtime::Phase::Select;
     return true;
 }

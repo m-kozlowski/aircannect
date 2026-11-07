@@ -132,6 +132,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
     metadata_loader_.begin(read_port);
     night_loader_.begin(read_port);
     history_writes_ = &write_port;
+    read_port_ = &read_port;
     sources_loader_.begin(read_port);
 }
 
@@ -334,7 +335,7 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
         case ActivePhase::LoadingCheckpoint:
             worked = metadata_loader_.poll() || worked;
             if (metadata_loader_.status().terminal()) {
-                worked = finish_checkpoint_load(now_ms) || worked;
+                worked = finish_checkpoint_load() || worked;
             }
             break;
 
@@ -343,6 +344,17 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             if (metadata_loader_.status().terminal()) {
                 worked = finish_fallback_metadata_load(now_ms) || worked;
             }
+            break;
+
+        case ActivePhase::LoadingSessionStatistics:
+            worked = metadata_loader_.poll() || worked;
+            if (metadata_loader_.status().terminal()) {
+                worked = finish_session_statistics_load(now_ms) || worked;
+            }
+            break;
+
+        case ActivePhase::RecoveringSessionStatistics:
+            worked = recover_session_statistics(now_ms) || worked;
             break;
 
         case ActivePhase::AcquiringFallback:
@@ -394,6 +406,8 @@ ReportEngineStatus ReportEngine::status() const {
         case ActivePhase::LoadingSources:
         case ActivePhase::LoadingFallbackMetadata:
         case ActivePhase::LoadingCheckpoint:
+        case ActivePhase::LoadingSessionStatistics:
+        case ActivePhase::RecoveringSessionStatistics:
             out.state = ReportEngineState::Executing;
             break;
         case ActivePhase::AcquiringFallback:
@@ -890,7 +904,7 @@ bool ReportEngine::start_build(
     return start_execution(now_ms);
 }
 
-bool ReportEngine::finish_checkpoint_load(uint32_t now_ms) {
+bool ReportEngine::finish_checkpoint_load() {
     const auto load = metadata_loader_.status();
     if (load.state != StorageBoundedFileLoadState::Ready) {
         complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
@@ -916,6 +930,65 @@ bool ReportEngine::finish_checkpoint_load(uint32_t now_ms) {
         return true;
     }
 
+    metadata_loader_.reset();
+    char path[AC_STORAGE_PATH_MAX];
+    if (!ReportSessionStatistics::path(previous, path, sizeof(path)) ||
+        metadata_loader_.start(path, ReportSessionStatistics::MaxBytes,
+            active_request_.ticket.generation, read_lane(active_request_.priority), true)
+                != OperationAdmission::Accepted) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, "report_session_statistics_read_rejected");
+        return true;
+    }
+
+    phase_ = ActivePhase::LoadingSessionStatistics;
+    return true;
+}
+
+bool ReportEngine::finish_session_statistics_load(uint32_t now_ms) {
+    const auto load = metadata_loader_.status();
+    previous_sessions_ = metadata_loader_.take_completed();
+    metadata_loader_.reset();
+    if (previous_sessions_ && ReportSessionStatistics::resumable(
+            *previous_sessions_, previous_metadata_.view.night,
+            previous_checkpoint_.view.closed_before_ms)) {
+        return start_execution(now_ms);
+    }
+
+    previous_sessions_.reset();
+    if (load.state != StorageBoundedFileLoadState::Ready &&
+        load.state != StorageBoundedFileLoadState::Missing &&
+        strcmp(load.error, "storage_file_size_invalid") != 0) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, load.error);
+        return true;
+    }
+
+    // Legacy caches pooled the tail with history. Reconstruct once, before
+    // any append writes, using the same bounded reader as historical queries.
+    session_reader_.reset(new (std::nothrow) ReportSessionStatisticsReader(*read_port_));
+    if (!session_reader_ || !session_reader_->start(
+            previous_metadata_, previous_checkpoint_.view.closed_before_ms)) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, "report_session_statistics_alloc");
+        return true;
+    }
+
+    phase_ = ActivePhase::RecoveringSessionStatistics;
+    return true;
+}
+
+bool ReportEngine::recover_session_statistics(uint32_t now_ms) {
+    const bool worked = session_reader_->poll();
+    if (session_reader_->active()) return worked;
+    if (session_reader_->error()[0]) {
+        complete_active(OperationOutcome::failed(), ReportPlanStatus::Ready,
+                        ReportExecutorError::None, session_reader_->error());
+        return true;
+    }
+
+    previous_sessions_ = session_reader_->take_completed();
+    session_reader_.reset();
     return start_execution(now_ms);
 }
 
@@ -1008,6 +1081,7 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
 
             previous_metadata_ = {};
             previous_checkpoint_ = {};
+            previous_sessions_.reset();
             active_store_generation_ = increment_generation(
                 active_store_generation_);
         } else if (!resumed.ready()) {
@@ -1022,7 +1096,8 @@ bool ReportEngine::start_execution(uint32_t now_ms) {
 
     if (!builder_.begin_build(
             active_request_, *active_plan_, active_store_generation_,
-            previous_metadata_, previous_checkpoint_, execution_plan)) {
+            previous_metadata_, previous_checkpoint_, execution_plan,
+            std::move(previous_sessions_))) {
         const char *reason = builder_.failure_reason();
         builder_.discard_build();
         complete_active(OperationOutcome::failed(),
@@ -1275,6 +1350,8 @@ void ReportEngine::cancel_active_work() {
             break;
         case ActivePhase::LoadingFallbackMetadata:
         case ActivePhase::LoadingCheckpoint:
+        case ActivePhase::LoadingSessionStatistics:
+        case ActivePhase::RecoveringSessionStatistics:
             metadata_loader_.cancel();
             complete_active(OperationOutcome::cancelled(),
                             ReportPlanStatus::Ready,
@@ -1352,6 +1429,8 @@ void ReportEngine::reset_active() {
     previous_metadata_ = {};
     retained_metadata_ = {};
     previous_checkpoint_ = {};
+    previous_sessions_.reset();
+    session_reader_.reset();
     phase_ = ActivePhase::Idle;
     clear_after_fallback_cancel_ = false;
 }

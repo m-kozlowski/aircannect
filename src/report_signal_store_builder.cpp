@@ -168,7 +168,6 @@ struct ReportSignalStoreBuilder::Runtime {
     uint32_t store_generation = 0;
     ReportMetricAccumulator closed_metrics;
     ReportSessionStatistics session_statistics;
-    bool session_statistics_complete = true;
     struct BreathSpan {
         EdfReportSeriesSpan samples;
         size_t track = SIZE_MAX;
@@ -224,7 +223,6 @@ struct ReportSignalStoreBuilder::Runtime {
 
         closed_metrics.clear();
         session_statistics.clear();
-        session_statistics_complete = true;
         decltype(inspiration_spans)().swap(inspiration_spans);
         decltype(ie_spans)().swap(ie_spans);
         closed_before_ms = 0;
@@ -421,12 +419,11 @@ struct ReportSignalStoreBuilder::Runtime {
                     return false;
                 }
 
-                if (!previous_checkpoint.bytes && session_statistics_complete &&
-                    !session_statistics.accept(
-                        session_index, duration, series.signal, canonical_value)) {
-                    // This shortcut is optional; never lose a night for its RAM budget.
-                    session_statistics.clear();
-                    session_statistics_complete = false;
+                if (!session_statistics.accept(
+                        session_index, duration, series.signal, canonical_value, false,
+                        timestamp < closed_before_ms)) {
+                    failure = "report_session_statistics_allocation_failed";
+                    return false;
                 }
             }
         }
@@ -544,7 +541,8 @@ bool ReportSignalStoreBuilder::begin_build(
     uint32_t store_generation,
     const ReportSignalStoreMetadata &previous,
     const ReportBuildCheckpointInput &checkpoint_input,
-    std::shared_ptr<const ReportReadPlan> execution_plan) {
+    std::shared_ptr<const ReportReadPlan> execution_plan,
+    std::shared_ptr<const LargeByteBuffer> previous_sessions) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_signal_store_runtime_unavailable";
@@ -649,9 +647,22 @@ bool ReportSignalStoreBuilder::begin_build(
         failure_reason_ = "report_signal_store_coverage_prepare_failed";
         return false;
     }
+    uint32_t retained_signals = 0;
     for (size_t i = 0; i < runtime_->track_count; ++i) {
-        runtime_->set_expected_coverage(runtime_->tracks[i]);
+        auto &work = runtime_->tracks[i];
+        runtime_->set_expected_coverage(work);
+        if (!work.source_present) retained_signals |= report_signal_bit(work.track.signal);
     }
+
+    if (checkpoint_bytes) {
+        if (!previous_sessions || !runtime_->session_statistics.resume(
+                std::move(previous_sessions), retained_signals,
+                runtime_->closed_before_ms > checkpoint.closed_before_ms)) {
+            failure_reason_ = "report_session_statistics_resume_failed";
+            return false;
+        }
+    }
+
     if (!runtime_->closed_metrics.begin(
             plan, checkpoint_bytes ? checkpoint.metrics : nullptr,
             checkpoint.metrics_size)) {
@@ -1255,11 +1266,11 @@ bool ReportSignalStoreBuilder::end_record() {
                     const uint32_t duration = static_cast<uint32_t>(std::min<int64_t>(
                         track.sample_interval_ms, session->output_window.end_ms - timestamp));
 
-                    if (!runtime_->previous_checkpoint.bytes && runtime_->session_statistics_complete &&
-                        !runtime_->session_statistics.accept(part.session, duration,
-                            ReportSignalId::InspiratoryDuration, expiration, true)) {
-                        runtime_->session_statistics.clear();
-                        runtime_->session_statistics_complete = false;
+                    if (!runtime_->session_statistics.accept(part.session, duration,
+                            ReportSignalId::InspiratoryDuration, expiration, true,
+                            timestamp < runtime_->closed_before_ms)) {
+                        failure_reason_ = "report_session_statistics_allocation_failed";
+                        return false;
                     }
 
                     if (timestamp < runtime_->closed_before_ms) {
@@ -1516,10 +1527,11 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
     night.session_count = runtime_->plan->session_count();
     night.track_count = runtime_->track_count;
 
-    // Append checkpoints contain pooled history, not session contributions.
-    // The period owner can recover those from the published RAW planes once.
-    if (!runtime_->previous_checkpoint.bytes && runtime_->session_statistics_complete) {
-        bundle->session_statistics = runtime_->session_statistics.finish(night);
+    bundle->session_statistics = runtime_->session_statistics.finish(
+        night, runtime_->closed_before_ms);
+    if (!bundle->session_statistics) {
+        failure_reason_ = "report_session_statistics_allocation_failed";
+        return false;
     }
 
     // ReportReadSession is not a flat NightCatalogTimeRange array.

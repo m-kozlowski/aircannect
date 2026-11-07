@@ -13,6 +13,7 @@
 #include "report_signal_store_catalog.h"
 #include "report_signal_store_metadata_loader.h"
 #include "report_signal_store_service.h"
+#include "report_session_statistics.h"
 #include "report_spool_availability.h"
 #include "storage_bounded_file_loader.h"
 
@@ -103,6 +104,8 @@ private:
         LoadingSources,
         LoadingFallbackMetadata,
         LoadingCheckpoint,
+        LoadingSessionStatistics,
+        RecoveringSessionStatistics,
         AcquiringFallback,
         WaitingForCatalog,
         Executing,
@@ -120,7 +123,9 @@ private:
     bool finish_fallback_metadata_load(uint32_t now_ms);
     bool start_build(uint32_t now_ms,
                      std::shared_ptr<const NightCatalog> sources = {});
-    bool finish_checkpoint_load(uint32_t now_ms);
+    bool finish_checkpoint_load();
+    bool finish_session_statistics_load(uint32_t now_ms);
+    bool recover_session_statistics(uint32_t now_ms);
     bool start_execution(uint32_t now_ms);
     bool defer_build_for_low_space();
     bool finish_fallback_acquisition();
@@ -151,6 +156,10 @@ private:
     ReportSignalStoreMetadata previous_metadata_;
     ReportSignalStoreMetadata retained_metadata_;
     ReportBuildCheckpointInput previous_checkpoint_;
+
+    StorageReadPort *read_port_ = nullptr;
+    std::shared_ptr<const LargeByteBuffer> previous_sessions_;
+    std::unique_ptr<ReportSessionStatisticsReader> session_reader_;
 
     NightCatalogStoreService sources_loader_;
     SourceRevision sources_expected_revision_;

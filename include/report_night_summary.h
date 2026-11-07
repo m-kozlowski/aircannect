@@ -137,6 +137,7 @@ public:
     bool restore(const uint8_t *data, size_t length,
                  uint32_t additional_signals = 0);
     bool merge(const ReportMetricAccumulator &other);
+    void retain_signals(uint32_t signal_mask);
 
     bool histogram(size_t index, Histogram &out) const;
     static ReportSignalId metric_signal(size_t index);

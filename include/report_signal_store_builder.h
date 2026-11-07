@@ -27,7 +27,8 @@ public:
                      uint32_t store_generation,
                      const ReportSignalStoreMetadata &previous = {},
                      const ReportBuildCheckpointInput &checkpoint = {},
-                     std::shared_ptr<const ReportReadPlan> execution_plan = {});
+                     std::shared_ptr<const ReportReadPlan> execution_plan = {},
+                     std::shared_ptr<const LargeByteBuffer> previous_sessions = {});
     bool configure_series(const ReportSeriesDescriptor &series,
                           const EdfSignalScale &scale) override;
     bool ready(bool *progressed = nullptr) override;
