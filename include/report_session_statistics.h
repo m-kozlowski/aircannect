@@ -37,12 +37,15 @@ private:
         uint32_t interval_ms;
         std::unique_ptr<ReportMetricAccumulator> metrics;
         size_t bytes = 0;
+        std::shared_ptr<const LargeByteBuffer> packed;
     };
 
     bool account_current();
+    bool pack_parts();
     std::vector<Part, LargeAllocator<Part>> parts_;
     size_t current_ = SIZE_MAX;
     size_t working_bytes_ = 0;
+    size_t packed_bytes_ = HeaderBytes;
     ReportSignalId signal_ = ReportSignalId::Flow;
 };
 

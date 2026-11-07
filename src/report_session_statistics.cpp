@@ -21,7 +21,28 @@ bool ReportSessionStatistics::account_current() {
     }
     working_bytes_ += bytes - part.bytes;
     part.bytes = bytes;
-    return working_bytes_ <= Memory::buffer_budget(MaxBytes, 64 * 1024);
+    return working_bytes_ <= Memory::buffer_budget(MaxBytes, 64 * 1024) || pack_parts();
+}
+
+bool ReportSessionStatistics::pack_parts() {
+    // The wire format pools repeated session/cadence contributions. Retire
+    // dense working histograms without restoring them when that session recurs.
+    for (auto &part : parts_) {
+        if (!part.metrics) continue;
+
+        auto packed = part.metrics->snapshot();
+        if (!packed || packed_bytes_ > MaxBytes - EntryBytes ||
+            packed->size() > MaxBytes - packed_bytes_ - EntryBytes) return false;
+
+        packed_bytes_ += EntryBytes + packed->size();
+        part.packed = std::move(packed);
+        part.metrics.reset();
+        part.bytes = 0;
+    }
+
+    working_bytes_ = 0;
+    current_ = SIZE_MAX;
+    return true;
 }
 
 bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
@@ -33,7 +54,8 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
         if (!account_current()) return false;
         size_t index = 0;
         for (; index < parts_.size(); ++index) {
-            if (parts_[index].session == session && parts_[index].interval_ms == interval_ms) break;
+            if (parts_[index].metrics && parts_[index].session == session &&
+                parts_[index].interval_ms == interval_ms) break;
         }
         if (index == parts_.size()) {
             auto metrics = std::unique_ptr<ReportMetricAccumulator>(
@@ -55,32 +77,16 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
 
 std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
     const ReportSignalStoreNight &night) {
-    if (!account_current()) return {};
+    if (!pack_parts()) return {};
 
-    using Snapshot = std::shared_ptr<const LargeByteBuffer>;
-    std::vector<Snapshot, LargeAllocator<Snapshot>> snapshots;
-    size_t size = HeaderBytes;
-    try {
-        snapshots.reserve(parts_.size());
-        for (auto &part : parts_) {
-            auto bytes = part.metrics->snapshot();
-            if (!bytes || size > MaxBytes - EntryBytes ||
-                bytes->size() > MaxBytes - size - EntryBytes) return {};
-
-            size += EntryBytes + bytes->size();
-            snapshots.push_back(std::move(bytes));
-            part.metrics.reset();
-        }
-    } catch (const std::bad_alloc &) { return {}; }
-
-    auto bytes = LargeByteBuffer::allocate(size);
+    auto bytes = LargeByteBuffer::allocate(packed_bytes_);
     if (!bytes) return {};
 
     auto *p = bytes->data();
     memset(p, 0, HeaderBytes);
     put_le16(p, 1);
     put_le16(p + 2, HeaderBytes);
-    put_le32(p + 4, size);
+    put_le32(p + 4, packed_bytes_);
     put_le32(p + 8, night.sleep_day.epoch_days());
     put_le32(p + 12, night.generation);
     put_le64(p + 16, night.source_revision.value());
@@ -90,7 +96,7 @@ std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
 
     for (size_t i = 0; i < parts_.size(); ++i) {
         const auto &part = parts_[i];
-        const auto &metrics = snapshots[i];
+        const auto &metrics = part.packed;
         memset(p, 0, EntryBytes);
         put_le16(p, part.session);
         put_le32(p + 4, part.interval_ms);
@@ -108,6 +114,7 @@ void ReportSessionStatistics::clear() {
     decltype(parts_){}.swap(parts_);
     current_ = SIZE_MAX;
     working_bytes_ = 0;
+    packed_bytes_ = HeaderBytes;
 }
 
 bool ReportSessionStatistics::matches(const LargeByteBuffer &bytes,
