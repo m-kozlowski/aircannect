@@ -1579,7 +1579,7 @@ void ReportHttpController::publish_completion() {
             completion_json_ += ",\"sessions\":[";
             for (size_t i = 0; i < period->key.sessions->size(); ++i) {
                 if (i) completion_json_ += ',';
-                completion_json_ += (*period->key.sessions)[i];
+                append_json_float(completion_json_, (*period->key.sessions)[i]);
             }
             completion_json_ += ']';
         }
