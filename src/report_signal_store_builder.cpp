@@ -16,6 +16,7 @@
 #include "large_scratch_array.h"
 #include "memory_manager.h"
 #include "report_night_summary.h"
+#include "report_session_statistics.h"
 #include "report_build_checkpoint.h"
 #include "report_night_histogram.h"
 #include "report_planner.h"
@@ -166,9 +167,12 @@ struct ReportSignalStoreBuilder::Runtime {
     uint16_t block_slot_count = 0;
     uint32_t store_generation = 0;
     ReportMetricAccumulator closed_metrics;
+    ReportSessionStatistics session_statistics;
+    bool session_statistics_complete = true;
     struct BreathSpan {
         EdfReportSeriesSpan samples;
         size_t track = SIZE_MAX;
+        uint16_t session = 0;
     };
     std::vector<BreathSpan, LargeAllocator<BreathSpan>> inspiration_spans;
     std::vector<BreathSpan, LargeAllocator<BreathSpan>> ie_spans;
@@ -219,6 +223,8 @@ struct ReportSignalStoreBuilder::Runtime {
         event_capacity = 0;
 
         closed_metrics.clear();
+        session_statistics.clear();
+        session_statistics_complete = true;
         decltype(inspiration_spans)().swap(inspiration_spans);
         decltype(ie_spans)().swap(ie_spans);
         closed_before_ms = 0;
@@ -413,6 +419,14 @@ struct ReportSignalStoreBuilder::Runtime {
                 if (!metrics.accept(series.signal, canonical_value, duration)) {
                     failure = "report_signal_store_metrics_allocation_failed";
                     return false;
+                }
+
+                if (!previous_checkpoint.bytes && session_statistics_complete &&
+                    !session_statistics.accept(
+                        session_index, duration, series.signal, canonical_value)) {
+                    // This shortcut is optional; never lose a night for its RAM budget.
+                    session_statistics.clear();
+                    session_statistics_complete = false;
                 }
             }
         }
@@ -974,7 +988,7 @@ bool ReportSignalStoreBuilder::accept_series_span(
         auto &spans = series.signal == ReportSignalId::InspiratoryDuration
             ? runtime_->inspiration_spans : runtime_->ie_spans;
         try {
-            spans.push_back({span, runtime_->last_track});
+            spans.push_back({span, runtime_->last_track, session_index});
         } catch (const std::bad_alloc &) {
             failure_reason_ = "report_signal_store_breath_allocation_failed";
             return false;
@@ -1235,6 +1249,19 @@ bool ReportSignalStoreBuilder::end_record() {
                 const int64_t expiration =
                     (static_cast<int64_t>(inspiration_ms) * 100000 + ratio / 2) / ratio;
                 if (expiration <= INT32_MAX) {
+                    const auto &part = inspiration[ti_span];
+                    const auto &track = runtime_->tracks[part.track].track;
+                    const auto *session = runtime_->plan->session(part.session);
+                    const uint32_t duration = static_cast<uint32_t>(std::min<int64_t>(
+                        track.sample_interval_ms, session->output_window.end_ms - timestamp));
+
+                    if (!runtime_->previous_checkpoint.bytes && runtime_->session_statistics_complete &&
+                        !runtime_->session_statistics.accept(part.session, duration,
+                            ReportSignalId::InspiratoryDuration, expiration, true)) {
+                        runtime_->session_statistics.clear();
+                        runtime_->session_statistics_complete = false;
+                    }
+
                     if (timestamp < runtime_->closed_before_ms) {
                         if (!runtime_->closed_metrics.accept_expiration_time(expiration)) {
                             failure_reason_ = "report_signal_store_metrics_allocation_failed";
@@ -1488,6 +1515,12 @@ bool ReportSignalStoreBuilder::finish_build(bool *progressed) {
         csr_duration_ms);
     night.session_count = runtime_->plan->session_count();
     night.track_count = runtime_->track_count;
+
+    // Append checkpoints contain pooled history, not session contributions.
+    // The period owner can recover those from the published RAW planes once.
+    if (!runtime_->previous_checkpoint.bytes && runtime_->session_statistics_complete) {
+        bundle->session_statistics = runtime_->session_statistics.finish(night);
+    }
 
     // ReportReadSession is not a flat NightCatalogTimeRange array.
     NightCatalogTimeRange *sessions = nullptr;

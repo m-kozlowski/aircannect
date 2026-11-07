@@ -164,6 +164,8 @@ public:
                            int64_t timestamp_ms,
                            bool &present,
                            int16_t &raw);
+    static bool physical_value(const ReportSignalStoreTrack &track,
+                               int16_t raw, int32_t &value_milli);
 };
 
 enum ReportSignalStoreNightFlag : uint32_t {
@@ -244,6 +246,7 @@ public:
     std::shared_ptr<const LargeByteBuffer> events;
     std::shared_ptr<const LargeByteBuffer> checkpoint;
     std::shared_ptr<const LargeByteBuffer> histogram;
+    std::shared_ptr<const LargeByteBuffer> session_statistics;
     uint8_t checkpoint_slot = 0;
 
     size_t signal_count() const { return signal_count_; }

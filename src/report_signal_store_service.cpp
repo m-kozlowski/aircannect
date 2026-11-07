@@ -7,6 +7,7 @@
 #include "large_object.h"
 #include "report_build_checkpoint.h"
 #include "report_night_histogram.h"
+#include "report_session_statistics.h"
 #include "string_util.h"
 
 #ifdef ARDUINO
@@ -761,6 +762,9 @@ ReportSignalStoreService::current_bytes() const {
         case Phase::SubmitHistogram:
         case Phase::WaitHistogram:
             return bundle_->histogram;
+        case Phase::SubmitSessionStatistics:
+        case Phase::WaitSessionStatistics:
+            return bundle_->session_statistics;
         default:
             return {};
     }
@@ -791,6 +795,10 @@ bool ReportSignalStoreService::current_path(
         case Phase::SubmitHistogram:
         case Phase::WaitHistogram:
             return ReportNightHistogramCodec::path(
+                bundle_->metadata_view.night, path, path_size);
+        case Phase::SubmitSessionStatistics:
+        case Phase::WaitSessionStatistics:
+            return ReportSessionStatistics::path(
                 bundle_->metadata_view.night, path, path_size);
         default:
             return false;
@@ -832,6 +840,9 @@ bool ReportSignalStoreService::submit_current() {
         case Phase::SubmitHistogram:
             phase_ = Phase::WaitHistogram;
             break;
+        case Phase::SubmitSessionStatistics:
+            phase_ = Phase::WaitSessionStatistics;
+            break;
         default:
             fail("report_signal_store_publish_phase_invalid");
             break;
@@ -871,6 +882,11 @@ bool ReportSignalStoreService::finish_current() {
             break;
         case Phase::WaitHistogram:
             bundle_->histogram.reset();
+            phase_ = bundle_->session_statistics ? Phase::SubmitSessionStatistics
+                                                : Phase::SubmitMetadata;
+            break;
+        case Phase::WaitSessionStatistics:
+            bundle_->session_statistics.reset();
             phase_ = Phase::SubmitMetadata;
             break;
         case Phase::WaitMetadata:
@@ -927,11 +943,13 @@ bool ReportSignalStoreService::poll() {
         case Phase::SubmitCheckpoint:
         case Phase::SubmitHistogram:
         case Phase::SubmitMetadata:
+        case Phase::SubmitSessionStatistics:
             return submit_current();
         case Phase::WaitEvents:
         case Phase::WaitCheckpoint:
         case Phase::WaitHistogram:
         case Phase::WaitMetadata:
+        case Phase::WaitSessionStatistics:
             return finish_current();
         case Phase::Idle:
         case Phase::Ready:

@@ -493,12 +493,19 @@ bool ReportSignalStoreFileCodec::sample(
     if (!sample_raw(view, timestamp_ms, present, raw)) return false;
     if (!present) return true;
 
+    if (!physical_value(view.track, raw, value_milli)) {
+        present = false;
+        return false;
+    }
+    return true;
+}
+
+bool ReportSignalStoreFileCodec::physical_value(const ReportSignalStoreTrack &track,
+                                               int16_t raw, int32_t &value_milli) {
     const double value = round(
-        (static_cast<double>(raw) * view.track.value_scale +
-         view.track.value_offset) * 1000.0);
+        (static_cast<double>(raw) * track.value_scale + track.value_offset) * 1000.0);
 
     if (!isfinite(value) || value < INT32_MIN || value > INT32_MAX) {
-        present = false;
         return false;
     }
 

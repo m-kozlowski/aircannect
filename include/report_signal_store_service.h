@@ -148,6 +148,8 @@ private:
         WaitCheckpoint,
         SubmitHistogram,
         WaitHistogram,
+        SubmitSessionStatistics,
+        WaitSessionStatistics,
         SubmitMetadata,
         WaitMetadata,
         Ready,
