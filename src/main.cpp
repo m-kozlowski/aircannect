@@ -1986,6 +1986,8 @@ void loop() {
     telnet_console.poll(config_service.data(), console_router);
     if (StorageUsbDevice::serial_available()) {
         serial_management_console.poll(Serial, Serial, console_router);
+    } else {
+        serial_management_console.stop(console_router);
     }
 
     drain_can_rx();
