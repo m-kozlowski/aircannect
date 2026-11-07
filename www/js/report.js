@@ -578,7 +578,7 @@
       if (!Array.isArray(sessions) || !sessions.length) return;
       const toggleable = sessions.length > 1;
       sessions.forEach((session) => {
-        const item = document.createElement("span");
+        const item = document.createElement(toggleable ? "button" : "span");
         item.className = "report-session";
         const start = Number(session.start || 0);
         const minutes = Number(session.duration_min || 0);
@@ -587,16 +587,25 @@
         item.textContent = fmtReportTime(start) + "-" + fmtReportTime(end) +
           " " + fmtMinutes(minutes);
         if (toggleable) {
+          item.type = "button";
+          item.setAttribute("aria-pressed", String(!reportHiddenSessions.has(start)));
           item.classList.add("toggle");
           if (reportHiddenSessions.has(start)) item.classList.add("hidden");
           item.onclick = () => {
             if (reportHiddenSessions.has(start)) {
               reportHiddenSessions.delete(start);
             } else {
+              if (sessions.filter((s) => !reportHiddenSessions.has(Number(s.start))).length <= 1) return;
               reportHiddenSessions.add(start);
             }
             renderReportSessions(sessions);
             renderReportCharts();
+            if (reportSummaryScope === "sessions") {
+              cancelReportPeriodRequest();
+              reportSelectionResult = null;
+              renderReportSummary();
+              loadReportPeriod();
+            }
           };
         }
         container.appendChild(item);
@@ -634,6 +643,8 @@
     }
 
     function resetReportData() {
+      reportSummaryScope = "night";
+      reportSelectionResult = null;
       reportFinishDrag(true, false);
       cancelReportRangeRequest();
       disconnectReportResizeObserver();
@@ -782,6 +793,8 @@
 
     function activateSignalStoreNight(nightId, revision, generation, store) {
       cancelReportRangeRequest();
+      if (reportViewMode === "night") cancelReportPeriodRequest();
+      reportSelectionResult = null;
 
       const nightPrefix = String(nightId) + ":";
       const generationPrefix = nightPrefix + generation + ":";
@@ -2385,7 +2398,7 @@
       return svg;
     }
 
-    function renderReportTiles(result, selected, period = false) {
+    function renderReportTiles(result, selected, period = false, selection = false) {
       const container = document.getElementById("reportMetricTiles");
       if (!container) return;
       container.replaceChildren();
@@ -2393,8 +2406,8 @@
         const value = period && metric.key === "duration"
           ? result?.nights ? result.duration_min / result.nights : null
           : reportMetricValue(metric, result, selected);
-        const trend = reportTrend(metric, selected, value);
-        const button = document.createElement(period ? "div" : "button");
+        const trend = selection ? {mean: null, count: 0, points: []} : reportTrend(metric, selected, value);
+        const button = document.createElement(period || selection ? "div" : "button");
         button.type = "button";
         button.className = "report-metric";
         button.dataset.action = "report.metric";
@@ -2404,14 +2417,15 @@
         button.setAttribute("aria-controls", "reportMetricHistory");
         button.title = metric.label + "; previous 7 days: " + formatReportMetric(metric, trend.mean) +
           " " + metric.unit + " (" + trend.count + "/7 nights)";
-        if (period) {
+        if (period || selection) {
           delete button.dataset.action;
           delete button.dataset.value;
           button.removeAttribute("aria-expanded");
           button.removeAttribute("aria-controls");
           const coverage = metric.key === "duration" ? result?.nights
             : metric.key === "ahi" ? result?.ahi_nights : result?.statistics?.[metric.key]?.nights;
-          button.title = (coverage || 0) + "/" + reportPeriodDays + " nights with data";
+          button.title = selection ? "Selected sessions; calculated from recorded data"
+            : (coverage || 0) + "/" + reportPeriodDays + " nights with data";
         }
 
         button.innerHTML = '<span class="report-metric-label"></span><span class="report-metric-main">' +
@@ -2422,9 +2436,9 @@
         button.querySelector(".report-metric-unit").textContent = metric.unit;
         button.querySelector(".report-metric-delta").textContent = formatReportMetric(metric,
           value === null || trend.mean === null ? null : value - trend.mean, true);
-        if (period) {
+        if (period || selection) {
           button.querySelector(".report-metric-delta").textContent = "";
-          if (metric.key === "duration") {
+          if (period && metric.key === "duration") {
             button.querySelector(".report-metric-label").textContent = "Therapy time · avg/night";
             button.querySelector(".report-metric-unit").textContent = result?.nights
               ? fmtMinutes(Math.round(result.duration_min)) + " total" : "--";
@@ -2432,7 +2446,7 @@
         }
 
         if (metric.key === "ahi") button.querySelector(".report-metric-main").appendChild(reportAhiPie(result));
-        else if (!period) {
+        else if (!period && !selection) {
           const spark = svgNode("svg", {class: "report-spark", "aria-hidden": "true"});
           (metric.key === "duration" ? button.querySelector(".report-metric-unit") :
             button.querySelector(".report-metric-main")).appendChild(spark);
@@ -2450,7 +2464,7 @@
         button.setAttribute("aria-expanded", String(button.dataset.value === reportHistoryMetric));
       });
       const metric = reportMetricTiles.find((item) => item.key === reportHistoryMetric);
-      panel.hidden = !metric || reportViewMode === "period";
+      panel.hidden = !metric || reportViewMode === "period" || reportSummaryScope === "sessions";
       if (panel.hidden) return;
 
       const selected = selectedReportNight();
@@ -2582,6 +2596,16 @@
         button.setAttribute("aria-pressed", String(button.dataset.value === reportViewMode)));
       AirCANnect.ui.text("reportSummaryCaption", period ? "Period summary" : "Night summary");
       AirCANnect.ui.text("reportStatisticsScope", period ? "Full period" : "Full night");
+      const scope = document.getElementById("reportSummaryScope");
+      if (scope) scope.hidden = period;
+      document.querySelectorAll('[data-action="report.scope"]').forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.value === reportSummaryScope));
+        button.disabled = !reportResult || (button.dataset.value === "sessions" && !!reportResult.active);
+      });
+      if (!period && reportSummaryScope === "sessions") {
+        AirCANnect.ui.text("reportSummaryCaption", "Selected sessions");
+        AirCANnect.ui.text("reportStatisticsScope", "Selected sessions");
+      }
       if (period) {
         const history = document.getElementById("reportMetricHistory");
         if (history) history.hidden = true;
@@ -2655,7 +2679,9 @@
     }
 
     async function loadReportPeriod() {
-      if (reportViewMode !== "period") return;
+      const selection = reportViewMode === "night" && reportSummaryScope === "sessions";
+      if (reportViewMode !== "period" && !selection) return;
+      if (selection && !reportResult) return;
       if (reportPeriodController) { reportPeriodReload = true; return; }
       if (!reportPeriodEnd) reportPeriodEnd = selectedReportNight()?.id || "";
       if (!reportPeriodEnd) return;
@@ -2663,10 +2689,16 @@
       const controller = new AbortController();
       reportPeriodController = controller;
       const current = () => reportPeriodController === controller && !controller.signal.aborted;
-      const key = "period:v3:" + reportPeriodEnd + ":" + reportPeriodDays;
-      const url = "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays;
+      const selected = selection ? reportResult.sessions.map((s, i) =>
+        reportHiddenSessions.has(Number(s.start)) ? null : i).filter((i) => i !== null) : null;
+      const version = reportCurrentGeneration + "." + reportCurrentRevision;
+      const key = selection ? "sessions:v1:" + reportCurrentNightId + ":" + version + ":" + selected.join(",")
+        : "period:v3:" + reportPeriodEnd + ":" + reportPeriodDays;
+      const url = selection ? "/api/report/summary?night=" + reportCurrentNightId +
+        "&sessions=" + selected.join(",") + "&v=" + version
+        : "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays;
       let saved = null;
-      AirCANnect.ui.message("reportMsg", "Loading period...", true, true);
+      AirCANnect.ui.message("reportMsg", selection ? "Loading session statistics..." : "Loading period...", true, true);
       try {
         saved = (await readReportCache([key])).get(key);
         if (!current()) return;
@@ -2674,7 +2706,7 @@
         if (!current()) return;
         if (response.status === 202) {
           reportPeriodWaiting = true;
-          AirCANnect.ui.message("reportMsg", "Preparing period...", true, true);
+          AirCANnect.ui.message("reportMsg", selection ? "Preparing session statistics..." : "Preparing period...", true, true);
           return;
         }
         if (response.status !== 200 && !(response.status === 304 && saved)) {
@@ -2683,7 +2715,8 @@
         }
         const body = response.status === 304 ? saved.body : await response.json();
         if (!current()) return;
-        reportPeriodResult = body;
+        if (selection) reportSelectionResult = body;
+        else reportPeriodResult = body;
         reportPeriodWaiting = false;
         if (response.status === 200) void writeReportCache([{key, value: {
           body, etag: response.headers.get("ETag") || "",
@@ -2694,11 +2727,16 @@
         if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) out of date");
         if (body.checkpoint_missing) notes.push(body.checkpoint_missing + " night(s) without saved distributions");
         if (body.layout_blocked) notes.push(body.layout_blocked + " night(s) skipped due to a storage layout conflict");
-        AirCANnect.ui.message("reportMsg", notes.join("; ") || "Period loaded", true, !!notes.length);
+        AirCANnect.ui.message("reportMsg", notes.join("; ") ||
+          (selection ? "Session statistics loaded" : "Period loaded"), true, !!notes.length);
       } catch (error) {
         if (!current()) return;
         reportPeriodWaiting = false;
-        if (saved) { reportPeriodResult = saved.body; renderReportSummary(); }
+        if (saved) {
+          if (selection) reportSelectionResult = saved.body;
+          else reportPeriodResult = saved.body;
+          renderReportSummary();
+        }
         AirCANnect.ui.message("reportMsg", (saved ? "Browser copy; freshness not verified. " : "") + error.message, false, true);
       } finally {
         if (current()) {
@@ -2739,10 +2777,14 @@
       if (pop && pop.classList.contains("open")) renderReportCalendar();
       const displayable = reportResult &&
         (reportResult.state === "ready" || reportResult.state === "partial");
-      AirCANnect.ui.text("reportRdi", displayable && reportNumber(reportResult.rdi) !== null ?
-        Number(reportResult.rdi).toFixed(2) : "--");
-      renderReportTiles(displayable ? reportResult : null, selected);
-      renderReportStatistics(displayable ? reportResult : null);
+      const selection = reportSummaryScope === "sessions";
+      const data = selection ? reportSelectionResult : displayable ? reportResult : null;
+      const statistics = selection && data ? {...data, events_available: data.event_nights > 0,
+        ca_count: data.events[0], oa_count: data.events[1], ua_count: data.events[2],
+        hypopnea_count: data.events[3], arousal_count: data.events[4]} : data;
+      AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) !== null ? Number(data.rdi).toFixed(2) : "--");
+      renderReportTiles(statistics, selection ? null : selected, false, selection);
+      renderReportStatistics(statistics);
       renderReportSettings(displayable ? reportResult : null);
 
       const spo2Median = displayable &&
@@ -2751,18 +2793,17 @@
       const spo2Threshold = displayable &&
         reportNumber(reportResult.spo2_threshold_minutes) !== null ?
         Math.round(Number(reportResult.spo2_threshold_minutes)) + "m" : "--";
-      const spo2Visible = spo2Median !== "--" || spo2Threshold !== "--";
+      const spo2Visible = !selection && (spo2Median !== "--" || spo2Threshold !== "--");
       renderOptionalReportMetric(
         "reportSpo2Metric",
         "reportSpo2Summary",
         spo2Visible,
         spo2Median + " / " + spo2Threshold);
 
-      const csrVisible = displayable &&
-        reportNumber(reportResult.csr_minutes) !== null;
-      AirCANnect.ui.text("reportCsr", csrVisible ? Math.round(Number(reportResult.csr_minutes)) + "m" : "--");
+      const csrVisible = reportNumber(data?.csr_minutes) !== null;
+      AirCANnect.ui.text("reportCsr", csrVisible ? Math.round(Number(data.csr_minutes)) + "m" : "--");
 
-      renderReportEventCounts(displayable ? reportResult : null);
+      renderReportEventCounts(statistics);
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);
       updateReportZoomControls();
@@ -4207,6 +4248,7 @@
         !!reportResult;
       const savedZoom = keepView ? reportZoom : null;
       const savedHiddenSessions = keepView ? [...reportHiddenSessions] : [];
+      const savedScope = keepView ? reportSummaryScope : "night";
       const token = ++reportLoadToken;
       reportOffline = false;
       if (!keepView) {
@@ -4245,6 +4287,7 @@
         reportOffline = !!res.cached;
         if (changed) {
           if (keepView) resetReportData();
+          reportSummaryScope = savedScope;
           reportResult = res.result;
           reportZoom = savedZoom;
           savedHiddenSessions.forEach((key) => reportHiddenSessions.add(key));
@@ -4281,6 +4324,7 @@
             ? "Report loaded (incomplete - some data missing)"
             : "Report loaded", !update || update === "pending" ||
                 update === REPORT_LOW_SPACE_REASON, !!(update || res.cached));
+        if (reportSummaryScope === "sessions") void loadReportPeriod();
       } catch (error) {
         if (token !== reportLoadToken) return;
         AirCANnect.ui.message("reportMsg", (reportOffline
@@ -4397,6 +4441,21 @@
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
       reportHandledCompletionKey = completionKey;
+      if (data.kind === "sessions") {
+        const selected = reportResult?.sessions.map((s, i) =>
+          reportHiddenSessions.has(Number(s.start)) ? null : i).filter((i) => i !== null);
+        if (AirCANnect.pages.isActive("report") && reportViewMode === "night" &&
+            reportSummaryScope === "sessions" && data.night === reportCurrentNightId &&
+            data.version === reportCurrentGeneration + "." + reportCurrentRevision &&
+            Array.isArray(data.sessions) && data.sessions.join(",") === selected?.join(",")) {
+          if (data.success) loadReportPeriod();
+          else {
+            cancelReportPeriodRequest();
+            AirCANnect.ui.message("reportMsg", data.error || "Session statistics unavailable", false, true);
+          }
+        }
+        return;
+      }
       if (data.kind === "period") {
         if (AirCANnect.pages.isActive("report") && reportViewMode === "period" &&
             data.night === reportPeriodEnd && Number(data.days) === reportPeriodDays) {
@@ -4481,6 +4540,16 @@
       renderReportSummary();
       loadReportPeriod();
     });
+
+    AirCANnect.actions.register("report.scope", (_event, element) => {
+      const scope = element.dataset.value;
+      if (!["night", "sessions"].includes(scope) || scope === reportSummaryScope) return;
+      cancelReportPeriodRequest();
+      reportSummaryScope = scope;
+      reportSelectionResult = null;
+      renderReportSummary();
+      if (scope === "sessions") loadReportPeriod();
+    });
     AirCANnect.actions.register("report.period-step", (_event, element) => {
       const step = Number(element.dataset.value);
       if (step !== -1 && step !== 1) return;
@@ -4545,6 +4614,8 @@
 
     let reportSummary = null;
     let reportViewMode = "night";
+    let reportSummaryScope = "night";
+    let reportSelectionResult = null;
     let reportPeriodDays = 30;
     let reportPeriodEnd = "";
     let reportPeriodResult = null;

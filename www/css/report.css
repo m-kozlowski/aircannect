@@ -38,6 +38,7 @@
       padding: 5px 10px;
       font-size: 12px;
       font-weight: 700;
+      font-family: inherit;
     }
 
     .report-session.toggle {
@@ -360,6 +361,17 @@
     }
 
     .report-summary-caption:empty { display: none; }
+
+    .report-summary-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      margin-bottom: 6px;
+    }
+
+    .report-summary-heading .report-summary-caption { margin: 0; }
 
     .report-metrics {
       display: grid;

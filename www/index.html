@@ -394,7 +394,13 @@
               </div>
               <span id="reportPeriodCoverage"></span>
             </div>
-            <div class="report-summary-caption" id="reportSummaryCaption"><span>Night summary</span></div>
+            <div class="report-summary-heading">
+              <div class="report-summary-caption" id="reportSummaryCaption">Night summary</div>
+              <div class="report-segment" id="reportSummaryScope" role="group" aria-label="Statistics scope">
+                <button type="button" data-action="report.scope" data-value="night" aria-pressed="true">Full night</button>
+                <button type="button" data-action="report.scope" data-value="sessions" aria-pressed="false">Selected sessions</button>
+              </div>
+            </div>
             <div class="report-metrics" id="reportMetricTiles"></div>
             <div class="report-event-strip"><span>Events</span>
               <div class="report-events" id="reportEventCounts"></div></div>
