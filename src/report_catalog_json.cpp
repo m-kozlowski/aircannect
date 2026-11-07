@@ -55,7 +55,7 @@ bool format_catalog_etag(const NightCatalog &catalog,
     const int written = snprintf(
         out,
         out_size,
-        "\"catalog-%08lx-%016llx\"",
+        "\"catalog-v2-%08lx-%016llx\"",
         static_cast<unsigned long>(generation),
         static_cast<unsigned long long>(catalog_identity(catalog, store)));
     return written > 0 && static_cast<size_t>(written) < out_size;
@@ -140,6 +140,20 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                         (current_stored_->flags &
                          REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED)) {
                         current_stored_ = nullptr;
+                    }
+
+                    // Summary includes unused calendar days. Keep the source
+                    // record, but do not offer it as a night with therapy.
+                    constexpr uint8_t summary_flags = NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
+                        NIGHT_CATALOG_SOURCE_SUMMARY_EXPIRED;
+                    const uint8_t source_flags = night->source_flags |
+                        (current_stored_ ? current_stored_->source_flags : 0);
+                    if ((night->source_flags & NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) &&
+                        !(source_flags & ~summary_flags) &&
+                        !night->session_count && !night->metrics.valid_mask &&
+                        (!current_stored_ ||
+                         current_stored_->source_revision == night->source_revision)) {
+                        continue;
                     }
 
                     phase_ = Phase::NightPrefix;
