@@ -561,6 +561,25 @@ struct ReportTask::Runtime {
             return false;
         }
 
+        // The recorder briefly has no active metadata between closing the old
+        // files and opening the next segment. Keep their identity across it.
+        if (activity.therapy_active && !pending_capture.raw_segment_start_ms) {
+            capture_pending = false;
+            unlock();
+            return true;
+        }
+        if (rollover_session.raw_segment_start_ms && activity.therapy_active) {
+            unlock();
+            return false;
+        }
+
+        if (capture_session.raw_segment_start_ms &&
+            pending_capture.raw_segment_start_ms &&
+            capture_session.capture_session_id == pending_capture.capture_session_id &&
+            capture_session.canonical_sleep_day < pending_capture.canonical_sleep_day) {
+            rollover_session = capture_session;
+            rollover_sources_ready = false;
+        }
         capture_session = pending_capture;
         capture_pending = false;
         unlock();
@@ -597,6 +616,72 @@ struct ReportTask::Runtime {
             engine.status().state != ReportEngineState::Idle ||
             engine.status().queued != 0 || !capture_storage_ready() ||
             !deadline_due(now_ms, capture_retry_at_ms)) return false;
+
+        if (rollover_session.raw_segment_start_ms) {
+            if (layout_blocked(rollover_session.canonical_sleep_day)) {
+                record_failure("capture", "report_layout_night_blocked",
+                               rollover_session.canonical_sleep_day);
+                rollover_session = {};
+                rollover_sources_ready = false;
+                return true;
+            }
+
+            if (edf_finalization_pending.load() || !catalog || pending_catalog_save ||
+                refresh_generation || catalog_refresh.active() ||
+                summary_acquisition.active()) return false;
+
+            if (!rollover_sources_ready) {
+                NightCatalogRefreshTarget target;
+                target.sleep_day = rollover_session.canonical_sleep_day;
+                copy_cstr(target.datalog_sleep_day, sizeof(target.datalog_sleep_day),
+                          rollover_session.datalog_sleep_day);
+
+                const uint32_t generation = next_catalog_generation();
+                const auto admitted = catalog_refresh.request_refresh(
+                    {}, true, rollover_session.timezone_offset_minutes,
+                    generation, catalog, target, catalog_store.layout_issues());
+
+                if (admitted == OperationAdmission::Accepted) {
+                    refresh_generation = generation;
+                    refresh_base_generation = catalog_generation;
+                    refresh_target = target;
+                    refresh_rollover = true;
+                } else if (admitted == OperationAdmission::Rejected) {
+                    capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+                    record_failure("capture", "report_sources_refresh_rejected",
+                                   target.sleep_day, CATALOG_RETRY_MAX_MS);
+                }
+                return admitted == OperationAdmission::Accepted;
+            }
+
+            const auto *night = catalog->find(rollover_session.canonical_sleep_day);
+            if (!night) {
+                record_failure("capture", "report_night_missing",
+                               rollover_session.canonical_sleep_day);
+                rollover_session = {};
+                rollover_sources_ready = false;
+                return true;
+            }
+
+            ReportNightFailureStatus failure;
+            if (find_failure(night->sleep_day, failure, 0) && !failure.retryable) {
+                rollover_session = {};
+                rollover_sources_ready = false;
+                return true;
+            }
+
+            const auto key = ReportArtifactKey::result(night->sleep_day, night->source_revision);
+            const auto request = engine.request(key, ReportRequestPriority::Reconcile,
+                                                catalog_generation);
+
+            if (request.status == ReportRequestEnqueueStatus::Full ||
+                request.status == ReportRequestEnqueueStatus::Invalid) {
+                capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+                return false;
+            }
+            capture_build = key;
+            return true;
+        }
 
         const auto progress = storage_status->edf_progress_snapshot();
         if (!progress) return false;
@@ -1192,6 +1277,11 @@ struct ReportTask::Runtime {
             capture_checked_revision = 0;
         }
 
+        if (therapy_ended) {
+            rollover_session = {};
+            rollover_sources_ready = false;
+        }
+
         if (capture_build.valid() &&
             (next.ota_install_active || next.manual_update_check_active ||
              next.export_work_claimed)) {
@@ -1229,7 +1319,9 @@ struct ReportTask::Runtime {
         summary_acquisition.cancel();
         spool_availability_probe.cancel();
         if (catalog_refresh.active()) {
-            if (refresh_rebuild) {
+            if (refresh_rollover) {
+                refresh_rollover = false;
+            } else if (refresh_rebuild) {
                 refresh_rebuild = false;
             } else if (!pending_refresh.valid()) {
                 pending_refresh.generation = refresh_generation;
@@ -2263,7 +2355,12 @@ struct ReportTask::Runtime {
         const bool post_therapy = completion.request.artifact == post_therapy_build;
         const bool capture = completion.request.artifact == capture_build;
         if (capture) {
-            if (succeeded || retained || deferred) {
+            const bool rollover = rollover_session.raw_segment_start_ms &&
+                completed_day == rollover_session.canonical_sleep_day;
+            if (rollover && (succeeded || retained || deferred)) {
+                rollover_session = {};
+                rollover_sources_ready = false;
+            } else if (!rollover && (succeeded || retained || deferred)) {
                 // A refusal consumes this input revision, not the saved report.
                 // New closed data or a rewrite can trigger the next attempt.
                 capture_evaluated_end_ms = capture_attempt_end_ms;
@@ -2659,6 +2756,7 @@ struct ReportTask::Runtime {
             spool_availability_probe.status().active() ||
             pending_catalog_save != nullptr || pending_refresh.valid() ||
             post_therapy_build.valid() || signal_tile_backfill_started ||
+            rollover_session.raw_segment_start_ms != 0 ||
             source_change_count != 0 || pending_source_changes ||
             pending_catalog_save_source_change;
 
@@ -2820,6 +2918,9 @@ struct ReportTask::Runtime {
             capture_attempt_progress.reset();
             capture_build = {};
             capture_session = {};
+            rollover_session = {};
+            rollover_sources_ready = false;
+            refresh_rollover = false;
             capture_checked_revision = 0;
             capture_sources_pending = false;
             signal_tile_backfill_started = false;
@@ -2910,6 +3011,8 @@ struct ReportTask::Runtime {
 
     EdfSessionMetadata capture_session;
     EdfSessionMetadata pending_capture;
+    EdfSessionMetadata rollover_session;
+    bool rollover_sources_ready = false;
     bool capture_pending = false;
     bool capture_sources_pending = false;
     SourceRevision capture_sources_revision;
@@ -2957,6 +3060,7 @@ struct ReportTask::Runtime {
     NightCatalogRefreshTarget refresh_target;
     bool refresh_post_therapy = false;
     bool refresh_source_change = false;
+    bool refresh_rollover = false;
     uint32_t catalog_refresh_retry_at_ms = 0;
     uint8_t catalog_refresh_retry_attempt = 0;
     char catalog_refresh_error[AC_STORAGE_ERROR_MAX] = {};
@@ -4072,7 +4176,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.discard_refresh_stage();
     }
 
-    if (runtime.catalog_refresh.active()) {
+    if (runtime.catalog_refresh.active() &&
+        (!runtime.refresh_rollover || runtime.capture_storage_ready())) {
         worked = runtime.catalog_refresh.poll() || worked;
     }
 
@@ -4143,6 +4248,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             if (rebuild_error) {
                 runtime.fail_rebuild(rebuild_error);
             } else if (status.state == NightCatalogRefreshState::NoCompleteRecords) {
+                if (runtime.refresh_rollover) {
+                    runtime.rollover_session = {};
+                    runtime.rollover_sources_ready = false;
+                }
 #ifdef ARDUINO
                 char day[9] = {};
                 runtime.refresh_target.sleep_day.format_yyyymmdd(day, sizeof(day));
@@ -4158,6 +4267,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_refresh_retry_attempt = 0;
                 runtime.catalog_refresh_error[0] = '\0';
             } else if (status.state == NightCatalogRefreshState::Ready) {
+                if (runtime.refresh_rollover) runtime.rollover_sources_ready = true;
 #ifdef ARDUINO
                 if (status.warning[0]) {
                     Log::logf(CAT_REPORT, LOG_WARN,
@@ -4165,8 +4275,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                               status.warning, static_cast<unsigned long>(status.preserved_nights));
                 }
 #endif
-                publish_catalog(refreshed_catalog,
-                                runtime.refresh_generation);
+                runtime.accept_catalog(refreshed_catalog,
+                                       runtime.refresh_generation,
+                                       !runtime.refresh_rollover);
                 if (!runtime.refresh_install_complete) {
                     runtime.pending_catalog_save = runtime.catalog;
                     runtime.pending_catalog_save_generation = runtime.catalog_generation;
@@ -4203,6 +4314,15 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_refresh_retry_attempt = 0;
                 runtime.catalog_refresh_error[0] = '\0';
                 if (runtime.refresh_rebuild) runtime.rebuild_sources_ready = true;
+            } else if (runtime.refresh_rollover) {
+                if (status.retryable) {
+                    runtime.capture_retry_at_ms = now_ms + CATALOG_RETRY_MAX_MS;
+                    runtime.catalog_refresh_retry_at_ms = runtime.capture_retry_at_ms;
+                } else {
+                    runtime.rollover_session = {};
+                    runtime.rollover_sources_ready = false;
+                    runtime.catalog_refresh_retry_at_ms = 0;
+                }
             } else if (status.retryable) {
                 if (!runtime.pending_refresh.valid()) {
                     runtime.pending_refresh.generation =
@@ -4282,6 +4402,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.refresh_target = {};
             runtime.refresh_post_therapy = false;
             runtime.refresh_source_change = false;
+            runtime.refresh_rollover = false;
             worked = true;
         }
     }
