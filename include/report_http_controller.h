@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <stdint.h>
 
 #include "http_route_module.h"

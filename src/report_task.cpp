@@ -4721,12 +4721,12 @@ void ReportTask::task_entry(void *context) {
 }
 
 void ReportTask::run() {
-#ifdef ARDUINO
     if (!runtime_) return;
 
     runtime_->task_started = true;
     runtime_->publish_status();
 
+#ifdef ARDUINO
     uint32_t batch_started_us = micros();
     size_t batch_steps = 0;
 
