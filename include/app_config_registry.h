@@ -129,6 +129,7 @@ enum class AppConfigFieldId : uint8_t {
     SleepHqClientSecret,
     SleepHqTeamId,
     SleepHqDeviceId,
+    SleepHqMaskId,
     HttpUser,
     HttpPassword,
     AuthWhitelist,

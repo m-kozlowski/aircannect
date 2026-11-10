@@ -366,6 +366,11 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "SleepHQ device ID",
      "SleepHQ device ID.", nullptr, 0, -1,
      AC_CFG_OFFSET(sleephq_device_id)},
+    {"shq_mask", AppConfigFieldId::SleepHqMaskId,
+     AppConfigGroup::SleepHq, 50, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "Default mask",
+     "SleepHQ mask ID for new post-therapy imports; empty disables it.",
+     nullptr, 0, -1, AC_CFG_OFFSET(sleephq_mask_id)},
 
 #if AC_BUTTON_PROFILE != AC_BUTTON_PROFILE_NONE
     {"keybindings", AppConfigFieldId::Keybindings,
@@ -675,6 +680,8 @@ bool AppConfigFieldWriter::set_value(
             return config.set_sleephq_credentials(
                 cfg.sleephq_client_id, cfg.sleephq_client_secret,
                 cfg.sleephq_team_id, value);
+        case AppConfigFieldId::SleepHqMaskId:
+            return config.set_sleephq_mask_id(value);
         case AppConfigFieldId::HttpUser:
             return config.set_http_auth(value, cfg.http_password);
         case AppConfigFieldId::HttpPassword:

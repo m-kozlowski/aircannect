@@ -78,6 +78,7 @@ struct AppConfigData {
     String sleephq_client_secret;
     String sleephq_team_id;
     String sleephq_device_id;
+    String sleephq_mask_id;
 
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
@@ -149,6 +150,7 @@ private:
                                  const String &client_secret,
                                  const String &team_id,
                                  const String &device_id);
+    bool set_sleephq_mask_id(const String &mask_id);
 
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);

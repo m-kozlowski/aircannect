@@ -81,8 +81,11 @@ public:
         const BackgroundOperationControl *operation = nullptr);
     bool create_import(
         uint32_t team_id,
+        const char *mask_id,
         SleepHqImportInfo &out,
         const BackgroundOperationControl *operation = nullptr);
+    bool list_masks(uint32_t team_id, SleepHqMaskList &masks,
+                    const BackgroundOperationControl *operation = nullptr);
     bool attach_file(const SleepHqAttachRequest &request,
                      SleepHqUploadResult &out,
                      const BackgroundOperationControl *operation = nullptr);

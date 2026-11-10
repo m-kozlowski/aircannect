@@ -163,6 +163,7 @@ and `vpn_error`.
 | `shq_secret` | SleepHQ OAuth client secret | empty | OAuth client secret. |
 | `shq_team` | Numeric SleepHQ team ID | empty | Optional team ID. |
 | `shq_device` | Numeric SleepHQ device ID, or empty | empty | Optional SleepHQ device type override. |
+| `shq_mask` | Numeric SleepHQ mask ID, or empty | empty | Default mask for new post-therapy imports only. |
 
 ## Logging
 

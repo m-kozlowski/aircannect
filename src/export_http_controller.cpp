@@ -78,6 +78,24 @@ void append_sleephq_sync_json(LargeTextBuffer &json,
     json_add_string(json, "current_path", status.current_path);
     json_add_string(json, "configured_team_id", configured_team_id);
     json_add_string(json, "device_id", device_id);
+    json_add_string(json, "masks_error", status.masks ? status.masks->error : "");
+    json += ",\"masks\":";
+    if (status.masks && !status.masks->error[0]) {
+        json += "[";
+        bool first = true;
+        for (const auto &mask : status.masks->entries) {
+            if (!first) json += ",";
+            first = false;
+            json += "{";
+            json_add_uint64(json, "id", mask.id, false);
+            json_add_string(json, "name", mask.name);
+            json += "}";
+        }
+        json += "]";
+    } else {
+        json += "null";
+    }
+
     json_add_int(json, "team_id", static_cast<long>(status.team_id));
     json_add_int(json, "import_id", static_cast<long>(status.import_id));
     json_add_string(json, "import_status", status.import_status);

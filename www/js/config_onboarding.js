@@ -200,6 +200,19 @@
       root.appendChild(fieldRow);
     }
 
+    function renderSleepHqMasks(control, selected) {
+      const status = AirCANnect.snapshots.read("exports").data?.sleephq;
+      control.replaceChildren(new Option("None", ""));
+      (status?.masks || []).forEach((mask) => {
+        control.add(new Option(mask.name || "Mask #" + mask.id, String(mask.id)));
+      });
+      if (selected && !Array.from(control.options).some((option) => option.value === selected)) {
+        control.add(new Option("Mask #" + selected, selected));
+      }
+      control.value = selected;
+      control.title = status?.masks_error || "";
+    }
+
     function renderConfigField(root, section, field, data) {
       data = data || configData || {};
       if (field.type === "keybindings") {
@@ -208,7 +221,10 @@
       }
 
       let control;
-      if (field.type === "bool") {
+      if (field.key === "shq_mask") {
+        control = document.createElement("select");
+        renderSleepHqMasks(control, String(data[field.key] || ""));
+      } else if (field.type === "bool") {
         control = document.createElement("select");
         ["false", "true"].forEach((value) => {
           const option = document.createElement("option");
@@ -1360,5 +1376,9 @@
         cancelEndpointConfig(element.dataset.value));
     AirCANnect.pages.onLoad("config", () => loadConfig());
     AirCANnect.events.subscribe("config", () => {});
+    AirCANnect.snapshots.subscribe("exports", () => {
+      document.querySelectorAll('[data-key="shq_mask"]').forEach((control) =>
+        renderSleepHqMasks(control, control.value));
+    });
     AirCANnect.events.subscribe("as11_ble", renderAs11BlePairing);
 })();

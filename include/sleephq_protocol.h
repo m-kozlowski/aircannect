@@ -2,7 +2,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
 
+#include "large_allocator.h"
 #include "large_text_buffer.h"
 #include "storage_path.h"
 
@@ -34,6 +36,18 @@ struct SleepHqRemoteFile {
 struct SleepHqMachine {
     uint32_t id = 0;
     char serial_number[AC_SLEEPHQ_SERIAL_MAX] = {};
+};
+
+struct SleepHqMask {
+    uint32_t id = 0;
+    char name[128] = {};
+};
+
+using SleepHqMaskList = std::vector<SleepHqMask, LargeAllocator<SleepHqMask>>;
+
+struct SleepHqMasks {
+    SleepHqMaskList entries;
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
 };
 
 struct SleepHqMachineDate {
@@ -91,6 +105,9 @@ private:
 };
 
 SleepHqImportStatusKind sleephq_classify_import_status(const char *status);
+
+bool sleephq_parse_mask_list_json(const char *json, SleepHqMaskList &masks,
+                                 char *error, size_t error_size);
 
 bool sleephq_parse_machine_list_json(const char *json,
                                      uint32_t per_page,

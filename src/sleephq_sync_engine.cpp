@@ -171,6 +171,7 @@ void SleepHqSyncEngine::BlockingResult::reset() {
     import = SleepHqImportInfo();
     upload = SleepHqUploadResult();
     remote_files.clear();
+    masks.reset();
     content_hash[0] = '\0';
     serial[0] = '\0';
     error[0] = '\0';
@@ -292,10 +293,17 @@ bool SleepHqSyncEngine::config_matches_locked(
     return strcmp(active.client_id, config.client_id) == 0 &&
            strcmp(active.client_secret, config.client_secret) == 0 &&
            strcmp(active.team_id, config.team_id) == 0 &&
-           strcmp(active.device_id, config.device_id) == 0;
+           strcmp(active.device_id, config.device_id) == 0 &&
+           strcmp(active.mask_id, config.mask_id) == 0;
 }
 
 void SleepHqSyncEngine::apply_config_locked(const SleepHqExportConfig &config) {
+    if (strcmp(config_.client_id, config.client_id) != 0 ||
+        strcmp(config_.client_secret, config.client_secret) != 0 ||
+        strcmp(config_.team_id, config.team_id) != 0) {
+        status_.masks.reset();
+    }
+
     config_ = config;
     status_.config_generation++;
     status_.configured = snapshot_configured(config_);
@@ -903,7 +911,9 @@ void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
         const uint32_t last_sync_failed = status_.last_sync_files_failed;
         const uint64_t last_sync_bytes = status_.last_sync_bytes_uploaded;
         const uint64_t last_failure = status_.last_failure_epoch;
+        auto masks = std::move(status_.masks);
         status_ = SleepHqSyncStatus();
+        status_.masks = std::move(masks);
         status_.configured = configured;
         status_.network_available = network_available;
         status_.config_generation = generation;
@@ -2608,6 +2618,21 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
                 return;
             }
             result.ok = result.team_id != 0;
+            if (result.ok && current_run_kind_ == RunKind::Check) {
+                try {
+                    auto masks = std::make_shared<SleepHqMasks>();
+                    if (!client_.list_masks(result.team_id, masks->entries,
+                                             &operation)) {
+                        SleepHqMaskList().swap(masks->entries);
+                        copy_cstr(masks->error, sizeof(masks->error),
+                                  client_.last_error());
+                    }
+                    result.masks = std::move(masks);
+                } catch (const std::bad_alloc &) {
+                    copy_cstr(result.error, sizeof(result.error),
+                              "mask_list_alloc");
+                }
+            }
             if (!result.ok) {
                 copy_cstr(result.error,
                           sizeof(result.error),
@@ -2680,9 +2705,20 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
             return;
         }
 
-        case WorkPhase::CreateImport:
+        case WorkPhase::CreateImport: {
             result.performed = true;
+            // Recovery and replanning may reach an older, unfinished night.
+            const auto &catalog = inventory_session_.catalog();
+            const auto &day = inventory_session_.datalog_day();
+            const char *mask_id =
+                current_run_kind_ == RunKind::PostTherapySync &&
+                        !followup_active_ && catalog && day &&
+                        strcmp(day->loaded_datalog_day(),
+                               catalog->latest_datalog_day()) == 0
+                    ? config_.mask_id : nullptr;
+
             result.ok = client_.create_import(status_.team_id,
+                                               mask_id,
                                                result.import,
                                                &operation);
             if (!result.ok) {
@@ -2691,6 +2727,7 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
                           client_.last_error());
             }
             return;
+        }
 
         case WorkPhase::OpenLocal: {
             result.ok = current_file_.open(operation,
@@ -2968,6 +3005,15 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
         case WorkPhase::Connect: {
             status_.team_id = result.team_id;
             if (current_run_kind_ == RunKind::Check) {
+                status_.masks = result.masks;
+                const char *mask_error = result.masks
+                    ? result.masks->error : result.error;
+                if (mask_error[0]) {
+                    Log::logf(CAT_EXPORT, LOG_WARN,
+                              "[SLEEPHQ] mask list unavailable error=%s\n",
+                              mask_error);
+                }
+
                 finish_check_locked(result.team_id);
                 return ExportStep::Idle;
             }

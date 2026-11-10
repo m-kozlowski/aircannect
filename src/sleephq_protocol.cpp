@@ -317,6 +317,44 @@ SleepHqImportStatusKind sleephq_classify_import_status(const char *status) {
     return SleepHqImportStatusKind::Unknown;
 }
 
+bool sleephq_parse_mask_list_json(const char *json, SleepHqMaskList &masks,
+                                 char *error, size_t error_size) {
+    JsonDocument doc;
+    if (deserializeJson(doc, json)) {
+        set_error(error, error_size, "mask_list_json_parse");
+        return false;
+    }
+    JsonArrayConst data = doc["data"].as<JsonArrayConst>();
+    if (data.isNull()) {
+        set_error(error, error_size, "mask_list_missing");
+        return false;
+    }
+    if (masks.size() + data.size() > 100) {
+        set_error(error, error_size, "mask_list_too_large");
+        return false;
+    }
+
+    try {
+        for (JsonObjectConst item : data) {
+            SleepHqMask mask;
+            if (!json_variant_to_uint32(item["id"], mask.id) || !mask.id) {
+                set_error(error, error_size, "mask_id_missing");
+                return false;
+            }
+            const char *name = json_string_or_empty(item["attributes"]["nickname"]);
+            if (!name[0]) name = json_string_or_empty(item["attributes"]["name"]);
+            copy_cstr(mask.name, sizeof(mask.name), name);
+            masks.push_back(mask);
+        }
+    } catch (const std::bad_alloc &) {
+        set_error(error, error_size, "mask_list_alloc");
+        return false;
+    }
+
+    set_error(error, error_size, "");
+    return true;
+}
+
 bool sleephq_parse_machine_list_json(const char *json,
                                      uint32_t per_page,
                                      SleepHqMachineCallback callback,

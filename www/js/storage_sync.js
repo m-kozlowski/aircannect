@@ -897,6 +897,8 @@
 
       if (data && data.state === "error") {
         AirCANnect.ui.message("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
+      } else if (data && !active && data.masks_error) {
+        AirCANnect.ui.message("edfSleepHqMsg", "Mask list: " + data.masks_error, false, true);
       } else if (data && wasActive && !active && data.state === "idle") {
         AirCANnect.ui.message("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
       }

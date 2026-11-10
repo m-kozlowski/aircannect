@@ -674,6 +674,7 @@ bool SleepHqClient::parse_team_id(const SleepHqHttpResponse &response,
 
 bool SleepHqClient::create_import(
     uint32_t team_id,
+    const char *mask_id,
     SleepHqImportInfo &out,
     const BackgroundOperationControl *operation) {
     char path[64];
@@ -690,6 +691,11 @@ bool SleepHqClient::create_import(
         body += "&device_id=";
         if (!form_encode_append(body, config_.device_id)) return false;
     }
+    if (mask_id && mask_id[0]) {
+        body += "&mask_id=";
+        if (!form_encode_append(body, mask_id)) return false;
+    }
+
     SleepHqHttpResponse response;
     if (!request("POST", path, body.c_str(),
                  "application/x-www-form-urlencoded", true, response,
@@ -697,6 +703,32 @@ bool SleepHqClient::create_import(
         return false;
     }
     return parse_import(response, out);
+}
+
+bool SleepHqClient::list_masks(
+    uint32_t team_id, SleepHqMaskList &masks,
+    const BackgroundOperationControl *operation) {
+    masks.clear();
+    for (uint32_t page = 1; ; ++page) {
+        char path[96];
+        snprintf(path, sizeof(path),
+                 "/api/v1/teams/%lu/masks?page=%lu&per_page=20",
+                 static_cast<unsigned long>(team_id),
+                 static_cast<unsigned long>(page));
+
+        SleepHqHttpResponse response;
+        if (!request("GET", path, nullptr, nullptr, true, response,
+                     nullptr, nullptr, operation)) {
+            return false;
+        }
+
+        const size_t before = masks.size();
+        if (!sleephq_parse_mask_list_json(response.body.c_str(), masks,
+                                         last_error_, sizeof(last_error_))) {
+            return false;
+        }
+        if (masks.size() - before < 20) return true;
+    }
 }
 
 bool SleepHqClient::attach_file(const SleepHqAttachRequest &attach,

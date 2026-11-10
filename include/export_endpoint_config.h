@@ -24,6 +24,7 @@ struct SleepHqExportConfig {
     char client_secret[AC_SLEEPHQ_SECRET_MAX] = {};
     char team_id[AC_SLEEPHQ_ID_MAX] = {};
     char device_id[AC_SLEEPHQ_ID_MAX] = {};
+    char mask_id[AC_SLEEPHQ_ID_MAX] = {};
 };
 
 struct ExportEndpointConfig {

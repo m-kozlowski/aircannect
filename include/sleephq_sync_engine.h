@@ -44,6 +44,7 @@ struct SleepHqSyncStatus {
     char current_path[AC_STORAGE_PATH_MAX] = {};
     uint32_t config_generation = 0;
     uint32_t team_id = 0;
+    std::shared_ptr<const SleepHqMasks> masks;
     uint32_t import_id = 0;
     char import_status[AC_SLEEPHQ_STATUS_MAX] = {};
     // Current run only; journal entries count as skipped when encountered.
@@ -203,6 +204,7 @@ private:
         SleepHqImportInfo import;
         SleepHqUploadResult upload;
         SleepHqRemoteFileCache remote_files;
+        std::shared_ptr<const SleepHqMasks> masks;
         char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
         char serial[AC_SLEEPHQ_SERIAL_MAX] = {};
         char error[AC_SLEEPHQ_ERROR_MAX] = {};

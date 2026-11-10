@@ -702,6 +702,7 @@ bool AppConfig::normalize() {
     data_.sleephq_client_secret.trim();
     data_.sleephq_team_id.trim();
     data_.sleephq_device_id.trim();
+    data_.sleephq_mask_id.trim();
     if (sleephq_secret_reject_reason(data_.sleephq_client_id)) {
         data_.sleephq_client_id = "";
         unchanged = false;
@@ -716,6 +717,10 @@ bool AppConfig::normalize() {
     }
     if (sleephq_id_reject_reason(data_.sleephq_device_id)) {
         data_.sleephq_device_id = "";
+        unchanged = false;
+    }
+    if (sleephq_id_reject_reason(data_.sleephq_mask_id)) {
+        data_.sleephq_mask_id = "";
         unchanged = false;
     }
     if (!valid_optional_secret(data_.http_user)) {
@@ -1037,6 +1042,16 @@ bool AppConfig::set_wireguard(const WireguardConfig &wireguard) {
 
     data_.wireguard = parsed;
     return mark_dirty(AC_CONFIG_DIRTY_VPN);
+}
+
+bool AppConfig::set_sleephq_mask_id(const String &mask_id) {
+    String parsed = mask_id;
+    parsed.trim();
+    if (sleephq_id_reject_reason(parsed)) return false;
+    if (data_.sleephq_mask_id == parsed) return true;
+
+    data_.sleephq_mask_id = parsed;
+    return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
 }
 
 bool AppConfig::set_sleephq_credentials(const String &client_id,
