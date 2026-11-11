@@ -354,10 +354,6 @@
       }
     }
 
-    function setOtaUploadProgress(percent, bytes) {
-      AirCANnect.ui.text("otaProgress", i18n.join([percent, "% / ", i18n.bytes(bytes || 0)]));
-    }
-
     function otaSourceChanged(source) {
       const urlInput = document.getElementById("otaUrl");
       const fileInput = document.getElementById("otaFile");
@@ -463,7 +459,6 @@
 
     async function otaInstallFromFile(file) {
       const plan = otaUploadPlan(file);
-      const bar = document.getElementById("otaUploadBar");
 
       AirCANnect.ui.message("otaMsg", i18n.message("ota.preparing"), true, true);
       await prepareOtaUpload(plan);
@@ -473,25 +468,12 @@
       form.append("firmware", file);
 
       const result = await AirCANnect.http.upload(
-        "/api/ota/upload?" + otaUploadQuery(plan), form, {
-          onProgress: (event) => {
-            if (event.lengthComputable) {
-              const percent = Math.min(100,
-                Math.floor(event.loaded / event.total * 100));
-              const bytes = Math.min(file.size, event.loaded);
-              bar.style.width = percent + "%";
-              setOtaUploadProgress(percent, bytes);
-            }
-          },
-        });
+        "/api/ota/upload?" + otaUploadQuery(plan), form);
       const data = JSON.parse(result.responseText || "{}");
+      renderOta(data);
       if (result.status >= 300) {
-        renderOta(data);
         throw i18n.failure(data.last_error || result.statusText);
       }
-
-      bar.style.width = "100%";
-      setOtaUploadProgress(100, data.wire_bytes || file.size);
 
       const restarting = data.reboot_pending || data.http_ready;
       AirCANnect.ui.message("otaMsg", restarting ?
@@ -520,7 +502,7 @@
       button.disabled = true;
       progress.style.display = "block";
       bar.style.width = "0%";
-      setOtaUploadProgress(0, 0);
+      AirCANnect.ui.text("otaProgress", "--");
 
       let restarting = false;
       try {
