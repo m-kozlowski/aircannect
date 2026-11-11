@@ -231,7 +231,7 @@
     function setTimezoneFromZone(input, timezone) {
       const value = getPosixTimezone(timezone);
       input.value = value;
-      input.title = timezone + " -> " + value;
+      AirCANnect.i18n.text(input, timezone + " -> " + value, "title");
     }
 
     function timezoneHelper(input) {
@@ -242,7 +242,7 @@
       const detect = document.createElement("button");
       detect.type = "button";
       detect.className = "btn";
-      detect.textContent = "Detect";
+      AirCANnect.i18n.text(detect, AirCANnect.i18n.message("config.detect"));
       detect.onclick = () => {
         try {
           const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone ||
@@ -250,7 +250,7 @@
           setTimezoneFromZone(input, timezone);
         } catch (error) {
           input.value = "UTC0";
-          input.title = "Timezone detection failed";
+          AirCANnect.i18n.text(input, AirCANnect.i18n.message("config.timezone_failed"), "title");
         }
       };
       wrapper.appendChild(detect);
@@ -258,12 +258,12 @@
       const select = document.createElement("select");
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = "Preset...";
+      AirCANnect.i18n.text(placeholder, AirCANnect.i18n.message("config.preset"));
       select.appendChild(placeholder);
       TZ_ZONES.forEach((timezone) => {
         const option = document.createElement("option");
         option.value = timezone;
-        option.textContent = timezone;
+        AirCANnect.i18n.text(option, timezone);
         select.appendChild(option);
       });
       select.onchange = () => {
@@ -275,27 +275,27 @@
     }
 
     const WIFI_COUNTRY_PRESETS = [
-      ["01", "Worldwide / default"],
-      ["AU", "Australia"],
-      ["BR", "Brazil"],
-      ["CA", "Canada"],
-      ["CN", "China"],
-      ["DE", "Germany"],
-      ["ES", "Spain"],
-      ["FI", "Finland"],
-      ["FR", "France"],
-      ["GB", "United Kingdom"],
-      ["IN", "India"],
-      ["IT", "Italy"],
-      ["JP", "Japan"],
-      ["KR", "South Korea"],
-      ["MX", "Mexico"],
-      ["NL", "Netherlands"],
-      ["NO", "Norway"],
-      ["NZ", "New Zealand"],
-      ["PL", "Poland"],
-      ["SE", "Sweden"],
-      ["US", "United States"],
+      ["01", AirCANnect.i18n.message("config.worldwide")],
+      ["AU", AirCANnect.i18n.message("country.AU")],
+      ["BR", AirCANnect.i18n.message("country.BR")],
+      ["CA", AirCANnect.i18n.message("country.CA")],
+      ["CN", AirCANnect.i18n.message("country.CN")],
+      ["DE", AirCANnect.i18n.message("country.DE")],
+      ["ES", AirCANnect.i18n.message("country.ES")],
+      ["FI", AirCANnect.i18n.message("country.FI")],
+      ["FR", AirCANnect.i18n.message("country.FR")],
+      ["GB", AirCANnect.i18n.message("country.GB")],
+      ["IN", AirCANnect.i18n.message("country.IN")],
+      ["IT", AirCANnect.i18n.message("country.IT")],
+      ["JP", AirCANnect.i18n.message("country.JP")],
+      ["KR", AirCANnect.i18n.message("country.KR")],
+      ["MX", AirCANnect.i18n.message("country.MX")],
+      ["NL", AirCANnect.i18n.message("country.NL")],
+      ["NO", AirCANnect.i18n.message("country.NO")],
+      ["NZ", AirCANnect.i18n.message("country.NZ")],
+      ["PL", AirCANnect.i18n.message("country.PL")],
+      ["SE", AirCANnect.i18n.message("country.SE")],
+      ["US", AirCANnect.i18n.message("country.US")],
     ];
 
     function wifiCountryHelper(input) {
@@ -311,22 +311,22 @@
       const world = document.createElement("button");
       world.type = "button";
       world.className = "btn";
-      world.textContent = "Default";
+      AirCANnect.i18n.text(world, AirCANnect.i18n.message("config.default"));
       world.onclick = () => {
         input.value = "01";
-        input.title = "Worldwide / ESP-IDF default";
+        AirCANnect.i18n.text(input, AirCANnect.i18n.message("config.worldwide_hint"), "title");
       };
       wrapper.appendChild(world);
 
       const select = document.createElement("select");
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = "Preset...";
+      AirCANnect.i18n.text(placeholder, AirCANnect.i18n.message("config.preset"));
       select.appendChild(placeholder);
       WIFI_COUNTRY_PRESETS.forEach((entry) => {
         const option = document.createElement("option");
         option.value = entry[0];
-        option.textContent = entry[0] + " - " + entry[1];
+        AirCANnect.i18n.text(option, AirCANnect.i18n.message("config.country", {code: entry[0], name: entry[1]}));
         select.appendChild(option);
       });
       select.onchange = () => {
@@ -334,7 +334,7 @@
         input.value = select.value;
         const selected = WIFI_COUNTRY_PRESETS.find((entry) =>
           entry[0] === select.value);
-        input.title = selected ? selected[1] : "";
+        AirCANnect.i18n.text(input, selected ? selected[1] : "", "title");
       };
       wrapper.appendChild(select);
 

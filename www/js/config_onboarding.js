@@ -127,23 +127,27 @@
           const defaultAction = (field.actions || []).find(
             (action) => action.value === gesture.default);
           const defaultLabel = defaultAction ?
-            defaultAction.label : gesture.default;
-          defaultOption.textContent = "Default";
+            AirCANnect.i18n.message("config.action." + defaultAction.value,
+              {}, defaultAction.label) : gesture.default;
+          AirCANnect.i18n.text(defaultOption, AirCANnect.i18n.message("config.default"));
           select.appendChild(defaultOption);
 
           (field.actions || []).forEach((action) => {
             const option = document.createElement("option");
             option.value = action.value;
-            option.textContent = action.label || action.value;
+            AirCANnect.i18n.text(option, AirCANnect.i18n.message(
+              "config.action." + action.value, {}, action.label || action.value));
             select.appendChild(option);
           });
 
           select.value = overrides.get(
             button.id + ":" + gesture.gesture) || "";
           const bindingRow = AirCANnect.ui.row(
-            button.label + " / " + gesture.gesture,
+            AirCANnect.i18n.join([button.label,
+              AirCANnect.i18n.message("config.gesture." + gesture.gesture,
+                {}, gesture.gesture)], " / "),
             select,
-            "Hardware default: " + defaultLabel);
+            AirCANnect.i18n.message("config.hardware_default", {label: defaultLabel}));
           panel.insertBefore(bindingRow, before || null);
         });
       }
@@ -159,7 +163,7 @@
           physicalButtons.forEach((button) => {
             const option = document.createElement("option");
             option.value = button.id;
-            option.textContent = button.label;
+            AirCANnect.i18n.text(option, button.label);
             select.appendChild(option);
           });
         });
@@ -168,7 +172,7 @@
         const add = document.createElement("button");
         add.type = "button";
         add.className = "btn";
-        add.textContent = "Add combination";
+        AirCANnect.i18n.text(add, AirCANnect.i18n.message("config.add_combination"));
         add.onclick = () => {
           if (first.value === second.value) return;
           const selected = [physicalById.get(first.value),
@@ -204,15 +208,23 @@
 
     function renderSleepHqMasks(control, selected) {
       const status = AirCANnect.snapshots.read("exports").data?.sleephq;
-      control.replaceChildren(new Option("None", ""));
+      const none = new Option("", "");
+      AirCANnect.i18n.text(none, AirCANnect.i18n.message("config.mask.none"));
+      control.replaceChildren(none);
       (status?.masks || []).forEach((mask) => {
-        control.add(new Option(mask.name || "Mask #" + mask.id, String(mask.id)));
+        const option = new Option("", String(mask.id));
+        AirCANnect.i18n.text(option, mask.name ||
+          AirCANnect.i18n.message("config.mask.id", {id: String(mask.id)}));
+        control.add(option);
       });
       if (selected && !Array.from(control.options).some((option) => option.value === selected)) {
-        control.add(new Option("Mask #" + selected, selected));
+        const option = new Option("", selected);
+        AirCANnect.i18n.text(option,
+          AirCANnect.i18n.message("config.mask.id", {id: selected}));
+        control.add(option);
       }
       control.value = selected;
-      control.title = status?.masks_error || "";
+      AirCANnect.i18n.text(control, status?.masks_error || "", "title");
     }
 
     function renderConfigField(root, section, field, data) {
@@ -267,17 +279,17 @@
         control.value = data[field.key] ?? "";
         if (field.secret) {
           const setKey = field.key + "_set";
-          control.placeholder = data[setKey] ? "set" : "empty";
+          AirCANnect.i18n.text(control, data[setKey] ? AirCANnect.i18n.message("config.secret.set") : AirCANnect.i18n.message("config.secret.empty"), "placeholder");
           if (data[setKey]) control.value = "********";
         }
         if (field.key === "smb_ep") {
-          control.placeholder = "smb://host/share/path";
+          AirCANnect.i18n.text(control, "smb://host/share/path", "placeholder");
         }
         if (field.key === "shq_team" || field.key === "shq_device") {
-          control.placeholder = "optional numeric id";
+          AirCANnect.i18n.text(control, AirCANnect.i18n.message("config.optional_id"), "placeholder");
         }
         if (field.key === "syslog_host") {
-          control.placeholder = "IPv4 address";
+          AirCANnect.i18n.text(control, AirCANnect.i18n.message("config.ipv4"), "placeholder");
         }
       }
 
@@ -293,17 +305,17 @@
 
     function as11BleStateLabel(data) {
       const labels = {
-        idle: data.paired ? "Paired" : "Not paired",
-        scanning: "Scanning",
-        select_device: "Select a device",
-        connecting: "Connecting",
-        awaiting_passkey: "Enter the code shown on the AS11",
-        verifying: "Verifying",
-        saving: "Saving pairing",
-        complete: data.paired ? "Paired" : "Pairing removed",
-        failed: "Pairing failed",
+        idle: data.paired ? AirCANnect.i18n.message("pairing.paired") : AirCANnect.i18n.message("pairing.not_paired"),
+        scanning: AirCANnect.i18n.message("pairing.scanning"),
+        select_device: AirCANnect.i18n.message("pairing.select"),
+        connecting: AirCANnect.i18n.message("pairing.connecting"),
+        awaiting_passkey: AirCANnect.i18n.message("pairing.enter_code"),
+        verifying: AirCANnect.i18n.message("pairing.verifying"),
+        saving: AirCANnect.i18n.message("pairing.saving"),
+        complete: data.paired ? AirCANnect.i18n.message("pairing.paired") : AirCANnect.i18n.message("pairing.removed"),
+        failed: AirCANnect.i18n.message("pairing.failed"),
       };
-      return labels[data.state] || data.state || "Unknown";
+      return labels[data.state] || data.state || AirCANnect.i18n.message("ui.unknown");
     }
 
     function renderAs11BlePairingPanel(panel, data) {
@@ -314,10 +326,10 @@
       panel.innerHTML = "";
 
       const state = AirCANnect.ui.valueSpan(as11BleStateLabel(data));
-      panel.appendChild(AirCANnect.ui.row("BLE pairing", state));
+      panel.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("pairing.ble"), state));
 
       if (data.paired_address) {
-        panel.appendChild(AirCANnect.ui.row("Paired device",
+        panel.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("pairing.device"),
           AirCANnect.ui.valueSpan(data.paired_address)));
       }
 
@@ -325,26 +337,24 @@
           (!data.paired_address || data.selected_address !== data.paired_address)) {
         const selected = [data.selected_name, data.selected_address]
           .filter(Boolean).join(" / ");
-        panel.appendChild(AirCANnect.ui.row("Selected device", AirCANnect.ui.valueSpan(selected)));
+        panel.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("pairing.selected"), AirCANnect.ui.valueSpan(selected)));
       }
 
       if (data.state === "select_device") {
         const instruction = document.createElement("p");
         instruction.className = "as11-pairing-instruction";
-        instruction.textContent =
-          "Before continuing, on the AirSense open More > myAir App, " +
-          "then select OK, Downloaded.";
+        AirCANnect.i18n.text(instruction, AirCANnect.i18n.message("pairing.instructions"));
         panel.appendChild(instruction);
 
         const select = document.createElement("select");
         (data.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.address;
-          option.textContent = (device.name || "AS11") + " / " +
-            device.address + " / " + device.rssi + " dBm";
+          AirCANnect.i18n.text(option, (device.name || "AS11") + " / " +
+            device.address + " / " + device.rssi + " dBm");
           select.appendChild(option);
         });
-        panel.appendChild(AirCANnect.ui.row("Device", select));
+        panel.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("ui.device"), select));
       }
 
       let passkey = null;
@@ -354,8 +364,8 @@
         passkey.inputMode = "numeric";
         passkey.autocomplete = "one-time-code";
         passkey.maxLength = 4;
-        passkey.placeholder = "0000";
-        panel.appendChild(AirCANnect.ui.row("Pairing code", passkey));
+        AirCANnect.i18n.text(passkey, "0000", "placeholder");
+        panel.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("pairing.code"), passkey));
       }
 
       const buttons = document.createElement("div");
@@ -363,7 +373,7 @@
       if (data.state === "select_device") {
         const selectButton = document.createElement("button");
         selectButton.className = "btn primary";
-        selectButton.textContent = "Continue";
+        AirCANnect.i18n.text(selectButton, AirCANnect.i18n.message("pairing.continue"));
         const select = panel.querySelector("select");
         selectButton.onclick = () => {
           if (select && select.value) {
@@ -374,12 +384,12 @@
       } else if (data.passkey_required) {
         const confirmButton = document.createElement("button");
         confirmButton.className = "btn primary";
-        confirmButton.textContent = "Pair";
+        AirCANnect.i18n.text(confirmButton, AirCANnect.i18n.message("ui.pair"));
         confirmButton.onclick = () => {
           const value = passkey ? passkey.value.trim() : "";
           if (!/^\d{4}$/.test(value)) {
             showAs11BlePairingError(
-              "Enter the four-digit code shown on the AS11.");
+              AirCANnect.i18n.message("pairing.four_digits"));
             return;
           }
           as11BleAction("passkey", {passkey: value});
@@ -388,7 +398,7 @@
       } else if (!data.active) {
         const pairButton = document.createElement("button");
         pairButton.className = "btn primary";
-        pairButton.textContent = data.paired ? "Pair another" : "Pair";
+        AirCANnect.i18n.text(pairButton, data.paired ? AirCANnect.i18n.message("pairing.another") : AirCANnect.i18n.message("ui.pair"));
         pairButton.disabled = !data.enabled;
         pairButton.onclick = () => as11BleAction("pair");
         buttons.appendChild(pairButton);
@@ -397,14 +407,14 @@
       if (data.active) {
         const cancelButton = document.createElement("button");
         cancelButton.className = "btn";
-        cancelButton.textContent = "Cancel";
+        AirCANnect.i18n.text(cancelButton, AirCANnect.i18n.message("ui.cancel"));
         cancelButton.onclick = () => as11BleAction("cancel");
         buttons.appendChild(cancelButton);
       }
       if (data.paired && !data.active) {
         const forgetButton = document.createElement("button");
         forgetButton.className = "btn danger";
-        forgetButton.textContent = "Forget";
+        AirCANnect.i18n.text(forgetButton, AirCANnect.i18n.message("pairing.forget"));
         forgetButton.onclick = as11BleForget;
         buttons.appendChild(forgetButton);
       }
@@ -413,8 +423,8 @@
       const message = document.createElement("div");
       message.className = "msg" + (data.error ? " err" : "");
       message.classList.add("as11-ble-msg");
-      message.textContent = data.error ||
-        (!data.enabled ? "Select BLE transport and save first." : "");
+      AirCANnect.i18n.text(message, data.error ||
+        (!data.enabled ? AirCANnect.i18n.message("pairing.enable") : ""));
       panel.appendChild(message);
     }
 
@@ -426,7 +436,7 @@
       as11BlePairingPanels().forEach((panel) => {
         const message = panel.querySelector(".as11-ble-msg");
         if (!message) return;
-        message.textContent = text;
+        AirCANnect.i18n.text(message, text);
         message.className = "msg err as11-ble-msg";
       });
     }
@@ -442,7 +452,7 @@
         const response = await AirCANnect.http.requestOk("/api/as11/ble");
         renderAs11BlePairing(await response.json());
       } catch (error) {
-        if (showError) showAs11BlePairingError(error.message);
+        if (showError) showAs11BlePairingError(AirCANnect.i18n.error(error));
       }
     }
 
@@ -455,7 +465,7 @@
         });
         return true;
       } catch (error) {
-        showError(error.message);
+        showError(AirCANnect.i18n.error(error));
         return false;
       }
     }
@@ -466,7 +476,7 @@
     }
 
     function as11BleForget() {
-      if (!confirm("Forget the paired AS11?")) return;
+      if (!confirm(AirCANnect.i18n.t("pairing.forget_confirm"))) return;
       as11BleAction("forget");
     }
 
@@ -505,7 +515,7 @@
         });
         await loadAs11BlePairing(true);
       } catch (error) {
-        AirCANnect.ui.message("configMsg", error.message, false);
+        AirCANnect.ui.message("configMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -528,12 +538,15 @@
     function waitForConfigUpdate(revision, afterSerial) {
       const expected = Number(revision || 0);
       if (!expected) {
-        return Promise.reject(new Error("missing config update revision"));
+        return Promise.reject(AirCANnect.i18n.failure("error.missing_config_revision"));
       }
       return AirCANnect.snapshots.wait(
         "config", (data) => Number(data.revision || 0) === expected,
-        afterSerial, 5000, "config update timed out").then((data) => {
-          if (!data.ok) throw new Error(data.error || "config update failed");
+        afterSerial, 5000, AirCANnect.i18n.message("error.config_timeout")).then((data) => {
+          if (!data.ok) {
+            if (data.error) throw new Error(data.error);
+            throw AirCANnect.i18n.failure("error.config_failed");
+          }
           return data;
         });
     }
@@ -618,13 +631,13 @@
             current = {};
             peers.push(current);
           } else if (section !== "interface") {
-            throw new Error("line " + (index + 1) + ": unknown section [" + header[1] + "]");
+            throw AirCANnect.i18n.failure("wg.unknown_section", {line: index + 1, section: header[1]});
           }
           return;
         }
         const eq = line.indexOf("=");
         if (eq <= 0 || !section) {
-          throw new Error("line " + (index + 1) + " is not a key = value pair");
+          throw AirCANnect.i18n.failure("wg.invalid_line", {line: index + 1});
         }
         const key = line.slice(0, eq).trim().toLowerCase();
         const value = line.slice(eq + 1).trim();
@@ -632,42 +645,41 @@
       });
 
       if (!Object.prototype.hasOwnProperty.call(iface, "privatekey")) {
-        throw new Error("[Interface] PrivateKey is missing");
+        throw AirCANnect.i18n.failure("wg.private_missing");
       }
       if (!iface.privatekey) {
-        throw new Error("[Interface] PrivateKey is empty; export the client " +
-          "config again with its private key");
+        throw AirCANnect.i18n.failure("wg.private_empty");
       }
       if (peers.length !== 1) {
-        throw new Error("expected exactly one [Peer], found " + peers.length);
+        throw AirCANnect.i18n.failure("wg.peer_count", {count: peers.length});
       }
       const peer = peers[0];
-      if (!peer.publickey) throw new Error("[Peer] PublicKey is missing");
-      if (!peer.endpoint) throw new Error("[Peer] Endpoint is missing");
+      if (!peer.publickey) throw AirCANnect.i18n.failure("wg.public_missing");
+      if (!peer.endpoint) throw AirCANnect.i18n.failure("wg.endpoint_missing");
 
       const address = String(iface.address || "").split(",").map((item) => item.trim())
         .find((item) => validIpv4(item.split("/")[0]) && item.split("/")[0].length);
-      if (!address) throw new Error("[Interface] Address has no IPv4 address");
+      if (!address) throw AirCANnect.i18n.failure("wg.address_missing");
       const addressIp = address.split("/")[0];
       if (address.includes("/") && address.split("/")[1] !== "32") {
-        result.notes.push("Address " + address + " used as " + addressIp + "/32");
+        result.notes.push(AirCANnect.i18n.message("wg.address_used", {address, ip: addressIp}));
       }
 
       const allowedAll = String(peer.allowedips || "0.0.0.0/0").split(",")
         .map((item) => item.trim()).filter((item) => item.length);
       const allowed = allowedAll.filter((item) => !item.includes(":"));
-      if (allowed.length !== allowedAll.length) result.notes.push("IPv6 routes ignored");
-      if (!allowed.length) throw new Error("[Peer] AllowedIPs has no IPv4 range");
+      if (allowed.length !== allowedAll.length) result.notes.push(AirCANnect.i18n.message("wg.ipv6_ignored"));
+      if (!allowed.length) throw AirCANnect.i18n.failure("wg.allowed_missing");
 
       // Hotspot resolvers often refuse queries arriving via the home WAN.
       const dnsAll = String(iface.dns || "").split(",").map((item) => item.trim())
         .filter((item) => item.length);
       const dns = dnsAll.find((item) => validIpv4(item));
-      if (dnsAll.length && !dns) result.notes.push("DNS ignored (no IPv4 server)");
-      if (dns && dnsAll.length > 1) result.notes.push("DNS uses " + dns + " only");
+      if (dnsAll.length && !dns) result.notes.push(AirCANnect.i18n.message("wg.dns_ignored"));
+      if (dns && dnsAll.length > 1) result.notes.push(AirCANnect.i18n.message("wg.dns_used", {dns}));
       ["mtu", "listenport", "table", "preup", "postup", "predown", "postdown"]
         .forEach((key) => {
-          if (iface[key]) result.notes.push(key + " ignored");
+          if (iface[key]) result.notes.push(AirCANnect.i18n.message("wg.ignored", {key}));
         });
 
       result.values.wg_addr = addressIp;
@@ -689,7 +701,7 @@
       }
       if (!validWireguardEndpoint(result.values.wg_ep)) errors.push("Endpoint");
       if (!validWireguardAllowedIps(result.values.wg_allowed)) errors.push("AllowedIPs");
-      if (errors.length) throw new Error("invalid " + errors.join(", "));
+      if (errors.length) throw AirCANnect.i18n.failure("wg.invalid", {fields: errors.join(", ")});
       return result;
     }
 
@@ -706,16 +718,15 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = "btn";
-      button.textContent = "Import .conf";
+      AirCANnect.i18n.text(button, AirCANnect.i18n.message("wg.import"));
       button.dataset.action = "config.wireguard-pick";
 
       const status = document.createElement("small");
       status.dataset.wireguardImportStatus = "true";
-      status.textContent = "Fills the fields below from a WireGuard client " +
-        "config. Review, set home networks and mode, then Save.";
+      AirCANnect.i18n.text(status, AirCANnect.i18n.message("wg.import_hint"));
 
       panel.appendChild(input);
-      panel.appendChild(AirCANnect.ui.row("WireGuard config", button));
+      panel.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("wg.config"), button));
       panel.appendChild(status);
       root.insertBefore(panel, root.firstChild);
     }
@@ -727,7 +738,7 @@
       const root = input.closest(".config-section-fields");
       const status = root && root.querySelector("[data-wireguard-import-status]");
       try {
-        if (file.size > 8192) throw new Error("file is too large for a WireGuard config");
+        if (file.size > 8192) throw AirCANnect.i18n.failure("wg.too_large");
         const parsed = parseWireguardConf(await file.text());
         Object.keys(parsed.values).forEach((key) => {
           const control = root.querySelector('[data-key="' + key + '"]');
@@ -737,13 +748,11 @@
         });
         const modeControl = root.querySelector('[data-key="wg_mode"]');
         if (modeControl && modeControl.value === "off") modeControl.value = "away";
-        const text = "Imported " + file.name +
-          (parsed.notes.length ? " (" + parsed.notes.join("; ") + ")" : "") +
-          ". Review, then Save.";
-        if (status) status.textContent = text;
+        const text = AirCANnect.i18n.message("wg.imported", {file: file.name, notes: parsed.notes.length ? AirCANnect.i18n.join([" (", AirCANnect.i18n.join(parsed.notes, "; "), ")"]) : ""});
+        if (status) AirCANnect.i18n.text(status, text);
         AirCANnect.ui.message("configMsg", text, true, true);
       } catch (error) {
-        AirCANnect.ui.message("configMsg", "WireGuard import failed: " + error.message, false);
+        AirCANnect.ui.message("configMsg", AirCANnect.i18n.message("wg.import_failed", {error: AirCANnect.i18n.error(error)}), false);
       }
     }
 
@@ -803,31 +812,31 @@
       for (const key of ["wg_key", "wg_psk"]) {
         if (has(key) && changes[key] && changes[key] !== "********" &&
             !wireguardKeyPattern.test(changes[key])) {
-          return fail(key + " must be a 44-character WireGuard key");
+          return fail(AirCANnect.i18n.message("wg.invalid_key", {key}));
         }
       }
       if (has("wg_peer") && changes.wg_peer && !wireguardKeyPattern.test(changes.wg_peer)) {
-        return fail("wg_peer must be a 44-character WireGuard key");
+        return fail(AirCANnect.i18n.message("wg.peer_invalid"));
       }
       if (!validWireguardAddress(value("wg_addr"))) {
-        return fail("wg_addr must be an IPv4 address");
+        return fail(AirCANnect.i18n.message("wg.address_invalid"));
       }
       if (!validWireguardEndpoint(value("wg_ep"))) {
-        return fail("wg_ep must be host:port");
+        return fail(AirCANnect.i18n.message("wg.endpoint_invalid"));
       }
       if (!validWireguardAllowedIps(value("wg_allowed"))) {
-        return fail("wg_allowed must be IPv4 CIDRs separated by commas");
+        return fail(AirCANnect.i18n.message("wg.allowed_invalid"));
       }
       if (String(value("wg_dns") || "").trim().length &&
           !validIpv4(String(value("wg_dns")).trim())) {
-        return fail("wg_dns must be an IPv4 address");
+        return fail(AirCANnect.i18n.message("wg.dns_invalid"));
       }
       if (value("wg_mode") && value("wg_mode") !== "off") {
         const missing = ["wg_addr", "wg_peer", "wg_ep", "wg_allowed"]
           .filter((key) => !String(value(key) || "").trim().length);
         if (!secretSet("wg_key")) missing.push("wg_key");
         if (missing.length) {
-          return fail("Tunnel mode needs " + missing.join(", "));
+          return fail(AirCANnect.i18n.message("wg.tunnel_missing", {fields: missing.join(", ")}));
         }
       }
       return true;
@@ -836,17 +845,17 @@
     function validateConfigChanges(changes, messageId) {
       if (Object.prototype.hasOwnProperty.call(changes, "smb_ep") &&
           !validSmbEndpoint(changes.smb_ep)) {
-        AirCANnect.ui.message(messageId, "smb_ep must be smb://host/share[/path]", false);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.smb_invalid"), false);
         return false;
       }
       if (Object.prototype.hasOwnProperty.call(changes, "shq_team") &&
           !validOptionalNumericId(changes.shq_team)) {
-        AirCANnect.ui.message(messageId, "shq_team must be numeric", false);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.shq_team_invalid"), false);
         return false;
       }
       if (Object.prototype.hasOwnProperty.call(changes, "shq_device") &&
           !validOptionalNumericId(changes.shq_device)) {
-        AirCANnect.ui.message(messageId, "shq_device must be numeric", false);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.shq_device_invalid"), false);
         return false;
       }
 
@@ -857,11 +866,11 @@
       const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_en") ?
         changes.syslog_en : !!(configData && configData.syslog_en);
       if (!validIpv4(syslogHost)) {
-        AirCANnect.ui.message(messageId, "syslog_host must be an IPv4 address", false);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.syslog_invalid"), false);
         return false;
       }
       if (syslogEnabled && !String(syslogHost || "").trim().length) {
-        AirCANnect.ui.message(messageId, "syslog_host is required when syslog_en is true", false);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.syslog_required"), false);
         return false;
       }
       return true;
@@ -884,7 +893,7 @@
       if (!validateConfigChanges(changes, messageId)) return false;
 
       if (!Object.keys(changes).length) {
-        AirCANnect.ui.message(messageId, "No changes", true);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.no_changes"), true);
         return false;
       }
 
@@ -899,10 +908,10 @@
           const latest = await fetchConfigSections(sectionIds);
           configData = Object.assign({}, configData || {}, latest);
         }
-        AirCANnect.ui.message(messageId, "Saved", true);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.message("config.saved"), true);
         return true;
       } catch (error) {
-        AirCANnect.ui.message(messageId, error.message, false);
+        AirCANnect.ui.message(messageId, AirCANnect.i18n.error(error), false);
         return false;
       }
     }
@@ -945,7 +954,7 @@
           renderConfigField(root, section, field, configData));
         return true;
       } catch (error) {
-        AirCANnect.ui.message(panel.msg, error.message, false, true);
+        AirCANnect.ui.message(panel.msg, AirCANnect.i18n.error(error), false, true);
         return false;
       }
     }
@@ -991,12 +1000,12 @@
 
     const ONBOARDING_STEP_KEY = "aircannect-onboarding-step";
     const onboardingSteps = [
-      {id: "network", title: "Network"},
-      {id: "as11", title: "Therapy device connection"},
-      {id: "time", title: "Time"},
-      {id: "access", title: "Access"},
-      {id: "smb", title: "SMB export"},
-      {id: "sleephq", title: "SleepHQ export"},
+      {id: "network", title: AirCANnect.i18n.message("onboarding.network")},
+      {id: "as11", title: AirCANnect.i18n.message("onboarding.connection")},
+      {id: "time", title: AirCANnect.i18n.message("ui.time")},
+      {id: "access", title: AirCANnect.i18n.message("onboarding.access")},
+      {id: "smb", title: AirCANnect.i18n.message("onboarding.smb")},
+      {id: "sleephq", title: AirCANnect.i18n.message("onboarding.shq")},
     ];
     let onboardingStep = 0;
     let onboardingBusy = false;
@@ -1007,7 +1016,7 @@
     function onboardingNote(root, text) {
       const note = document.createElement("p");
       note.className = "onboarding-note";
-      note.textContent = text;
+      AirCANnect.i18n.text(note, text);
       root.appendChild(note);
     }
 
@@ -1064,20 +1073,20 @@
 
       const heading = document.createElement("div");
       heading.className = "section-title";
-      heading.textContent = "Add Wi-Fi profile";
+      AirCANnect.i18n.text(heading, AirCANnect.i18n.message("onboarding.wifi_add"));
       root.appendChild(heading);
 
       onboardingInputRow(root, "SSID", "onboardingWifiSsid", "text",
         "network-name");
-      onboardingInputRow(root, "Password", "onboardingWifiPass", "password",
+      onboardingInputRow(root, AirCANnect.i18n.message("ui.password"), "onboardingWifiPass", "password",
         "current-password");
 
       try {
         const response = await AirCANnect.http.requestOk("/api/wifi");
         const data = await response.json();
         const current = data.ssid ? data.ssid + " / " + (data.ip || "--") :
-          "Not connected";
-        root.insertBefore(AirCANnect.ui.row("Current Wi-Fi", AirCANnect.ui.valueSpan(current)), heading);
+          AirCANnect.i18n.message("onboarding.disconnected");
+        root.insertBefore(AirCANnect.ui.row(AirCANnect.i18n.message("onboarding.current_wifi"), AirCANnect.ui.valueSpan(current)), heading);
       } catch (error) {
         // The current connection is informational; setup can continue offline.
       }
@@ -1094,10 +1103,7 @@
 
     async function onboardingRenderAs11(root) {
       onboardingNote(root,
-        "Choose how AirCANnect connects to your AirSense or AirCurve. " +
-        "CAN uses a wired connection. Bluetooth requires pairing below, and " +
-        "some device options may be unavailable over Bluetooth or with stock " +
-        "ResMed firmware.");
+        AirCANnect.i18n.message("onboarding.connection_hint"));
       onboardingRenderConfigFields(root, ["as11_transport"]);
       const transport = root.querySelector('[data-key="as11_transport"]');
       if (transport) {
@@ -1113,10 +1119,7 @@
 
     function onboardingRenderTime(root) {
       onboardingNote(root,
-        "The timezone keeps local dates and report times correct. AS11 time " +
-        "sync also sets the machine clock when supported. Stock firmware " +
-        "does not allow this over Bluetooth, but AirCANnect still corrects " +
-        "timestamps in recorded EDF files.");
+        AirCANnect.i18n.message("onboarding.time_hint"));
       onboardingRenderConfigFields(root, ["tz", "resmed_time"]);
       const timezone = root.querySelector('[data-key="tz"]');
       if (!timezone) return;
@@ -1134,9 +1137,7 @@
 
     function onboardingRenderAccess(root) {
       onboardingNote(root,
-        "These credentials protect the Web UI and HTTP API. Other access " +
-        "channels, including the TCP bridge and Telnet, can be configured " +
-        "later.");
+        AirCANnect.i18n.message("onboarding.access_hint"));
       onboardingRenderConfigFields(root, ["http_user", "http_pass"]);
 
       const user = root.querySelector('[data-key="http_user"]');
@@ -1150,13 +1151,11 @@
     async function renderOnboardingStep() {
       const step = onboardingSteps[onboardingStep];
       const root = document.getElementById("onboardingBody");
-      document.getElementById("onboardingTitle").textContent = step.title;
-      document.getElementById("onboardingCounter").textContent =
-        (onboardingStep + 1) + " of " + onboardingSteps.length;
+      AirCANnect.i18n.text(document.getElementById("onboardingTitle"), step.title);
+      AirCANnect.i18n.text(document.getElementById("onboardingCounter"), AirCANnect.i18n.message("onboarding.counter", {step: onboardingStep + 1, total: onboardingSteps.length}));
       document.getElementById("onboardingBack").disabled =
         onboardingStep === 0;
-      document.getElementById("onboardingNext").textContent =
-        onboardingStep === onboardingSteps.length - 1 ? "Finish" : "Next";
+      AirCANnect.i18n.text(document.getElementById("onboardingNext"), onboardingStep === onboardingSteps.length - 1 ? AirCANnect.i18n.message("onboarding.finish") : AirCANnect.i18n.message("ui.next"));
       root.innerHTML = "";
       AirCANnect.ui.clearMessage("onboardingMsg");
       onboardingRenderProgress();
@@ -1167,14 +1166,12 @@
       if (step.id === "access") onboardingRenderAccess(root);
       if (step.id === "smb") {
         onboardingNote(root,
-          "Export EDF files automatically to a shared folder on your " +
-          "computer or NAS.");
+          AirCANnect.i18n.message("onboarding.smb_hint"));
         onboardingSectionFields(root, "smb");
       }
       if (step.id === "sleephq") {
         onboardingNote(root,
-          "Connect your SleepHQ account to upload new therapy data " +
-          "automatically.");
+          AirCANnect.i18n.message("onboarding.shq_hint"));
         onboardingRenderConfigFields(root, ["shq_id", "shq_secret"]);
       }
 
@@ -1192,7 +1189,7 @@
           changes, "http_pass") ? changes.http_pass : null;
         AirCANnect.ui.message("onboardingMsg",
           onboardingUser === null && onboardingPassword === null ?
-            "No changes" : "Access credentials will change after setup",
+            AirCANnect.i18n.message("config.no_changes") : AirCANnect.i18n.message("onboarding.access_deferred"),
           true);
         return true;
       }
@@ -1202,7 +1199,7 @@
         const saved = await saveConfigFields(root, "onboardingMsg", null);
         if (!saved) return false;
       } else {
-        AirCANnect.ui.message("onboardingMsg", "No changes", true);
+        AirCANnect.ui.message("onboardingMsg", AirCANnect.i18n.message("config.no_changes"), true);
       }
 
       if (onboardingSteps[onboardingStep].id !== "network") return true;
@@ -1215,10 +1212,10 @@
           action: "add", ssid, pass: password,
         });
 
-        AirCANnect.ui.message("onboardingMsg", "Wi-Fi profile queued", true);
+        AirCANnect.ui.message("onboardingMsg", AirCANnect.i18n.message("onboarding.wifi_queued"), true);
         return true;
       } catch (error) {
-        AirCANnect.ui.message("onboardingMsg", error.message, false);
+        AirCANnect.ui.message("onboardingMsg", AirCANnect.i18n.error(error), false);
         return false;
       }
     }
@@ -1238,7 +1235,7 @@
       }
       return AirCANnect.snapshots.wait(
         "status", (data) => !!data.onboarding_complete, current.serial,
-        5000, "Onboarding completion was not persisted");
+        5000, AirCANnect.i18n.message("onboarding.not_persisted"));
     }
 
     async function onboardingComplete() {
@@ -1258,8 +1255,8 @@
     }
 
     function onboardingRenderFinish() {
-      document.getElementById("onboardingTitle").textContent = "Setup complete";
-      document.getElementById("onboardingCounter").textContent = "";
+      AirCANnect.i18n.text(document.getElementById("onboardingTitle"), AirCANnect.i18n.message("onboarding.complete"));
+      AirCANnect.i18n.text(document.getElementById("onboardingCounter"), "");
       document.getElementById("onboardingProgress").innerHTML = "";
       document.getElementById("onboardingActions").hidden = true;
 
@@ -1268,20 +1265,20 @@
       const finish = document.createElement("div");
       finish.className = "onboarding-finish";
       const heading = document.createElement("h3");
-      heading.textContent = "AirCANnect is ready";
+      AirCANnect.i18n.text(heading, AirCANnect.i18n.message("onboarding.ready"));
       finish.appendChild(heading);
 
       const buttons = document.createElement("div");
       buttons.className = "btns";
       const dashboard = document.createElement("button");
       dashboard.className = "btn primary";
-      dashboard.textContent = "Dashboard";
+      AirCANnect.i18n.text(dashboard, AirCANnect.i18n.message("ui.dashboard"));
       dashboard.onclick = () => onboardingExit("dash");
       buttons.appendChild(dashboard);
 
       const configure = document.createElement("button");
       configure.className = "btn";
-      configure.textContent = "Configure more";
+      AirCANnect.i18n.text(configure, AirCANnect.i18n.message("onboarding.configure_more"));
       configure.onclick = () => onboardingExit("config");
       buttons.appendChild(configure);
       finish.appendChild(buttons);
@@ -1313,7 +1310,7 @@
         sessionStorage.removeItem(ONBOARDING_STEP_KEY);
         onboardingRenderFinish();
       } catch (error) {
-        AirCANnect.ui.message("onboardingMsg", error.message, false);
+        AirCANnect.ui.message("onboardingMsg", AirCANnect.i18n.error(error), false);
         onboardingSetBusy(false);
       }
     }

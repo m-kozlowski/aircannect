@@ -61,6 +61,7 @@
       }
 
       function localizedValue(value) {
+        if (Array.isArray(value)) return value.map(localizedValue).join("");
         if (value && typeof value === "object" && value.key) {
           return translate(value.key, value.params, value.fallback);
         }
@@ -95,9 +96,17 @@
       }
 
       function localizedFailure(key, params = {}) {
-        return Object.assign(new Error(key), {
-          ui: localizedMessage(key, params),
+        const message = key && typeof key === "object" ? key :
+          localizedMessage(key, params);
+        return Object.assign(new Error(message.key), {
+          ui: message,
         });
+      }
+
+      function localizedJoin(values, separator = "") {
+        const parts = values.flatMap((value, index) =>
+          index ? [separator, value] : [value]);
+        return localizedMessage("common.parts", {parts});
       }
 
       function localizedText(target, value, attribute = "textContent") {
@@ -250,7 +259,8 @@
           timeout = setTimeout(() => {
             unsubscribe();
             if (timeoutMessage) {
-              reject(new Error(timeoutMessage));
+              reject(typeof timeoutMessage === "object" ?
+                localizedFailure(timeoutMessage) : new Error(timeoutMessage));
             } else {
               resolve(null);
             }
@@ -933,6 +943,7 @@
           text: localizedText,
           error: localizedError,
           failure: localizedFailure,
+          join: localizedJoin,
           number: localizedNumber,
           translate: translateElements,
           onChange: onLanguageChange,

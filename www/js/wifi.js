@@ -17,13 +17,13 @@
       const active = Number.isFinite(Number(data.active)) ?
         Number(data.active) : Number(status.wifi_profile);
 
-      root.appendChild(AirCANnect.ui.row("State", AirCANnect.ui.valueSpan(state),
-        roam ? "roaming on" : "roaming off"));
+      root.appendChild(AirCANnect.ui.row(AirCANnect.i18n.message("ui.state"), AirCANnect.ui.valueSpan(state),
+        roam ? AirCANnect.i18n.message("wifi.roam.on") : AirCANnect.i18n.message("wifi.roam.off")));
       root.appendChild(AirCANnect.ui.row("SSID", AirCANnect.ui.valueSpan(ssid),
-        Number.isFinite(active) && active >= 0 ? "profile " + active : ""));
+        Number.isFinite(active) && active >= 0 ? AirCANnect.i18n.message("wifi.profile", {index: String(active)}) : ""));
       root.appendChild(AirCANnect.ui.row(
-        "Signal", AirCANnect.ui.wifiSignal(rssi),
-        channel > 0 ? "channel " + channel : ""));
+        AirCANnect.i18n.message("ui.signal"), AirCANnect.ui.wifiSignal(rssi),
+        channel > 0 ? AirCANnect.i18n.message("wifi.channel", {channel}) : ""));
       root.appendChild(AirCANnect.ui.row("IP", AirCANnect.ui.valueSpan(ip),
         bssid && bssid !== "00:00:00:00:00:00" ? bssid : ""));
     }
@@ -52,10 +52,10 @@
       const isHome = homeSsids.includes(ssid);
       const button = document.createElement("button");
       button.className = isHome ? "btn primary" : "btn";
-      button.textContent = isHome ? "Home" : "Set as home";
-      button.title = isHome ?
-        "The VPN stays down on this network in Away mode. Click to unset." :
-        "Keep the VPN down on this network in Away mode.";
+      AirCANnect.i18n.text(button, isHome ? AirCANnect.i18n.message("wifi.home") : AirCANnect.i18n.message("wifi.set_home"));
+      AirCANnect.i18n.text(button, isHome ?
+        AirCANnect.i18n.message("wifi.home_hint") :
+        AirCANnect.i18n.message("wifi.away_hint"), "title");
       // wg_home is a comma-separated list.
       button.disabled = ssid.includes(",");
       button.onclick = () => setHomeSsid(ssid, !isHome, homeSsids);
@@ -73,7 +73,7 @@
         const root = document.getElementById("wifiProfiles");
         root.innerHTML = "";
         if (!data.profiles.length) {
-          root.innerHTML = '<div class="value" style="text-align:left">No profiles</div>';
+          root.appendChild(AirCANnect.ui.valueSpan(AirCANnect.i18n.message("wifi.no_profiles")));
         }
         data.profiles.forEach((profile, index) => {
           const controls = document.createElement("div");
@@ -81,15 +81,14 @@
           if (homeSsids) controls.appendChild(homeButton(profile.ssid, homeSsids));
           const button = document.createElement("button");
           button.className = "btn danger";
-          button.textContent = "Remove";
+          AirCANnect.i18n.text(button, AirCANnect.i18n.message("ui.remove"));
           button.onclick = () => wifiRemove(index);
           controls.appendChild(button);
           root.appendChild(AirCANnect.ui.row(profile.ssid, controls,
-            (index === data.active ? "active, " : "") +
-            (profile.open ? "open" : "password")));
+            index === data.active ? AirCANnect.i18n.message("wifi.active_security", {security: AirCANnect.i18n.message(profile.open ? "wifi.open" : "wifi.password")}) : AirCANnect.i18n.message(profile.open ? "wifi.open" : "wifi.password")));
         });
       } catch (error) {
-        AirCANnect.ui.message("wifiMsg", error.message, false);
+        AirCANnect.ui.message("wifiMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -99,7 +98,7 @@
       const value = next.join(",");
       if (value.length > HOME_SSIDS_MAX) {
         AirCANnect.ui.message("wifiMsg",
-          "Home networks list is limited to " + HOME_SSIDS_MAX + " characters",
+          AirCANnect.i18n.message("wifi.home_limit", {limit: HOME_SSIDS_MAX}),
           false);
         return;
       }
@@ -110,11 +109,11 @@
           body: JSON.stringify({wg_home: value}),
         });
         AirCANnect.ui.message("wifiMsg",
-          home ? ssid + " set as home Wi-Fi" : ssid + " no longer home Wi-Fi",
+          home ? AirCANnect.i18n.message("wifi.home_set", {ssid}) : AirCANnect.i18n.message("wifi.home_unset", {ssid}),
           true);
         setTimeout(loadWifi, 600);
       } catch (error) {
-        AirCANnect.ui.message("wifiMsg", error.message, false);
+        AirCANnect.ui.message("wifiMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -126,7 +125,7 @@
         AirCANnect.ui.message("wifiMsg", data.result, data.ok);
         setTimeout(loadWifi, 600);
       } catch (error) {
-        AirCANnect.ui.message("wifiMsg", error.message, false);
+        AirCANnect.ui.message("wifiMsg", AirCANnect.i18n.error(error), false);
       }
     }
 

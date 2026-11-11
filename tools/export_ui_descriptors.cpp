@@ -1,6 +1,7 @@
 // Read the production descriptor owners; do not duplicate their tables here.
 #include "app_config_registry.h"
 #include "as11_settings.h"
+#include "local_input.h"
 
 #include <ArduinoJson.h>
 #include <iostream>
@@ -29,6 +30,12 @@ int main() {
             document["config.option." + std::string(field.key) + "." +
                      options[j].value] = options[j].label;
         }
+    }
+
+    const auto *actions = local_action_catalog(count);
+    for (size_t i = 0; i < count; ++i) {
+        document["config.action." + std::string(actions[i].name)] =
+            actions[i].label;
     }
 
     for (size_t i = 0; i < as11_setting_count(); ++i) {
