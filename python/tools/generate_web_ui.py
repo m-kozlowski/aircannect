@@ -86,9 +86,10 @@ def inline_assets(html, base_dir):
             localization.check_language_header(root, catalogs)
             localization.check_source_keys(root, catalogs)
             urls = {}
-            for tag, catalog in catalogs.items():
+            for tag in catalogs:
                 data = json.dumps(
-                    catalog, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+                    localization.compile_catalog(catalogs, tag),
+                    ensure_ascii=False, separators=(",", ":"), sort_keys=True,
                 ).encode("utf-8")
                 version = hashlib.sha256(data).hexdigest()[:16]
                 url = f"/i18n/{tag}.{version}.json"

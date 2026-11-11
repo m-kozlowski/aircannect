@@ -65,6 +65,17 @@ def load_catalogs(root=ROOT):
     return catalogs
 
 
+def compile_catalog(catalogs, language):
+    """Fill omitted translations at build time, retaining English plurals."""
+    english = catalogs['en']
+    selected = catalogs[language]
+    return {
+        'messages': {**english, **selected},
+        'englishPluralKeys': [key for key, value in english.items()
+                              if key not in selected and isinstance(value, dict)],
+    }
+
+
 def language_header(catalogs):
     rows = [('auto', catalogs['en']['config.option.ui_language.auto'])]
     rows.extend((tag, catalog['language.name'])

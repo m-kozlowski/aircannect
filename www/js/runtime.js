@@ -29,7 +29,7 @@
         "data-i18n-placeholder": "placeholder",
         "data-i18n-aria-label": "aria-label",
       };
-      let languagePreference = "auto";
+      let languagePreference = null;
       let requestedLanguage = "";
       let languageRequest = 0;
       let uiLanguage = "en";
@@ -73,14 +73,11 @@
       }
 
       function translate(key, params = {}, fallback = key) {
-        let value = catalogs[uiLanguage]?.[key];
-        let rules = pluralRules;
-        if (value === undefined) {
-          value = catalogs.en?.[key];
-          rules = englishPluralRules;
-        }
+        const catalog = catalogs[uiLanguage];
+        let value = catalog?.messages[key];
         if (value === undefined) return String(fallback);
         if (typeof value === "object") {
+          const rules = catalog.englishPluralKeys.has(key) ? englishPluralRules : pluralRules;
           value = value[rules.select(params.count)] ?? value.other;
         }
         return value.replace(/\{(\w+)\}/g,
@@ -95,13 +92,13 @@
         if (error && typeof error === "object" && error.key) return error;
         if (error?.ui) return error.ui;
         const code = error?.message ?? error;
-        return Object.hasOwn(catalogs.en || {}, "error." + code) ?
+        return Object.hasOwn(catalogs[uiLanguage]?.messages || {}, "error." + code) ?
           localizedMessage("error." + code) : String(code ?? "");
       }
 
       function localizedFailure(key, params = {}) {
         const code = typeof key === "string" &&
-          Object.hasOwn(catalogs.en || {}, "error." + key) ? "error." + key : key;
+          Object.hasOwn(catalogs[uiLanguage]?.messages || {}, "error." + key) ? "error." + key : key;
         const message = key && typeof key === "object" ? key :
           localizedMessage(code, params);
         return Object.assign(new Error(typeof key === "string" ? key : message.key), {
@@ -167,7 +164,10 @@
         if (!catalogLoads.has(language)) {
           const pending = requestOk(languageSources[language])
             .then((response) => response.json())
-            .then((catalog) => { catalogs[language] = catalog; })
+            .then((catalog) => {
+              catalog.englishPluralKeys = new Set(catalog.englishPluralKeys);
+              catalogs[language] = catalog;
+            })
             .finally(() => catalogLoads.delete(language));
           catalogLoads.set(language, pending);
         }
@@ -182,17 +182,25 @@
         const serial = ++languageRequest;
 
         try {
-          await loadCatalog("en");
+          await loadCatalog(language);
+        } catch (error) {
+          console.warn("Could not load UI language", language, error);
           if (serial !== languageRequest) return;
+          if (language === "en") {
+            if (!catalogs[uiLanguage]) requestedLanguage = "";
+            return;
+          }
+
+          language = "en";
           try {
             await loadCatalog(language);
           } catch (error) {
-            console.warn("Could not load UI language", language, error);
-            language = "en";
+            console.warn("Could not load English UI catalog", error);
+            if (serial === languageRequest && !catalogs[uiLanguage]) {
+              requestedLanguage = "";
+            }
+            return;
           }
-        } catch (error) {
-          console.warn("Could not load English UI catalog", error);
-          return;
         }
 
         if (serial !== languageRequest) return;
@@ -212,8 +220,9 @@
       subscribeSnapshot("status", (data) => {
         if (data.ui_language !== undefined) applyLanguage(data.ui_language);
       }, false);
-      window.addEventListener("languagechange", () =>
-        applyLanguage(languagePreference));
+      window.addEventListener("languagechange", () => {
+        if (languagePreference !== null) applyLanguage(languagePreference);
+      });
 
       function snapshotChannel(name) {
         if (!snapshotChannels.has(name)) {
@@ -1023,5 +1032,13 @@
         uploads: Object.freeze({begin: beginStorageUpload}),
       });
 
-      applyLanguage("auto");
+      const cookiePrefix = "ac_ui_language=";
+      const languageCookie = document.cookie.split(";").map((cookie) => cookie.trim())
+        .find((cookie) => cookie.startsWith(cookiePrefix));
+      if (languageCookie) {
+        const preference = languageCookie.slice(cookiePrefix.length);
+        if (preference === "auto" || Object.hasOwn(languageSources, preference)) {
+          applyLanguage(preference);
+        }
+      }
     })();

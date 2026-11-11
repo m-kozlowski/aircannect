@@ -215,6 +215,7 @@ bool StatusHttpController::publish_snapshot(
 
     if (!snapshot_.replace(build_json_)) return false;
 
+    ui_language_.store(snapshot.ui_language, std::memory_order_release);
     observed_device_revision_ = device_revision;
     observed_config_revision_ = config_revision;
     last_snapshot_ms_ = snapshot.now_ms;

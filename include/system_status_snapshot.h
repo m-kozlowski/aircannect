@@ -78,6 +78,7 @@ struct SystemStatusSnapshot {
     const char *built = "";
     const char *reset_reason = "";
     bool onboarding_complete = false;
+    // Registry-owned tag with static lifetime, also used for WebUI bootstrap.
     const char *ui_language = "auto";
     MemoryStatus memory;
     StorageStatus storage;

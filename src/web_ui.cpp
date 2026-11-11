@@ -49,11 +49,17 @@ const char *web_command_name(uint8_t kind) {
     }
 }
 
-void send_web_ui(AsyncWebServerRequest *request) {
+void send_web_ui(AsyncWebServerRequest *request, const char *language) {
+    String cookie = "ac_ui_language=";
+    cookie += language;
+    cookie += "; Path=/; SameSite=Lax";
+
     AsyncWebServerResponse *response = request->beginResponse(
         200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
+
     response->addHeader("Content-Encoding", "gzip");
-    response->addHeader("Cache-Control", "no-cache");
+    response->addHeader("Cache-Control", "private, no-cache");
+    response->addHeader("Set-Cookie", cookie);
     request->send(response);
 }
 
@@ -1345,8 +1351,12 @@ bool WebUI::register_routes(HttpRouteModule *const *route_modules,
     HttpRouteRegistry routes(*server_);
 
     // Static UI and snapshots
-    routes.on("/", HTTP_GET, send_web_ui);
-    routes.on(AsyncURIMatcher::exact("/wizard"), HTTP_GET, send_web_ui);
+    const auto send_ui = [this](AsyncWebServerRequest *request) {
+        send_web_ui(request, status_->ui_language());
+    };
+
+    routes.on("/", HTTP_GET, send_ui);
+    routes.on(AsyncURIMatcher::exact("/wizard"), HTTP_GET, send_ui);
     for (const auto &asset : WEB_UI_LANGUAGES) {
         routes.on(
             AsyncURIMatcher::exact(asset.url), HTTP_GET,

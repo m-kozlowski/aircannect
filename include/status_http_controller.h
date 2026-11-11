@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <stdint.h>
 
 #include "http_route_module.h"
@@ -27,12 +28,16 @@ public:
 
     uint32_t revision() const { return snapshot_.revision(); }
     bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
+    const char *ui_language() const {
+        return ui_language_.load(std::memory_order_acquire);
+    }
 
 private:
     void send_snapshot(AsyncWebServerRequest *request) const;
 
     PublishedJsonSnapshot snapshot_;
     LargeTextBuffer build_json_;
+    std::atomic<const char *> ui_language_{"auto"};
 
     uint32_t observed_device_revision_ = 0;
     uint32_t observed_config_revision_ = 0;

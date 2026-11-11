@@ -18,7 +18,12 @@ endpoint needs editing. Unknown keys and mismatched parameters are errors;
 missing translations are not.
 
 Each language is served as a separate compressed resource from firmware.
-Browsers load English as the fallback and only their selected translation.
+The build fills omitted entries with English text in the generated resource,
+preserving English plural rules for those entries. Source catalogs are not
+changed. The HTML response supplies the saved preference in a cookie, so
+browsers immediately load only the selected language. Later status SSE events
+apply preference changes. English is fetched separately only if that resource
+fails to load, or if the user selects English.
 
 English entries beginning with `config.field.`, `config.option.`,
 `config.section.`, `config.action.`, `clinical.label.`, `clinical.option.`
