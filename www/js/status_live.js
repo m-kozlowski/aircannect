@@ -602,10 +602,17 @@
       const label = unavailable ? AirCANnect.i18n.message("status.unavailable") : pending ?
         (data.therapy_pending === "running" ? AirCANnect.i18n.message("status.starting") : AirCANnect.i18n.message("status.stopping")) :
         fmtTherapy(data.therapy);
-      AirCANnect.i18n.text(badge, label);
+      AirCANnect.ui.text("therapyState", label);
       badge.className = "badge " +
         (unavailable || pending ? "warn" :
           data.therapy === "running" ? "good" : "");
+
+      const elapsed = document.getElementById("therapyElapsed");
+      const showElapsed = !unavailable && !pending && data.therapy === "running" &&
+        Number.isFinite(data.therapy_elapsed_s) && data.therapy_elapsed_s >= 0;
+      AirCANnect.i18n.text(elapsed, showElapsed ? " \u00b7 " + fmtUp(data.therapy_elapsed_s) : "");
+      elapsed.hidden = !showElapsed;
+
       setTherapyButtons(data);
     }
 

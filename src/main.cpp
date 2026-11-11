@@ -1168,6 +1168,9 @@ static void refresh_status_presentations(uint32_t now_ms) {
         },
         drain_can_rx);
 
+    snapshot.therapy_elapsed_valid = session_manager.elapsed_seconds(
+        snapshot.now_ms, snapshot.therapy_elapsed_s);
+
     alert_manager.observe(
         AlertMetric::StorageFreeMiB,
         snapshot.storage.mounted && snapshot.storage.total_bytes != 0,

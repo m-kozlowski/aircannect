@@ -470,6 +470,9 @@
       background: #123323;
     }
 
+    #therapyBadge { white-space: nowrap; }
+    #therapyElapsed { text-transform: none; font-variant-numeric: tabular-nums; }
+
     .badge.warn {
       color: var(--orange);
       border-color: #7a5525;

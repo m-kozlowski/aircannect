@@ -101,6 +101,11 @@ bool build_status_json(LargeTextBuffer &json,
     json_add_string(json, "therapy_pending",
                     As11DeviceState::therapy_target_name(
                         as11.pending_therapy_target));
+    if (snap.therapy_elapsed_valid) {
+        json_add_int(json, "therapy_elapsed_s", snap.therapy_elapsed_s);
+    } else {
+        json += ",\"therapy_elapsed_s\":null";
+    }
     json_add_string_view(json, "profile", as11.active_therapy_profile);
 
     char hours[16];

@@ -99,6 +99,16 @@ void SessionManager::note_device_boot(uint32_t now_ms) {
     end_session(empty, now_ms, "device_boot");
 }
 
+bool SessionManager::elapsed_seconds(uint32_t now_ms, uint32_t &seconds) const {
+    seconds = 0;
+    if (status_.state != SessionState::Active || status_.recovered_active_start) {
+        return false;
+    }
+
+    seconds = static_cast<uint32_t>(now_ms - status_.started_ms) / 1000;
+    return true;
+}
+
 const char *SessionManager::state_name(SessionState state) {
     switch (state) {
         case SessionState::Active: return "active";

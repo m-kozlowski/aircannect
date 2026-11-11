@@ -91,6 +91,8 @@ struct SystemStatusSnapshot {
     bool ota_active = false;
     OtaUpdateNotification update;
     As11StatusSnapshot as11;
+    bool therapy_elapsed_valid = false;
+    uint32_t therapy_elapsed_s = 0;
     OximetryRuntimeStatus oximetry;
     TimeStatusSnapshot time;
 };

@@ -40,6 +40,7 @@ public:
     void note_device_boot(uint32_t now_ms);
 
     const SessionStatus &status() const { return status_; }
+    bool elapsed_seconds(uint32_t now_ms, uint32_t &seconds) const;
     bool idle_for(uint32_t now_ms, uint32_t duration_ms) const {
         return status_.state == SessionState::Idle &&
                (status_.end_count == 0 ||
