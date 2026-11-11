@@ -434,6 +434,8 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
     server.on(
         AsyncURIMatcher::exact("/api/ota/upload"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
+            if (request->isSent()) return;
+
             if (url_source_->active()) {
                 request->send(409, "application/json",
                               "{\"error\":\"ota_busy\"}");
@@ -450,9 +452,12 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
         },
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t length, bool final) {
+            // The parser may deliver more callbacks after aborting this request.
+            if (request->isSent()) return;
+
             if (index == 0) {
                 if (url_source_->active()) {
-                    if (request && request->client()) request->client()->close();
+                    request->abort();
                     return;
                 }
 
@@ -461,7 +466,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                 OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
                 if (!request_upload_args(request, image_size, encoding,
                                          wire_size)) {
-                    if (request && request->client()) request->client()->close();
+                    request->abort();
                     return;
                 }
 
@@ -472,12 +477,13 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
                 if (!installer_->begin_write(
                         filename, image_size, encoding, wire_size,
                         FirmwareInstallSource::HttpUpload)) {
+                    request->abort();
                     return;
                 }
             }
 
             if (!installer_->write(index, data, length)) {
-                if (request && request->client()) request->client()->close();
+                request->abort();
                 return;
             }
 
