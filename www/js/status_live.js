@@ -31,12 +31,13 @@
     }
 
     function apiError(error) {
-      AirCANnect.ui.text("title", "API unavailable");
+      AirCANnect.ui.text("title", AirCANnect.i18n.message("status.api_unavailable"));
       if (location.protocol === "file:") {
-        AirCANnect.ui.text("wifiTop", "Open device HTTP UI, not file preview");
+        AirCANnect.ui.text("wifiTop", AirCANnect.i18n.message("status.file_preview"));
       } else {
         AirCANnect.ui.text(
-          "wifiTop", error && error.message ? error.message : "API error");
+          "wifiTop", error ? AirCANnect.i18n.error(error) :
+            AirCANnect.i18n.message("status.api_error"));
       }
     }
 
@@ -50,7 +51,7 @@
     function setWifiTop(data) {
       const element = document.getElementById("wifiTop");
       if (!element) return;
-      element.textContent = "";
+      AirCANnect.i18n.text(element, "");
 
       const state = data && data.wifi_state ? String(data.wifi_state) : "--";
       const ssid = data && data.wifi_ssid ? String(data.wifi_ssid) : "";
@@ -64,12 +65,13 @@
       const wrapper = AirCANnect.ui.wifiSignal(
         rssi, "WiFi: " + connection);
       wrapper.classList.remove("value");
-      wrapper.title = "WiFi: " + connection + "\nSignal: " +
-        AirCANnect.format.rssi(rssi);
-      if (staConnected && data.wifi_ip && data.wifi_ip !== "0.0.0.0") {
-        wrapper.title += "\nSTA IP: " + data.wifi_ip;
-      }
-      wrapper.querySelector(".wifi-bars").title = wrapper.title;
+      const tooltip = AirCANnect.i18n.message("status.wifi_hint", {
+        connection, rssi: AirCANnect.format.rssi(rssi),
+        ip: staConnected && data.wifi_ip && data.wifi_ip !== "0.0.0.0" ?
+          "\nSTA IP: " + data.wifi_ip : "",
+      });
+      AirCANnect.i18n.text(wrapper, tooltip, "title");
+      AirCANnect.i18n.text(wrapper.querySelector(".wifi-bars"), tooltip, "title");
       element.appendChild(wrapper);
     }
 
@@ -115,20 +117,19 @@
     }
 
     function fmtTherapy(value) {
-      if (value === "running") return "Therapy";
-      if (value === "standby") return "Standby";
-      if (value === "unknown") return "Unknown";
-      return value || "Unknown";
+      if (value === "running") return AirCANnect.i18n.message("ui.therapy");
+      if (value === "standby") return AirCANnect.i18n.message("ui.standby");
+      if (value === "unknown") return AirCANnect.i18n.message("ui.unknown");
+      return value || AirCANnect.i18n.message("ui.unknown");
     }
 
     function fmtSync(data) {
-      if (!data.esp_time_valid) return "Clock invalid";
+      if (!data.esp_time_valid) return AirCANnect.i18n.message("status.clock_invalid");
 
       let source = data.esp_time_source === "ntp" ? "NTP" :
-        data.esp_time_source === "resmed" ? "ResMed" : "Clock";
+        data.esp_time_source === "resmed" ? "ResMed" : AirCANnect.i18n.message("status.clock");
       if (data.ntp_synced) source = "NTP";
-      return source + (data.resmed_time_sync_enabled &&
-        data.resmed_time_write_supported ? " -> ResMed" : "");
+      return AirCANnect.i18n.join([source, data.resmed_time_sync_enabled && data.resmed_time_write_supported ? " -> ResMed" : ""]);
     }
 
     function renderStorageStatus(data) {
@@ -136,7 +137,7 @@
       const meter = document.getElementById("storageMeter");
       if (!summary || !meter) return;
 
-      let text = data.storage_state || "Not mounted";
+      let text = data.storage_state || AirCANnect.i18n.message("status.not_mounted");
       let percent = 0;
       const total = Number(data.storage_total || 0);
       const used = Number(data.storage_used || 0);
@@ -146,9 +147,9 @@
         percent = Math.max(0, Math.min(100, used / total * 100));
       }
 
-      summary.textContent = text;
+      AirCANnect.i18n.text(summary, text);
       meter.style.width = percent.toFixed(1) + "%";
-      meter.title = percent.toFixed(1) + "% used";
+      AirCANnect.i18n.text(meter, AirCANnect.i18n.message("status.used", {percent: Math.round(percent * 10) / 10}), "title");
     }
 
     function renderSystemIssues(data) {
@@ -157,9 +158,9 @@
       const recording = data.edf || {};
       const issues = [
         {tab: "storage", active: !!data.storage_low_space,
-          text: "SD low: " + AirCANnect.format.bytes(free) + " free"},
+          text: AirCANnect.i18n.message("status.low_space", {free: AirCANnect.format.bytes(free)})},
         {tab: "edf", active: !!recording.storage_blocked,
-          text: "EDF recording suspended", detail: recording.storage_error || ""},
+          text: AirCANnect.i18n.message("status.edf_suspended"), detail: recording.storage_error || ""},
       ];
 
       const list = document.getElementById("systemIssues");
@@ -167,15 +168,14 @@
         document.querySelectorAll('.nav[data-tab="' + issue.tab + '"]')
           .forEach((link) => {
             link.toggleAttribute("data-fault", issue.active);
-            link.title = issue.active ? issue.text : "";
+            AirCANnect.i18n.text(link, issue.active ? issue.text : "", "title");
           });
 
         const notice = document.getElementById(issue.tab + "Fault");
         if (notice) {
           notice.hidden = !issue.active;
-          const text = issue.active ? issue.text +
-            (issue.detail ? ": " + issue.detail : "") : "";
-          if (notice.textContent !== text) notice.textContent = text;
+          const text = issue.active ? AirCANnect.i18n.join([issue.text, issue.detail ? ": " + issue.detail : ""]) : "";
+          if (notice.textContent !== text) AirCANnect.i18n.text(notice, text);
         }
         if (!list) return;
 
@@ -197,7 +197,7 @@
           list.appendChild(item);
         }
         const link = item.firstElementChild;
-        if (link.textContent !== issue.text) link.textContent = issue.text;
+        if (link.textContent !== issue.text) AirCANnect.i18n.text(link, issue.text);
       });
       if (list) list.hidden = !list.childElementCount;
     }
@@ -210,35 +210,35 @@
       AirCANnect.ui.text("oxiTabSpo2", sourceValid ? oxi.spo2 : "--");
       AirCANnect.ui.text("oxiTabPulse", sourceValid ? oxi.pulse_bpm : "--");
 
-      let badgeLabel = "Off";
+      let badgeLabel = AirCANnect.i18n.message("ui.off");
       let badgeStyle = "";
       if (!oxi.enabled) {
-        badgeLabel = "Off";
+        badgeLabel = AirCANnect.i18n.message("ui.off");
       } else if (!oxi.ble_available) {
-        badgeLabel = "BLE Off";
+        badgeLabel = AirCANnect.i18n.message("status.ble_off");
         badgeStyle = "bad";
       } else if (oxi.subscribed) {
-        badgeLabel = "Recording";
+        badgeLabel = AirCANnect.i18n.message("status.recording");
         badgeStyle = "good";
       } else if (oxi.connected) {
-        badgeLabel = "Connected";
+        badgeLabel = AirCANnect.i18n.message("status.connected");
         badgeStyle = "warn";
       } else if (oxi.pairing_active) {
-        badgeLabel = "Pairing";
+        badgeLabel = AirCANnect.i18n.message("status.pairing");
         badgeStyle = "warn";
       } else if (oxi.advertising) {
-        badgeLabel = "Advertising";
+        badgeLabel = AirCANnect.i18n.message("ui.advertising");
         badgeStyle = "warn";
       } else if (sourceValid) {
-        badgeLabel = "Ready";
+        badgeLabel = AirCANnect.i18n.message("status.ready");
         badgeStyle = "good";
       } else {
-        badgeLabel = "Idle";
+        badgeLabel = AirCANnect.i18n.message("status.idle");
       }
       ["oxiBadge", "oxiTabBadge"].forEach((id) => {
         const badge = document.getElementById(id);
         if (!badge) return;
-        badge.textContent = badgeLabel;
+        AirCANnect.i18n.text(badge, badgeLabel);
         badge.className = "badge " + badgeStyle;
       });
 
@@ -247,29 +247,29 @@
       const sourceDetail = (oxi.source_detail || "").trim();
       const sourceIdentity = sourceKind === "none" ? "none" :
         sourceKind + (sourceDetail ? " " + sourceDetail : "");
-      let sourceStatus = "no source";
+      let sourceStatus = AirCANnect.i18n.message("status.no_source");
       if (!oxi.enabled) {
         sourceStatus = "off";
       } else if (oxi.source_present && oxi.source_fresh && oxi.valid) {
         sourceStatus = "fresh";
       } else if (oxi.source_present && oxi.source_fresh &&
           oxi.contact_known && !oxi.contact_present) {
-        sourceStatus = "no finger";
+        sourceStatus = AirCANnect.i18n.message("status.no_finger");
       } else if (oxi.source_present && oxi.source_fresh) {
         sourceStatus = "invalid";
       } else if (oxi.source_present) {
         sourceStatus = "stale";
       }
       AirCANnect.ui.text("oxiSource", sourceIdentity === "none" ?
-        sourceStatus : sourceIdentity + " " + sourceStatus);
+        sourceStatus : AirCANnect.i18n.join([sourceIdentity, sourceStatus], " "));
       AirCANnect.ui.text("oxiTabSource", sourceIdentity);
       AirCANnect.ui.text("oxiTabStatus", sourceStatus);
 
       const integrationAvailable =
         oxi.airsense_integration_available !== false;
-      const as11 = !integrationAvailable ? "local SA2" :
+      const as11 = !integrationAvailable ? AirCANnect.i18n.message("status.local_sa2") :
         oxi.subscribed ? "subscribed" :
-          oxi.connected ? "connected" : "not connected";
+          oxi.connected ? "connected" : AirCANnect.i18n.message("status.not_connected");
       AirCANnect.ui.text("oxiAs11", as11);
       AirCANnect.ui.text("oxiTabAs11", as11);
 
@@ -287,8 +287,9 @@
       }
       let advertise = (oxi.advertise_mode || "--") + " / " + advertiseState;
       if (oxi.pairing_active) {
-        advertise += " / pairing " +
-          Math.ceil((oxi.pairing_left_ms || 0) / 1000) + "s";
+        advertise = AirCANnect.i18n.message("status.pairing_left", {
+          advertise, seconds: Math.ceil((oxi.pairing_left_ms || 0) / 1000),
+        });
       }
       AirCANnect.ui.text("oxiAdvertise", advertise);
       AirCANnect.ui.text("oxiTabAdvertise", advertise);
@@ -304,7 +305,7 @@
       const advStop = document.getElementById("oxiAdvStopBtn");
       const forget = document.getElementById("oxiForgetBtn");
       if (pair) {
-        pair.textContent = oxi.pairing_active ? "Stop Pairing" : "Pair AirSense";
+        AirCANnect.i18n.text(pair, oxi.pairing_active ? AirCANnect.i18n.message("status.stop_pairing") : AirCANnect.i18n.message("ui.pair.airsense"));
         pair.disabled = !oxi.ble_available || !integrationAvailable;
       }
       if (advertiseMode) advertiseMode.disabled = !integrationAvailable;
@@ -362,13 +363,13 @@
         main.className = "sensor-device-main";
         const title = document.createElement("div");
         title.className = "sensor-device-title";
-        title.textContent = sensorDisplayName(device);
+        AirCANnect.i18n.text(title, sensorDisplayName(device));
         main.appendChild(title);
         const metaText = sensorMeta(device);
         if (metaText) {
           const meta = document.createElement("div");
           meta.className = "sensor-device-meta";
-          meta.textContent = metaText;
+          AirCANnect.i18n.text(meta, metaText);
           main.appendChild(meta);
         }
         item.appendChild(main);
@@ -393,7 +394,7 @@
       }
       const badge = document.getElementById("oxiSensorBadge");
       if (badge) {
-        badge.textContent = badgeText;
+        AirCANnect.i18n.text(badge, badgeText);
         badge.className = "badge " + badgeStyle;
       }
 
@@ -413,12 +414,12 @@
       const activeSensor = (sensorData.sensor_peer || "").toLowerCase();
 
       renderSensorList("oxiSensorResults", scanResults,
-        "No scan results", (controls, device) => {
+        AirCANnect.i18n.message("status.no_scan"), (controls, device) => {
           const button = document.createElement("button");
           button.className = "btn primary";
           const isActive = activeSensor &&
             (device.addr || "").toLowerCase() === activeSensor;
-          button.textContent = isActive ? "Connected" : "Connect";
+          AirCANnect.i18n.text(button, isActive ? AirCANnect.i18n.message("status.connected") : AirCANnect.i18n.message("ui.connect"));
           button.disabled = isActive || !sensorData.enabled ||
             !sensorData.ble_available || sensorData.sensor_connected ||
             state === "connecting";
@@ -427,20 +428,20 @@
         });
 
       renderSensorList("oxiSensorKnown", knownSensors,
-        "No known devices", (controls, device) => {
+        AirCANnect.i18n.message("status.no_known"), (controls, device) => {
           const isActive = activeSensor &&
             (device.addr || "").toLowerCase() === activeSensor;
           const auto = document.createElement("button");
           auto.className = "btn" + (device.autoconnect ? " primary" : "");
-          auto.textContent = device.autoconnect ?
-            "Auto-connect On" : "Auto-connect Off";
+          AirCANnect.i18n.text(auto, device.autoconnect ?
+            AirCANnect.i18n.message("status.autoconnect_on") : AirCANnect.i18n.message("status.autoconnect_off"));
           auto.onclick = () => oxiSensorAutoconnect(
             device.addr, !device.autoconnect);
           controls.appendChild(auto);
 
           const connect = document.createElement("button");
           connect.className = "btn primary";
-          connect.textContent = isActive ? "Connected" : "Connect";
+          AirCANnect.i18n.text(connect, isActive ? AirCANnect.i18n.message("status.connected") : AirCANnect.i18n.message("ui.connect"));
           connect.disabled = isActive || !sensorData.enabled ||
             !sensorData.ble_available || sensorData.sensor_connected ||
             state === "connecting";
@@ -449,7 +450,7 @@
 
           const forget = document.createElement("button");
           forget.className = "btn danger";
-          forget.textContent = "Forget";
+          AirCANnect.i18n.text(forget, AirCANnect.i18n.message("pairing.forget"));
           forget.onclick = () => oxiSensorForget(device.addr);
           controls.appendChild(forget);
         });
@@ -471,8 +472,8 @@
       const pending = therapyPending(data);
       const shown = therapyDisplayState(data);
       const unavailable = data.as11_state === "unavailable";
-      start.textContent = pending && shown === "running" ? "Starting" : "Therapy";
-      stop.textContent = pending && shown === "standby" ? "Stopping" : "Standby";
+      AirCANnect.i18n.text(start, pending && shown === "running" ? AirCANnect.i18n.message("status.starting") : AirCANnect.i18n.message("ui.therapy"));
+      AirCANnect.i18n.text(stop, pending && shown === "standby" ? AirCANnect.i18n.message("status.stopping") : AirCANnect.i18n.message("ui.standby"));
       start.className = "btn" + (shown === "running" ? " primary" : "");
       stop.className = "btn" + (shown === "standby" ? " primary" : "");
       start.disabled = unavailable || !!pending || shown === "running";
@@ -535,9 +536,9 @@
       const updateNotice = document.getElementById("updateNotice");
       if (updateNotice) {
         updateNotice.hidden = !data.update_available;
-        updateNotice.textContent = data.update_available
-          ? "Version " + (data.update_version || "new") + " available"
-          : "";
+        AirCANnect.i18n.text(updateNotice, data.update_available
+          ? AirCANnect.i18n.message("status.update_available", {version: data.update_version || "--"})
+          : "");
       }
 
       let memory = (data.heap / 1024).toFixed(1) + " KB heap";
@@ -545,9 +546,9 @@
         memory += " / " + (data.psram_free / 1048576).toFixed(1) + " MB psram";
       }
       AirCANnect.ui.text("heap", memory);
-      AirCANnect.ui.text("uptime", "Up: " + fmtUp(data.uptime || 0));
+      AirCANnect.ui.text("uptime", AirCANnect.i18n.message("status.uptime", {duration: fmtUp(data.uptime || 0)}));
       setWifiTop(data);
-      AirCANnect.ui.text("productName", data.device_name || "ResMed device");
+      AirCANnect.ui.text("productName", data.device_name || AirCANnect.i18n.message("status.resmed_device"));
       AirCANnect.ui.text("serial", data.serial);
       AirCANnect.ui.text("firmware", fmtFirmware(data.software_id || data.application));
       let as11Connection = (data.as11_transport || "can").toUpperCase();
@@ -576,7 +577,7 @@
 
       AirCANnect.ui.text("profile", fmtProfile(data.profile));
       AirCANnect.ui.text("motorHours", data.motor_hours ?
-        Number(data.motor_hours).toLocaleString() + " hrs" : "--");
+        AirCANnect.i18n.message("status.motor_hours", {hours: Number(data.motor_hours)}) : "--");
       AirCANnect.ui.text("deviceTime", fmtIsoMinute(data.device_datetime,
         data.device_datetime_age_ms));
       AirCANnect.ui.text("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
@@ -590,10 +591,10 @@
       const badge = document.getElementById("therapyBadge");
       const pending = therapyPending(data);
       const unavailable = data.as11_state === "unavailable";
-      const label = unavailable ? "Unavailable" : pending ?
-        (data.therapy_pending === "running" ? "Starting" : "Stopping") :
+      const label = unavailable ? AirCANnect.i18n.message("status.unavailable") : pending ?
+        (data.therapy_pending === "running" ? AirCANnect.i18n.message("status.starting") : AirCANnect.i18n.message("status.stopping")) :
         fmtTherapy(data.therapy);
-      badge.textContent = label;
+      AirCANnect.i18n.text(badge, label);
       badge.className = "badge " +
         (unavailable || pending ? "warn" :
           data.therapy === "running" ? "good" : "");
@@ -620,7 +621,8 @@
     function setChartValue(id, value, decimals) {
       const element = document.getElementById(id);
       if (!element) return;
-      element.textContent = Number.isFinite(value) ? value.toFixed(decimals) : "--";
+      AirCANnect.i18n.text(element, Number.isFinite(value) ?
+        AirCANnect.i18n.number(value, decimals, decimals) : "--");
     }
 
     function expandChartScale(name, seriesList) {
@@ -697,7 +699,8 @@
       ctx.textAlign = "right";
       for (let i = 0; i <= 4; i++) {
         const value = maxY - (maxY - minY) * (i / 4);
-        const label = Math.abs(value) >= 10 ? value.toFixed(0) : value.toFixed(1);
+        const decimals = Math.abs(value) >= 10 ? 0 : 1;
+        const label = AirCANnect.i18n.number(value, decimals, decimals);
         ctx.fillText(label, pad.left - 6, pad.top + graphH * (i / 4) + 3);
       }
 
@@ -775,7 +778,7 @@
       const attached = data && data.attached;
       const badge = document.getElementById("liveBadge");
       if (badge) {
-        badge.textContent = attached ? "Live" : active ? "Starting" : "Idle";
+        AirCANnect.i18n.text(badge, attached ? AirCANnect.i18n.message("status.live") : active ? AirCANnect.i18n.message("status.starting") : AirCANnect.i18n.message("status.idle"));
         badge.className = "badge " + (attached ? "good" : active ? "warn" : "");
       }
       if (!data || !data.samples) {
@@ -803,9 +806,9 @@
           body: JSON.stringify({action}),
         });
         const data = await response.json();
-        if (!data.ok) throw new Error("therapy command queue failed");
+        if (!data.ok) throw AirCANnect.i18n.failure("status.therapy_failed");
       } catch (error) {
-        alert(error.message);
+        alert(AirCANnect.i18n.format(AirCANnect.i18n.error(error)));
         loadStatus();
       }
     }
@@ -821,7 +824,7 @@
         AirCANnect.ui.message("timeMsg", data.result, data.ok);
         setTimeout(loadStatus, 900);
       } catch (error) {
-        AirCANnect.ui.message("timeMsg", error.message, false);
+        AirCANnect.ui.message("timeMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -834,9 +837,9 @@
           body: JSON.stringify(body),
         });
         const data = await response.json();
-        AirCANnect.ui.message(msgId || "oxiTabMsg", data.result || "Queued", data.ok);
+        AirCANnect.ui.message(msgId || "oxiTabMsg", data.result || AirCANnect.i18n.message("status.queued"), data.ok);
       } catch (error) {
-        AirCANnect.ui.message(msgId || "oxiTabMsg", error.message, false);
+        AirCANnect.ui.message(msgId || "oxiTabMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -846,7 +849,7 @@
     }
 
     function oxiForget() {
-      if (!confirm("Forget paired AirSense oximeter bond?")) return;
+      if (!confirm(AirCANnect.i18n.t("status.forget_airsense"))) return;
       oxiAction("forget");
     }
 
@@ -873,7 +876,7 @@
 
     function oxiSensorForget(addr) {
       if (!addr) return;
-      if (!confirm("Forget BLE oximeter " + addr + "?")) return;
+      if (!confirm(AirCANnect.i18n.t("status.forget_sensor", {address: addr}))) return;
       oxiAction("sensor_forget", {addr}, "oxiKnownMsg");
     }
 
@@ -896,10 +899,10 @@
           body: JSON.stringify({oxi_adv: advertiseMode}),
         });
         const data = await response.json();
-        AirCANnect.ui.message("oxiTabMsg", data.queued ? "Config update queued" : "Saved", true);
+        AirCANnect.ui.message("oxiTabMsg", data.queued ? AirCANnect.i18n.message("status.config_queued") : AirCANnect.i18n.message("config.saved"), true);
         setTimeout(loadStatus, 600);
       } catch (error) {
-        AirCANnect.ui.message("oxiTabMsg", error.message, false);
+        AirCANnect.ui.message("oxiTabMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -925,8 +928,8 @@
     AirCANnect.snapshots.subscribe("status", applyStatusSnapshot, false);
     AirCANnect.snapshots.subscribe("ota", (data) => {
       const built = document.getElementById("built");
-      if (built) built.title = data.release_target ?
-        "Build target: " + data.release_target : "";
+      if (built) AirCANnect.i18n.text(built, data.release_target ?
+        AirCANnect.i18n.message("status.build_target", {target: data.release_target}) : "", "title");
     }, true);
     AirCANnect.events.subscribe("status", () => {});
     AirCANnect.events.subscribe("oximetry", (data) => {
@@ -937,6 +940,7 @@
       }
     });
     AirCANnect.events.subscribe("live", renderLive);
+    AirCANnect.i18n.onChange(updateCharts);
     window.addEventListener("resize", () => updateCharts());
     updateCharts();
 })();

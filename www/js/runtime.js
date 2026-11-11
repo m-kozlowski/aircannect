@@ -939,6 +939,7 @@
       window.AirCANnect = Object.freeze({
         i18n: Object.freeze({
           t: translate,
+          format: localizedValue,
           message: localizedMessage,
           text: localizedText,
           error: localizedError,
