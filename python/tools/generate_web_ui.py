@@ -2,10 +2,13 @@
 
 import base64
 import gzip
+import hashlib
 import importlib.util
 import mimetypes
 import os
 import re
+import json
+from pathlib import Path
 
 
 Import("env")
@@ -39,15 +42,21 @@ def load_js_minifier():
 
 js_minify = load_js_minifier()
 
+localization_spec = importlib.util.spec_from_file_location(
+    "aircannect_web_localization",
+    os.path.join(project_dir, "python/tools/web_localization.py"),
+)
+localization = importlib.util.module_from_spec(localization_spec)
+localization_spec.loader.exec_module(localization)
+
 
 def inline_assets(html, base_dir):
-    deps = []
+    languages = {}
 
     def asset_path(path_text):
         if os.path.isabs(path_text) or ".." in path_text.split("/"):
             raise ValueError(f"unsafe inline asset path: {path_text}")
         path = os.path.join(base_dir, path_text)
-        deps.append(path)
         return path
 
     def read_text_asset(path_text):
@@ -70,7 +79,27 @@ def inline_assets(html, base_dir):
 
     def inline_js(match):
         src = match.group("src")
-        return "<script>\n" + read_text_asset(src) + "\n</script>"
+        source = read_text_asset(src)
+        if "/* UI_LANGUAGES */ {}" in source:
+            root = Path(base_dir).parent
+            catalogs = localization.load_catalogs(root)
+            localization.check_language_header(root, catalogs)
+            urls = {}
+            for tag, catalog in catalogs.items():
+                data = json.dumps(
+                    catalog, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+                ).encode("utf-8")
+                version = hashlib.sha256(data).hexdigest()[:16]
+                url = f"/i18n/{tag}.{version}.json"
+                urls[tag] = url
+                languages[url] = gzip.compress(data, compresslevel=9, mtime=0)
+
+            source = source.replace(
+                "/* UI_LANGUAGES */ {}",
+                json.dumps(urls, ensure_ascii=True,
+                           separators=(",", ":")).replace("<", "\\u003c"),
+            )
+        return "<script>\n" + source + "\n</script>"
 
     def inline_link_asset(match):
         tag = match.group(0)
@@ -122,7 +151,7 @@ def inline_assets(html, base_dir):
         html,
         flags=re.IGNORECASE,
     )
-    return html, deps
+    return html, languages
 
 
 def minify_html(html):
@@ -165,39 +194,47 @@ def minify_html(html):
     return html
 
 
+def byte_array(name, data):
+    rows = [f"static const uint8_t {name}[] PROGMEM = {{\n"]
+    for offset in range(0, len(data), 16):
+        chunk = data[offset:offset + 16]
+        rows.append("    " + ", ".join(f"0x{b:02x}" for b in chunk) + ",\n")
+    return "".join(rows) + "};\n"
+
+
 html_path = os.path.join(project_dir, "www", "index.html")
 web_dir = os.path.dirname(html_path)
 header_path = os.path.join(project_dir, "src", "web_ui_html.h")
-generator_path = os.path.join(
-    project_dir, "python", "tools", "generate_web_ui.py"
-)
 
 if os.path.exists(html_path):
     with open(html_path, "r", encoding="utf-8") as f:
         raw = f.read()
-    inlined, deps = inline_assets(raw, web_dir)
-    needs_update = (
-        not os.path.exists(header_path)
-        or os.path.getmtime(html_path) > os.path.getmtime(header_path)
-        or os.path.getmtime(generator_path) > os.path.getmtime(header_path)
-        or os.path.getmtime(rjs_min_path) > os.path.getmtime(header_path)
-        or any(os.path.getmtime(dep) > os.path.getmtime(header_path)
-               for dep in deps)
+    inlined, languages = inline_assets(raw, web_dir)
+    minified = minify_html(inlined)
+    compressed = gzip.compress(minified.encode("utf-8"), compresslevel=9, mtime=0)
+    header = (
+        "// Auto-generated from www/index.html, do not edit.\n"
+        "#pragma once\n#include <Arduino.h>\n#include <stdint.h>\n\n"
+        f"#define HTML_PAGE_GZ_SIZE {len(compressed)}\n\n" +
+        byte_array("HTML_PAGE_GZ", compressed)
     )
-    if needs_update:
-        minified = minify_html(inlined)
-        compressed = gzip.compress(minified.encode("utf-8"), compresslevel=9)
-        with open(header_path, "w", encoding="utf-8") as f:
-            f.write("// Auto-generated from www/index.html, do not edit.\n")
-            f.write("#pragma once\n")
-            f.write("#include <Arduino.h>\n")
-            f.write("#include <stdint.h>\n\n")
-            f.write(f"#define HTML_PAGE_GZ_SIZE {len(compressed)}\n\n")
-            f.write("static const uint8_t HTML_PAGE_GZ[] PROGMEM = {\n")
-            for i in range(0, len(compressed), 16):
-                chunk = compressed[i : i + 16]
-                f.write("    " + ", ".join(f"0x{b:02x}" for b in chunk) + ",\n")
-            f.write("};\n")
+    if languages:
+        for index, data in enumerate(languages.values()):
+            header += "\n" + byte_array(f"WEB_LANGUAGE_{index}", data)
+
+        header += (
+            "\nstruct WebUiLanguageAsset {\n"
+            "    const char *url;\n    const uint8_t *data;\n    size_t size;\n"
+            "};\nstatic const WebUiLanguageAsset WEB_UI_LANGUAGES[] = {\n"
+        )
+        for index, url in enumerate(languages):
+            header += (f'    {{"{url}", WEB_LANGUAGE_{index}, '
+                       f'sizeof(WEB_LANGUAGE_{index})}},\n')
+        header += "};\n"
+
+    output = Path(header_path)
+    if not output.exists() or output.read_text(encoding="utf-8") != header:
+        output.write_text(header, encoding="utf-8")
         print(
             f"[web_ui] {html_path} ({len(raw)} -> "
             f"{len(inlined)} inline -> {len(minified)} minified -> "

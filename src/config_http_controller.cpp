@@ -303,7 +303,8 @@ bool parse_keybindings_update(JsonVariantConst value,
 void append_schema_enum(LargeTextBuffer &json,
                         const AppConfigFieldDescriptor &field) {
     if (field.type != AppConfigFieldType::Enum &&
-        field.type != AppConfigFieldType::LogLevel) {
+        field.type != AppConfigFieldType::LogLevel &&
+        !field.enum_value_count) {
         return;
     }
 
@@ -415,6 +416,7 @@ void build_schema_json(LargeTextBuffer &json) {
         json_add_string(json, "key", field.key, false);
         json_add_string(json, "label", field.label);
         json_add_string(json, "type",
+                        field.enum_value_count ? "enum" :
                         app_config_field_type_name(field.type));
         json_add_bool(json, "secret", app_config_field_is_secret(field));
         json_add_bool(json, "provisionable",

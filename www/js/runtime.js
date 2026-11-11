@@ -17,6 +17,182 @@
       let activePage = "";
       let activeStorageUpload = null;
 
+      const languageSources = /* UI_LANGUAGES */ {};
+      const catalogs = {};
+      const catalogLoads = new Map();
+      const languageListeners = new Set();
+      const textBindings = new WeakMap();
+      const numberFormats = new Map();
+      const translatedAttributes = {
+        "data-i18n": "textContent",
+        "data-i18n-title": "title",
+        "data-i18n-placeholder": "placeholder",
+        "data-i18n-aria-label": "aria-label",
+      };
+      let languagePreference = "auto";
+      let requestedLanguage = "";
+      let languageRequest = 0;
+      let uiLanguage = "en";
+      let pluralRules = new Intl.PluralRules(uiLanguage);
+      const englishPluralRules = new Intl.PluralRules("en");
+
+      function resolveLanguage(preference) {
+        if (Object.hasOwn(languageSources, preference)) return preference;
+        const preferences = navigator.languages?.length ?
+          navigator.languages : [navigator.language];
+        for (const value of preferences) {
+          const tag = String(value || "").toLowerCase();
+          const supported = Object.keys(languageSources).find(
+            (key) => key.toLowerCase() === tag) || tag.split("-")[0];
+          if (Object.hasOwn(languageSources, supported)) return supported;
+        }
+        return "en";
+      }
+
+      function localizedNumber(value, maximumFractionDigits = 2,
+                               minimumFractionDigits = 0) {
+        const key = maximumFractionDigits + ":" + minimumFractionDigits;
+        if (!numberFormats.has(key)) {
+          numberFormats.set(key, new Intl.NumberFormat(uiLanguage, {
+            maximumFractionDigits, minimumFractionDigits,
+          }));
+        }
+        return numberFormats.get(key).format(value);
+      }
+
+      function localizedValue(value) {
+        if (value && typeof value === "object" && value.key) {
+          return translate(value.key, value.params, value.fallback);
+        }
+        if (typeof value === "number") return localizedNumber(value);
+        return String(value ?? "");
+      }
+
+      function translate(key, params = {}, fallback = key) {
+        let value = catalogs[uiLanguage]?.[key];
+        let rules = pluralRules;
+        if (value === undefined) {
+          value = catalogs.en?.[key];
+          rules = englishPluralRules;
+        }
+        if (value === undefined) return String(fallback);
+        if (typeof value === "object") {
+          value = value[rules.select(params.count)] ?? value.other;
+        }
+        return value.replace(/\{(\w+)\}/g,
+          (_match, name) => localizedValue(params[name]));
+      }
+
+      function localizedMessage(key, params = {}, fallback) {
+        return {key, params, fallback};
+      }
+
+      function localizedError(error) {
+        if (error?.ui) return error.ui;
+        const code = error?.message ?? error;
+        return Object.hasOwn(catalogs.en || {}, "error." + code) ?
+          localizedMessage("error." + code) : String(code ?? "");
+      }
+
+      function localizedFailure(key, params = {}) {
+        return Object.assign(new Error(key), {
+          ui: localizedMessage(key, params),
+        });
+      }
+
+      function localizedText(target, value, attribute = "textContent") {
+        const element = typeof target === "string" ?
+          document.getElementById(target) : target;
+        if (!element) return;
+        const marker = Object.keys(translatedAttributes).find(
+          (key) => translatedAttributes[key] === attribute);
+        let bindings = textBindings.get(element);
+        if (value && typeof value === "object" && value.key) {
+          if (!bindings) {
+            bindings = {};
+            textBindings.set(element, bindings);
+          }
+          bindings[attribute] = value;
+          element.setAttribute(marker, value.key);
+        } else {
+          if (bindings) delete bindings[attribute];
+          if (marker) element.removeAttribute(marker);
+        }
+        const text = localizedValue(value);
+        if (attribute === "textContent") element.textContent = text;
+        else element.setAttribute(attribute, text);
+      }
+
+      function translateElements(root = document) {
+        const selector = Object.keys(translatedAttributes).map(
+          (key) => "[" + key + "]").join(",");
+        const elements = [...root.querySelectorAll(selector)];
+        if (root.matches?.(selector)) elements.unshift(root);
+        for (const element of elements) {
+          for (const [marker, attribute] of Object.entries(translatedAttributes)) {
+            if (!element.hasAttribute(marker)) continue;
+            const binding = textBindings.get(element)?.[attribute];
+            const text = binding ? localizedValue(binding) :
+              translate(element.getAttribute(marker));
+            if (attribute === "textContent") element.textContent = text;
+            else element.setAttribute(attribute, text);
+          }
+        }
+      }
+
+      async function loadCatalog(language) {
+        if (catalogs[language]) return;
+        if (!catalogLoads.has(language)) {
+          const pending = requestOk(languageSources[language])
+            .then((response) => response.json())
+            .then((catalog) => { catalogs[language] = catalog; })
+            .finally(() => catalogLoads.delete(language));
+          catalogLoads.set(language, pending);
+        }
+        await catalogLoads.get(language);
+      }
+
+      async function applyLanguage(preference) {
+        languagePreference = preference;
+        let language = resolveLanguage(preference);
+        if (language === requestedLanguage) return;
+        requestedLanguage = language;
+        const serial = ++languageRequest;
+
+        try {
+          await loadCatalog("en");
+          if (serial !== languageRequest) return;
+          try {
+            await loadCatalog(language);
+          } catch (error) {
+            console.warn("Could not load UI language", language, error);
+            language = "en";
+          }
+        } catch (error) {
+          console.warn("Could not load English UI catalog", error);
+          return;
+        }
+
+        if (serial !== languageRequest) return;
+        uiLanguage = language;
+        pluralRules = new Intl.PluralRules(language);
+        numberFormats.clear();
+        document.documentElement.lang = language;
+        translateElements();
+        languageListeners.forEach((listener) => listener(language));
+      }
+
+      function onLanguageChange(listener) {
+        languageListeners.add(listener);
+        return () => languageListeners.delete(listener);
+      }
+
+      subscribeSnapshot("status", (data) => {
+        if (data.ui_language !== undefined) applyLanguage(data.ui_language);
+      }, false);
+      window.addEventListener("languagechange", () =>
+        applyLanguage(languagePreference));
+
       function snapshotChannel(name) {
         if (!snapshotChannels.has(name)) {
           snapshotChannels.set(name, {
@@ -495,7 +671,7 @@
 
         activePage = page;
         const title = document.getElementById("title");
-        if (title) title.textContent = pageTitles.get(page);
+        if (title) localizedText(title, pageTitles.get(page));
         location.hash = page;
         pageListeners.forEach((listener) => listener(page, previous));
         loadPage(page, false);
@@ -587,8 +763,8 @@
       function text(id, value) {
         const element = document.getElementById(id);
         if (element) {
-          element.textContent =
-            value === undefined || value === null || value === "" ? "--" : value;
+          localizedText(element,
+            value === undefined || value === null || value === "" ? "--" : value);
         }
       }
 
@@ -600,7 +776,7 @@
         if (previous) clearTimeout(previous);
         messageTimers.delete(id);
 
-        element.textContent = value;
+        localizedText(element, value);
         element.className = "msg " + (ok ? "ok" : "err");
         if (!sticky) {
           messageTimers.set(id, setTimeout(() => {
@@ -617,7 +793,7 @@
         const previous = messageTimers.get(id);
         if (previous) clearTimeout(previous);
         messageTimers.delete(id);
-        element.textContent = "";
+        localizedText(element, "");
         element.className = "msg";
       }
 
@@ -631,10 +807,12 @@
         const element = document.createElement("div");
         element.className = "row";
         const labelElement = document.createElement("label");
-        labelElement.textContent = label;
+        const caption = document.createElement("span");
+        localizedText(caption, label);
+        labelElement.appendChild(caption);
         if (small) {
           const smallElement = document.createElement("small");
-          smallElement.textContent = small;
+          localizedText(smallElement, small);
           labelElement.appendChild(smallElement);
         }
         element.appendChild(labelElement);
@@ -645,8 +823,8 @@
       function valueSpan(value) {
         const element = document.createElement("span");
         element.className = "value";
-        element.textContent =
-          value === undefined || value === null || value === "" ? "--" : value;
+        localizedText(element,
+          value === undefined || value === null || value === "" ? "--" : value);
         return element;
       }
 
@@ -749,6 +927,17 @@
       }
 
       window.AirCANnect = Object.freeze({
+        i18n: Object.freeze({
+          t: translate,
+          message: localizedMessage,
+          text: localizedText,
+          error: localizedError,
+          failure: localizedFailure,
+          number: localizedNumber,
+          translate: translateElements,
+          onChange: onLanguageChange,
+          language: () => uiLanguage,
+        }),
         actions: Object.freeze({register: registerAction, start: startActions}),
         events: Object.freeze({
           start: startEvents,
@@ -804,4 +993,6 @@
         }),
         uploads: Object.freeze({begin: beginStorageUpload}),
       });
+
+      applyLanguage("auto");
     })();

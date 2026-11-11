@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "plx_peripheral.h"
+#include "app_config_registry.h"
 #include "storage_service.h"
 #include "udp_oximeter_source.h"
 #include "version.h"
@@ -61,6 +62,10 @@ SystemStatusSnapshot collect_system_status(
     out.built = aircannect_build_date();
     out.reset_reason = system_reset_reason_name();
     out.onboarding_complete = sources.app_config.onboarding_complete;
+    const char *language = app_config_supported_ui_language(
+        sources.app_config.ui_language.c_str());
+    out.ui_language = language ? language : "auto";
+
     if (service_pending_work) service_pending_work();
 
     // Periodic presentation does not use largest-block sizes.

@@ -23,6 +23,7 @@ struct AppConfigData {
     bool onboarding_complete = false;
 
     String hostname = AC_HOSTNAME;
+    String ui_language = "auto";
 
     As11Transport as11_transport = default_as11_transport();
     String as11_ble_address;
@@ -117,6 +118,7 @@ private:
 
     bool set_onboarding_complete(bool complete);
     bool set_hostname(const String &hostname);
+    bool set_ui_language(const String &language);
     bool set_as11_transport(As11Transport transport);
     bool set_as11_ble_credentials(const String &address,
                                   const String &client_id,

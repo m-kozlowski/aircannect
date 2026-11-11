@@ -1,0 +1,10 @@
+{
+  "language.name": "English",
+  "config.field.ui_language.label": "Web UI language",
+  "config.field.ui_language.help": "Language of the web interface. Auto follows each browser's preferences.",
+  "config.option.ui_language.auto": "Browser language",
+  "config.unknown": "Unknown ({value})",
+  "common.save": "Save",
+  "common.cancel": "Cancel",
+  "common.error": "Error: {detail}"
+}

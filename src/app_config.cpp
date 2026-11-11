@@ -783,6 +783,14 @@ bool AppConfig::set_hostname(const String &hostname) {
     return mark_dirty(AC_CONFIG_DIRTY_HOSTNAME);
 }
 
+bool AppConfig::set_ui_language(const String &language) {
+    if (!app_config_supported_ui_language(language.c_str())) return false;
+    if (data_.ui_language == language) return true;
+
+    data_.ui_language = language;
+    return mark_dirty(AC_CONFIG_DIRTY_UI_LANGUAGE);
+}
+
 bool AppConfig::set_as11_transport(As11Transport transport) {
     if (!as11_transport_supported(transport)) return false;
     if (data_.as11_transport == transport) return true;

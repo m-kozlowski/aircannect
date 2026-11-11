@@ -53,6 +53,7 @@ void send_web_ui(AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse(
         200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
     response->addHeader("Content-Encoding", "gzip");
+    response->addHeader("Cache-Control", "no-cache");
     request->send(response);
 }
 
@@ -1346,6 +1347,17 @@ bool WebUI::register_routes(HttpRouteModule *const *route_modules,
     // Static UI and snapshots
     routes.on("/", HTTP_GET, send_web_ui);
     routes.on(AsyncURIMatcher::exact("/wizard"), HTTP_GET, send_web_ui);
+    for (const auto &asset : WEB_UI_LANGUAGES) {
+        routes.on(
+            AsyncURIMatcher::exact(asset.url), HTTP_GET,
+            [data = asset.data, size = asset.size](AsyncWebServerRequest *request) {
+                auto *response = request->beginResponse(
+                    200, "application/json", data, size);
+                response->addHeader("Content-Encoding", "gzip");
+                response->addHeader("Cache-Control", "private, max-age=31536000, immutable");
+                request->send(response);
+            });
+    }
 
     // Web console and file log
     routes.on(

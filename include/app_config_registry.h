@@ -81,6 +81,7 @@ enum AppConfigDirty : uint32_t {
     AC_CONFIG_DIRTY_ALERTS = 1UL << 23,
     AC_CONFIG_DIRTY_PSU_90W = 1UL << 24,
     AC_CONFIG_DIRTY_VPN = 1UL << 25,
+    AC_CONFIG_DIRTY_UI_LANGUAGE = 1UL << 26,
 };
 
 static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
@@ -96,11 +97,13 @@ static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
     AC_CONFIG_DIRTY_AS11_TRANSPORT | AC_CONFIG_DIRTY_AS11_OTA_KEY |
     AC_CONFIG_DIRTY_ONBOARDING | AC_CONFIG_DIRTY_KEYBINDINGS |
     AC_CONFIG_DIRTY_DISPLAY | AC_CONFIG_DIRTY_ALERTS |
-    AC_CONFIG_DIRTY_PSU_90W | AC_CONFIG_DIRTY_VPN;
+    AC_CONFIG_DIRTY_PSU_90W | AC_CONFIG_DIRTY_VPN |
+    AC_CONFIG_DIRTY_UI_LANGUAGE;
 
 enum class AppConfigFieldId : uint8_t {
     OnboardingComplete,
     Hostname,
+    UiLanguage,
     As11Transport,
     As11BleAddress,
     As11BleClientId,
@@ -180,6 +183,7 @@ struct AppConfigFieldDescriptor {
 
 const AppConfigFieldDescriptor *app_config_fields(size_t &count);
 const AppConfigFieldDescriptor *app_config_find_field(const char *key);
+const char *app_config_supported_ui_language(const char *tag);
 const char *app_config_group_id(AppConfigGroup group);
 const char *app_config_group_label(AppConfigGroup group);
 const char *app_config_field_type_name(AppConfigFieldType type);

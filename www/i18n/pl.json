@@ -1,0 +1,10 @@
+{
+  "language.name": "Polski",
+  "config.field.ui_language.label": "Język interfejsu WWW",
+  "config.field.ui_language.help": "Język interfejsu WWW. Tryb automatyczny używa preferencji każdej przeglądarki.",
+  "config.option.ui_language.auto": "Język przeglądarki",
+  "config.unknown": "Nieznany ({value})",
+  "common.save": "Zapisz",
+  "common.cancel": "Anuluj",
+  "common.error": "Błąd: {detail}"
+}

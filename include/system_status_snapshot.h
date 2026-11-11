@@ -78,6 +78,7 @@ struct SystemStatusSnapshot {
     const char *built = "";
     const char *reset_reason = "";
     bool onboarding_complete = false;
+    const char *ui_language = "auto";
     MemoryStatus memory;
     StorageStatus storage;
     bool storage_low_space = false;

@@ -11,6 +11,7 @@ Boolean values accept `on`/`off`, `yes`/`no`, `true`/`false`, `1`/`0`, and
 | --- | --- | --- | --- |
 | `onboard` | boolean | `off` on a fresh device | Mark the first-run wizard complete. Set it off or open `/wizard` to run setup again. |
 | `host` | Hostname, 1-63 alnum/hyphen chars, not starting or ending with hyphen | `aircannect` | Device hostname and SoftAP SSID prefix. |
+| `ui_language` | `auto`, `en`, `pl` | `auto` | WebUI language. Auto follows each browser's preferences; an explicit language applies to all browsers. Independent of the ResMed language. |
 | `edf_cap` | boolean | on when the build has SD storage | Enable AS11-style EDF capture on SD card. |
 
 ## AS11 Connection

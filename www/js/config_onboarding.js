@@ -235,12 +235,25 @@
         });
       } else if (field.type === "enum") {
         control = document.createElement("select");
+        const saved = String(data[field.key] ?? "");
+        if (!(field.enum || []).some((entry) =>
+          String(typeof entry === "string" ? entry : entry.value) === saved)) {
+          const unknown = document.createElement("option");
+          unknown.value = saved;
+          AirCANnect.i18n.text(unknown,
+            AirCANnect.i18n.message("config.unknown", {value: saved}));
+          unknown.selected = true;
+          control.appendChild(unknown);
+        }
         (field.enum || []).forEach((entry) => {
           const value = typeof entry === "string" ? entry : entry.value;
           const label = typeof entry === "string" ? entry : entry.label;
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = label || value;
+          AirCANnect.i18n.text(option,
+            field.key === "ui_language" && value === "auto" ?
+              AirCANnect.i18n.message("config.option.ui_language.auto") :
+              label || value);
           if (String(data[field.key]) === value) option.selected = true;
           control.appendChild(option);
         });
@@ -269,7 +282,10 @@
       control.dataset.type = field.type;
       control.dataset.orig = String(control.value || "");
       const rendered = AirCANnect.forms.decorate(field.key, control);
-      root.appendChild(AirCANnect.ui.row(field.label || field.key, rendered, field.key));
+      const label = field.key === "ui_language" ?
+        AirCANnect.i18n.message("config.field.ui_language.label") :
+        field.label || field.key;
+      root.appendChild(AirCANnect.ui.row(label, rendered, field.key));
     }
 
     function as11BleStateLabel(data) {

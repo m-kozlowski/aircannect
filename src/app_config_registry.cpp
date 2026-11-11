@@ -21,6 +21,8 @@ namespace aircannect {
 
 namespace {
 
+#include "ui_languages_generated.inc"
+
 enum ConfigLogCategoryIndex : int16_t {
     CONFIG_LOG_GENERAL = 0,
     CONFIG_LOG_CAN = 1,
@@ -163,6 +165,13 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      20, AppConfigFieldType::Bool, PROVISIONABLE,
      AC_CONFIG_DIRTY_EDF_CAPTURE, "EDF capture", "Enable EDF capture.",
      nullptr, 0, -1, AC_CFG_OFFSET(edf_capture_enabled)},
+    {"ui_language", AppConfigFieldId::UiLanguage, AppConfigGroup::Device,
+     30, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_UI_LANGUAGE, "Web UI language",
+     "Language of the web interface. Auto follows each browser's preferences.",
+     UI_LANGUAGE_VALUES,
+     sizeof(UI_LANGUAGE_VALUES) / sizeof(UI_LANGUAGE_VALUES[0]), -1,
+     AC_CFG_OFFSET(ui_language)},
 
     {"as11_transport", AppConfigFieldId::As11Transport, AppConfigGroup::As11,
      10, AppConfigFieldType::Enum, PROVISIONABLE,
@@ -569,6 +578,8 @@ bool AppConfigFieldWriter::set_value(
             return config.set_onboarding_complete(parsed_bool);
         case AppConfigFieldId::Hostname:
             return config.set_hostname(value);
+        case AppConfigFieldId::UiLanguage:
+            return config.set_ui_language(value);
         case AppConfigFieldId::As11Transport: {
             As11Transport transport = As11Transport::Can;
             String parsed = value;
@@ -798,6 +809,14 @@ bool AppConfigFieldWriter::set_value(
 const AppConfigFieldDescriptor *app_config_fields(size_t &count) {
     count = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_FIELDS[0]);
     return CONFIG_FIELDS;
+}
+
+const char *app_config_supported_ui_language(const char *tag) {
+    if (!tag) return nullptr;
+    for (const auto &language : UI_LANGUAGE_VALUES) {
+        if (strcmp(language.value, tag) == 0) return language.value;
+    }
+    return nullptr;
 }
 
 const AppConfigFieldDescriptor *app_config_find_field(const char *key) {
