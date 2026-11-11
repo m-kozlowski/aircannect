@@ -17,20 +17,20 @@
              aria-labelledby="onboardingTitle">
       <header class="onboarding-head">
         <div>
-          <small>AirCANnect setup</small>
-          <h2 id="onboardingTitle">Initial setup</h2>
+          <small data-i18n="ui.aircannect.setup"></small>
+          <h2 id="onboardingTitle" data-i18n="ui.initial.setup"></h2>
         </div>
-        <span id="onboardingCounter">1 of 6</span>
+        <span id="onboardingCounter" data-i18n="ui.1.of.6"></span>
       </header>
       <div class="onboarding-progress" id="onboardingProgress"
            aria-hidden="true"></div>
       <div class="onboarding-body" id="onboardingBody"></div>
       <div class="msg" id="onboardingMsg"></div>
       <footer class="onboarding-actions" id="onboardingActions">
-        <button class="btn" id="onboardingBack">Back</button>
+        <button class="btn" id="onboardingBack" data-i18n="ui.back"></button>
         <div class="btns">
-          <button class="btn" id="onboardingSkip">Skip</button>
-          <button class="btn primary" id="onboardingNext">Next</button>
+          <button class="btn" id="onboardingSkip" data-i18n="ui.skip"></button>
+          <button class="btn primary" id="onboardingNext" data-i18n="ui.next"></button>
         </div>
       </footer>
     </section>
@@ -39,26 +39,26 @@
   <dialog class="release-notes-dialog" id="otaReleaseNotesDialog"
           aria-labelledby="otaReleaseNotesTitle">
     <header>
-      <small>ESP32 firmware</small>
-      <h2 id="otaReleaseNotesTitle">Release notes</h2>
+      <small data-i18n="ui.esp32.firmware"></small>
+      <h2 id="otaReleaseNotesTitle" data-i18n="ui.release.notes"></h2>
     </header>
-    <div class="release-notes-content" id="otaReleaseNotesText">Loading...</div>
+    <div class="release-notes-content" id="otaReleaseNotesText" data-i18n="ui.loading.progress"></div>
     <form method="dialog" class="btns">
-      <button class="btn primary">Close</button>
+      <button class="btn primary" data-i18n="ui.close"></button>
     </form>
   </dialog>
 
   <dialog class="report-charts-dialog" id="reportChartsDialog"
           aria-labelledby="reportChartsDialogTitle">
     <header>
-      <h2 id="reportChartsDialogTitle">Report charts</h2>
+      <h2 id="reportChartsDialogTitle" data-i18n="ui.report.charts"></h2>
     </header>
     <div class="report-chart-options" id="reportChartOptions"></div>
     <footer>
       <button class="btn" type="button"
-              data-action="report.reset-charts">Reset</button>
+              data-action="report.reset-charts" data-i18n="ui.reset"></button>
       <form method="dialog">
-        <button class="btn primary">Close</button>
+        <button class="btn primary" data-i18n="ui.close"></button>
       </form>
     </footer>
   </dialog>
@@ -76,58 +76,50 @@
       <nav>
         <a class="nav active" data-tab="dash" data-action="app.show-tab"
            data-value="dash">
-          <span class="ico">&#9878;</span>Dashboard
-        </a>
+          <span class="ico">&#9878;</span><span data-i18n="ui.dashboard"></span></a>
         <a class="nav" data-tab="report" data-action="app.show-tab"
            data-value="report">
-          <span class="ico">&#9638;</span>Report
-        </a>
+          <span class="ico">&#9638;</span><span data-i18n="ui.report"></span></a>
         <a class="nav" data-tab="edf" data-action="app.show-tab"
            data-value="edf">
           <span class="ico">&#9635;</span>EDF
         </a>
         <a class="nav" data-tab="clinical" data-action="app.show-tab"
            data-value="clinical">
-          <span class="ico">&#9881;</span>Clinical
-        </a>
+          <span class="ico">&#9881;</span><span data-i18n="ui.clinical"></span></a>
         <a class="nav" data-tab="oxi" data-action="app.show-tab"
            data-value="oxi">
-          <span class="ico">&#9829;</span>Oximetry
-        </a>
+          <span class="ico">&#9829;</span><span data-i18n="ui.oximetry"></span></a>
         <a class="nav" data-tab="wifi" data-action="app.show-tab"
            data-value="wifi">
           <span class="ico">&#9783;</span>WiFi
         </a>
         <a class="nav" data-tab="ota" data-action="app.show-tab"
            data-value="ota">
-          <span class="ico">&#8679;</span>Update
-        </a>
+          <span class="ico">&#8679;</span><span data-i18n="ui.update"></span></a>
         <a class="nav" data-tab="console" data-action="app.show-tab"
            data-value="console">
-          <span class="ico">&#9002;</span>Console
-        </a>
+          <span class="ico">&#9002;</span><span data-i18n="ui.console"></span></a>
         <a class="nav" data-tab="storage" data-action="app.show-tab"
            data-value="storage">
-          <span class="ico">&#8681;</span>Storage
-        </a>
+          <span class="ico">&#8681;</span><span data-i18n="ui.storage"></span></a>
         <a class="nav" data-tab="config" data-action="app.show-tab"
            data-value="config">
-          <span class="ico">&#9000;</span>Config
-        </a>
+          <span class="ico">&#9000;</span><span data-i18n="ui.config"></span></a>
       </nav>
     </aside>
 
     <main class="main">
       <div class="topbar">
         <div>
-          <span id="title">Dashboard</span>
+          <span id="title" data-i18n="ui.dashboard"></span>
           <span class="msg" id="reportMsg"></span>
         </div>
         <div class="right">
-          <span id="uptime">Up: --</span>
+          <span id="uptime" data-i18n="ui.up.unavailable"></span>
           <span id="wifiTop">WiFi: --</span>
           <span id="heap">-- free</span>
-          <button class="btn" data-action="app.refresh">Refresh</button>
+          <button class="btn" data-action="app.refresh" data-i18n="ui.refresh"></button>
         </div>
       </div>
 
@@ -136,57 +128,49 @@
           <div class="grid">
             <div class="card">
               <div class="card-head">
-                <span class="label">Device</span>
-                <span class="badge" id="therapyBadge">Unknown</span>
+                <span class="label" data-i18n="ui.device"></span>
+                <span class="badge" id="therapyBadge" data-i18n="ui.unknown"></span>
               </div>
               <div class="headline" id="productName">--</div>
               <div class="row">
-                <label>Serial</label>
+                <label data-i18n="ui.serial"></label>
                 <span class="value" id="serial">--</span>
               </div>
               <div class="row">
-                <label>Firmware</label>
+                <label data-i18n="ui.firmware"></label>
                 <span class="value" id="firmware">--</span>
               </div>
               <div class="row">
-                <label>Connection</label>
+                <label data-i18n="ui.connection"></label>
                 <div class="connection-control">
                   <span class="value" id="as11Connection">--</span>
                   <button class="btn" id="as11ConnectButton" hidden
                           data-action="as11.connect-dashboard"
-                          title="Connect to the paired AirSense">
-                    Connect
-                  </button>
+                          title="Connect to the paired AirSense" data-i18n-title="ui.connect.to.the.paired.airsense" data-i18n="ui.connect"></button>
                   <button class="btn" id="as11PairButton" hidden
-                          data-action="as11.pair-dashboard">
-                    Pair
-                  </button>
+                          data-action="as11.pair-dashboard" data-i18n="ui.pair"></button>
                 </div>
               </div>
               <div class="row">
-                <label>Profile</label>
+                <label data-i18n="ui.profile"></label>
                 <span class="value" id="profile">--</span>
               </div>
               <div class="row">
-                <label>Motor Hours</label>
+                <label data-i18n="ui.motor.hours"></label>
                 <span class="value" id="motorHours">--</span>
               </div>
               <div class="btns">
-                <button class="btn" id="therapyStart" data-action="therapy.command" data-value="start">
-                  Therapy
-                </button>
-                <button class="btn" id="therapyStop" data-action="therapy.command" data-value="stop">
-                  Standby
-                </button>
+                <button class="btn" id="therapyStart" data-action="therapy.command" data-value="start" data-i18n="ui.therapy"></button>
+                <button class="btn" id="therapyStop" data-action="therapy.command" data-value="stop" data-i18n="ui.standby"></button>
               </div>
             </div>
 
             <div class="card">
               <div class="card-head">
-                <span class="label">System</span>
+                <span class="label" data-i18n="ui.system"></span>
               </div>
               <div class="row">
-                <label>Time</label>
+                <label data-i18n="ui.time"></label>
                 <span class="value" id="espTime">--</span>
               </div>
               <div class="row">
@@ -194,20 +178,16 @@
                 <span class="value" id="deviceTime">--</span>
               </div>
               <div class="row">
-                <label>Time Sync</label>
+                <label data-i18n="ui.time.sync"></label>
                 <span class="value" id="timeSync">--</span>
               </div>
               <div class="btns">
                 <button class="btn" data-action="time.command" data-value="ntp_sync">NTP</button>
-                <button id="timeToResmed" class="btn" data-action="time.command" data-value="sync_to_resmed">
-                  To ResMed
-                </button>
-                <button class="btn" data-action="time.command" data-value="sync_from_resmed">
-                  From ResMed
-                </button>
+                <button id="timeToResmed" class="btn" data-action="time.command" data-value="sync_to_resmed" data-i18n="ui.to.resmed"></button>
+                <button class="btn" data-action="time.command" data-value="sync_from_resmed" data-i18n="ui.from.resmed"></button>
               </div>
               <div class="row">
-                <label>Storage</label>
+                <label data-i18n="ui.storage"></label>
                 <span class="value" id="storageSummary">--</span>
               </div>
               <div class="storage-meter">
@@ -219,8 +199,8 @@
 
             <div class="card">
               <div class="card-head">
-                <span class="label">Oximetry</span>
-                <span class="badge" id="oxiBadge">Off</span>
+                <span class="label" data-i18n="ui.oximetry"></span>
+                <span class="badge" id="oxiBadge" data-i18n="ui.off"></span>
               </div>
               <div class="metric-grid">
                 <div class="metric">
@@ -239,7 +219,7 @@
                 </div>
               </div>
               <div class="row">
-                <label>Source</label>
+                <label data-i18n="ui.source"></label>
                 <span class="value" id="oxiSource">--</span>
               </div>
               <div class="row">
@@ -247,15 +227,15 @@
                 <span class="value" id="oxiAs11">--</span>
               </div>
               <div class="row">
-                <label>Advertising</label>
+                <label data-i18n="ui.advertising"></label>
                 <span class="value" id="oxiAdvertise">--</span>
               </div>
             </div>
           </div>
 
           <div class="telemetry-head">
-            <h3>Live Telemetry</h3>
-            <span class="badge" id="liveBadge">Idle</span>
+            <h3 data-i18n="ui.live.telemetry"></h3>
+            <span class="badge" id="liveBadge" data-i18n="ui.idle"></span>
           </div>
 
           <div class="chart-card">
@@ -341,22 +321,22 @@
 
         <section class="pane" id="p-report">
           <div class="report-overview">
-            <div class="report-view-heading"><h3>Therapy Report</h3>
-              <div class="report-segment" role="group" aria-label="Report view">
-                <button type="button" data-action="report.view" data-value="night" aria-pressed="true">Night</button>
-                <button type="button" data-action="report.view" data-value="period" aria-pressed="false">Period</button>
+            <div class="report-view-heading"><h3 data-i18n="ui.therapy.report"></h3>
+              <div class="report-segment" role="group" aria-label="Report view" data-i18n-aria-label="ui.report.view">
+                <button type="button" data-action="report.view" data-value="night" aria-pressed="true" data-i18n="ui.night"></button>
+                <button type="button" data-action="report.view" data-value="period" aria-pressed="false" data-i18n="ui.period"></button>
               </div>
             </div>
             <div class="report-actions" id="reportNightActions">
               <div class="night-picker">
                 <button class="btn np-arrow" id="reportPrevNight"
-                        title="Older night" data-action="report.step-night" data-value="1">&larr;</button>
+                        title="Older night" data-action="report.step-night" data-value="1" data-i18n-title="ui.older.night">&larr;</button>
                 <button class="btn np-date" id="reportDateBtn"
                         data-action="report.toggle-calendar">--</button>
                 <button class="btn np-arrow" id="reportNextNight"
-                        title="Newer night" data-action="report.step-night" data-value="-1">&rarr;</button>
+                        title="Newer night" data-action="report.step-night" data-value="-1" data-i18n-title="ui.newer.night">&rarr;</button>
                 <button class="btn np-arrow" id="reportLatestNight"
-                        title="Latest night" data-action="report.latest">&#8677;</button>
+                        title="Latest night" data-action="report.latest" data-i18n-title="ui.latest.night">&#8677;</button>
                 <div class="np-pop" id="reportCalPop">
                   <div class="np-head">
                     <button class="btn" data-action="report.step-month" data-value="-1">&lsaquo;</button>
@@ -367,52 +347,48 @@
                 </div>
               </div>
               <button class="btn np-arrow" id="reportZoomOut"
-                      title="Zoom out" data-action="report.zoom" data-value="2">-</button>
+                      title="Zoom out" data-action="report.zoom" data-value="2" data-i18n-title="ui.zoom.out">-</button>
               <button class="btn np-arrow" id="reportZoomIn"
-                      title="Zoom in" data-action="report.zoom" data-value="0.5">+</button>
+                      title="Zoom in" data-action="report.zoom" data-value="0.5" data-i18n-title="ui.zoom.in">+</button>
               <button class="btn" id="reportZoomReset"
-                      data-action="report.reset-zoom">
-                Reset Zoom
-              </button>
+                      data-action="report.reset-zoom" data-i18n="ui.reset.zoom"></button>
               <button class="btn" id="reportChartsButton"
-                      data-action="report.configure-charts">
-                Charts
-              </button>
+                      data-action="report.configure-charts" data-i18n="ui.charts"></button>
             </div>
             <div class="report-actions" id="reportPeriodActions" hidden>
-              <div class="report-segment" role="group" aria-label="Period length">
-                <button type="button" data-action="report.period-days" data-value="7" aria-pressed="false">7 d</button>
-                <button type="button" data-action="report.period-days" data-value="30" aria-pressed="true">30 d</button>
-                <button type="button" data-action="report.period-days" data-value="90" aria-pressed="false">90 d</button>
-                <button type="button" data-action="report.period-days" data-value="180" aria-pressed="false">180 d</button>
-                <button type="button" data-action="report.period-days" data-value="365" aria-pressed="false">365 d</button>
+              <div class="report-segment" role="group" aria-label="Period length" data-i18n-aria-label="ui.period.length">
+                <button type="button" data-action="report.period-days" data-value="7" aria-pressed="false" data-i18n="ui.7.d"></button>
+                <button type="button" data-action="report.period-days" data-value="30" aria-pressed="true" data-i18n="ui.30.d"></button>
+                <button type="button" data-action="report.period-days" data-value="90" aria-pressed="false" data-i18n="ui.90.d"></button>
+                <button type="button" data-action="report.period-days" data-value="180" aria-pressed="false" data-i18n="ui.180.d"></button>
+                <button type="button" data-action="report.period-days" data-value="365" aria-pressed="false" data-i18n="ui.365.d"></button>
               </div>
               <div class="report-period-navigation">
-                <button type="button" class="btn np-arrow" data-action="report.period-step" data-value="-1" title="Previous period" aria-label="Previous period">&larr;</button>
+                <button type="button" class="btn np-arrow" data-action="report.period-step" data-value="-1" title="Previous period" aria-label="Previous period" data-i18n-title="ui.previous.period" data-i18n-aria-label="ui.previous.period">&larr;</button>
                 <span id="reportPeriodRange">--</span>
-                <button type="button" class="btn np-arrow" id="reportPeriodNext" data-action="report.period-step" data-value="1" title="Next period" aria-label="Next period">&rarr;</button>
+                <button type="button" class="btn np-arrow" id="reportPeriodNext" data-action="report.period-step" data-value="1" title="Next period" aria-label="Next period" data-i18n-title="ui.next.period" data-i18n-aria-label="ui.next.period">&rarr;</button>
               </div>
               <span id="reportPeriodCoverage"></span>
             </div>
             <div class="report-summary-heading">
-              <div class="report-summary-caption" id="reportSummaryCaption">Night summary</div>
-              <div class="report-segment" id="reportSummaryScope" role="group" aria-label="Statistics scope">
-                <button type="button" data-action="report.scope" data-value="night" aria-pressed="true">Full night</button>
-                <button type="button" data-action="report.scope" data-value="sessions" aria-pressed="false">Selected sessions</button>
+              <div class="report-summary-caption" id="reportSummaryCaption" data-i18n="ui.night.summary"></div>
+              <div class="report-segment" id="reportSummaryScope" role="group" aria-label="Statistics scope" data-i18n-aria-label="ui.statistics.scope">
+                <button type="button" data-action="report.scope" data-value="night" aria-pressed="true" data-i18n="ui.full.night"></button>
+                <button type="button" data-action="report.scope" data-value="sessions" aria-pressed="false" data-i18n="ui.selected.sessions"></button>
               </div>
             </div>
             <div class="report-metrics" id="reportMetricTiles"></div>
-            <div class="report-event-strip"><span>Events</span>
+            <div class="report-event-strip"><span data-i18n="ui.events"></span>
               <div class="report-events" id="reportEventCounts"></div></div>
             <div class="report-history" id="reportMetricHistory" hidden>
               <div class="report-history-heading"><span id="reportHistoryTitle"></span>
                 <span id="reportHistoryValue" aria-live="polite"></span>
                 <button type="button" class="btn" data-action="report.close-history"
-                        aria-label="Close history" title="Close history">&times;</button></div>
-              <svg id="reportHistoryPlot" role="img" aria-label="Nightly history"></svg>
+                        aria-label="Close history" title="Close history" data-i18n-title="ui.close.history" data-i18n-aria-label="ui.close.history">&times;</button></div>
+              <svg id="reportHistoryPlot" role="img" aria-label="Nightly history" data-i18n-aria-label="ui.nightly.history"></svg>
             </div>
             <details class="report-details" id="reportStatistics">
-              <summary>Statistics <span id="reportStatisticsScope">Full night</span></summary>
+              <summary><span data-i18n="ui.statistics"></span><span id="reportStatisticsScope" data-i18n="ui.full.night"></span></summary>
               <div class="report-stat-strip">
                 <span>RDI <b id="reportRdi">--</b> /h</span>
                 <span>CSR <b id="reportCsr">--</b></span>
@@ -420,12 +396,12 @@
                 <span id="reportSpo2Metric" hidden>SpO2 P50 / &lt; Thr <b id="reportSpo2Summary">--</b></span>
               </div>
               <div class="report-table-wrap"><table class="report-stat-table">
-                <thead><tr><th>Signal</th><th>Min</th><th>Mean</th><th>Median</th><th>P95</th><th>Max</th><th id="reportPeriodNightsHeading" hidden>Nights</th></tr></thead>
+                <thead><tr><th data-i18n="ui.signal"></th><th data-i18n="ui.min"></th><th data-i18n="ui.mean"></th><th data-i18n="ui.median"></th><th>P95</th><th data-i18n="ui.max"></th><th id="reportPeriodNightsHeading" hidden data-i18n="ui.nights"></th></tr></thead>
                 <tbody id="reportStatisticsBody"></tbody>
               </table></div>
             </details>
             <details class="report-details" id="reportTherapySettings">
-              <summary>Therapy settings <span id="reportSettingsMode">--</span></summary>
+              <summary><span data-i18n="ui.therapy.settings"></span><span id="reportSettingsMode">--</span></summary>
               <div class="report-summary-caption" id="reportSettingsSource"></div>
               <table class="report-settings-table"><tbody id="reportSettingsBody"></tbody></table>
             </details>
@@ -433,7 +409,7 @@
           </div>
           <div id="reportCharts" class="report-charts"></div>
           <details class="report-details" id="reportPeriodTrends" hidden open>
-            <summary>Daily trends</summary>
+            <summary data-i18n="ui.daily.trends"></summary>
             <div id="reportPeriodCharts"></div>
             <div id="reportPeriodReadout" aria-live="polite"></div>
           </details>
@@ -443,55 +419,55 @@
           <div class="grid edf-grid">
             <div class="card">
               <div class="card-head subsystem-head">
-                <span class="label">EDF Capture</span>
+                <span class="label" data-i18n="ui.edf.capture"></span>
                 <span id="edfFault" class="badge warn subsystem-issue" role="status" hidden></span>
               </div>
               <div class="row">
-                <label>Latest session</label>
+                <label data-i18n="ui.latest.session"></label>
                 <span class="value" id="edfLastSession">--</span>
               </div>
               <div class="row">
-                <label>Recorded data</label>
+                <label data-i18n="ui.recorded.data"></label>
                 <span class="value wrap" id="edfLastFiles">--</span>
               </div>
             </div>
 
             <div class="card">
               <div class="card-head">
-                <span class="label">SMB Sync</span>
+                <span class="label" data-i18n="ui.smb.sync"></span>
                 <span class="badge" id="edfSyncBadge">--</span>
               </div>
               <div class="row">
-                <label>Endpoint</label>
+                <label data-i18n="ui.endpoint"></label>
                 <span class="value wrap" id="edfSyncEndpoint">--</span>
               </div>
               <div class="row">
-                <label>Status</label>
+                <label data-i18n="ui.status"></label>
                 <span class="value wrap" id="edfSyncResult">--</span>
               </div>
               <div class="row">
-                <label>Last sync</label>
+                <label data-i18n="ui.last.sync"></label>
                 <span class="value wrap" id="edfSyncLast">--</span>
               </div>
               <div class="row">
-                <label>Last check</label>
+                <label data-i18n="ui.last.check"></label>
                 <span class="value wrap" id="edfSyncCheck">--</span>
               </div>
               <div class="row">
-                <label>Activity</label>
+                <label data-i18n="ui.activity"></label>
                 <span class="value wrap" id="edfSyncCurrent">--</span>
               </div>
               <div class="btns">
-                <button class="btn primary" id="edfSyncBtn" data-action="sync.smb-start">Sync SMB</button>
-                <button class="btn" id="edfVerifyBtn" data-action="sync.smb-verify">Verify Share</button>
-                <button class="btn" id="edfSmbEditBtn" data-action="config.endpoint-toggle" data-value="smb">Edit</button>
+                <button class="btn primary" id="edfSyncBtn" data-action="sync.smb-start" data-i18n="ui.sync.smb"></button>
+                <button class="btn" id="edfVerifyBtn" data-action="sync.smb-verify" data-i18n="ui.verify.share"></button>
+                <button class="btn" id="edfSmbEditBtn" data-action="config.endpoint-toggle" data-value="smb" data-i18n="ui.edit"></button>
               </div>
               <div class="msg" id="edfSmbMsg"></div>
               <div class="endpoint-config" id="edfSmbConfig" hidden>
                 <div id="edfSmbConfigFields"></div>
                 <div class="btns">
-                  <button class="btn primary" id="edfSmbSaveBtn" data-action="config.endpoint-save" data-value="smb">Save</button>
-                  <button class="btn" data-action="config.endpoint-cancel" data-value="smb">Cancel</button>
+                  <button class="btn primary" id="edfSmbSaveBtn" data-action="config.endpoint-save" data-value="smb" data-i18n="ui.save"></button>
+                  <button class="btn" data-action="config.endpoint-cancel" data-value="smb" data-i18n="ui.cancel"></button>
                 </div>
                 <div class="msg" id="edfSmbConfigMsg"></div>
               </div>
@@ -499,40 +475,40 @@
 
             <div class="card">
               <div class="card-head">
-                <span class="label">SleepHQ Sync</span>
+                <span class="label" data-i18n="ui.sleephq.sync"></span>
                 <span class="badge" id="edfSleepHqBadge">--</span>
               </div>
               <div class="row">
-                <label>Endpoint</label>
+                <label data-i18n="ui.endpoint"></label>
                 <span class="value wrap" id="edfSleepHqEndpoint">--</span>
               </div>
               <div class="row">
-                <label>Status</label>
+                <label data-i18n="ui.status"></label>
                 <span class="value wrap" id="edfSleepHqResult">--</span>
               </div>
               <div class="row">
-                <label>Last sync</label>
+                <label data-i18n="ui.last.sync"></label>
                 <span class="value wrap" id="edfSleepHqLast">--</span>
               </div>
               <div class="row">
-                <label>Last check</label>
+                <label data-i18n="ui.last.check"></label>
                 <span class="value wrap" id="edfSleepHqCheck">--</span>
               </div>
               <div class="row">
-                <label>Activity</label>
+                <label data-i18n="ui.activity"></label>
                 <span class="value wrap" id="edfSleepHqCurrent">--</span>
               </div>
               <div class="btns">
-                <button class="btn primary" id="edfSleepHqSyncBtn" data-action="sync.sleephq-start">Sync SleepHQ</button>
-                <button class="btn" id="edfSleepHqCheckBtn" data-action="sync.sleephq-check">Check Account</button>
-                <button class="btn" id="edfSleepHqEditBtn" data-action="config.endpoint-toggle" data-value="sleephq">Edit</button>
+                <button class="btn primary" id="edfSleepHqSyncBtn" data-action="sync.sleephq-start" data-i18n="ui.sync.sleephq"></button>
+                <button class="btn" id="edfSleepHqCheckBtn" data-action="sync.sleephq-check" data-i18n="ui.check.account"></button>
+                <button class="btn" id="edfSleepHqEditBtn" data-action="config.endpoint-toggle" data-value="sleephq" data-i18n="ui.edit"></button>
               </div>
               <div class="msg" id="edfSleepHqMsg"></div>
               <div class="endpoint-config" id="edfSleepHqConfig" hidden>
                 <div id="edfSleepHqConfigFields"></div>
                 <div class="btns">
-                  <button class="btn primary" id="edfSleepHqSaveBtn" data-action="config.endpoint-save" data-value="sleephq">Save</button>
-                  <button class="btn" data-action="config.endpoint-cancel" data-value="sleephq">Cancel</button>
+                  <button class="btn primary" id="edfSleepHqSaveBtn" data-action="config.endpoint-save" data-value="sleephq" data-i18n="ui.save"></button>
+                  <button class="btn" data-action="config.endpoint-cancel" data-value="sleephq" data-i18n="ui.cancel"></button>
                 </div>
                 <div class="msg" id="edfSleepHqConfigMsg"></div>
               </div>
@@ -543,7 +519,7 @@
         <section class="pane" id="p-storage">
           <div class="card">
             <div class="card-head subsystem-head">
-              <span class="label">Storage</span>
+              <span class="label" data-i18n="ui.storage"></span>
               <div class="card-status">
                 <span id="storageFault" class="badge warn subsystem-issue" role="status" hidden></span>
                 <span class="badge" id="storageBadge">--</span>
@@ -551,16 +527,16 @@
             </div>
             <div class="row" id="storageUsbRow" hidden>
               <button class="btn" type="button" id="storageUsbBtn"
-                data-action="storage.usb" disabled>Share SD via USB</button>
-              <span class="value" id="storageUsbStatus" role="status">Local</span>
+                data-action="storage.usb" disabled data-i18n="ui.share.sd.via.usb"></button>
+              <span class="value" id="storageUsbStatus" role="status" data-i18n="ui.local"></span>
             </div>
             <div class="msg" id="storageUsbMsg"></div>
             <div class="storage-toolbar">
               <div class="storage-path" id="storagePath">/</div>
               <div class="btns" style="margin-top: 0">
-                <button class="btn" id="storageUpBtn" data-action="storage.up">Up</button>
-                <button class="btn primary" id="storageUploadBtn" data-action="storage.upload-choose">Upload</button>
-                <button class="btn" id="storageRefreshBtn" data-action="storage.refresh">Refresh</button>
+                <button class="btn" id="storageUpBtn" data-action="storage.up" data-i18n="ui.up"></button>
+                <button class="btn primary" id="storageUploadBtn" data-action="storage.upload-choose" data-i18n="ui.upload"></button>
+                <button class="btn" id="storageRefreshBtn" data-action="storage.refresh" data-i18n="ui.refresh"></button>
                 <input id="storageUploadInput" type="file" multiple hidden
                   data-change-action="storage.upload-files">
               </div>
@@ -572,22 +548,22 @@
               </div>
               <progress id="storageUploadBar" max="1" value="0"></progress>
               <button class="btn" id="storageUploadCancelBtn"
-                data-action="storage.upload-cancel">Cancel</button>
+                data-action="storage.upload-cancel" data-i18n="ui.cancel"></button>
             </div>
             <div class="storage-selection-bar">
               <label class="storage-select">
                 <input type="checkbox" id="storageSelectAll" data-change-action="storage.select-all">
               </label>
-              <div class="storage-selection-label">Select all</div>
+              <div class="storage-selection-label" data-i18n="ui.select.all"></div>
               <div class="btns" style="margin-top: 0">
-                <button class="btn danger" id="storageDeleteBtn" data-action="storage.delete-selected">Delete Selected</button>
-                <button class="btn primary" id="storageArchiveBtn" data-action="storage.archive-selected">Download Selected</button>
+                <button class="btn danger" id="storageDeleteBtn" data-action="storage.delete-selected" data-i18n="ui.delete.selected"></button>
+                <button class="btn primary" id="storageArchiveBtn" data-action="storage.archive-selected" data-i18n="ui.download.selected"></button>
               </div>
             </div>
             <div class="storage-list" id="storageList"></div>
             <div class="btns">
-              <button class="btn" id="storagePrevBtn" data-action="storage.prev">Prev</button>
-              <button class="btn" id="storageNextBtn" data-action="storage.next">Next</button>
+              <button class="btn" id="storagePrevBtn" data-action="storage.prev" data-i18n="ui.prev"></button>
+              <button class="btn" id="storageNextBtn" data-action="storage.next" data-i18n="ui.next"></button>
             </div>
             <div class="msg" id="storageMsg"></div>
           </div>
@@ -597,8 +573,8 @@
           <div class="grid">
             <div class="card">
               <div class="card-head">
-                <span class="label">Current Reading</span>
-                <span class="badge" id="oxiTabBadge">Off</span>
+                <span class="label" data-i18n="ui.current.reading"></span>
+                <span class="badge" id="oxiTabBadge" data-i18n="ui.off"></span>
               </div>
               <div class="metric-grid">
                 <div class="metric">
@@ -617,55 +593,47 @@
                 </div>
               </div>
               <div class="row">
-                <label>Source</label>
+                <label data-i18n="ui.source"></label>
                 <span class="value" id="oxiTabSource">--</span>
               </div>
               <div class="row">
-                <label>Status</label>
+                <label data-i18n="ui.status"></label>
                 <span class="value" id="oxiTabStatus">--</span>
               </div>
             </div>
 
             <div class="card">
               <div class="card-head">
-                <span class="label">AirSense Integration</span>
+                <span class="label" data-i18n="ui.airsense.integration"></span>
               </div>
               <div class="row">
                 <label>AirSense</label>
                 <span class="value" id="oxiTabAs11">--</span>
               </div>
               <div class="row">
-                <label>Advertising</label>
+                <label data-i18n="ui.advertising"></label>
                 <span class="value" id="oxiTabAdvertise">--</span>
               </div>
               <div class="row">
-                <label>Advertising Mode</label>
+                <label data-i18n="ui.advertising.mode"></label>
                 <select id="oxiAdvertiseMode" data-change-action="oximetry.advertise-config">
-                  <option value="auto">Auto</option>
-                  <option value="manual">Manual</option>
+                  <option value="auto" data-i18n="ui.auto"></option>
+                  <option value="manual" data-i18n="ui.manual"></option>
                 </select>
               </div>
               <div class="row">
-                <label>BLE Name</label>
+                <label data-i18n="ui.ble.name"></label>
                 <span class="value" id="oxiTabBleName">--</span>
               </div>
               <div class="row">
-                <label>Peer</label>
+                <label data-i18n="ui.peer"></label>
                 <span class="value" id="oxiTabPeer">--</span>
               </div>
               <div class="btns">
-                <button class="btn primary" id="oxiPairBtn" data-action="oximetry.pair-toggle">
-                  Pair AirSense
-                </button>
-                <button class="btn" id="oxiAdvStartBtn" data-action="oximetry.command" data-value="advertise_start">
-                  Advertise
-                </button>
-                <button class="btn" id="oxiAdvStopBtn" data-action="oximetry.command" data-value="advertise_stop">
-                  Stop Adv
-                </button>
-                <button class="btn danger" id="oxiForgetBtn" data-action="oximetry.forget">
-                  Forget AirSense
-                </button>
+                <button class="btn primary" id="oxiPairBtn" data-action="oximetry.pair-toggle" data-i18n="ui.pair.airsense"></button>
+                <button class="btn" id="oxiAdvStartBtn" data-action="oximetry.command" data-value="advertise_start" data-i18n="ui.advertise"></button>
+                <button class="btn" id="oxiAdvStopBtn" data-action="oximetry.command" data-value="advertise_stop" data-i18n="ui.stop.adv"></button>
+                <button class="btn danger" id="oxiForgetBtn" data-action="oximetry.forget" data-i18n="ui.forget.airsense"></button>
               </div>
               <div class="msg" id="oxiTabMsg"></div>
             </div>
@@ -673,25 +641,21 @@
 
           <div class="card">
             <div class="card-head">
-              <span class="label">Sensor Source</span>
-              <span class="badge" id="oxiSensorBadge">Idle</span>
+              <span class="label" data-i18n="ui.sensor.source"></span>
+              <span class="badge" id="oxiSensorBadge" data-i18n="ui.idle"></span>
             </div>
             <div class="btns">
-              <button class="btn primary" id="oxiSensorScanBtn" data-action="oximetry.sensor-scan">
-                Scan
-              </button>
-              <button class="btn" id="oxiSensorDisconnectBtn" data-action="oximetry.sensor-disconnect">
-                Disconnect
-              </button>
+              <button class="btn primary" id="oxiSensorScanBtn" data-action="oximetry.sensor-scan" data-i18n="ui.scan"></button>
+              <button class="btn" id="oxiSensorDisconnectBtn" data-action="oximetry.sensor-disconnect" data-i18n="ui.disconnect"></button>
             </div>
-            <div class="section-title">Scan Results</div>
+            <div class="section-title" data-i18n="ui.scan.results"></div>
             <div id="oxiSensorResults"></div>
             <div class="msg" id="oxiSensorMsg"></div>
           </div>
 
           <div class="card">
             <div class="card-head">
-              <span class="label">Known Devices</span>
+              <span class="label" data-i18n="ui.known.devices"></span>
             </div>
             <div id="oxiSensorKnown"></div>
             <div class="msg" id="oxiKnownMsg"></div>
@@ -700,7 +664,7 @@
 
         <section class="pane" id="p-clinical">
           <div class="card">
-            <h3>Clinical Settings</h3>
+            <h3 data-i18n="ui.clinical.settings"></h3>
             <div
               id="settingsMeta"
               class="value"
@@ -708,18 +672,14 @@
             ></div>
             <div id="settingsFields"></div>
             <div class="btns">
-              <button class="btn primary" id="settingsSave" data-action="settings.save">
-                Save
-              </button>
+              <button class="btn primary" id="settingsSave" data-action="settings.save" data-i18n="ui.save"></button>
               <button
                 class="btn"
                 id="settingsRevert"
                 style="display: none"
                 data-action="settings.revert"
-              >
-                Revert
-              </button>
-              <button class="btn" data-action="settings.refresh">Refresh</button>
+               data-i18n="ui.revert"></button>
+              <button class="btn" data-action="settings.refresh" data-i18n="ui.refresh"></button>
             </div>
             <div class="msg" id="settingsMsg"></div>
           </div>
@@ -728,27 +688,23 @@
         <section class="pane" id="p-wifi">
           <div class="card">
             <h3>WiFi</h3>
-            <div class="section-title">Current Connection</div>
+            <div class="section-title" data-i18n="ui.current.connection"></div>
             <div id="wifiCurrent"></div>
-            <div class="section-title">Profiles</div>
+            <div class="section-title" data-i18n="ui.profiles"></div>
             <div id="wifiProfiles"></div>
-            <div class="section-title">Add Profile</div>
+            <div class="section-title" data-i18n="ui.add.profile"></div>
             <div class="row">
               <label>SSID</label>
               <input id="wifiSsid" type="text">
             </div>
             <div class="row">
-              <label>Password</label>
+              <label data-i18n="ui.password"></label>
               <input id="wifiPass" type="password">
             </div>
             <div class="btns">
-              <button class="btn primary" data-action="wifi.add">Add</button>
-              <button class="btn" data-action="wifi.command" data-value="reconnect">
-                Reconnect
-              </button>
-              <button class="btn danger" data-action="wifi.command" data-value="clear">
-                Clear
-              </button>
+              <button class="btn primary" data-action="wifi.add" data-i18n="ui.add"></button>
+              <button class="btn" data-action="wifi.command" data-value="reconnect" data-i18n="ui.reconnect"></button>
+              <button class="btn danger" data-action="wifi.command" data-value="clear" data-i18n="ui.clear"></button>
             </div>
             <div class="msg" id="wifiMsg"></div>
           </div>
@@ -756,36 +712,36 @@
 
         <section class="pane" id="p-ota">
           <div class="card">
-            <h3>ESP32 Firmware</h3>
+            <h3 data-i18n="ui.esp32.firmware"></h3>
             <div class="row">
-              <label>Version</label>
+              <label data-i18n="ui.version"></label>
               <span class="value" id="otaVersion">--</span>
             </div>
             <div class="row">
-              <label>Latest release</label>
+              <label data-i18n="ui.latest.release"></label>
               <span class="value" id="otaLatest">--</span>
             </div>
             <div class="btns">
               <button class="btn" id="otaCheckUpdate"
-                      data-action="ota.check">Check for updates</button>
+                      data-action="ota.check" data-i18n="ui.check.for.updates"></button>
               <button class="btn primary" id="otaInstallUpdate" hidden
-                      data-action="ota.install-update">Install update</button>
+                      data-action="ota.install-update" data-i18n="ui.install.update"></button>
               <button class="btn" id="otaReleaseNotes" hidden
-                      data-action="ota.release-notes">Release notes</button>
+                      data-action="ota.release-notes" data-i18n="ui.release.notes"></button>
             </div>
             <div class="msg" id="otaUpdateMsg"></div>
-            <div class="section-title">Install firmware</div>
+            <div class="section-title" data-i18n="ui.install.firmware"></div>
             <div class="row">
-              <label>Progress</label>
+              <label data-i18n="ui.progress"></label>
               <span class="value" id="otaProgress">--</span>
             </div>
             <div class="row">
-              <label>Firmware URL</label>
+              <label data-i18n="ui.firmware.url"></label>
               <input id="otaUrl" type="url" placeholder="https://..."
                      data-input-action="ota.source" data-value="url">
             </div>
             <div class="row">
-              <label>Firmware image</label>
+              <label data-i18n="ui.firmware.image"></label>
               <input id="otaFile" type="file" accept=".bin,.zlib,.deflate"
                      data-change-action="ota.source" data-value="file">
             </div>
@@ -794,19 +750,19 @@
             </div>
             <div class="btns">
               <button class="btn primary" id="otaInstall"
-                      data-action="ota.install">Install</button>
+                      data-action="ota.install" data-i18n="ui.install"></button>
             </div>
             <div class="msg" id="otaMsg"></div>
           </div>
 
           <div class="card">
-            <h3>ResMed Firmware</h3>
+            <h3 data-i18n="ui.resmed.firmware"></h3>
             <div class="row">
-              <label>State</label>
+              <label data-i18n="ui.state"></label>
               <span class="value" id="resmedOtaState">--</span>
             </div>
             <div class="row">
-              <label>Progress</label>
+              <label data-i18n="ui.progress"></label>
               <span class="value" id="resmedOtaProgress">--</span>
             </div>
             <div class="row">
@@ -814,38 +770,36 @@
               <span class="value" id="resmedOtaHash">--</span>
             </div>
             <div class="row">
-              <label>Installation method</label>
+              <label data-i18n="ui.installation.method"></label>
               <select id="resmedOtaTransport" data-change-action="resmed.transport">
-                <option value="rpc" selected>Native RPC</option>
-                <option value="service">Patched Bootloader</option>
+                <option value="rpc" selected data-i18n="ui.native.rpc"></option>
+                <option value="service" data-i18n="ui.patched.bootloader"></option>
               </select>
             </div>
             <div class="row">
-              <label>Firmware regions</label>
+              <label data-i18n="ui.firmware.regions"></label>
               <select id="resmedOtaTarget">
                 <option value="APCX" selected>CONF + APPL</option>
                 <option value="APPL">APPL</option>
                 <option value="CONF">CONF</option>
-                <option value="FGBL">Bootloader (FGBL)</option>
-                <option value="FGCB">Full flash (FGBL + CONF + APPL)</option>
+                <option value="FGBL" data-i18n="ui.bootloader.fgbl"></option>
+                <option value="FGCB" data-i18n="ui.full.flash.fgbl.conf.appl"></option>
               </select>
             </div>
-            <div class="section-title">Firmware repository</div>
+            <div class="section-title" data-i18n="ui.firmware.repository"></div>
             <div class="storage-toolbar">
               <span class="storage-path" id="resmedRepositoryPath">
                 /aircannect/resmed-firmware
               </span>
               <div class="btns">
                 <button class="btn primary" id="resmedRepositoryAddBtn"
-                        data-action="resmed.repository-choose">Add</button>
+                        data-action="resmed.repository-choose" data-i18n="ui.add"></button>
                 <button class="btn" id="resmedOtaDumpBtn"
-                        data-action="resmed.dump">Dump current</button>
+                        data-action="resmed.dump" data-i18n="ui.dump.current"></button>
                 <button class="btn" id="resmedRepositoryRefreshBtn"
-                        data-action="resmed.repository-refresh">Refresh</button>
+                        data-action="resmed.repository-refresh" data-i18n="ui.refresh"></button>
                 <button class="btn danger" id="resmedOtaDumpConfirmBtn"
-                        hidden data-action="resmed.dump-confirm">
-                  Install patched bootloader and retry
-                </button>
+                        hidden data-action="resmed.dump-confirm" data-i18n="ui.install.patched.bootloader.and.retry"></button>
               </div>
               <input id="resmedRepositoryInput" type="file" multiple hidden
                      accept=".abc,.bin,.img"
@@ -860,15 +814,15 @@
               <progress id="resmedRepositoryUploadBar" max="1" value="0">
               </progress>
               <button class="btn" id="resmedRepositoryUploadCancelBtn"
-                      data-action="resmed.repository-cancel">Cancel</button>
+                      data-action="resmed.repository-cancel" data-i18n="ui.cancel"></button>
             </div>
             <div class="storage-list" id="resmedRepositoryList">
-              <div class="storage-empty">Loading</div>
+              <div class="storage-empty" data-i18n="ui.loading"></div>
             </div>
             <div class="msg" id="resmedRepositoryMsg"></div>
-            <div class="section-title">Install another image</div>
+            <div class="section-title" data-i18n="ui.install.another.image"></div>
             <div class="row">
-              <label>Firmware image</label>
+              <label data-i18n="ui.firmware.image"></label>
               <input id="resmedOtaFile" type="file" accept=".abc,.bin,.img">
             </div>
             <div class="progress" id="resmedOtaUploadProgress">
@@ -876,17 +830,13 @@
             </div>
             <div class="btns">
               <button class="btn primary" id="resmedOtaInstallBtn"
-                      data-action="resmed.install">
-                Install
-              </button>
+                      data-action="resmed.install" data-i18n="ui.install"></button>
               <button
                 class="btn danger"
                 id="resmedOtaCancelBtn"
                 style="display: none"
                 data-action="resmed.cancel"
-              >
-                Cancel
-              </button>
+               data-i18n="ui.cancel"></button>
             </div>
             <div class="msg" id="resmedOtaMsg"></div>
           </div>
@@ -894,10 +844,10 @@
 
         <section class="pane" id="p-config">
           <div class="card">
-            <h3>Device Config</h3>
+            <h3 data-i18n="ui.device.config"></h3>
             <div id="configFields"></div>
             <div class="btns">
-              <button class="btn primary" data-action="config.save">Save</button>
+              <button class="btn primary" data-action="config.save" data-i18n="ui.save"></button>
             </div>
             <div class="msg" id="configMsg"></div>
           </div>
@@ -905,7 +855,7 @@
 
         <section class="pane" id="p-console">
           <div class="card">
-            <h3>Management Console</h3>
+            <h3 data-i18n="ui.management.console"></h3>
             <div
               id="consoleLog"
               style="
@@ -930,9 +880,9 @@
                 style="flex: 1; width: auto; font-family: 'SF Mono', Consolas, monospace"
                 placeholder="command"
                 data-enter-action="console.send"
-              >
-              <button class="btn primary" data-action="console.send">Send</button>
-              <button class="btn" data-action="console.clear">Clear</button>
+               data-i18n-placeholder="ui.command">
+              <button class="btn primary" data-action="console.send" data-i18n="ui.send"></button>
+              <button class="btn" data-action="console.clear" data-i18n="ui.clear"></button>
             </div>
           </div>
         </section>
@@ -943,44 +893,37 @@
   <nav class="bottom">
     <a class="nav active" data-tab="dash" data-action="app.show-tab"
       data-value="dash">
-      <span class="ico">&#9878;</span>Home
-    </a>
+      <span class="ico">&#9878;</span><span data-i18n="ui.home"></span></a>
     <a class="nav" data-tab="report" data-action="app.show-tab"
       data-value="report">
-      <span class="ico">&#9638;</span>Report
-    </a>
+      <span class="ico">&#9638;</span><span data-i18n="ui.report"></span></a>
     <a class="nav" data-tab="edf" data-action="app.show-tab"
       data-value="edf">
       <span class="ico">&#9635;</span>EDF
     </a>
     <a class="nav" data-tab="clinical" data-action="app.show-tab"
       data-value="clinical">
-      <span class="ico">&#9881;</span>Clinical
-    </a>
+      <span class="ico">&#9881;</span><span data-i18n="ui.clinical"></span></a>
     <a class="nav" data-tab="oxi" data-action="app.show-tab"
       data-value="oxi">
-      <span class="ico">&#9829;</span>Oxi
-    </a>
+      <span class="ico">&#9829;</span><span data-i18n="ui.oxi"></span></a>
     <a class="nav" data-tab="wifi" data-action="app.show-tab"
       data-value="wifi">
       <span class="ico">&#9783;</span>WiFi
     </a>
     <a class="nav" data-tab="ota" data-action="app.show-tab"
       data-value="ota">
-      <span class="ico">&#8679;</span>Update
-    </a>
+      <span class="ico">&#8679;</span><span data-i18n="ui.update"></span></a>
     <a class="nav" data-tab="console" data-action="app.show-tab"
       data-value="console">
       <span class="ico">&#9002;</span>CLI
     </a>
     <a class="nav" data-tab="storage" data-action="app.show-tab"
       data-value="storage">
-      <span class="ico">&#8681;</span>Storage
-    </a>
+      <span class="ico">&#8681;</span><span data-i18n="ui.storage"></span></a>
     <a class="nav" data-tab="config" data-action="app.show-tab"
       data-value="config">
-      <span class="ico">&#9000;</span>Config
-    </a>
+      <span class="ico">&#9000;</span><span data-i18n="ui.config"></span></a>
   </nav>
 
   <script src="js/runtime.js" data-inline></script>

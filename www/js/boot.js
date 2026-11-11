@@ -1,15 +1,15 @@
 (() => {
     const pages = {
-      dash: "Dashboard",
-      report: "Report",
+      dash: AirCANnect.i18n.message("ui.dashboard"),
+      report: AirCANnect.i18n.message("ui.report"),
       edf: "EDF",
-      storage: "Storage",
-      clinical: "Clinical",
-      oxi: "Oximetry",
+      storage: AirCANnect.i18n.message("ui.storage"),
+      clinical: AirCANnect.i18n.message("ui.clinical"),
+      oxi: AirCANnect.i18n.message("ui.oximetry"),
       wifi: "WiFi",
-      ota: "Update",
-      console: "Console",
-      config: "Config",
+      ota: AirCANnect.i18n.message("ui.update"),
+      console: AirCANnect.i18n.message("ui.console"),
+      config: AirCANnect.i18n.message("ui.config"),
     };
 
     AirCANnect.pages.define(pages);
