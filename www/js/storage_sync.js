@@ -109,7 +109,7 @@
       const fileCount = Number(edf.file_count) || 0;
       const recorded = i18n.join([
         i18n.message("storage.file_count", {count: fileCount}), ", ",
-        AirCANnect.format.bytes(Number(edf.bytes) || 0),
+        AirCANnect.i18n.bytes(Number(edf.bytes) || 0),
         error ? "; " + error : "",
       ]);
       AirCANnect.ui.text("edfLastFiles", recorded);
@@ -283,10 +283,10 @@
         const meta = document.createElement("div");
         meta.className = "storage-meta";
         const metaParts = [entry.type === "dir" ?
-          (entry.path || "") : AirCANnect.format.bytes(entry.size)];
+          (entry.path || "") : AirCANnect.i18n.bytes(entry.size)];
         const modified = AirCANnect.format.modified(entry.modified);
         if (modified) metaParts.push(modified);
-        i18n.text(meta, metaParts.filter(Boolean).join(" | "));
+        i18n.text(meta, i18n.join(metaParts.filter(Boolean), " | "));
         info.appendChild(name);
         info.appendChild(meta);
 
@@ -536,7 +536,7 @@
         parts.push(i18n.message("storage.failed_files", {count: failed}));
       } else if (uploaded) {
         parts.push(i18n.message("storage.uploaded_size", {
-          count: uploaded, size: AirCANnect.format.bytes(bytes),
+          count: uploaded, size: AirCANnect.i18n.bytes(bytes),
         }));
       } else if (seen) {
         parts.push(i18n.message("storage.up_to_date"));
@@ -664,7 +664,7 @@
       }
       if (uploaded) {
         return i18n.message("storage.synced", {when, count: uploaded,
-          size: AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0)});
+          size: AirCANnect.i18n.bytes(Number(data.bytes_uploaded) || 0)});
       }
       if (seen && skipped === seen) {
         return i18n.message("storage.verified", {when, count: seen});
@@ -844,7 +844,7 @@
       }
       if (uploaded) {
         return i18n.message("storage.synced", {when: "", count: uploaded,
-          size: AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0)});
+          size: AirCANnect.i18n.bytes(Number(data.bytes_uploaded) || 0)});
       }
       if (seen && Number(data.files_skipped) === seen) {
         return i18n.message("storage.verified", {when: "", count: seen});
@@ -975,10 +975,10 @@
       if (state === "downloading") {
         if (estimate <= 0) return i18n.message("storage.downloading");
         const pct = Math.min(100, Math.floor(bytesSent * 100 / estimate));
-        const sentMiB = (bytesSent / (1024 * 1024)).toFixed(1);
-        const totalMiB = (estimate / (1024 * 1024)).toFixed(1);
+        const sentMiB = i18n.numberMessage(bytesSent / (1024 * 1024), 1, 1);
+        const totalMiB = i18n.numberMessage(estimate / (1024 * 1024), 1, 1);
         return i18n.message("storage.download_progress", {percent: pct,
-          sent: Number(sentMiB), total: Number(totalMiB)});
+          sent: sentMiB, total: totalMiB});
       }
       if (state === "error") return data && data.error ? data.error : i18n.message("storage.archive_failed");
       return state;

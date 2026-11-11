@@ -122,7 +122,8 @@
         const data = await AirCANnect.http.postJson("/api/wifi",
           Object.assign({action}, extra || {}));
 
-        AirCANnect.ui.message("wifiMsg", data.result, data.ok);
+        AirCANnect.ui.message("wifiMsg", data.result === "queued" ?
+          AirCANnect.i18n.message("status.queued") : data.result, data.ok);
         setTimeout(loadWifi, 600);
       } catch (error) {
         AirCANnect.ui.message("wifiMsg", AirCANnect.i18n.error(error), false);

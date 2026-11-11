@@ -902,8 +902,9 @@
             (fileIndex + 1) + "/" + fileCount + " " : "") + name;
         }
         if (amountNode) {
-          amountNode.textContent = formatBytes(safeCommitted) + " / " +
-            formatBytes(safeTotal);
+          localizedText(amountNode, localizedJoin([
+            localizedBytes(safeCommitted), " / ", localizedBytes(safeTotal),
+          ]));
         }
         if (bar) {
           bar.max = Math.max(1, safeTotal);
@@ -911,15 +912,16 @@
         }
       }
 
-      function formatBytes(bytes) {
+      function localizedBytes(bytes) {
         const value = Number(bytes);
         if (!Number.isFinite(value) || value < 0) return "--";
-        if (value < 1024) return Math.round(value) + " B";
-        if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KiB";
-        if (value < 1024 * 1024 * 1024) {
-          return (value / (1024 * 1024)).toFixed(1) + " MiB";
-        }
-        return (value / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+        const exponent = value < 1024 ? 0 : value < 1024 ** 2 ? 1 :
+          value < 1024 ** 3 ? 2 : 3;
+        const digits = [0, 1, 1, 2][exponent];
+        return localizedJoin([
+          localizedNumberMessage(value / 1024 ** exponent, digits, digits),
+          " ", ["B", "KiB", "MiB", "GiB"][exponent],
+        ]);
       }
 
       function formatDuration(seconds) {
@@ -961,6 +963,7 @@
           join: localizedJoin,
           number: localizedNumber,
           numberMessage: localizedNumberMessage,
+          bytes: localizedBytes,
           translate: translateElements,
           onChange: onLanguageChange,
           language: () => uiLanguage,
@@ -981,7 +984,7 @@
           setDefault: defaultFieldValue,
         }),
         format: Object.freeze({
-          bytes: formatBytes,
+          bytes: (value) => localizedValue(localizedBytes(value)),
           duration: formatDuration,
           modified: formatModified,
           pad2,

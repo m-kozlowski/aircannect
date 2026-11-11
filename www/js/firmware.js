@@ -148,19 +148,19 @@
       }
       if (data.http_prepare_pending) {
         const size = data.total_size || data.wire_total_size || 0;
-        AirCANnect.ui.text("otaProgress", i18n.message("ota.preparing_size", {size: AirCANnect.format.bytes(size)}));
+        AirCANnect.ui.text("otaProgress", i18n.message("ota.preparing_size", {size: AirCANnect.i18n.bytes(size)}));
         return;
       }
       if (data.http_prepared && !data.http_active) {
         const size = data.total_size || data.wire_total_size || 0;
-        AirCANnect.ui.text("otaProgress", i18n.message("ota.ready_size", {size: AirCANnect.format.bytes(size)}));
+        AirCANnect.ui.text("otaProgress", i18n.message("ota.ready_size", {size: AirCANnect.i18n.bytes(size)}));
         return;
       }
       let text;
       if (data.encoding === "zlib" && data.wire_total_size) {
-        text = i18n.message("ota.progress_size", {percent: data.progress || 0, wire: AirCANnect.format.bytes(data.wire_bytes || 0), raw: AirCANnect.format.bytes(data.bytes || 0)});
+        text = i18n.message("ota.progress_size", {percent: data.progress || 0, wire: AirCANnect.i18n.bytes(data.wire_bytes || 0), raw: AirCANnect.i18n.bytes(data.bytes || 0)});
       } else {
-        text = (data.progress || 0) + "% / " + AirCANnect.format.bytes(data.bytes || 0);
+        text = i18n.join([data.progress || 0, "% / ", i18n.bytes(data.bytes || 0)]);
       }
       AirCANnect.ui.text("otaProgress", text);
 
@@ -355,7 +355,7 @@
     }
 
     function setOtaUploadProgress(percent, bytes) {
-      AirCANnect.ui.text("otaProgress", percent + "% / " + AirCANnect.format.bytes(bytes || 0));
+      AirCANnect.ui.text("otaProgress", i18n.join([percent, "% / ", i18n.bytes(bytes || 0)]));
     }
 
     function otaSourceChanged(source) {
@@ -658,7 +658,7 @@
       if (!resmedOtaRate.bps) return "";
       const remaining = Math.max(0, total - bytes);
       const eta = AirCANnect.format.duration(remaining / resmedOtaRate.bps);
-      return AirCANnect.format.bytes(resmedOtaRate.bps) + "/s" + (eta ? " ETA " + eta : "");
+      return i18n.join([i18n.bytes(resmedOtaRate.bps), "/s", eta ? " ETA " + eta : ""]);
     }
 
     function renderResmedOta(data) {
@@ -676,8 +676,8 @@
       const stateText = data.waiting && displayPhase !== "programming" ? i18n.message("ota.waiting", {state: resmedOtaStatusText(data)}) : resmedOtaStatusText(data);
       const progressValue = data.prepare_active ?
         Number(data.prepare_progress || 0) : Number(data.progress || 0);
-      const progressText = progressValue + "%" +
-        (rateText ? " " + rateText : "");
+      const progressText = i18n.join([progressValue, "%",
+        ...(rateText ? [" ", rateText] : [])]);
       AirCANnect.ui.text("resmedOtaState", stateText);
       AirCANnect.ui.text("resmedOtaProgress", progressText);
       AirCANnect.ui.text("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
@@ -828,9 +828,9 @@
         };
         const meta = document.createElement("div");
         meta.className = "storage-meta";
-        i18n.text(meta, AirCANnect.format.bytes(entry.size) +
+        i18n.text(meta, i18n.join([i18n.bytes(entry.size),
           (AirCANnect.format.modified(entry.modified) ?
-            " / " + AirCANnect.format.modified(entry.modified) : ""));
+            " / " + AirCANnect.format.modified(entry.modified) : "")]));
         details.appendChild(name);
         details.appendChild(meta);
 
@@ -1115,8 +1115,8 @@
       const install = document.getElementById("resmedOtaInstallBtn");
 
       AirCANnect.ui.text("resmedOtaState", i18n.message("ota.uploading_name", {name}));
-      AirCANnect.ui.text("resmedOtaProgress", percent + "% " + AirCANnect.format.bytes(safeCommitted) +
-        " / " + AirCANnect.format.bytes(safeTotal));
+      AirCANnect.ui.text("resmedOtaProgress", i18n.join([percent, "% ", i18n.bytes(safeCommitted),
+        " / ", i18n.bytes(safeTotal)]));
       if (progress) progress.style.display = "block";
       if (bar) bar.style.width = percent + "%";
       if (cancel) {

@@ -143,7 +143,9 @@
       const used = Number(data.storage_used || 0);
       const free = Math.max(0, total - used);
       if (data.storage_state === "mounted" && total > 0) {
-        text = AirCANnect.format.bytes(free) + " / " + AirCANnect.format.bytes(total);
+        text = AirCANnect.i18n.join([
+          AirCANnect.i18n.bytes(free), " / ", AirCANnect.i18n.bytes(total),
+        ]);
         percent = Math.max(0, Math.min(100, used / total * 100));
       }
 
@@ -158,7 +160,7 @@
       const recording = data.edf || {};
       const issues = [
         {tab: "storage", active: !!data.storage_low_space,
-          text: AirCANnect.i18n.message("status.low_space", {free: AirCANnect.format.bytes(free)})},
+          text: AirCANnect.i18n.message("status.low_space", {free: AirCANnect.i18n.bytes(free)})},
         {tab: "edf", active: !!recording.storage_blocked,
           text: AirCANnect.i18n.message("status.edf_suspended"), detail: recording.storage_error || ""},
       ];
@@ -249,16 +251,16 @@
         sourceKind + (sourceDetail ? " " + sourceDetail : "");
       let sourceStatus = AirCANnect.i18n.message("status.no_source");
       if (!oxi.enabled) {
-        sourceStatus = "off";
+        sourceStatus = AirCANnect.i18n.message("ui.off");
       } else if (oxi.source_present && oxi.source_fresh && oxi.valid) {
-        sourceStatus = "fresh";
+        sourceStatus = AirCANnect.i18n.message("state.fresh");
       } else if (oxi.source_present && oxi.source_fresh &&
           oxi.contact_known && !oxi.contact_present) {
         sourceStatus = AirCANnect.i18n.message("status.no_finger");
       } else if (oxi.source_present && oxi.source_fresh) {
-        sourceStatus = "invalid";
+        sourceStatus = AirCANnect.i18n.message("state.invalid");
       } else if (oxi.source_present) {
-        sourceStatus = "stale";
+        sourceStatus = AirCANnect.i18n.message("state.stale");
       }
       AirCANnect.ui.text("oxiSource", sourceIdentity === "none" ?
         sourceStatus : AirCANnect.i18n.join([sourceIdentity, sourceStatus], " "));
@@ -268,8 +270,8 @@
       const integrationAvailable =
         oxi.airsense_integration_available !== false;
       const as11 = !integrationAvailable ? AirCANnect.i18n.message("status.local_sa2") :
-        oxi.subscribed ? "subscribed" :
-          oxi.connected ? "connected" : AirCANnect.i18n.message("status.not_connected");
+        oxi.subscribed ? AirCANnect.i18n.message("state.subscribed") :
+          oxi.connected ? AirCANnect.i18n.message("status.connected") : AirCANnect.i18n.message("status.not_connected");
       AirCANnect.ui.text("oxiAs11", as11);
       AirCANnect.ui.text("oxiTabAs11", as11);
 
@@ -285,7 +287,8 @@
       } else if (oxi.manual_advertising_requested) {
         advertiseState = "requested";
       }
-      let advertise = (oxi.advertise_mode || "--") + " / " + advertiseState;
+      let advertise = AirCANnect.i18n.join([oxi.advertise_mode || "--", " / ",
+        AirCANnect.i18n.message("state." + advertiseState, {}, advertiseState)]);
       if (oxi.pairing_active) {
         advertise = AirCANnect.i18n.message("status.pairing_left", {
           advertise, seconds: Math.ceil((oxi.pairing_left_ms || 0) / 1000),
@@ -394,7 +397,7 @@
       }
       const badge = document.getElementById("oxiSensorBadge");
       if (badge) {
-        AirCANnect.i18n.text(badge, badgeText);
+        AirCANnect.i18n.text(badge, AirCANnect.i18n.message("state." + badgeText, {}, badgeText));
         badge.className = "badge " + badgeStyle;
       }
 
@@ -541,11 +544,11 @@
           : "");
       }
 
-      let memory = (data.heap / 1024).toFixed(1) + " KB heap";
+      const memory = [AirCANnect.i18n.numberMessage(data.heap / 1024, 1, 1), " KB heap"];
       if (data.psram_available) {
-        memory += " / " + (data.psram_free / 1048576).toFixed(1) + " MB psram";
+        memory.push(" / ", AirCANnect.i18n.numberMessage(data.psram_free / 1048576, 1, 1), " MB psram");
       }
-      AirCANnect.ui.text("heap", memory);
+      AirCANnect.ui.text("heap", AirCANnect.i18n.join(memory));
       AirCANnect.ui.text("uptime", AirCANnect.i18n.message("status.uptime", {duration: fmtUp(data.uptime || 0)}));
       setWifiTop(data);
       AirCANnect.ui.text("productName", data.device_name || AirCANnect.i18n.message("status.resmed_device"));
@@ -837,7 +840,8 @@
           body: JSON.stringify(body),
         });
         const data = await response.json();
-        AirCANnect.ui.message(msgId || "oxiTabMsg", data.result || AirCANnect.i18n.message("status.queued"), data.ok);
+        AirCANnect.ui.message(msgId || "oxiTabMsg",
+          !data.result || data.result === "queued" ? AirCANnect.i18n.message("status.queued") : data.result, data.ok);
       } catch (error) {
         AirCANnect.ui.message(msgId || "oxiTabMsg", AirCANnect.i18n.error(error), false);
       }
