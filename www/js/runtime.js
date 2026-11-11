@@ -984,7 +984,6 @@
           setDefault: defaultFieldValue,
         }),
         format: Object.freeze({
-          bytes: (value) => localizedValue(localizedBytes(value)),
           duration: formatDuration,
           modified: formatModified,
           pad2,

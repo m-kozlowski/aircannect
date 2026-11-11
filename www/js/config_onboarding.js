@@ -1369,7 +1369,8 @@
     AirCANnect.actions.register("as11.connect-dashboard", async (_event, button) => {
       button.disabled = true;
       try {
-        await as11BleAction("connect", null, (message) => alert(message));
+        await as11BleAction("connect", null, (message) =>
+          alert(AirCANnect.i18n.format(message)));
       } finally {
         button.disabled = false;
       }

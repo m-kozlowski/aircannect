@@ -587,7 +587,8 @@
         AirCANnect.i18n.message("status.motor_hours", {hours: Number(data.motor_hours)}) : "--");
       AirCANnect.ui.text("deviceTime", fmtIsoMinute(data.device_datetime,
         data.device_datetime_age_ms));
-      AirCANnect.ui.text("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
+      AirCANnect.ui.text("espTime", data.esp_time_valid ?
+        fmtIsoMinute(data.esp_datetime) : AirCANnect.i18n.message("status.clock_invalid"));
       renderStorageStatus(data);
       renderSystemIssues(data);
       AirCANnect.ui.text("timeSync", fmtSync(data));
