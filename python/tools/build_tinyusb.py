@@ -64,5 +64,8 @@ def configure(env):
 
 
 if "Import" in globals():
+    from SCons.Script import COMMAND_LINE_TARGETS
+
     Import("env")
-    configure(env)
+    if "nobuild" not in COMMAND_LINE_TARGETS:
+        configure(env)
