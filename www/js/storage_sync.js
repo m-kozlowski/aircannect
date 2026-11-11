@@ -1,4 +1,6 @@
 (() => {
+
+    const i18n = AirCANnect.i18n;
     let storagePath = "/";
     let storageOffset = 0;
     let storageLimit = 64;
@@ -20,10 +22,10 @@
     let smbSyncBusy = false;
     let smbSyncEnabled = false;
     let smbSyncConfigured = false;
-    let smbSyncCompleteMessage = "SMB sync complete";
+    let smbSyncCompleteMessage = i18n.message("storage.smb_complete");
     let sleepHqSyncBusy = false;
     let sleepHqSyncConfigured = false;
-    let sleepHqSyncCompleteMessage = "SleepHQ sync complete";
+    let sleepHqSyncCompleteMessage = i18n.message("storage.shq_complete");
 
     function storageErrorText(text, status) {
       try {
@@ -75,7 +77,7 @@
     function storageSetBadge(text, cls) {
       const badge = document.getElementById("storageBadge");
       if (!badge) return;
-      badge.textContent = text;
+      i18n.text(badge, text);
       badge.className = "badge" + (cls ? " " + cls : "");
     }
 
@@ -90,25 +92,26 @@
       const edf = status && status.edf;
       const error = String(edf && edf.error || "").trim();
       if (!edf || !edf.ready) {
-        AirCANnect.ui.text("edfLastSession", error ? "Unavailable" :
-          (!edf || edf.refreshing ? "Loading" : "Unavailable"));
+        AirCANnect.ui.text("edfLastSession", error ? i18n.message("status.unavailable") :
+          (!edf || edf.refreshing ? i18n.message("ui.loading") : i18n.message("status.unavailable")));
         AirCANnect.ui.text("edfLastFiles", error || "--");
         return;
       }
 
       const session = String(edf.session || "");
       AirCANnect.ui.text("edfLastSession", session ?
-        edfSessionLabel(session) : "No EDF sessions");
+        edfSessionLabel(session) : i18n.message("storage.no_sessions"));
       if (!session) {
         AirCANnect.ui.text("edfLastFiles", error || "--");
         return;
       }
 
       const fileCount = Number(edf.file_count) || 0;
-      let recorded = fileCount + " file" +
-        (fileCount === 1 ? "" : "s") + ", " +
-        AirCANnect.format.bytes(Number(edf.bytes) || 0);
-      if (error) recorded += "; " + error;
+      const recorded = i18n.join([
+        i18n.message("storage.file_count", {count: fileCount}), ", ",
+        AirCANnect.format.bytes(Number(edf.bytes) || 0),
+        error ? "; " + error : "",
+      ]);
       AirCANnect.ui.text("edfLastFiles", recorded);
     }
 
@@ -134,14 +137,16 @@
       const archiveBtn = document.getElementById("storageArchiveBtn");
       if (archiveBtn) {
         archiveBtn.disabled = archiveBusy || selected === 0;
-        archiveBtn.textContent = selected > 0 ?
-          "Download Selected (" + selected + ")" : "Download Selected";
+        i18n.text(archiveBtn, selected > 0 ?
+          i18n.message("storage.download_selected", {count: selected}) :
+          i18n.message("ui.download.selected"));
       }
       const deleteBtn = document.getElementById("storageDeleteBtn");
       if (deleteBtn) {
         deleteBtn.disabled = destructiveBusy || selected === 0;
-        deleteBtn.textContent = selected > 0 ?
-          "Delete Selected (" + selected + ")" : "Delete Selected";
+        i18n.text(deleteBtn, selected > 0 ?
+          i18n.message("storage.delete_selected", {count: selected}) :
+          i18n.message("ui.delete.selected"));
       }
       const uploadBtn = document.getElementById("storageUploadBtn");
       if (uploadBtn) uploadBtn.disabled = storageJobBusy || exportBusy;
@@ -235,9 +240,9 @@
       if (upBtn) upBtn.disabled = storagePath === "/";
       if (prevBtn) prevBtn.disabled = storageOffset <= 0;
       if (nextBtn) nextBtn.disabled = storageNextOffset === null;
-      storageSetBadge((data && data.truncated ? "Page " : "") +
-                  entries.length + " item" + (entries.length === 1 ? "" : "s"),
-                  data && data.truncated ? "warn" : "good");
+      storageSetBadge(i18n.message(data && data.truncated ?
+        "storage.page_items" : "storage.items", {count: entries.length}),
+        data && data.truncated ? "warn" : "good");
 
       const message = document.getElementById("storageMsg");
       if (message) message.className = "msg";
@@ -247,7 +252,7 @@
       if (!entries.length) {
         const empty = document.createElement("div");
         empty.className = "storage-empty";
-        empty.textContent = "No files";
+        i18n.text(empty, i18n.message("storage.no_files"));
         root.appendChild(empty);
         storageSelectionUi();
         return;
@@ -266,7 +271,7 @@
         const info = document.createElement("div");
         const name = document.createElement("div");
         name.className = "storage-name";
-        name.textContent = entry.name || entry.path || "--";
+        i18n.text(name, entry.name || entry.path || "--");
         name.tabIndex = 0;
         name.onclick = () => storageOpenEntry(entry);
         name.onkeydown = (event) => {
@@ -281,7 +286,7 @@
           (entry.path || "") : AirCANnect.format.bytes(entry.size)];
         const modified = AirCANnect.format.modified(entry.modified);
         if (modified) metaParts.push(modified);
-        meta.textContent = metaParts.filter(Boolean).join(" | ");
+        i18n.text(meta, metaParts.filter(Boolean).join(" | "));
         info.appendChild(name);
         info.appendChild(meta);
 
@@ -289,14 +294,14 @@
         actions.className = "storage-entry-actions";
         const rename = document.createElement("button");
         rename.className = "btn";
-        rename.textContent = "Rename";
+        i18n.text(rename, i18n.message("storage.rename"));
         rename.dataset.storageAction = "rename";
         rename.onclick = () => storageRenameEntry(entry);
         const download = document.createElement("button");
         download.className = "btn primary storage-action";
-        download.textContent = "\u2193";
-        download.title = entry.type === "dir" ?
-          "Download directory as ZIP" : "Download file";
+        i18n.text(download, "\u2193");
+        i18n.text(download, entry.type === "dir" ?
+          i18n.message("storage.download_directory") : i18n.message("storage.download_file"), "title");
         download.setAttribute("aria-label", download.title);
         download.dataset.storageAction = entry.type === "dir" ? "archive" : "download";
         download.onclick = () => storageDownloadEntry(entry);
@@ -317,7 +322,7 @@
         storageOffset = 0;
         storageClearSelection();
       }
-      storageSetBadge("Loading", "warn");
+      storageSetBadge(i18n.message("ui.loading"), "warn");
       try {
         const data = await fetchStorageList(storagePath,
           storageOffset, storageLimit, reset);
@@ -325,8 +330,8 @@
         renderStorageList(data);
       } catch (error) {
         if (requestSeq !== storageListRequestSeq) return;
-        storageSetBadge("Unavailable", "bad");
-        AirCANnect.ui.message("storageMsg", error.message, false, true);
+        storageSetBadge(i18n.message("status.unavailable"), "bad");
+        AirCANnect.ui.message("storageMsg", i18n.error(error), false, true);
       }
     }
 
@@ -353,12 +358,12 @@
 
     async function storageDownload(path, messageId) {
       const target = messageId || "storageMsg";
-      AirCANnect.ui.message(target, "Preparing download", true, false);
+      AirCANnect.ui.message(target, i18n.message("storage.prepare_download"), true, false);
       try {
         await AirCANnect.files.download(path);
-        AirCANnect.ui.message(target, "Download started", true, false);
+        AirCANnect.ui.message(target, i18n.message("storage.download_started"), true, false);
       } catch (error) {
-        AirCANnect.ui.message(target, error.message, false, true);
+        AirCANnect.ui.message(target, i18n.error(error), false, true);
       }
     }
 
@@ -371,17 +376,19 @@
 
       storageRenameBusy = true;
       storageSelectionUi();
-      AirCANnect.ui.message("storageMsg", "Renaming " + entry.name, true, false);
+      AirCANnect.ui.message("storageMsg", i18n.message(
+        "storage.renaming", {name: entry.name}), true, false);
       try {
         const renamed = await storageRenamePath(storagePath, entry.name);
         if (!renamed) return;
 
-        AirCANnect.ui.message("storageMsg", "Renamed " + entry.name + " to " + renamed,
+        AirCANnect.ui.message("storageMsg", i18n.message(
+          "storage.renamed", {name: entry.name, renamed}),
           true, false);
         storageClearSelection();
         await loadStorageList(true);
       } catch (error) {
-        AirCANnect.ui.message("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", i18n.error(error), false, true);
       } finally {
         storageRenameBusy = false;
         storageSelectionUi();
@@ -430,7 +437,7 @@
       const operation = AirCANnect.uploads.begin();
       if (!operation) {
         AirCANnect.ui.message(
-          "storageMsg", "Another upload is already active", false, true);
+          "storageMsg", i18n.message("storage.upload_busy"), false, true);
         return;
       }
 
@@ -453,16 +460,16 @@
           }
         }
         if (operation.cancelled) {
-          AirCANnect.ui.message("storageMsg", "Upload cancelled", true, false);
+          AirCANnect.ui.message("storageMsg", i18n.message("storage.upload_cancelled"), true, false);
         } else {
-          AirCANnect.ui.message("storageMsg", "Uploaded " + uploaded + " file" +
-            (uploaded === 1 ? "" : "s"), true, false);
+          AirCANnect.ui.message("storageMsg", i18n.message(
+            "storage.uploaded", {count: uploaded}), true, false);
         }
       } catch (error) {
         if (error.message === "upload_cancelled") {
-          AirCANnect.ui.message("storageMsg", "Upload cancelled", true, false);
+          AirCANnect.ui.message("storageMsg", i18n.message("storage.upload_cancelled"), true, false);
         } else {
-          AirCANnect.ui.message("storageMsg", error.message, false, true);
+          AirCANnect.ui.message("storageMsg", i18n.error(error), false, true);
         }
       } finally {
         operation.close();
@@ -502,8 +509,8 @@
       const value = Number(ms) || 0;
       if (!current || !value || current < value) return "";
       const age = Math.max(0, Math.round((current - value) / 1000));
-      return age < 5 ? "just now" :
-        AirCANnect.format.duration(age) + " ago";
+      return age < 5 ? i18n.message("storage.just_now") :
+        i18n.message("storage.ago", {duration: AirCANnect.format.duration(age)});
     }
 
     function retryInText(ms) {
@@ -512,8 +519,8 @@
         Number(status.uptime) * 1000 : 0;
       const value = Number(ms) || 0;
       if (!current || !value || value <= current) return "";
-      return "Retry in " + AirCANnect.format.duration(
-        Math.ceil((value - current) / 1000));
+      return i18n.message("storage.retry_in", {duration:
+        AirCANnect.format.duration(Math.ceil((value - current) / 1000))});
     }
 
     function syncLastText(data, configured) {
@@ -524,16 +531,17 @@
       const bytes = Number(data.last_sync_bytes_uploaded) || 0;
       const when = AirCANnect.format.modified(data.last_sync_epoch);
       if (!when && !seen) return "--";
-      let text = when || "Completed";
+      const parts = [when || i18n.message("storage.completed")];
       if (failed) {
-        text += ", " + failed + " failed";
+        parts.push(i18n.message("storage.failed_files", {count: failed}));
       } else if (uploaded) {
-        text += ", uploaded " + uploaded + " file" +
-          (uploaded === 1 ? "" : "s") + " (" + AirCANnect.format.bytes(bytes) + ")";
+        parts.push(i18n.message("storage.uploaded_size", {
+          count: uploaded, size: AirCANnect.format.bytes(bytes),
+        }));
       } else if (seen) {
-        text += ", up to date";
+        parts.push(i18n.message("storage.up_to_date"));
       }
-      return text;
+      return i18n.join(parts, ", ");
     }
 
     function syncStatusActive(data) {
@@ -544,13 +552,13 @@
 
     function syncBadgeText(data, configured) {
       if (!data || data.ok === false) return "--";
-      if (!configured) return "Setup";
+      if (!configured) return i18n.message("storage.setup");
       const state = data.state || "unknown";
-      if (state === "working") return "Syncing";
-      if (state === "pending") return "Queued";
-      if (state === "error") return "Error";
-      if (state === "disabled") return "Off";
-      return "Ready";
+      if (state === "working") return i18n.message("storage.syncing");
+      if (state === "pending") return i18n.message("status.queued");
+      if (state === "error") return i18n.message("storage.error");
+      if (state === "disabled") return i18n.message("ui.off");
+      return i18n.message("status.ready");
     }
 
     function syncBadgeClass(data, configured) {
@@ -582,17 +590,17 @@
           return;
         }
         setBusy(false);
-        AirCANnect.ui.message(messageId, error.message, false, true);
+        AirCANnect.ui.message(messageId, i18n.error(error), false, true);
       }
     }
 
     function smbFriendlyError(error) {
       const text = String(error || "");
-      if (!text) return "Sync failed";
-      if (/timed out/i.test(text)) return "Connection timed out";
-      if (/auth|access|denied|logon/i.test(text)) return "Authentication failed";
-      if (/resolve|address|host/i.test(text)) return "Host not found";
-      if (/No such file|not found|PATH_NOT_FOUND/i.test(text)) return "Remote path not found";
+      if (!text) return i18n.message("storage.sync_failed");
+      if (/timed out/i.test(text)) return i18n.message("storage.connection_timeout");
+      if (/auth|access|denied|logon/i.test(text)) return i18n.message("storage.authentication_failed");
+      if (/resolve|address|host/i.test(text)) return i18n.message("storage.host_not_found");
+      if (/No such file|not found|PATH_NOT_FOUND/i.test(text)) return i18n.message("storage.path_not_found");
       return text.replace(/^[a-z_]+:/i, "");
     }
 
@@ -601,8 +609,8 @@
     }
 
     function smbSyncResultText(data) {
-      if (!data || data.ok === false) return "Unavailable";
-      if (!data.enabled || !data.configured) return "Configure an SMB endpoint first";
+      if (!data || data.ok === false) return i18n.message("status.unavailable");
+      if (!data.enabled || !data.configured) return i18n.message("storage.configure_smb");
       const state = data.state || "unknown";
       const seen = Number(data.files_seen) || 0;
       const uploaded = Number(data.files_uploaded) || 0;
@@ -612,57 +620,57 @@
         data.pending_reason === "startup_check";
       if (state === "working") {
         if (smbSyncCheckingShare(data)) {
-          return seen ? "Checking share: " + seen + " files checked" :
-            "Checking share";
+          return seen ? i18n.message("storage.checking_share_count", {count: seen}) :
+            i18n.message("storage.checking_share");
         }
-        if (verify) return "Checking latest data";
-        return seen ? "Checking files: " + seen + " seen" : "Starting sync";
+        if (verify) return i18n.message("storage.checking_latest");
+        return seen ? i18n.message("storage.checking_files", {count: seen}) :
+          i18n.message("storage.starting_sync");
       }
       if (state === "pending") {
         if (smbSyncCheckingShare(data)) {
-          return data.network_available ? "Waiting to check share" :
-            "Waiting for network";
+          return data.network_available ? i18n.message("storage.waiting_share") :
+            i18n.message("storage.waiting_network");
         }
         if (data.pending_reason === "startup_check") {
-          return data.network_available ? "Checking latest data" :
-            "Waiting for network";
+          return data.network_available ? i18n.message("storage.checking_latest") :
+            i18n.message("storage.waiting_network");
         }
-        return "Waiting to sync";
+        return i18n.message("storage.waiting_sync");
       }
       if (state === "error") {
         const retry = retryInText(data.retry_due_ms);
         const age = runtimeAgeText(data.updated_ms);
-        return "Last sync failed" + (age ? " " + age : "") + ": " +
-          smbFriendlyError(data.error || data.last_error) +
-          (retry ? ". " + retry : "");
+        return i18n.message("storage.last_failed", {
+          age, error: smbFriendlyError(data.error || data.last_error), retry,
+        });
       }
-      if (!data.started_ms) return "Not checked yet";
+      if (!data.started_ms) return i18n.message("storage.not_checked");
       const age = runtimeAgeText(data.updated_ms);
-      const when = age ? " " + age : "";
+      const when = age ? i18n.join([" ", age]) : "";
       if (data.last_run_verify) {
         if (seen) {
-          return (data.last_run_reconcile ? "Share checked" :
-            "Latest data checked") + when + " (" + seen +
-            " file" + (seen === 1 ? "" : "s") + ")";
+          return i18n.message("storage.checked_count", {
+            label: i18n.message(data.last_run_reconcile ?
+              "storage.share_checked" : "storage.latest_checked"),
+            when, count: seen,
+          });
         }
-        return (data.last_run_reconcile ? "Share reachable" :
-          "Endpoint reachable") + when;
+        return i18n.join([i18n.message(data.last_run_reconcile ?
+          "storage.share_reachable" : "storage.endpoint_reachable"), when]);
       }
       if (failed) {
-        return "Last sync finished" + when + " with " + failed +
-          " failed file" +
-          (failed === 1 ? "" : "s");
+        return i18n.message("storage.finished_failed", {when, count: failed});
       }
       if (uploaded) {
-        return "Synced" + when + ": uploaded " + uploaded + " file" +
-          (uploaded === 1 ? "" : "s") + " (" +
-          AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0) + ")";
+        return i18n.message("storage.synced", {when, count: uploaded,
+          size: AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0)});
       }
       if (seen && skipped === seen) {
-        return "Up to date" + when + " (" + seen + " files checked)";
+        return i18n.message("storage.verified", {when, count: seen});
       }
-      return seen ? "Checked" + when + ": " + seen + " files" :
-        "Ready";
+      return seen ? i18n.message("storage.checked", {when, count: seen}) :
+        i18n.message("status.ready");
     }
 
     function smbSyncNowText(data) {
@@ -671,20 +679,20 @@
       const state = data.state || "unknown";
       if (state === "working") {
         if (smbSyncCheckingShare(data)) {
-          return data.current_path ? "Checking " + data.current_path :
-            "Checking share";
+          return data.current_path ? i18n.message("storage.checking_path", {path: data.current_path}) :
+            i18n.message("storage.checking_share");
         }
-        if (data.last_run_verify) return "Checking latest data";
-        return data.current_path ? "Syncing " + data.current_path : "Syncing";
+        if (data.last_run_verify) return i18n.message("storage.checking_latest");
+        return data.current_path ? i18n.message("storage.syncing_path", {path: data.current_path}) : i18n.message("storage.syncing");
       }
       if (state === "pending") {
         if (smbSyncCheckingShare(data)) {
-          return data.network_available ? "Queued" : "Waiting for network";
+          return data.network_available ? i18n.message("status.queued") : i18n.message("storage.waiting_network");
         }
         if (data.pending_reason === "startup_check") {
-          return data.network_available ? "Queued" : "Waiting for network";
+          return data.network_available ? i18n.message("status.queued") : i18n.message("storage.waiting_network");
         }
-        return "Queued";
+        return i18n.message("status.queued");
       }
       if (state === "error") return retryInText(data.retry_due_ms) || "--";
       return "--";
@@ -697,20 +705,20 @@
       const reconcileSeen = Number(data.last_reconcile_files_seen) || 0;
       const reconcileWhen = AirCANnect.format.modified(data.last_reconcile_epoch);
       if (reconcileWhen || reconcileSeen) {
-        let text = reconcileWhen || "Share checked";
+        const text = reconcileWhen || i18n.message("storage.share_checked");
         if (reconcileSeen) {
-          text += ", " + reconcileSeen + " file" +
-            (reconcileSeen === 1 ? "" : "s");
+          return i18n.join([text,
+            i18n.message("storage.file_count", {count: reconcileSeen})], ", ");
         }
         return text;
       }
       const seen = Number(data.last_verify_files_seen) || 0;
       const when = AirCANnect.format.modified(data.last_verify_epoch);
       if (!when && !seen) return "--";
-      let text = when || "Latest data checked";
+      const text = when || i18n.message("storage.latest_checked");
       if (seen) {
-        text += ", latest " + seen + " file" +
-          (seen === 1 ? "" : "s");
+        return i18n.join([text,
+          i18n.message("storage.latest_files", {count: seen})], ", ");
       }
       return text;
     }
@@ -725,7 +733,7 @@
       AirCANnect.ui.text("edfSyncCurrent", smbSyncNowText(data));
       const badge = document.getElementById("edfSyncBadge");
       if (badge) {
-        badge.textContent = syncBadgeText(data, configured);
+        i18n.text(badge, syncBadgeText(data, configured));
         badge.className = syncBadgeClass(data, configured);
       }
     }
@@ -736,7 +744,7 @@
       if (active && !wasActive) {
         smbSyncCompleteMessage = data.pending_reason === "startup_check" ||
           data.pending_reason === "verify_recent" || data.last_run_verify ?
-          "SMB check complete" : "SMB sync complete";
+          i18n.message("storage.smb_checked") : i18n.message("storage.smb_complete");
       }
 
       smbSyncEnabled = !!(data && data.enabled);
@@ -745,7 +753,7 @@
       smbSyncSetBusy(active);
 
       if (data && data.state === "error") {
-        AirCANnect.ui.message("edfSmbMsg", data.error || "SMB sync failed", false, true);
+        AirCANnect.ui.message("edfSmbMsg", data.error || i18n.message("storage.smb_failed"), false, true);
       } else if (data && wasActive && !active && data.state === "idle") {
         AirCANnect.ui.message("edfSmbMsg", smbSyncCompleteMessage, true, false);
       }
@@ -762,7 +770,7 @@
       } catch (error) {
         smbSyncEnabled = false;
         smbSyncConfigured = false;
-        AirCANnect.ui.text("edfSyncResult", error.message);
+        AirCANnect.ui.text("edfSyncResult", i18n.error(error));
         AirCANnect.ui.text("edfSyncLast", "--");
         AirCANnect.ui.text("edfSyncCheck", "--");
         AirCANnect.ui.text("edfSyncCurrent", "--");
@@ -772,79 +780,76 @@
     }
 
     async function smbQueueAction(url, startMessage, completeMessage) {
-      smbSyncCompleteMessage = completeMessage || "SMB sync complete";
+      smbSyncCompleteMessage = completeMessage || i18n.message("storage.smb_complete");
       await queueSyncAction(url, startMessage, "edfSmbMsg",
-        "SMB operation already in progress", smbSyncSetBusy,
+        i18n.message("storage.smb_busy"), smbSyncSetBusy,
         loadSmbSyncStatus);
     }
 
     async function smbStartSync() {
       await smbQueueAction("/api/storage/sync/start",
-        "Starting SMB sync", "SMB sync complete");
+        i18n.message("storage.smb_starting"), i18n.message("storage.smb_complete"));
     }
 
     async function smbVerifyRecent() {
       await smbQueueAction("/api/storage/sync/verify",
-        "Checking SMB share", "SMB check complete");
+        i18n.message("storage.smb_checking"), i18n.message("storage.smb_checked"));
     }
 
     function sleepHqEndpointText(data) {
       if (!data || data.ok === false) return "--";
-      if (!data.configured) return "Configure SleepHQ account first";
+      if (!data.configured) return i18n.message("storage.configure_shq");
       const team = data.team_id || data.configured_team_id;
-      return team ? "SleepHQ team " + team : "SleepHQ account";
+      return team ? i18n.message("storage.team", {team: String(team)}) : i18n.message("storage.shq_account");
     }
 
     function sleepHqFriendlyError(error) {
       const text = String(error || "");
-      if (!text) return "Sync failed";
-      if (/tls_heap|heap/i.test(text)) return "Not enough free heap for TLS";
-      if (/auth|unauthor|token/i.test(text)) return "Authentication failed";
-      if (/connect|timed out|timeout/i.test(text)) return "Connection failed";
-      if (/team/i.test(text)) return "Team not found";
+      if (!text) return i18n.message("storage.sync_failed");
+      if (/tls_heap|heap/i.test(text)) return i18n.message("storage.tls_heap");
+      if (/auth|unauthor|token/i.test(text)) return i18n.message("storage.authentication_failed");
+      if (/connect|timed out|timeout/i.test(text)) return i18n.message("storage.connection_failed");
+      if (/team/i.test(text)) return i18n.message("storage.team_not_found");
       return text.replace(/^[a-z_]+:/i, "");
     }
 
     function sleepHqSyncResultText(data) {
-      if (!data || data.ok === false) return "Unavailable";
-      if (!data.configured) return "Configure SleepHQ account first";
+      if (!data || data.ok === false) return i18n.message("status.unavailable");
+      if (!data.configured) return i18n.message("storage.configure_shq");
       const state = data.state || "unknown";
       const seen = Number(data.files_seen) || 0;
       const uploaded = Number(data.files_uploaded) || 0;
       const failed = Number(data.files_failed) || 0;
       if (state === "working") {
         if (uploaded) {
-          return "Uploading: " + uploaded + " file" +
-            (uploaded === 1 ? "" : "s");
+          return i18n.message("storage.uploading", {count: uploaded});
         }
-        return seen ? "Checking files: " + seen + " seen" :
-          "Connecting to SleepHQ";
+        return seen ? i18n.message("storage.checking_files", {count: seen}) :
+          i18n.message("storage.connecting_shq");
       }
       if (state === "pending") {
-        return data.network_available ? "Waiting to sync" :
-          "Waiting for network";
+        return data.network_available ? i18n.message("storage.waiting_sync") :
+          i18n.message("storage.waiting_network");
       }
       if (state === "error") {
         const age = runtimeAgeText(data.updated_ms);
         const retry = retryInText(data.retry_due_ms);
-        return "Last sync failed" + (age ? " " + age : "") + ": " +
-          sleepHqFriendlyError(data.error) +
-          (retry ? ". " + retry : "");
+        return i18n.message("storage.last_failed", {
+          age, error: sleepHqFriendlyError(data.error), retry,
+        });
       }
-      if (!data.started_ms && !data.last_check_epoch) return "Not checked yet";
+      if (!data.started_ms && !data.last_check_epoch) return i18n.message("storage.not_checked");
       if (failed) {
-        return "Last sync finished with " + failed + " failed file" +
-          (failed === 1 ? "" : "s");
+        return i18n.message("storage.finished_failed", {when: "", count: failed});
       }
       if (uploaded) {
-        return "Synced: uploaded " + uploaded + " file" +
-          (uploaded === 1 ? "" : "s") + " (" +
-          AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0) + ")";
+        return i18n.message("storage.synced", {when: "", count: uploaded,
+          size: AirCANnect.format.bytes(Number(data.bytes_uploaded) || 0)});
       }
       if (seen && Number(data.files_skipped) === seen) {
-        return "Up to date (" + seen + " files checked)";
+        return i18n.message("storage.verified", {when: "", count: seen});
       }
-      return "Ready";
+      return i18n.message("status.ready");
     }
 
     function sleepHqSyncCheckText(data) {
@@ -857,13 +862,14 @@
       if (!data || data.ok === false || !data.configured) return "--";
       const state = data.state || "unknown";
       if (state === "working") {
-        if (data.import_status) return "Processing import: " +
-          data.import_status;
-        return data.current_path ? "Uploading " + data.current_path :
-          "Working";
+        if (data.import_status) return i18n.message("storage.import_status", {
+          status: data.import_status,
+        });
+        return data.current_path ? i18n.message("storage.uploading_path", {path: data.current_path}) :
+          i18n.message("storage.working");
       }
       if (state === "pending") {
-        return data.network_available ? "Queued" : "Waiting for network";
+        return data.network_available ? i18n.message("status.queued") : i18n.message("storage.waiting_network");
       }
       if (state === "error") return retryInText(data.retry_due_ms) || "--";
       return "--";
@@ -878,7 +884,7 @@
       AirCANnect.ui.text("edfSleepHqCurrent", sleepHqSyncNowText(data));
       const badge = document.getElementById("edfSleepHqBadge");
       if (badge) {
-        badge.textContent = syncBadgeText(data, configured);
+        i18n.text(badge, syncBadgeText(data, configured));
         badge.className = syncBadgeClass(data, configured);
       }
     }
@@ -888,7 +894,7 @@
       const active = syncStatusActive(data);
       if (active && !wasActive) {
         sleepHqSyncCompleteMessage = data.pending_reason === "startup_check" ?
-          "SleepHQ account check complete" : "SleepHQ sync complete";
+          i18n.message("storage.shq_checked") : i18n.message("storage.shq_complete");
       }
 
       sleepHqSyncConfigured = !!(data && data.configured);
@@ -896,9 +902,10 @@
       sleepHqSyncSetBusy(active);
 
       if (data && data.state === "error") {
-        AirCANnect.ui.message("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
+        AirCANnect.ui.message("edfSleepHqMsg", data.error || i18n.message("storage.shq_failed"), false, true);
       } else if (data && !active && data.masks_error) {
-        AirCANnect.ui.message("edfSleepHqMsg", "Mask list: " + data.masks_error, false, true);
+        AirCANnect.ui.message("edfSleepHqMsg", i18n.message(
+          "storage.mask_error", {error: i18n.error(data.masks_error)}), false, true);
       } else if (data && wasActive && !active && data.state === "idle") {
         AirCANnect.ui.message("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
       }
@@ -914,7 +921,7 @@
         return data;
       } catch (error) {
         sleepHqSyncConfigured = false;
-        AirCANnect.ui.text("edfSleepHqResult", error.message);
+        AirCANnect.ui.text("edfSleepHqResult", i18n.error(error));
         AirCANnect.ui.text("edfSleepHqLast", "--");
         AirCANnect.ui.text("edfSleepHqCheck", "--");
         AirCANnect.ui.text("edfSleepHqCurrent", "--");
@@ -925,20 +932,20 @@
 
     async function sleepHqQueueAction(url, startMessage, completeMessage) {
       sleepHqSyncCompleteMessage = completeMessage ||
-        "SleepHQ sync complete";
+        i18n.message("storage.shq_complete");
       await queueSyncAction(url, startMessage, "edfSleepHqMsg",
-        "SleepHQ operation already in progress", sleepHqSyncSetBusy,
+        i18n.message("storage.shq_busy"), sleepHqSyncSetBusy,
         loadSleepHqSyncStatus);
     }
 
     async function sleepHqStartSync() {
       await sleepHqQueueAction("/api/sleephq/sync/start",
-        "Starting SleepHQ sync", "SleepHQ sync complete");
+        i18n.message("storage.shq_starting"), i18n.message("storage.shq_complete"));
     }
 
     async function sleepHqCheckAccount() {
       await sleepHqQueueAction("/api/sleephq/sync/check",
-        "Checking SleepHQ account", "SleepHQ account check complete");
+        i18n.message("storage.shq_checking"), i18n.message("storage.shq_checked"));
     }
 
     function storageArchiveDownload(id) {
@@ -958,21 +965,22 @@
       const bytesSent = Number(data && data.bytes_sent) || 0;
       const estimate = Number(data && data.estimated_archive_bytes) || 0;
       if (state === "preparing") {
-        return files > 0 ? "Preparing " + files + " files" : "Preparing file list";
+        return files > 0 ? i18n.message("storage.preparing_files", {count: files}) : i18n.message("storage.prepare_file_list");
       }
       if (state === "building") {
         const pct = estimate > 0 ? " " + Math.min(99, Math.floor(bytes * 100 / estimate)) + "%" : "";
-        return "Building " + filesDone + "/" + files + pct;
+        return i18n.message("storage.building", {done: filesDone, total: files, percent: pct});
       }
-      if (state === "ready") return "Archive ready";
+      if (state === "ready") return i18n.message("storage.archive_ready");
       if (state === "downloading") {
-        if (estimate <= 0) return "Downloading";
+        if (estimate <= 0) return i18n.message("storage.downloading");
         const pct = Math.min(100, Math.floor(bytesSent * 100 / estimate));
         const sentMiB = (bytesSent / (1024 * 1024)).toFixed(1);
         const totalMiB = (estimate / (1024 * 1024)).toFixed(1);
-        return "Downloading " + pct + "% (" + sentMiB + "/" + totalMiB + " MiB)";
+        return i18n.message("storage.download_progress", {percent: pct,
+          sent: Number(sentMiB), total: Number(totalMiB)});
       }
-      if (state === "error") return data && data.error ? data.error : "Archive failed";
+      if (state === "error") return data && data.error ? data.error : i18n.message("storage.archive_failed");
       return state;
     }
 
@@ -986,7 +994,7 @@
         storageArchiveJobId = 0;
         storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
-        AirCANnect.ui.message("storageMsg", "Archive download complete", true, false);
+        AirCANnect.ui.message("storageMsg", i18n.message("storage.archive_downloaded"), true, false);
         return;
       }
       if (Number(data.id) !== id) return;
@@ -1038,17 +1046,17 @@
       if (row) row.hidden = !usb.supported;
       const button = document.getElementById("storageUsbBtn");
       if (button) {
-        const actions = {local: "Share SD via USB", preparing: "Preparing USB...",
-          shared: "Return SD to AirCANnect", returning: "Returning SD...",
-          restoring: "Reloading SD...", error: "Retry SD return"};
-        button.textContent = storageUsbRequestPending ? "Requesting..."
-          : actions[storageUsbState] || "USB unavailable";
+        const actions = {local: i18n.message("ui.share.sd.via.usb"), preparing: i18n.message("storage.usb_preparing"),
+          shared: i18n.message("storage.usb_return"), returning: i18n.message("storage.usb_returning"),
+          restoring: i18n.message("storage.usb_reloading"), error: i18n.message("storage.usb_retry")};
+        i18n.text(button, storageUsbRequestPending ? i18n.message("storage.requesting")
+          : actions[storageUsbState] || i18n.message("storage.usb_unavailable"));
         button.disabled = storageUsbRequestPending ||
           !["local", "shared", "error"].includes(storageUsbState);
       }
-      const labels = {local: "Local", preparing: "Preparing",
-        shared: "USB read/write", returning: "Returning SD",
-        restoring: "Reloading", error: "Unavailable"};
+      const labels = {local: i18n.message("storage.local"), preparing: i18n.message("storage.preparing"),
+        shared: i18n.message("storage.usb_rw"), returning: i18n.message("storage.returning"),
+        restoring: i18n.message("storage.reloading"), error: i18n.message("status.unavailable")};
       AirCANnect.ui.text("storageUsbStatus", labels[storageUsbState] || storageUsbState);
       if (usb.error) AirCANnect.ui.message("storageUsbMsg", usb.error, false, true);
       else AirCANnect.ui.clearMessage("storageUsbMsg");
@@ -1070,9 +1078,9 @@
 
     async function storageSetUsb(enabled) {
       const question = enabled
-        ? "Pause recording, reports and exports, and give the computer read/write access to SD?"
-        : "Has the USB disk been unmounted on the computer? Returning it before unmounting can damage files.";
-      if (!confirm(question)) {
+        ? i18n.message("storage.usb_confirm")
+        : i18n.message("storage.usb_unmount");
+      if (!confirm(i18n.format(question))) {
         applyStorageUsbStatus(storageOperationData && storageOperationData.usb);
         return;
       }
@@ -1099,7 +1107,7 @@
       storageArchiveJobId = 0;
       storageArchiveDownloadStartedId = 0;
       storageArchiveSetBusy(true);
-      AirCANnect.ui.message("storageMsg", "Starting archive", true, false);
+      AirCANnect.ui.message("storageMsg", i18n.message("storage.starting_archive"), true, false);
       try {
         const response = await AirCANnect.http.request(url, Object.assign({
           method: "POST",
@@ -1116,7 +1124,7 @@
         storageArchiveJobId = 0;
         storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
-        AirCANnect.ui.message("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", i18n.error(error), false, true);
       }
     }
 
@@ -1131,7 +1139,7 @@
         .filter((entry) => entry && storageSelectedNames.has(entry.name))
         .map((entry) => entry.name);
       if (!selected.length) {
-        AirCANnect.ui.message("storageMsg", "Select files or folders first", false, true);
+        AirCANnect.ui.message("storageMsg", i18n.message("storage.select_first"), false, true);
         return;
       }
       await storageStartArchive("/api/storage/archive/start", {
@@ -1147,11 +1155,12 @@
       const files = Number(data && data.files_deleted) || 0;
       const dirs = Number(data && data.dirs_deleted) || 0;
       if (state === "deleting") {
-        return "Deleting " + rootsDone + "/" + roots +
-          " selected, removed " + (files + dirs);
+        return i18n.message("storage.deleting", {
+          done: rootsDone, total: roots, removed: files + dirs,
+        });
       }
-      if (state === "done") return "Delete complete";
-      if (state === "error") return data && data.error ? data.error : "Delete failed";
+      if (state === "done") return i18n.message("storage.delete_complete");
+      if (state === "error") return data && data.error ? data.error : i18n.message("storage.delete_failed");
       return state;
     }
 
@@ -1160,13 +1169,13 @@
         .filter((entry) => entry && storageSelectedNames.has(entry.name))
         .map((entry) => entry.name);
       if (!selected.length) {
-        AirCANnect.ui.message("storageMsg", "Select files or folders first", false, true);
+        AirCANnect.ui.message("storageMsg", i18n.message("storage.select_first"), false, true);
         return;
       }
-      if (!confirm("Delete selected files and folders recursively?")) return;
+      if (!confirm(i18n.t("storage.delete_confirm"))) return;
       storageDeleteJobId = 0;
       storageDeleteSetBusy(true);
-      AirCANnect.ui.message("storageMsg", "Starting delete", true, false);
+      AirCANnect.ui.message("storageMsg", i18n.message("storage.starting_delete"), true, false);
       try {
         const response = await AirCANnect.http.request("/api/storage/delete/start", {
           method: "POST",
@@ -1184,7 +1193,7 @@
       } catch (error) {
         storageDeleteJobId = 0;
         storageDeleteSetBusy(false);
-        AirCANnect.ui.message("storageMsg", error.message, false, true);
+        AirCANnect.ui.message("storageMsg", i18n.error(error), false, true);
       }
     }
 

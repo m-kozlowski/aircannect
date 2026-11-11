@@ -89,6 +89,7 @@
       }
 
       function localizedError(error) {
+        if (error && typeof error === "object" && error.key) return error;
         if (error?.ui) return error.ui;
         const code = error?.message ?? error;
         return Object.hasOwn(catalogs.en || {}, "error." + code) ?
@@ -363,7 +364,8 @@
 
       async function renameStoragePath(base, currentName, title) {
         const requested = window.prompt(
-          title || "Rename storage item", currentName);
+          localizedValue(title || localizedMessage("storage.rename_prompt")),
+          currentName);
         if (requested === null) return "";
         const newName = requested.trim();
         if (!newName || newName === currentName) return "";
@@ -555,8 +557,8 @@
               const replace = confirmReplace === false ? false :
                 typeof confirmReplace === "function" ?
                   await confirmReplace(file) :
-                  window.confirm(file.name +
-                    " already exists. Replace it?");
+                  window.confirm(translate("storage.replace_prompt",
+                    {name: file.name}));
               if (replace) {
                 conflict = "replace";
                 continue;
@@ -786,7 +788,7 @@
         if (previous) clearTimeout(previous);
         messageTimers.delete(id);
 
-        localizedText(element, value);
+        localizedText(element, localizedError(value));
         element.className = "msg " + (ok ? "ok" : "err");
         if (!sticky) {
           messageTimers.set(id, setTimeout(() => {
