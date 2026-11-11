@@ -1,0 +1,13 @@
+--- a/AsyncEventSource.cpp
++++ b/AsyncEventSource.cpp
+@@ -327,7 +327,9 @@
+       const size_t bytes_written = i->write(_client);
+       total_bytes_written += bytes_written;
+       _inflight += bytes_written;
+-      if (bytes_written == 0 || _inflight > _max_inflight) {
++      // TCP room can grow between writes as LwIP processes ACKs. Never
++      // insert the next event before the rest of a partially sent frame.
++      if (!i->sent() || bytes_written == 0 || _inflight > _max_inflight) {
+         // Serial.print("_");
+         break;
+       }
