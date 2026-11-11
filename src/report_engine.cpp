@@ -947,10 +947,10 @@ bool ReportEngine::finish_checkpoint_load() {
 
 bool ReportEngine::finish_session_statistics_load(uint32_t now_ms) {
     const auto load = metadata_loader_.status();
-    previous_sessions_ = metadata_loader_.take_completed();
+    previous_sessions_.bytes = metadata_loader_.take_completed();
     metadata_loader_.reset();
     if (previous_sessions_ && ReportSessionStatistics::resumable(
-            *previous_sessions_, previous_metadata_.view.night,
+            *previous_sessions_.bytes, previous_metadata_.view.night,
             previous_checkpoint_.view.closed_before_ms)) {
         return start_execution(now_ms);
     }

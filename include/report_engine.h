@@ -158,7 +158,7 @@ private:
     ReportBuildCheckpointInput previous_checkpoint_;
 
     StorageReadPort *read_port_ = nullptr;
-    std::shared_ptr<const LargeByteBuffer> previous_sessions_;
+    StorageWritePayload previous_sessions_;
     std::unique_ptr<ReportSessionStatisticsReader> session_reader_;
 
     NightCatalogStoreService sources_loader_;

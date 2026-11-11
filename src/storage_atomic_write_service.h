@@ -44,7 +44,8 @@ private:
         OperationTicket ticket;
         StorageAtomicWriteLane lane = StorageAtomicWriteLane::Maintenance;
         Phase phase = Phase::Open;
-        std::shared_ptr<const LargeByteBuffer> bytes;
+        StorageWritePayload payload;
+        StorageWritePayload::Cursor cursor;
         File output;
         Storage::WriteStagingBuffer staging;
         size_t offset = 0;

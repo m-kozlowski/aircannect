@@ -169,7 +169,7 @@ private:
     void prepare_tiles(StorageRangeWriteCommand memory = {}, size_t prefix = 0);
 
     // Events and metadata publication
-    std::shared_ptr<const LargeByteBuffer> current_bytes() const;
+    StorageWritePayload current_payload() const;
     bool current_path(char *path, size_t path_size) const;
     bool submit_current();
     bool finish_current();

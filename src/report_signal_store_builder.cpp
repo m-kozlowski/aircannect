@@ -542,7 +542,7 @@ bool ReportSignalStoreBuilder::begin_build(
     const ReportSignalStoreMetadata &previous,
     const ReportBuildCheckpointInput &checkpoint_input,
     std::shared_ptr<const ReportReadPlan> execution_plan,
-    std::shared_ptr<const LargeByteBuffer> previous_sessions) {
+    StorageWritePayload previous_sessions) {
     failure_reason_ = nullptr;
     if (!runtime_) {
         failure_reason_ = "report_signal_store_runtime_unavailable";

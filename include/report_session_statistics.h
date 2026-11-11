@@ -21,25 +21,29 @@ public:
         const uint8_t *metrics = nullptr;
         size_t size = 0;
         bool closed = false;
+        std::shared_ptr<const LargeByteBuffer> owner;
     };
 
     // Collection and append
     // The caller has matched the file to the previous checkpoint. Only tails
     // without replayable sources are retained; the executor replaces the rest.
-    bool resume(std::shared_ptr<const LargeByteBuffer> previous,
+    bool resume(StorageWritePayload previous,
                 uint32_t retained_signals, bool close_retained_tail);
     bool accept(uint16_t session, uint32_t interval_ms, ReportSignalId signal,
                 int32_t value_milli, bool expiration = false, bool closed = true);
-    std::shared_ptr<const LargeByteBuffer> finish(const ReportSignalStoreNight &night,
-                                                int64_t closed_before_ms = 0);
+    StorageWritePayload finish(const ReportSignalStoreNight &night,
+                               int64_t closed_before_ms = 0);
     void clear();
 
     // Persisted identity and contribution views
     static bool matches(const LargeByteBuffer &bytes, const ReportSignalStoreNight &night);
+    static bool matches(const StorageWritePayload &bytes, const ReportSignalStoreNight &night);
     static bool resumable(const LargeByteBuffer &bytes, const ReportSignalStoreNight &night,
                           int64_t closed_before_ms);
     static size_t entries_offset(const LargeByteBuffer &bytes);
     static bool next(const LargeByteBuffer &bytes, size_t &offset, Entry &entry);
+    static bool next(const StorageWritePayload &bytes, StorageWritePayload::Cursor &cursor,
+                     Entry &entry);
     static bool path(const ReportSignalStoreNight &night, char *out, size_t size);
 
 private:
@@ -71,7 +75,7 @@ public:
     bool poll();
     bool active() const;
     const char *error() const;
-    std::shared_ptr<const LargeByteBuffer> take_completed();
+    StorageWritePayload take_completed();
 
 private:
     struct Runtime;

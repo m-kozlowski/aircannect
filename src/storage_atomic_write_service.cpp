@@ -184,7 +184,9 @@ bool StorageAtomicWriteService::apply_abandon_request_locked() {
 
 OperationSubmission StorageAtomicWriteService::request_write(
     const StorageAtomicWriteCommand &command) {
-    if (!command.valid() || command.path.size() >= AC_STORAGE_PATH_MAX ||
+    uint64_t source_size = 0;
+    if (!command.valid(source_size) ||
+        command.path.size() >= AC_STORAGE_PATH_MAX ||
         command.staged_path.size() >= AC_STORAGE_PATH_MAX ||
         reserved_transaction_path(command.path.c_str()) ||
         (!command.staged_path.empty() &&
@@ -205,9 +207,8 @@ OperationSubmission StorageAtomicWriteService::request_write(
     job_->active = true;
     job_->ticket = next_ticket_locked(command.generation);
     job_->lane = command.lane;
-    job_->bytes = command.bytes;
-    job_->source_size = command.bytes ? command.bytes->size()
-                                      : command.staged_size;
+    job_->payload = command;
+    job_->source_size = source_size;
     job_->free_reserve_bytes = command.free_reserve_bytes;
     job_->staged_source = !command.staged_path.empty();
     job_->replace_existing = command.replace_existing;
@@ -374,24 +375,36 @@ bool StorageAtomicWriteService::open_locked(const char *&error) {
 }
 
 bool StorageAtomicWriteService::write_locked(const char *&error) {
-    if (!job_->output || !job_->bytes || job_->offset >= job_->bytes->size()) {
+    if (!job_->output || job_->offset >= job_->source_size) {
         error = "write_state_invalid";
         return false;
     }
 
-    const size_t remaining = job_->bytes->size() - job_->offset;
-    const size_t wanted = std::min(remaining, WRITE_STEP_BYTES);
-    const size_t written = Storage::write_buffer(
-        job_->output, job_->bytes->data() + job_->offset, wanted,
-        job_->staging);
+    size_t budget = WRITE_STEP_BYTES;
+    while (budget && job_->offset < job_->source_size) {
+        const auto &part = job_->payload.span(job_->cursor);
+        if (!part) {
+            error = "write_state_invalid";
+            return false;
+        }
 
-    if (written != wanted) {
-        error = "write_failed";
-        return false;
+        const size_t remaining = part->size() - job_->cursor.offset;
+        const size_t wanted = std::min(remaining, budget);
+        const size_t written = Storage::write_buffer(
+            job_->output, part->data() + job_->cursor.offset, wanted,
+            job_->staging);
+
+        if (written != wanted) {
+            error = "write_failed";
+            return false;
+        }
+
+        job_->offset += written;
+        job_->cursor.offset += written;
+        budget -= written;
     }
 
-    job_->offset += written;
-    if (job_->offset == job_->bytes->size()) {
+    if (job_->offset == job_->source_size) {
         job_->staging.reset();
         job_->phase = Phase::Flush;
     }

@@ -9,6 +9,7 @@
 #include "report_night_summary.h"
 #include "report_records.h"
 #include "report_sources.h"
+#include "storage_write_payload.h"
 
 namespace aircannect {
 
@@ -246,7 +247,7 @@ public:
     std::shared_ptr<const LargeByteBuffer> events;
     std::shared_ptr<const LargeByteBuffer> checkpoint;
     std::shared_ptr<const LargeByteBuffer> histogram;
-    std::shared_ptr<const LargeByteBuffer> session_statistics;
+    StorageWritePayload session_statistics;
     uint8_t checkpoint_slot = 0;
 
     size_t signal_count() const { return signal_count_; }

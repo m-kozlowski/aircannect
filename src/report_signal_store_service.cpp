@@ -745,23 +745,22 @@ void ReportSignalStoreService::advance_level() {
     else phase_ = write_header_ ? Phase::EncodeHeader : Phase::EncodeBlock;
 }
 
-std::shared_ptr<const LargeByteBuffer>
-ReportSignalStoreService::current_bytes() const {
+StorageWritePayload ReportSignalStoreService::current_payload() const {
     if (!bundle_) return {};
 
     switch (phase_) {
         case Phase::SubmitEvents:
         case Phase::WaitEvents:
-            return bundle_->events;
+            return {bundle_->events};
         case Phase::SubmitMetadata:
         case Phase::WaitMetadata:
-            return bundle_->metadata;
+            return {bundle_->metadata};
         case Phase::SubmitCheckpoint:
         case Phase::WaitCheckpoint:
-            return bundle_->checkpoint;
+            return {bundle_->checkpoint};
         case Phase::SubmitHistogram:
         case Phase::WaitHistogram:
-            return bundle_->histogram;
+            return {bundle_->histogram};
         case Phase::SubmitSessionStatistics:
         case Phase::WaitSessionStatistics:
             return bundle_->session_statistics;
@@ -807,8 +806,8 @@ bool ReportSignalStoreService::current_path(
 
 bool ReportSignalStoreService::submit_current() {
     char path[AC_STORAGE_PATH_MAX] = {};
-    std::shared_ptr<const LargeByteBuffer> bytes = current_bytes();
-    if (!write_port_ || !bundle_ || !bytes ||
+    auto payload = current_payload();
+    if (!write_port_ || !bundle_ || !payload ||
         !current_path(path, sizeof(path))) {
         fail("report_signal_store_publish_invalid");
         return true;
@@ -816,7 +815,7 @@ bool ReportSignalStoreService::submit_current() {
 
     StorageAtomicWriteCommand command;
     command.path = path;
-    command.bytes = std::move(bytes);
+    static_cast<StorageWritePayload &>(command) = std::move(payload);
     command.lane = lane_;
     command.generation = operation_generation_;
     const OperationSubmission submission = write_port_->request_write(command);
@@ -860,9 +859,9 @@ bool ReportSignalStoreService::finish_current() {
     if (!write_port_->take_completion(write_ticket_, completion)) return false;
     write_ticket_ = {};
 
-    const std::shared_ptr<const LargeByteBuffer> expected = current_bytes();
+    const auto expected = current_payload();
     if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !expected || completion.bytes_written != expected->size()) {
+        !expected || completion.bytes_written != expected.size()) {
         fail(completion.error[0] ? completion.error
                                  : "report_signal_store_write_failed");
         return true;

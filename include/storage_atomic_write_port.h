@@ -4,9 +4,9 @@
 #include <stdint.h>
 #include <string>
 
-#include "large_byte_buffer.h"
 #include "operation_outcome.h"
 #include "storage_path.h"
+#include "storage_write_payload.h"
 
 namespace aircannect {
 
@@ -15,9 +15,8 @@ enum class StorageAtomicWriteLane : uint8_t {
     Maintenance,
 };
 
-struct StorageAtomicWriteCommand {
+struct StorageAtomicWriteCommand : StorageWritePayload {
     std::string path;
-    std::shared_ptr<const LargeByteBuffer> bytes;
     std::string staged_path;
     uint64_t staged_size = 0;
     uint64_t free_reserve_bytes = 0;
@@ -26,15 +25,29 @@ struct StorageAtomicWriteCommand {
     bool replace_existing = true;
 
     bool valid() const {
-        const bool memory_source = bytes && bytes->size() != 0 &&
+        uint64_t source_size = 0;
+        return valid(source_size);
+    }
+
+    // Return the accepted length so the storage job need not rescan the chain.
+    bool valid(uint64_t &source_size) const {
+        source_size = 0;
+        const bool memory_source = (bytes || buffers) &&
                                    staged_path.empty() && staged_size == 0;
-        const bool staged_source = !bytes && !staged_path.empty() &&
+        const bool staged_source = !bytes && !buffers &&
+                                   !staged_path.empty() &&
                                    storage_user_path_valid(
                                        staged_path.c_str()) &&
                                    staged_path != "/";
-        return generation != 0 && storage_user_path_valid(path.c_str()) &&
-               path != "/" && (memory_source || staged_source) &&
-               staged_path != path;
+
+        if (generation == 0 || !storage_user_path_valid(path.c_str()) ||
+            path == "/" || (!memory_source && !staged_source) ||
+            staged_path == path) {
+            return false;
+        }
+
+        source_size = memory_source ? size() : staged_size;
+        return staged_source || source_size != 0;
     }
 };
 

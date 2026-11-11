@@ -76,18 +76,20 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
         : metrics.accept(signal, value_milli, interval_ms);
 }
 
-bool ReportSessionStatistics::resume(std::shared_ptr<const LargeByteBuffer> previous,
+bool ReportSessionStatistics::resume(StorageWritePayload previous,
     uint32_t retained_signals, bool close_retained_tail) {
     clear();
-    size_t offset = entries_offset(*previous);
-    while (offset < previous->size()) {
+    StorageWritePayload::Cursor cursor;
+    cursor.offset = entries_offset(*previous.bytes);
+    while (previous.span(cursor)) {
         Entry entry;
-        if (!next(*previous, offset, entry)) return false;
+        if (!next(previous, cursor, entry)) return false;
         if (!entry.closed && !retained_signals) continue;
 
         std::shared_ptr<const LargeByteBuffer> packed;
         if (entry.closed) {
-            packed = LargeByteBuffer::slice(previous, entry.metrics - previous->data(), entry.size);
+            packed = LargeByteBuffer::slice(entry.owner,
+                entry.metrics - entry.owner->data(), entry.size);
         } else {
             ReportMetricAccumulator retained;
             if (!retained.restore(entry.metrics, entry.size)) return false;
@@ -109,14 +111,17 @@ bool ReportSessionStatistics::resume(std::shared_ptr<const LargeByteBuffer> prev
     return true;
 }
 
-std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
+StorageWritePayload ReportSessionStatistics::finish(
     const ReportSignalStoreNight &night, int64_t closed_before_ms) {
     if (!pack_parts()) return {};
 
-    auto bytes = LargeByteBuffer::allocate(packed_bytes_);
-    if (!bytes) return {};
+    // Keep payload owners; only the file and contribution headers are new.
+    auto headers = LargeByteBuffer::allocate(HeaderBytes + parts_.size() * EntryBytes);
+    auto buffers = std::shared_ptr<StorageWriteBuffers>(
+        LargeObject::create<StorageWriteBuffers>(), LargeObject::destroy<StorageWriteBuffers>);
+    if (!headers || !buffers || !buffers->allocate(parts_.size() * 2)) return {};
 
-    auto *p = bytes->data();
+    auto *p = headers->data();
     memset(p, 0, HeaderBytes);
     put_le16(p, 2);
     put_le16(p + 2, HeaderBytes);
@@ -138,12 +143,23 @@ std::shared_ptr<const LargeByteBuffer> ReportSessionStatistics::finish(
         put_le32(p + 4, part.interval_ms);
         put_le32(p + 8, metrics->size());
         p += EntryBytes;
-        memcpy(p, metrics->data(), metrics->size());
-        p += metrics->size();
     }
 
+    const auto header_owner = LargeByteBuffer::freeze(std::move(headers));
+    StorageWritePayload output;
+    output.bytes = LargeByteBuffer::slice(header_owner, 0, HeaderBytes);
+    if (!output.bytes) return {};
+
+    for (size_t i = 0; i < parts_.size(); ++i) {
+        auto entry = LargeByteBuffer::slice(header_owner, HeaderBytes + i * EntryBytes, EntryBytes);
+        if (!entry) return {};
+
+        *buffers->append() = std::move(entry);
+        *buffers->append() = std::move(parts_[i].packed);
+    }
+    output.buffers = std::move(buffers);
     clear();
-    return LargeByteBuffer::freeze(std::move(bytes));
+    return output;
 }
 
 void ReportSessionStatistics::clear() {
@@ -153,19 +169,31 @@ void ReportSessionStatistics::clear() {
     packed_bytes_ = HeaderBytes;
 }
 
-bool ReportSessionStatistics::matches(const LargeByteBuffer &bytes,
-                                      const ReportSignalStoreNight &night) {
-    if (bytes.size() < 32 || bytes.size() > MaxBytes) return false;
+namespace {
+bool matches_header(const LargeByteBuffer &bytes, size_t length,
+                    const ReportSignalStoreNight &night) {
+    if (bytes.size() < 32 || length > ReportSessionStatistics::MaxBytes) return false;
     const auto *p = bytes.data();
     const auto version = get_le16(p);
-    const size_t header = version == 1 ? 32 : HeaderBytes;
+    const size_t header = version == 1 ? 32 : ReportSessionStatistics::HeaderBytes;
     return (version == 1 || version == 2) && bytes.size() >= header &&
         get_le16(p + 2) == header &&
-        get_le32(p + 4) == bytes.size() &&
+        get_le32(p + 4) == length &&
         get_le32(p + 8) == uint32_t(night.sleep_day.epoch_days()) &&
         get_le32(p + 12) == night.generation &&
         get_le64(p + 16) == night.source_revision.value() &&
         get_le16(p + 24) == night.session_count && p[26] == night.checkpoint_slot;
+}
+} // namespace
+
+bool ReportSessionStatistics::matches(const LargeByteBuffer &bytes,
+                                      const ReportSignalStoreNight &night) {
+    return matches_header(bytes, bytes.size(), night);
+}
+
+bool ReportSessionStatistics::matches(const StorageWritePayload &bytes,
+                                      const ReportSignalStoreNight &night) {
+    return bytes.bytes && matches_header(*bytes.bytes, bytes.size(), night);
 }
 
 bool ReportSessionStatistics::resumable(const LargeByteBuffer &bytes,
@@ -196,6 +224,33 @@ bool ReportSessionStatistics::next(const LargeByteBuffer &bytes, size_t &offset,
     return true;
 }
 
+bool ReportSessionStatistics::next(const StorageWritePayload &bytes,
+    StorageWritePayload::Cursor &cursor, Entry &entry) {
+    if (!bytes.buffers) {
+        if (!next(*bytes.bytes, cursor.offset, entry)) return false;
+        entry.owner = bytes.bytes;
+        return true;
+    }
+
+    // Only finish() produces segmented data; loaded files use the decoder above.
+    const auto &header = bytes.span(cursor);
+    if (!header || header->size() - cursor.offset < EntryBytes) return false;
+
+    const auto *p = header->data() + cursor.offset;
+    entry.session = get_le16(p);
+    entry.closed = p[2] == 1;
+    entry.interval_ms = get_le32(p + 4);
+    entry.size = get_le32(p + 8);
+    cursor.offset += EntryBytes;
+
+    entry.owner = bytes.span(cursor);
+    if (!entry.owner || entry.size > entry.owner->size() - cursor.offset) return false;
+
+    entry.metrics = entry.owner->data() + cursor.offset;
+    cursor.offset += entry.size;
+    return true;
+}
+
 bool ReportSessionStatistics::path(const ReportSignalStoreNight &night,
                                    char *out, size_t size) {
     char directory[AC_STORAGE_PATH_MAX];
@@ -223,7 +278,7 @@ struct ReportSessionStatisticsReader::Runtime {
     StoragePreparedRead prepared;
     std::shared_ptr<const LargeByteBuffer> raw;
     std::shared_ptr<const LargeByteBuffer> ratio_raw;
-    std::shared_ptr<const LargeByteBuffer> completed;
+    StorageWritePayload completed;
     size_t expected = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
     enum class Phase { Select, Read, Wait, Samples, Done } phase = Phase::Done;
@@ -463,8 +518,8 @@ const char *ReportSessionStatisticsReader::error() const {
     return runtime_ ? runtime_->error : "session_statistics_alloc";
 }
 
-std::shared_ptr<const LargeByteBuffer> ReportSessionStatisticsReader::take_completed() {
-    return runtime_ && !active() ? std::move(runtime_->completed) : nullptr;
+StorageWritePayload ReportSessionStatisticsReader::take_completed() {
+    return runtime_ && !active() ? std::move(runtime_->completed) : StorageWritePayload{};
 }
 
 }  // namespace aircannect
