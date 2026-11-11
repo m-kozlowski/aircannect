@@ -11,6 +11,14 @@ struct BleSensorFrameView {
     size_t payload_len = 0;
 };
 
+enum class BleSensorFrameResult { Incomplete, Complete, Invalid };
+
+// Keep used/expected between notifications; reset both after Complete/Invalid
+// or a response timeout. Marker-valued continuation bytes are ordinary data.
+BleSensorFrameResult append_ble_sensor_frame(
+    const uint8_t *data, size_t len, uint8_t marker,
+    uint8_t *buffer, size_t capacity, size_t &used, size_t &expected);
+
 bool ble_sensor_frame_size(const uint8_t *header,
                            size_t len,
                            uint8_t marker,

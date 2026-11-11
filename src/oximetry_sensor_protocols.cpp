@@ -102,12 +102,13 @@ bool BleSensorProtocolEngine::subscribe(NimBLEClient *client) {
     if (subscribe_nonin()) {
         return true;
     }
-    active_protocol_ = ActiveProtocol::Viatom;
-    if (subscribe_viatom()) {
-        return true;
-    }
+    // Some newer sensors also expose legacy Viatom GATT, but use OxyII for live data.
     active_protocol_ = ActiveProtocol::Oxyii;
     if (subscribe_oxyii()) {
+        return true;
+    }
+    active_protocol_ = ActiveProtocol::Viatom;
+    if (subscribe_viatom()) {
         return true;
     }
 

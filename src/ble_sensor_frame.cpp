@@ -1,8 +1,31 @@
 #include "ble_sensor_frame.h"
 
+#include <string.h>
+
 #include "oximetry_codec.h"
 
 namespace aircannect {
+
+BleSensorFrameResult append_ble_sensor_frame(
+    const uint8_t *data, size_t len, uint8_t marker,
+    uint8_t *buffer, size_t capacity, size_t &used, size_t &expected) {
+    if (!len) return BleSensorFrameResult::Incomplete;
+    if (!data || (!used && data[0] != marker) || len > capacity - used) {
+        return BleSensorFrameResult::Invalid;
+    }
+
+    memcpy(buffer + used, data, len);
+    used += len;
+    if (!expected && used >= 7) {
+        if (!ble_sensor_frame_size(buffer, used, marker, expected) ||
+            expected > capacity) {
+            return BleSensorFrameResult::Invalid;
+        }
+    }
+
+    return expected && used >= expected ? BleSensorFrameResult::Complete
+                                        : BleSensorFrameResult::Incomplete;
+}
 
 bool ble_sensor_frame_size(const uint8_t *header,
                            size_t len,

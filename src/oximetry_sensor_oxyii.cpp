@@ -189,34 +189,17 @@ void BleSensorProtocolEngine::oxyii_notify_callback(
 }
 
 void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
-    if (!data || !len) return;
+    const auto result = append_ble_sensor_frame(
+        data, len, 0xa5, oxyii_.rx, sizeof(oxyii_.rx),
+        oxyii_.rx_len, oxyii_.rx_want);
 
-    if (data[0] == 0xa5) {
-        oxyii_reset_rx();
-        size_t wanted = 0;
-        if (ble_sensor_frame_size(data, len, 0xa5, wanted)) {
-            if (wanted <= sizeof(oxyii_.rx)) {
-                oxyii_.rx_want = wanted;
-            } else {
-                Log::logf(CAT_OXI, LOG_DEBUG,
-                          "Sensor OxyII RX too large want=%u\n",
-                          static_cast<unsigned>(wanted));
-                return;
-            }
-        }
-    }
-
-    if (!oxyii_.rx_want ||
-        oxyii_.rx_len + len > sizeof(oxyii_.rx)) {
+    if (result == BleSensorFrameResult::Incomplete) return;
+    if (result == BleSensorFrameResult::Invalid) {
+        Log::logf(CAT_OXI, LOG_DEBUG, "Sensor OxyII RX invalid fragment\n");
         oxyii_reset_rx();
         return;
     }
 
-    memcpy(oxyii_.rx + oxyii_.rx_len, data, len);
-    oxyii_.rx_len += len;
-    if (oxyii_.rx_len < oxyii_.rx_want) return;
-
-    uint8_t command = 0;
     BleSensorFrameView frame;
     if (!decode_ble_sensor_frame(oxyii_.rx, oxyii_.rx_len,
                                  oxyii_.rx_want, 0, frame)) {
@@ -226,17 +209,18 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
         oxyii_reset_rx();
         return;
     }
-    command = frame.command;
+    const uint8_t command = frame.command;
     oxyii_reset_rx();
 
     const uint8_t pending_command = oxyii_.pending_cmd;
-    oxyii_clear_pending();
     if (pending_command == OXYII_CMD_SETUP && command == OXYII_CMD_SETUP) {
+        oxyii_clear_pending();
         oxyii_.need_time_sync = true;
         return;
     }
     if (pending_command == OXYII_CMD_SET_TIME &&
         command == OXYII_CMD_SET_TIME) {
+        oxyii_clear_pending();
         return;
     }
     if (pending_command != OXYII_CMD_LIVE_SAMPLES ||
@@ -261,6 +245,7 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
         return;
     }
 
+    oxyii_clear_pending();
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor OxyII reading %s spo2=%u pulse=%u\n",
               invalid ? "invalid" : "valid",

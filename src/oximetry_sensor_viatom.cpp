@@ -31,9 +31,7 @@ const char *viatom_command_name(uint8_t command) {
     }
 }
 
-bool decode_viatom_reading(const uint8_t *packet,
-                           size_t len,
-                           size_t expected_size,
+bool decode_viatom_reading(const BleSensorFrameView &frame,
                            uint8_t &spo2,
                            uint16_t &pulse,
                            uint8_t &lead_state,
@@ -43,10 +41,7 @@ bool decode_viatom_reading(const uint8_t *packet,
                            uint16_t &spo2_raw,
                            uint16_t &pulse_raw,
                            bool &invalid) {
-    BleSensorFrameView frame;
-    if (!decode_ble_sensor_frame(packet, len, expected_size, 12, frame)) {
-        return false;
-    }
+    if (frame.payload_len < 12) return false;
 
     const uint8_t *payload = frame.payload;
     spo2 = payload[0];
@@ -182,54 +177,36 @@ void BleSensorProtocolEngine::viatom_notify_callback(
 }
 
 void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
-    if (!data || !len) return;
+    const auto result = append_ble_sensor_frame(
+        data, len, 0x55, viatom_.rx, sizeof(viatom_.rx),
+        viatom_.rx_len, viatom_.rx_want);
 
-    const uint8_t *packet = data;
-    size_t packet_len = len;
-    size_t expected_packet_len = 0;
-    if (data[0] == 0x55) {
+    if (result == BleSensorFrameResult::Incomplete) return;
+    if (result == BleSensorFrameResult::Invalid) {
+        Log::logf(CAT_OXI, LOG_DEBUG, "Sensor Viatom RX invalid fragment\n");
         viatom_reset_rx();
-        size_t wanted = 0;
-        if (ble_sensor_frame_size(data, len, 0x55, wanted)) {
-            expected_packet_len = wanted;
-            if (wanted <= sizeof(viatom_.rx)) {
-                viatom_.rx_want = wanted;
-            } else {
-                Log::logf(CAT_OXI, LOG_DEBUG,
-                          "Sensor Viatom RX too large want=%u\n",
-                          static_cast<unsigned>(wanted));
-            }
-        }
+        return;
     }
 
-    bool buffered = false;
-    if (viatom_.rx_want) {
-        if (viatom_.rx_len + len > sizeof(viatom_.rx)) {
-            Log::logf(CAT_OXI, LOG_DEBUG,
-                      "Sensor Viatom RX overflow have=%u add=%u\n",
-                      static_cast<unsigned>(viatom_.rx_len),
-                      static_cast<unsigned>(len));
-            viatom_reset_rx();
-            return;
-        }
+    BleSensorFrameView frame;
+    const bool valid_frame = decode_ble_sensor_frame(
+        viatom_.rx, viatom_.rx_len, viatom_.rx_want, 0, frame);
 
-        memcpy(viatom_.rx + viatom_.rx_len, data, len);
-        viatom_.rx_len += len;
-        if (viatom_.rx_len < viatom_.rx_want) return;
-
-        packet = viatom_.rx;
-        packet_len = viatom_.rx_len;
-        expected_packet_len = viatom_.rx_want;
-        buffered = true;
+    viatom_reset_rx();
+    if (!valid_frame) {
+        Log::logf(CAT_OXI, LOG_DEBUG, "Sensor Viatom RX decode failed\n");
+        return;
     }
 
     const uint8_t pending_command = viatom_.pending_cmd;
-    viatom_clear_pending();
+    if (pending_command == VIATOM_CMD_CONFIG) {
+        viatom_clear_pending();
+        return;
+    }
     if (pending_command != VIATOM_CMD_READ_SENSORS) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor Viatom RX ignored for cmd=%s\n",
                   viatom_command_name(pending_command));
-        if (buffered) viatom_reset_rx();
         return;
     }
 
@@ -244,16 +221,17 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     bool invalid = true;
 
     const bool decoded = decode_viatom_reading(
-        packet, packet_len, expected_packet_len, spo2, pulse, lead_state, battery,
+        frame, spo2, pulse, lead_state, battery,
         battery_state, pi, spo2_raw, pulse_raw, invalid);
-    if (buffered) viatom_reset_rx();
+
     if (!decoded) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "Sensor Viatom RX read decode failed len=%u\n",
-                  static_cast<unsigned>(packet_len));
+                  "Sensor Viatom RX read decode failed payload_len=%u\n",
+                  static_cast<unsigned>(frame.payload_len));
         return;
     }
 
+    viatom_clear_pending();
     const bool charging = battery_state == 1 || battery_state == 2;
     viatom_.initial_probe_complete = !charging;
 
