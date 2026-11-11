@@ -40,7 +40,7 @@
               const catalog = Array.isArray(data.settings) ?
                 data.settings : [];
               if (!catalog.some((item) => item && item.kind && item.label)) {
-                throw new Error("settings catalog unavailable");
+                throw AirCANnect.i18n.failure("clinical.catalog_unavailable");
               }
               settingsCatalog = catalog.map((item, index) =>
                 Object.assign({_catalogIndex: index}, item));
@@ -56,7 +56,7 @@
         await settingsCatalogPromise;
       }
 
-      throw new Error("settings catalog changed during refresh");
+      throw AirCANnect.i18n.failure("clinical.catalog_changed");
     }
 
     function settingMetaFor(setting, mode) {
@@ -97,9 +97,14 @@
         String(item.value) : String(index);
     }
 
-    function optionLabel(item) {
-      return item && typeof item === "object" ?
+    function optionLabel(item, setting, index) {
+      const label = item && typeof item === "object" ?
         (item.label || String(item.value)) : String(item);
+      if (setting?.stock !== true) return label;
+
+      const value = item?.translationIndex ?? optionValue(item, index);
+      return AirCANnect.i18n.message(
+        "clinical.option." + setting.key + "." + value, {}, label);
     }
 
     function visibleOptions(setting, supportedMask) {
@@ -121,11 +126,6 @@
         return "n:" + String(item.numeric_raw);
       }
       return "e:" + String(item.enum_value);
-    }
-
-    function compositeOptionLabel(item) {
-      return item && typeof item === "object" ?
-        (item.label || compositeOptionValue(item)) : String(item);
     }
 
     function compositeCurrentValue(composite, enumSetting, numericSetting) {
@@ -151,7 +151,7 @@
         const options = setting.options || [];
         for (let i = 0; i < options.length; i++) {
           if (optionValue(options[i], i) === raw) {
-            return optionLabel(options[i]) || raw;
+            return optionLabel(options[i], setting, i) || raw;
           }
         }
         return compositeDisplayFallback(raw);
@@ -160,7 +160,7 @@
         const options = setting.options || [];
         for (let i = 0; i < options.length; i++) {
           if (optionValue(options[i], i) === raw) {
-            return optionLabel(options[i]) || raw;
+            return optionLabel(options[i], setting, i) || raw;
           }
         }
         return raw;
@@ -192,13 +192,14 @@
       if (setting.rpc_name) parts.push(setting.rpc_name);
 
       if (setting.pending) {
-        parts.push("Pending readback; current " +
-          (formatSettingValue(setting, setting.value) || "--"));
+        parts.push(AirCANnect.i18n.message("clinical.pending_value", {
+          value: formatSettingValue(setting, setting.value) || "--",
+        }));
       } else if (setting.inferred && setting.key !== "MOP") {
-        parts.push("Inferred from device status");
+        parts.push(AirCANnect.i18n.message("clinical.inferred"));
       }
 
-      return parts.join("; ");
+      return AirCANnect.i18n.join(parts, "; ");
     }
 
     function settingVisibleForDevice(setting, settingsByKey) {
@@ -291,7 +292,9 @@
         if (!available) return;
 
         const options = (composite.options || []).map((item) =>
-          Object.assign({}, item, {value: compositeOptionValue(item)}));
+          Object.assign({}, item, {
+            translationIndex: item.value, value: compositeOptionValue(item),
+          }));
         const value = compositeCurrentValue(
           composite, enumSetting, numericSetting);
 
@@ -469,7 +472,7 @@
           await loadSettings(true);
         }
       } catch (error) {
-        AirCANnect.ui.message("settingsMsg", error.message, false);
+        AirCANnect.ui.message("settingsMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -487,23 +490,24 @@
       }
       const unavailable = data.as11_state === "unavailable";
       if (unavailable) {
-        parts.push("Device unavailable");
+        parts.push(AirCANnect.i18n.message("clinical.unavailable"));
       } else if (data.refresh_queued) {
-        parts.push("Refreshing settings");
+        parts.push(AirCANnect.i18n.message("clinical.refreshing"));
       } else if (!data.valid) {
-        parts.push("Waiting for device");
+        parts.push(AirCANnect.i18n.message("clinical.waiting"));
       }
       if (settingsModeDirty && settingsProfileMode !== null &&
           settingsActiveMode !== null &&
           settingsProfileMode !== settingsActiveMode) {
-        parts.push("Unsaved mode change");
+        parts.push(AirCANnect.i18n.message("clinical.unsaved_mode"));
       }
-      if (data.pending_count) parts.push(data.pending_count + " pending readback");
+      if (data.pending_count) parts.push(AirCANnect.i18n.message(
+        "clinical.pending_count", {count: data.pending_count}));
 
       const meta = document.getElementById("settingsMeta");
-      const metaText = parts.join("; ");
-      meta.textContent = metaText;
-      meta.style.display = metaText ? "block" : "none";
+      const metaText = AirCANnect.i18n.join(parts, "; ");
+      AirCANnect.i18n.text(meta, metaText);
+      meta.style.display = parts.length ? "block" : "none";
 
       const root = document.getElementById("settingsFields");
       const save = document.getElementById("settingsSave");
@@ -533,11 +537,12 @@
         .concat(compositeState.composites)
         .sort(compareSettings);
       if (!visible.length) {
-        root.innerHTML = '<div class="value" style="text-align:left">' +
-          (unavailable ? "Device unavailable" :
-            data.valid ? "No readable settings for this mode" :
-              "Waiting for AS11 settings readback") +
-          "</div>";
+        const empty = AirCANnect.ui.valueSpan(
+          (unavailable ? AirCANnect.i18n.message("clinical.unavailable") :
+            data.valid ? AirCANnect.i18n.message("clinical.no_settings") :
+              AirCANnect.i18n.message("clinical.waiting_readback")));
+        empty.style.textAlign = "left";
+        root.appendChild(empty);
         if (save) save.disabled = true;
         return;
       }
@@ -549,7 +554,9 @@
           group = settingGroup;
           const heading = document.createElement("div");
           heading.className = "section-title";
-          heading.textContent = group || "settings";
+          AirCANnect.i18n.text(heading, setting.stock === true ?
+            AirCANnect.i18n.message("clinical.group." + group, {}, group) :
+            group || AirCANnect.i18n.message("ui.settings"));
           root.appendChild(heading);
         }
 
@@ -564,26 +571,26 @@
 
         if (!settingWritable(setting)) {
           const unit = setting.unit ? " " + setting.unit : "";
-          control = AirCANnect.ui.valueSpan((shown || "--") + (shown ? unit : ""));
+          control = AirCANnect.ui.valueSpan(AirCANnect.i18n.join(
+            [shown || "--", shown ? unit : ""]));
         } else if (setting.kind === "enum" || setting.kind === "composite") {
           control = document.createElement("select");
           let seen = false;
           if (raw === "") {
             const option = document.createElement("option");
             option.value = "";
-            option.textContent = "--";
+            AirCANnect.i18n.text(option, "--");
             option.selected = true;
             option.disabled = true;
             control.appendChild(option);
           }
           visibleOptions(setting, data.supported_mode_mask || 0)
             .forEach((item, index) => {
-              const label = setting.kind === "composite" ?
-                compositeOptionLabel(item) : optionLabel(item);
+              const label = optionLabel(item, setting, index);
               const value = optionValue(item, index);
               const option = document.createElement("option");
               option.value = value;
-              option.textContent = label;
+              AirCANnect.i18n.text(option, label);
               if (setting.kind === "composite") {
                 option.dataset.enumValue = item.enum_value;
                 if (item.numeric_raw !== undefined &&
@@ -600,7 +607,7 @@
           if (raw !== "" && !seen) {
             const option = document.createElement("option");
             option.value = raw;
-            option.textContent = shown || raw;
+            AirCANnect.i18n.text(option, shown || raw);
             option.selected = true;
             control.appendChild(option);
           }
@@ -620,7 +627,7 @@
           ["false", "true"].forEach((value) => {
             const option = document.createElement("option");
             option.value = value;
-            option.textContent = value === "true" ? "On" : "Off";
+            AirCANnect.i18n.text(option, value === "true" ? AirCANnect.i18n.message("ui.on") : AirCANnect.i18n.message("ui.off"));
             const current = String(raw).toLowerCase();
             if (current === value ||
                 current === (value === "true" ? "on" : "off")) {
@@ -661,7 +668,9 @@
         }
 
         const entry = AirCANnect.ui.row(
-          setting.label || setting.key,
+          setting.stock === true ? AirCANnect.i18n.message(
+            "clinical.label." + setting.key, {}, setting.label || setting.key) :
+            setting.label || setting.key,
           control,
           settingSmallText(setting));
         if (setting.pending) entry.classList.add("pending");
@@ -707,7 +716,7 @@
       });
 
       if (!Object.keys(changes).length) {
-        AirCANnect.ui.message("settingsMsg", "No changes", true);
+        AirCANnect.ui.message("settingsMsg", AirCANnect.i18n.message("config.no_changes"), true);
         return;
       }
 
@@ -719,10 +728,10 @@
         });
         const data = await response.json();
         AirCANnect.ui.message("settingsMsg",
-          data.ok ? "Settings queued" : "Queue failed",
+          data.ok ? AirCANnect.i18n.message("clinical.queued") : AirCANnect.i18n.message("clinical.queue_failed"),
           data.ok);
       } catch (error) {
-        AirCANnect.ui.message("settingsMsg", error.message, false);
+        AirCANnect.ui.message("settingsMsg", AirCANnect.i18n.error(error), false);
       }
     }
 
@@ -744,7 +753,7 @@
       try {
         await applySettingsSnapshot(data);
       } catch (error) {
-        AirCANnect.ui.message("settingsMsg", error.message, false);
+        AirCANnect.ui.message("settingsMsg", AirCANnect.i18n.error(error), false);
       }
     });
     AirCANnect.events.subscribe("device_boot", () => {

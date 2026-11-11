@@ -150,6 +150,7 @@ void append_catalog_setting_json(LargeTextBuffer &json,
     json += '{';
     json_add_string(json, "key", def.key, false);
     json_add_string(json, "label", def.label);
+    json_add_bool(json, "stock", !catalog.overlaid(def.key));
     const std::string rpc_name = as11_setting_rpc_long_name(
         def, catalog.device_model());
     json_add_string(json, "rpc_name", rpc_name.c_str());
@@ -194,6 +195,7 @@ void append_catalog_composite_json(LargeTextBuffer &json,
     json += '{';
     json_add_string(json, "key", def.key, false);
     json_add_string(json, "kind", "paired_enum_numeric");
+    json_add_bool(json, "stock", true);
     json_add_string(json, "label", def.label);
     json_add_string(json, "enum_key", def.enum_key);
     json_add_string(json, "numeric_key", def.numeric_key);
