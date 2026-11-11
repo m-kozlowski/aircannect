@@ -14,7 +14,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      PLATFORMIO_VERSION: '6.1.19'
       PLATFORMIO_BUILD_CACHE_DIR: ${{ github.workspace }}/.pio/build-cache
 
     steps:
@@ -35,13 +34,13 @@ jobs:
             ~/.platformio/platforms
             .pio/libdeps
           key: >-
-            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-deps-${{
+            ${{ runner.os }}-pio-${{ hashFiles('requirements-ci.txt') }}-deps-${{
             hashFiles('platformio.ini', 'platformio-*.ini',
             'python/tools/generate_libsmb2.py', '.gitmodules',
             'patches/libsmb2/**',
             'third_party/libsmb2-pio/**') }}
           restore-keys: |
-            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-deps-
+            ${{ runner.os }}-pio-${{ hashFiles('requirements-ci.txt') }}-deps-
 
       - name: Cache PlatformIO build objects
         continue-on-error: true
@@ -49,21 +48,26 @@ jobs:
         with:
           path: .pio/build-cache
           key: >-
-            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{
+            ${{ runner.os }}-pio-${{ hashFiles('requirements-ci.txt') }}-build-${{
             hashFiles('platformio.ini', 'platformio-*.ini',
             'python/tools/generate_libsmb2.py', '.gitmodules',
             'patches/libsmb2/**',
             'third_party/libsmb2-pio/**') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{ hashFiles('platformio.ini', 'platformio-*.ini', 'python/tools/generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**', 'third_party/libsmb2-pio/**') }}-
-            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-
+            ${{ runner.os }}-pio-${{ hashFiles('requirements-ci.txt') }}-build-${{ hashFiles('platformio.ini', 'platformio-*.ini', 'python/tools/generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**', 'third_party/libsmb2-pio/**') }}-
+            ${{ runner.os }}-pio-${{ hashFiles('requirements-ci.txt') }}-build-
 
       - name: Create build environment
         run: |
           python3 -m venv .ci-venv
           .ci-venv/bin/python -m pip install \
             --disable-pip-version-check \
-            platformio=="$PLATFORMIO_VERSION"
+            -r requirements-ci.txt
+
+      - name: Check WebUI translations
+        run: |
+          PATH="$PWD/.ci-venv/bin:$PATH" \
+            .ci-venv/bin/python python/tools/web_localization.py --descriptors
 
       - name: Build firmware artifacts
         run: |

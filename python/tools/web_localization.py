@@ -1,6 +1,7 @@
 """Validate WebUI catalogs and synchronize their firmware language choices."""
 
 import argparse
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
@@ -87,6 +88,30 @@ def check_language_header(root, catalogs, sync=False):
                          'python3 python/tools/web_localization.py --sync')
 
 
+def check_source_keys(root, catalogs):
+    """Check explicit UI references; dynamic descriptor keys use the exporter."""
+    keys = set()
+
+    class MarkupKeys(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            for name, value in attrs:
+                if name in ('data-i18n', 'data-i18n-title',
+                            'data-i18n-placeholder', 'data-i18n-aria-label'):
+                    keys.add(value)
+
+    root = Path(root)
+    MarkupKeys().feed((root / 'www/index.html').read_text(encoding='utf-8'))
+    # Only complete literal arguments, not prefixes such as "config.field." + key.
+    literal = re.compile(
+        r'''\b(?:AirCANnect\.i18n|i18n)\.(?:message|t)\(\s*["']'''
+        r'''([A-Za-z0-9_.-]+)["']\s*(?=[,)])''')
+    for path in (root / 'www/js').glob('*.js'):
+        keys.update(literal.findall(path.read_text(encoding='utf-8')))
+    missing = keys - catalogs['en'].keys()
+    if missing:
+        raise ValueError(f'UI keys missing from English: {sorted(missing)}')
+
+
 def firmware_descriptors(root=ROOT):
     root = Path(root).resolve()
     subprocess.run(
@@ -125,6 +150,7 @@ def main():
                 raise ValueError(f'English firmware descriptions differ: {stale}')
     catalogs = load_catalogs()
     check_language_header(ROOT, catalogs, args.sync)
+    check_source_keys(ROOT, catalogs)
     print(f"WebUI catalogs: {len(catalogs)} languages, "
           f"{len(catalogs['en'])} English keys")
 

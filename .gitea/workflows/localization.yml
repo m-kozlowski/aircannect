@@ -1,0 +1,24 @@
+name: localization
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install --disable-pip-version-check -r requirements-ci.txt
+
+      - name: Check WebUI translations
+        run: |
+          PATH="$PWD/.ci-venv/bin:$PATH" \
+            .ci-venv/bin/python python/tools/web_localization.py --descriptors

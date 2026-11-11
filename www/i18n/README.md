@@ -33,3 +33,12 @@ compiler. They build the `ui-descriptors` environment in `platformio.ini`;
 PlatformIO installs its dependencies on first use. No firmware build or
 private test environment is required. To build the tool directly, run
 `pio run -e ui-descriptors`.
+
+Some descriptor entries apply only to other boards or ResMed models; keep them
+in the template even if your device does not display them. JSON comments are
+not supported. Firmware metadata remains the source for CLI text; the complete
+English catalog is also used by the browser, not just as an unused reference.
+
+`python3 python/tools/web_localization.py --descriptors` checks descriptor
+drift as well as catalog coverage and parameters.
+GitHub and Gitea run this check for pull requests and before release builds.

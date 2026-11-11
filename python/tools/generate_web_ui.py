@@ -84,6 +84,7 @@ def inline_assets(html, base_dir):
             root = Path(base_dir).parent
             catalogs = localization.load_catalogs(root)
             localization.check_language_header(root, catalogs)
+            localization.check_source_keys(root, catalogs)
             urls = {}
             for tag, catalog in catalogs.items():
                 data = json.dumps(
