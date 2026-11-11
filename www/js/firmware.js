@@ -1,6 +1,8 @@
 (() => {
     "use strict";
 
+    const i18n = AirCANnect.i18n;
+
     let otaData = null;
     const resmedOtaRate = {
       phase: "",
@@ -67,7 +69,7 @@
           AirCANnect.snapshots.publish("ota", data);
         }
       } catch (error) {
-        AirCANnect.ui.message("otaMsg", error.message, false);
+        AirCANnect.ui.message("otaMsg", i18n.error(error), false);
       }
     }
 
@@ -83,7 +85,7 @@
         }
         loadResmedRepository(!!refreshRepository);
       } catch (error) {
-        AirCANnect.ui.message("resmedOtaMsg", error.message, false);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false);
       }
     }
 
@@ -102,14 +104,13 @@
 
       let latest = "--";
       if (!data.update_check_enabled) {
-        latest = "Checks disabled";
+        latest = i18n.message("ota.checks_disabled");
       } else if (data.update_check_active) {
-        latest = "Checking...";
+        latest = i18n.message("ota.checking");
       } else if (data.update_check_pending) {
-        latest = "Check queued";
+        latest = i18n.message("ota.check_queued");
       } else if (data.update_version) {
-        latest = data.update_version +
-          (data.update_available ? " available" : " (current)");
+        latest = i18n.message(data.update_available ? "ota.version_available" : "ota.version_current", {version: data.update_version});
       }
       AirCANnect.ui.text("otaLatest", latest);
 
@@ -122,9 +123,9 @@
       const installUpdate = document.getElementById("otaInstallUpdate");
       if (installUpdate) {
         installUpdate.hidden = !data.update_available;
-        installUpdate.textContent = data.update_version
-          ? "Install " + data.update_version
-          : "Install update";
+        i18n.text(installUpdate, data.update_version
+          ? i18n.message("ota.install_version", {version: data.update_version})
+          : i18n.message("ui.install.update"));
         installUpdate.disabled = !data.update_installable || active;
       }
 
@@ -142,24 +143,22 @@
         return;
       }
       if (data.url_active && !data.total_size && !data.wire_total_size) {
-        AirCANnect.ui.text("otaProgress", "Resolving firmware URL...");
+        AirCANnect.ui.text("otaProgress", i18n.message("ota.resolving"));
         return;
       }
       if (data.http_prepare_pending) {
         const size = data.total_size || data.wire_total_size || 0;
-        AirCANnect.ui.text("otaProgress", "Preparing / " + AirCANnect.format.bytes(size));
+        AirCANnect.ui.text("otaProgress", i18n.message("ota.preparing_size", {size: AirCANnect.format.bytes(size)}));
         return;
       }
       if (data.http_prepared && !data.http_active) {
         const size = data.total_size || data.wire_total_size || 0;
-        AirCANnect.ui.text("otaProgress", "Ready / " + AirCANnect.format.bytes(size));
+        AirCANnect.ui.text("otaProgress", i18n.message("ota.ready_size", {size: AirCANnect.format.bytes(size)}));
         return;
       }
       let text;
       if (data.encoding === "zlib" && data.wire_total_size) {
-        text = (data.progress || 0) + "% / " +
-          AirCANnect.format.bytes(data.wire_bytes || 0) + " wire, " +
-          AirCANnect.format.bytes(data.bytes || 0) + " raw";
+        text = i18n.message("ota.progress_size", {percent: data.progress || 0, wire: AirCANnect.format.bytes(data.wire_bytes || 0), raw: AirCANnect.format.bytes(data.bytes || 0)});
       } else {
         text = (data.progress || 0) + "% / " + AirCANnect.format.bytes(data.bytes || 0);
       }
@@ -176,7 +175,7 @@
     async function otaCheckForUpdates() {
       const button = document.getElementById("otaCheckUpdate");
       if (button) button.disabled = true;
-      AirCANnect.ui.message("otaUpdateMsg", "Checking for updates...", true, true);
+      AirCANnect.ui.message("otaUpdateMsg", i18n.message("ota.checking_updates"), true, true);
 
       let data = null;
       try {
@@ -185,7 +184,7 @@
         data = await response.json();
         renderOta(data);
         if (!response.ok) {
-          throw new Error(data.update_error || "Update check rejected");
+          throw i18n.failure(data.update_error || i18n.message("ota.check_rejected"));
         }
 
         const started = Date.now();
@@ -196,7 +195,7 @@
             eventSerial, 10000, "");
           if (!startedData) {
             AirCANnect.ui.message("otaUpdateMsg",
-              "Check queued until the device is idle and network is available.",
+              i18n.message("ota.check_deferred"),
               true, true);
             return;
           }
@@ -207,18 +206,18 @@
             (next) => !next.update_check_pending &&
               !next.update_check_active,
             eventSerial, Math.max(1, 60000 - (Date.now() - started)),
-            "Update check timed out");
+            i18n.message("ota.check_timeout"));
         }
 
-        if (data.update_error) throw new Error(data.update_error);
+        if (data.update_error) throw i18n.failure(data.update_error);
         if (data.update_available) {
           AirCANnect.ui.message("otaUpdateMsg",
-            "Version " + data.update_version + " is available.", true);
+            i18n.message("ota.available", {version: data.update_version}), true);
         } else {
-          AirCANnect.ui.message("otaUpdateMsg", "This device is up to date.", true);
+          AirCANnect.ui.message("otaUpdateMsg", i18n.message("ota.current"), true);
         }
       } catch (error) {
-        AirCANnect.ui.message("otaUpdateMsg", error.message, false);
+        AirCANnect.ui.message("otaUpdateMsg", i18n.error(error), false);
       } finally {
         if (button) {
           button.disabled = !data || !data.update_check_enabled ||
@@ -237,7 +236,7 @@
         const element = document.createElement(
           match[0][0] === "`" ? "code" : "strong");
         const trim = match[0][0] === "`" ? 1 : 2;
-        element.textContent = match[0].slice(trim, -trim);
+        i18n.text(element, match[0].slice(trim, -trim));
         parent.append(element);
         offset = token.lastIndex;
       }
@@ -245,7 +244,7 @@
     }
 
     function renderReleaseNotesMarkdown(container, markdown) {
-      container.replaceChildren();
+      i18n.text(container, "");
       const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
       let paragraph = [];
       let list = null;
@@ -269,7 +268,7 @@
       const appendCode = () => {
         const pre = document.createElement("pre");
         const element = document.createElement("code");
-        element.textContent = code.join("\n");
+        i18n.text(element, code.join("\n"));
         pre.append(element);
         container.append(pre);
         code = null;
@@ -330,7 +329,7 @@
       closeList();
       if (code !== null) appendCode();
       if (!container.childNodes.length) {
-        container.textContent = "No release notes were provided.";
+        i18n.text(container, i18n.message("ota.no_notes"));
       }
     }
 
@@ -340,10 +339,10 @@
       const text = document.getElementById("otaReleaseNotesText");
       if (!dialog || !title || !text) return;
 
-      title.textContent = otaData && otaData.update_version
-        ? "Release notes " + otaData.update_version
-        : "Release notes";
-      text.textContent = "Loading...";
+      i18n.text(title, otaData && otaData.update_version
+        ? i18n.message("ota.notes_version", {version: otaData.update_version})
+        : i18n.message("ui.release.notes"));
+      i18n.text(text, i18n.message("ui.loading.progress"));
       if (!dialog.open) dialog.showModal();
 
       try {
@@ -351,8 +350,7 @@
           "/api/ota/release-notes", {cache: "no-store"});
         renderReleaseNotesMarkdown(text, await response.text());
       } catch (error) {
-        text.textContent = "Release notes could not be loaded: " +
-          error.message;
+        i18n.text(text, i18n.message("ota.notes_failed", {error: i18n.error(error)}));
       }
     }
 
@@ -376,10 +374,10 @@
       try {
         parsed = new URL(url);
       } catch (error) {
-        throw new Error("Enter a valid firmware URL");
+        throw i18n.failure("ota.url_invalid");
       }
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new Error("Firmware URL must use HTTP or HTTPS");
+        throw i18n.failure("ota.url_scheme");
       }
 
       return new URLSearchParams({url}).toString();
@@ -391,39 +389,39 @@
       let data = await response.json();
       renderOta(data);
       if (!response.ok) {
-        throw new Error(data.last_error || data.error || "URL update rejected");
+        throw i18n.failure(data.last_error || data.error || i18n.message("ota.url_rejected"));
       }
 
       data = await waitForOtaSnapshot(
         (next) => next.reboot_pending || next.http_ready ||
           (!!next.last_error && !next.url_active),
-        eventSerial, 15 * 60 * 1000, "URL update timed out");
+        eventSerial, 15 * 60 * 1000, i18n.message("ota.url_timeout"));
       if (data.last_error && !data.url_active && !data.reboot_pending) {
-        throw new Error(data.last_error);
+        throw i18n.failure(data.last_error);
       }
 
-      AirCANnect.ui.message(messageId, "Update installed. Restarting...", true, true);
+      AirCANnect.ui.message(messageId, i18n.message("ota.restarting"), true, true);
       scheduleOtaReload();
       return true;
     }
 
     async function otaInstallFromUrl(url) {
       const query = otaUrlQuery(url);
-      AirCANnect.ui.message("otaMsg", "Starting URL update...", true, true);
+      AirCANnect.ui.message("otaMsg", i18n.message("ota.url_starting"), true, true);
       return otaRunUrlUpdate("/api/ota/url?" + query, "otaMsg");
     }
 
     async function otaInstallAvailableUpdate() {
       const button = document.getElementById("otaInstallUpdate");
       if (button) button.disabled = true;
-      AirCANnect.ui.message("otaUpdateMsg", "Starting release update...", true, true);
+      AirCANnect.ui.message("otaUpdateMsg", i18n.message("ota.release_starting"), true, true);
 
       let restarting = false;
       try {
         restarting = await otaRunUrlUpdate(
           "/api/ota/install-update", "otaUpdateMsg");
       } catch (error) {
-        AirCANnect.ui.message("otaUpdateMsg", "Update failed: " + error.message, false, true);
+        AirCANnect.ui.message("otaUpdateMsg", i18n.message("ota.failed", {error: i18n.error(error)}), false, true);
         loadEspOta();
       } finally {
         if (button && !restarting) button.disabled = false;
@@ -448,18 +446,18 @@
       let data = await prepareResponse.json();
       renderOta(data);
       if (!prepareResponse.ok) {
-        throw new Error(data.last_error || data.error ||
-          "OTA prepare rejected");
+        throw i18n.failure(data.last_error || data.error ||
+          i18n.message("ota.prepare_rejected"));
       }
 
       if (!data.http_prepared) {
         data = await waitForOtaSnapshot(
           (next) => next.http_prepared || !!next.last_error ||
             !next.http_prepare_pending,
-          eventSerial, 65000, "OTA prepare timed out");
+          eventSerial, 65000, i18n.message("ota.prepare_timeout"));
       }
-      if (data.last_error) throw new Error(data.last_error);
-      if (!data.http_prepared) throw new Error("OTA prepare did not start");
+      if (data.last_error) throw i18n.failure(data.last_error);
+      if (!data.http_prepared) throw i18n.failure("ota.prepare_not_started");
       return data;
     }
 
@@ -467,9 +465,9 @@
       const plan = otaUploadPlan(file);
       const bar = document.getElementById("otaUploadBar");
 
-      AirCANnect.ui.message("otaMsg", "Preparing OTA...", true, true);
+      AirCANnect.ui.message("otaMsg", i18n.message("ota.preparing"), true, true);
       await prepareOtaUpload(plan);
-      AirCANnect.ui.message("otaMsg", "Uploading...", true, true);
+      AirCANnect.ui.message("otaMsg", i18n.message("ota.uploading_progress"), true, true);
 
       const form = new FormData();
       form.append("firmware", file);
@@ -489,7 +487,7 @@
       const data = JSON.parse(result.responseText || "{}");
       if (result.status >= 300) {
         renderOta(data);
-        throw new Error(data.last_error || result.statusText);
+        throw i18n.failure(data.last_error || result.statusText);
       }
 
       bar.style.width = "100%";
@@ -497,7 +495,7 @@
 
       const restarting = data.reboot_pending || data.http_ready;
       AirCANnect.ui.message("otaMsg", restarting ?
-        "Update installed. Restarting..." : "Upload finished",
+        i18n.message("ota.restarting") : i18n.message("ota.upload_finished"),
       restarting, true);
       if (restarting) scheduleOtaReload();
       return restarting;
@@ -508,11 +506,11 @@
       const file = document.getElementById("otaFile").files[0];
 
       if (!url && !file) {
-        AirCANnect.ui.message("otaMsg", "Enter a firmware URL or select an image", false);
+        AirCANnect.ui.message("otaMsg", i18n.message("ota.choose_source"), false);
         return;
       }
       if (url && file) {
-        AirCANnect.ui.message("otaMsg", "Choose either a firmware URL or an image", false);
+        AirCANnect.ui.message("otaMsg", i18n.message("ota.one_source"), false);
         return;
       }
 
@@ -529,7 +527,7 @@
         restarting = file ? await otaInstallFromFile(file) :
           await otaInstallFromUrl(url);
       } catch (error) {
-        AirCANnect.ui.message("otaMsg", "Update failed: " + error.message, false, true);
+        AirCANnect.ui.message("otaMsg", i18n.message("ota.failed", {error: i18n.error(error)}), false, true);
         loadEspOta();
       } finally {
         if (!restarting) button.disabled = false;
@@ -553,11 +551,11 @@
 
     function resmedOtaError(data) {
       if (data.phase === "error") {
-        return data.last_error || "ResMed OTA failed";
+        return data.last_error || i18n.message("ota.resmed_failed");
       }
       if (data.prepare_state === "error" ||
           data.prepare_state === "cancelled") {
-        return data.prepare_error || "Image preparation failed";
+        return data.prepare_error || i18n.message("ota.image_failed");
       }
       return "";
     }
@@ -571,50 +569,50 @@
     function resmedOtaDumpSavedText(data) {
       const path = String(data.output_path || "");
       const filename = String(data.filename || path.split("/").pop() || "");
-      return "Firmware dump saved" + (filename ? ": " + filename : "");
+      return i18n.message("ota.dump_saved", {filename: filename ? ": " + filename : ""});
     }
 
     function resmedOtaStatusText(data) {
       const phase = resmedOtaDisplayPhase(data);
       const target = data.target && data.target !== "ABC" ? " " + data.target : "";
       const prepareTarget = data.prepare_target ? " " + data.prepare_target : "";
-      if (data.prepare_state === "queued") return "Preparation queued";
+      if (data.prepare_state === "queued") return i18n.message("ota.prepare_queued");
       if (data.prepare_state === "inspecting") {
-        return "Inspecting image" + prepareTarget;
+        return i18n.message("ota.inspecting", {target: prepareTarget});
       }
       if (data.prepare_state === "converting") {
-        return "Building ABC image" + prepareTarget;
+        return i18n.message("ota.building_abc", {target: prepareTarget});
       }
-      if (data.prepare_state === "publishing") return "Saving ABC image";
-      if (phase === "reading_identity") return "Reading ResMed identity";
-      if (phase === "checking_storage") return "Checking firmware repository";
-      if (phase === "opening") return "Opening prepared image" + target;
-      if (phase === "entering_service") return "Entering service mode";
-      if (phase === "dumping") return "Reading current firmware";
+      if (data.prepare_state === "publishing") return i18n.message("ota.saving_abc");
+      if (phase === "reading_identity") return i18n.message("ota.reading_identity");
+      if (phase === "checking_storage") return i18n.message("ota.checking_repository");
+      if (phase === "opening") return i18n.message("ota.opening", {target});
+      if (phase === "entering_service") return i18n.message("ota.entering_service");
+      if (phase === "dumping") return i18n.message("ota.reading_firmware");
       if (phase === "publishing") return data.operation === "dump" ?
-        "Saving firmware dump" : "Publishing firmware";
+        i18n.message("ota.saving_dump") : i18n.message("ota.publishing");
       if (phase === "bootloader_required") {
-        return "Patched bootloader required";
+        return i18n.message("ota.bootloader_required");
       }
       if (phase === "preparing_bootloader") {
-        return "Preparing patched bootloader";
+        return i18n.message("ota.preparing_bootloader");
       }
-      if (phase === "programming") return "Programming ResMed" + target;
-      if (phase === "probing_apply") return "Checking installation permissions";
-      if (phase === "initiating") return "Starting device upload" + target;
+      if (phase === "programming") return i18n.message("ota.programming", {target});
+      if (phase === "probing_apply") return i18n.message("ota.permissions");
+      if (phase === "initiating") return i18n.message("ota.device_upload", {target});
       if (phase === "ready" || phase === "uploading") {
         return data.transport === "service" ?
-          "Programming ResMed" + target : "Sending to ResMed" + target;
+          i18n.message("ota.programming", {target}) : i18n.message("ota.sending_resmed", {target});
       }
       if (phase === "uploaded" || phase === "checking") {
-        return "Verifying on ResMed";
+        return i18n.message("ota.verifying_resmed");
       }
-      if (phase === "verified") return "Firmware verified";
-      if (phase === "applying") return "Installing firmware";
-      if (phase === "resetting") return "Restarting ResMed";
+      if (phase === "verified") return i18n.message("ota.verified");
+      if (phase === "applying") return i18n.message("ota.installing");
+      if (phase === "resetting") return i18n.message("ota.restarting_resmed");
       if (phase === "complete") return data.operation === "dump" ?
-        resmedOtaDumpSavedText(data) : "Installation complete";
-      if (phase === "error") return data.last_error || "ResMed OTA failed";
+        resmedOtaDumpSavedText(data) : i18n.message("ota.complete");
+      if (phase === "error") return data.last_error || i18n.message("ota.resmed_failed");
       return phase || "--";
     }
 
@@ -669,15 +667,13 @@
       document.querySelectorAll(".resmed-repository-actions .primary")
         .forEach((button) => {
           button.disabled = !installAvailable;
-          button.title = installAvailable ? "" :
-            "Patched Bootloader requires CAN";
+          i18n.text(button, installAvailable ? "" :
+            i18n.message("ota.can_required"), "title");
         });
 
       const rateText = resmedOtaRateText(data);
       const displayPhase = resmedOtaDisplayPhase(data);
-      const stateText = resmedOtaStatusText(data) +
-        (data.waiting && displayPhase !== "programming" ?
-          " / waiting" : "");
+      const stateText = data.waiting && displayPhase !== "programming" ? i18n.message("ota.waiting", {state: resmedOtaStatusText(data)}) : resmedOtaStatusText(data);
       const progressValue = data.prepare_active ?
         Number(data.prepare_progress || 0) : Number(data.progress || 0);
       const progressText = progressValue + "%" +
@@ -730,18 +726,18 @@
           "block" : "none";
       bar.style.width = progressValue + "%";
       if (data.confirmation_required) {
-        AirCANnect.ui.message("resmedOtaMsg", "Matching patched bootloader found", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.bootloader_found"), false, true);
       } else if (data.prepare_error || data.last_error) {
         AirCANnect.ui.message("resmedOtaMsg", data.prepare_error || data.last_error,
           false, true);
       } else if (!installAvailable) {
-        AirCANnect.ui.message("resmedOtaMsg", "Patched Bootloader requires CAN",
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.can_required"),
           false, true);
       } else if (data.phase === "verified") {
-        AirCANnect.ui.message("resmedOtaMsg", "Firmware verified", true, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.verified"), true, true);
       } else if (data.phase === "complete") {
         AirCANnect.ui.message("resmedOtaMsg", data.operation === "dump" ?
-          resmedOtaDumpSavedText(data) : "Installation complete", true, true);
+          resmedOtaDumpSavedText(data) : i18n.message("ota.complete"), true, true);
       } else if (data.active) {
         AirCANnect.ui.message("resmedOtaMsg", stateText, true, true);
       }
@@ -780,14 +776,14 @@
 
     async function resmedRepositoryDownload(path) {
       AirCANnect.ui.message(
-        "resmedRepositoryMsg", "Preparing download", true, false);
+        "resmedRepositoryMsg", i18n.message("storage.prepare_download"), true, false);
       try {
         await AirCANnect.files.download(path);
         AirCANnect.ui.message(
-          "resmedRepositoryMsg", "Download started", true, false);
+          "resmedRepositoryMsg", i18n.message("storage.download_started"), true, false);
       } catch (error) {
         AirCANnect.ui.message(
-          "resmedRepositoryMsg", error.message, false, true);
+          "resmedRepositoryMsg", i18n.error(error), false, true);
       }
     }
 
@@ -798,14 +794,14 @@
 
       const list = document.getElementById("resmedRepositoryList");
       if (!list) return;
-      list.textContent = "";
+      i18n.text(list, "");
 
       const entries = Array.isArray(data.entries) ? data.entries : [];
       if (!entries.length) {
         const empty = document.createElement("div");
         empty.className = "storage-empty";
-        empty.textContent = data.error ||
-          (data.refresh_pending ? "Refreshing" : "No firmware images");
+        i18n.text(empty, data.error ||
+          (data.refresh_pending ? i18n.message("ota.refreshing") : i18n.message("ota.no_images")));
         list.appendChild(empty);
       }
 
@@ -814,14 +810,14 @@
         row.className = "storage-entry";
 
         const marker = document.createElement("span");
-        marker.textContent = entry.kind_hint === "abc" ? "ABC" :
-          entry.kind_hint === "raw" ? "RAW" : "?";
+        i18n.text(marker, entry.kind_hint === "abc" ? "ABC" :
+          entry.kind_hint === "raw" ? "RAW" : "?");
         marker.className = "storage-meta";
 
         const details = document.createElement("div");
         const name = document.createElement("div");
         name.className = "storage-name";
-        name.textContent = entry.name || entry.path || "--";
+        i18n.text(name, entry.name || entry.path || "--");
         name.tabIndex = 0;
         name.onclick = () => resmedRepositoryDownload(entry.path);
         name.onkeydown = (event) => {
@@ -832,9 +828,9 @@
         };
         const meta = document.createElement("div");
         meta.className = "storage-meta";
-        meta.textContent = AirCANnect.format.bytes(entry.size) +
+        i18n.text(meta, AirCANnect.format.bytes(entry.size) +
           (AirCANnect.format.modified(entry.modified) ?
-            " / " + AirCANnect.format.modified(entry.modified) : "");
+            " / " + AirCANnect.format.modified(entry.modified) : ""));
         details.appendChild(name);
         details.appendChild(meta);
 
@@ -842,24 +838,24 @@
         actions.className = "resmed-repository-actions";
         const install = document.createElement("button");
         install.className = "btn primary";
-        install.textContent = "Install";
+        i18n.text(install, i18n.message("ui.install"));
         install.disabled = !resmedOtaInstallAvailable();
-        install.title = resmedOtaInstallAvailable() ? "" :
-          "Patched Bootloader requires CAN";
+        i18n.text(install, resmedOtaInstallAvailable() ? "" :
+          i18n.message("ota.can_required"), "title");
         install.onclick = () => resmedRepositoryInstall(
           entry.path, entry.name || entry.path);
         actions.appendChild(install);
 
         const rename = document.createElement("button");
         rename.className = "btn";
-        rename.textContent = "Rename";
+        i18n.text(rename, i18n.message("storage.rename"));
         rename.onclick = () => resmedRepositoryRename(entry.path,
           entry.name || entry.path);
         actions.appendChild(rename);
 
         const remove = document.createElement("button");
         remove.className = "btn danger";
-        remove.textContent = "Remove";
+        i18n.text(remove, i18n.message("ui.remove"));
         remove.onclick = () => resmedRepositoryRemove(entry.path,
           entry.name || entry.path);
         actions.appendChild(remove);
@@ -882,7 +878,7 @@
         const response = await AirCANnect.http.request(url, {cache: "no-store"});
         const data = await response.json();
         if (!response.ok && response.status !== 202) {
-          throw new Error(data.error || ("HTTP " + response.status));
+          throw i18n.failure(data.error || ("HTTP " + response.status));
         }
         if (!result) result = data;
         if (Array.isArray(data.entries)) entries.push(...data.entries);
@@ -904,7 +900,7 @@
         renderResmedRepository(data);
       } catch (error) {
         if (generation !== resmedRepositoryLoadGeneration) return;
-        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.error(error), false, true);
       }
     }
 
@@ -925,7 +921,7 @@
       const operation = AirCANnect.uploads.begin();
       if (!operation) {
         AirCANnect.ui.message(
-          "resmedRepositoryMsg", "Another upload is already active",
+          "resmedRepositoryMsg", i18n.message("storage.upload_busy"),
           false, true);
         return;
       }
@@ -949,14 +945,13 @@
         }
 
         if (operation.cancelled) {
-          AirCANnect.ui.message("resmedRepositoryMsg", "Upload cancelled", true, false);
+          AirCANnect.ui.message("resmedRepositoryMsg", i18n.message("storage.upload_cancelled"), true, false);
         } else {
-          AirCANnect.ui.message("resmedRepositoryMsg", "Added " + uploaded + " image" +
-            (uploaded === 1 ? "" : "s"), true, false);
+          AirCANnect.ui.message("resmedRepositoryMsg", i18n.message("ota.images_added", {count: uploaded}), true, false);
         }
         await loadResmedRepository(true);
       } catch (error) {
-        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.error(error), false, true);
       } finally {
         operation.close();
         if (resmedUploadOperation === operation) resmedUploadOperation = null;
@@ -974,7 +969,7 @@
     }
 
     async function resmedRepositoryRemove(path, name) {
-      if (!confirm("Remove " + name + " from the firmware repository?")) {
+      if (!confirm(i18n.t("ota.remove_confirm", {name}))) {
         return;
       }
 
@@ -985,9 +980,9 @@
           body: JSON.stringify({path}),
         });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Remove failed");
+        if (!response.ok) throw i18n.failure(data.error || i18n.message("ota.remove_failed"));
       } catch (error) {
-        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.error(error), false, true);
       }
     }
 
@@ -997,14 +992,13 @@
         const base = slash > 0 ? path.slice(0, slash) : "/";
         const name = slash >= 0 ? path.slice(slash + 1) : currentName;
         const renamed = await AirCANnect.files.rename(
-          base, name, "Rename firmware image");
+          base, name, i18n.message("ota.rename_image"));
         if (!renamed) return;
 
-        AirCANnect.ui.message("resmedRepositoryMsg", "Renamed " + currentName + " to " +
-          renamed, true, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.message("storage.renamed", {name: currentName, renamed}), true, true);
         await loadResmedRepository(true);
       } catch (error) {
-        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.error(error), false, true);
       }
     }
 
@@ -1025,12 +1019,10 @@
 
     function confirmResmedOtaTarget(target, name) {
       if (target === "FGBL") {
-        return confirm("Install " + name +
-          " into the ResMed bootloader region (FGBL)?");
+        return confirm(i18n.t("ota.bootloader_confirm", {name}));
       }
       if (target === "FGCB") {
-        return confirm("Replace the complete ResMed internal flash with " +
-          name + "?");
+        return confirm(i18n.t("ota.flash_confirm", {name}));
       }
       return true;
     }
@@ -1038,7 +1030,7 @@
     async function resmedRepositoryInstall(path, name) {
       if (!resmedOtaInstallAvailable()) {
         AirCANnect.ui.message("resmedRepositoryMsg",
-          "Patched Bootloader requires CAN", false, true);
+          i18n.message("ota.can_required"), false, true);
         return;
       }
 
@@ -1047,7 +1039,7 @@
       if (!confirmResmedOtaTarget(target, name)) return;
 
       try {
-        AirCANnect.ui.message("resmedRepositoryMsg", "Installing " + name, true, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.message("ota.installing_name", {name}), true, true);
         const request = await postResmedOta("/api/resmed-ota/install", {
           path,
           filename: name,
@@ -1058,9 +1050,9 @@
         await waitResmedOtaStart(request.eventSerial);
         await waitResmedOta((data) => data.phase === "complete", 4200,
           request.eventSerial);
-        AirCANnect.ui.message("resmedRepositoryMsg", "Installation complete", true, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.message("ota.complete"), true, true);
       } catch (error) {
-        AirCANnect.ui.message("resmedRepositoryMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedRepositoryMsg", i18n.error(error), false, true);
       }
     }
 
@@ -1077,9 +1069,9 @@
     async function waitResmedOta(predicate, attempts, afterSerial) {
       const data = await waitForResmedOtaSnapshot(
         (next) => !!resmedOtaError(next) || predicate(next),
-        afterSerial, (attempts || 360) * 500, "ResMed OTA timeout");
+        afterSerial, (attempts || 360) * 500, i18n.message("ota.resmed_timeout"));
       const error = resmedOtaError(data);
-      if (error) throw new Error(error);
+      if (error) throw i18n.failure(error);
       return data;
     }
 
@@ -1087,9 +1079,9 @@
       const data = await waitForResmedOtaSnapshot(
         (next) => next.active || !!resmedOtaError(next),
         afterSerial, (attempts || 20) * 500,
-        "ResMed OTA did not start");
+        i18n.message("ota.resmed_not_started"));
       const error = resmedOtaError(data);
-      if (error) throw new Error(error);
+      if (error) throw i18n.failure(error);
       return data;
     }
 
@@ -1102,7 +1094,7 @@
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.error || data.last_error ||
+        throw i18n.failure(data.error || data.last_error ||
           ("HTTP " + response.status));
       }
       if (!data.queued && data.result !== "queued") {
@@ -1122,7 +1114,7 @@
       const cancel = document.getElementById("resmedOtaCancelBtn");
       const install = document.getElementById("resmedOtaInstallBtn");
 
-      AirCANnect.ui.text("resmedOtaState", "Uploading " + name);
+      AirCANnect.ui.text("resmedOtaState", i18n.message("ota.uploading_name", {name}));
       AirCANnect.ui.text("resmedOtaProgress", percent + "% " + AirCANnect.format.bytes(safeCommitted) +
         " / " + AirCANnect.format.bytes(safeTotal));
       if (progress) progress.style.display = "block";
@@ -1137,14 +1129,14 @@
     async function resmedOtaInstall() {
       const file = document.getElementById("resmedOtaFile").files[0];
       if (!file) {
-        AirCANnect.ui.message("resmedOtaMsg", "Select firmware image", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.select_image"), false, true);
         return;
       }
 
       const target = selectedResmedOtaTarget();
       const transport = selectedResmedOtaTransport();
       if (!resmedOtaInstallAvailable()) {
-        AirCANnect.ui.message("resmedOtaMsg", "Patched Bootloader requires CAN", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.can_required"), false, true);
         return;
       }
       if (!confirmResmedOtaTarget(target, file.name)) return;
@@ -1152,17 +1144,17 @@
       try {
         const current = await getResmedOta();
         if (current.active) {
-          throw new Error("Another ResMed firmware operation is active");
+          throw i18n.failure("ota.resmed_busy");
         }
 
         const operation = AirCANnect.uploads.begin();
-        if (!operation) throw new Error("Another upload is already active");
+        if (!operation) throw i18n.failure("storage.upload_busy");
 
         resmedUploadOperation = operation;
         resmedDirectUploadBusy = true;
         const install = document.getElementById("resmedOtaInstallBtn");
         if (install) install.disabled = true;
-        AirCANnect.ui.message("resmedOtaMsg", "Uploading", true, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.uploading"), true, true);
         const uploaded = await operation.file(file, "/aircannect", {
             fileIndex: 0,
             fileCount: 1,
@@ -1171,7 +1163,7 @@
             conflict: "replace",
             confirmReplace: false,
           });
-        if (!uploaded) throw new Error("Upload was not completed");
+        if (!uploaded) throw i18n.failure("ota.upload_incomplete");
 
         operation.close();
         if (resmedUploadOperation === operation) resmedUploadOperation = null;
@@ -1186,9 +1178,9 @@
         await waitResmedOtaStart(request.eventSerial);
         await waitResmedOta((data) => data.phase === "complete", 4200,
           request.eventSerial);
-        AirCANnect.ui.message("resmedOtaMsg", "Installation complete", true, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.complete"), true, true);
       } catch (error) {
-        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
         loadResmedOta(false);
       } finally {
         if (resmedUploadOperation) {
@@ -1211,15 +1203,14 @@
         AirCANnect.ui.message("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
         loadResmedRepository(true);
       } catch (error) {
-        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
       }
     }
 
     async function resmedOtaConfirmBootloader() {
       const current = await getResmedOta();
       if (!current.confirmation_required || !current.recovery_available) return;
-      if (!confirm("Install the matching patched bootloader from " +
-          current.recovery_path + " and retry the firmware dump?")) {
+      if (!confirm(i18n.t("ota.recovery_confirm", {path: current.recovery_path}))) {
         return;
       }
 
@@ -1234,21 +1225,21 @@
         AirCANnect.ui.message("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
         loadResmedRepository(true);
       } catch (error) {
-        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
       }
     }
 
     async function resmedOtaCancel() {
-      if (!confirm("Cancel the current ResMed firmware operation?")) {
+      if (!confirm(i18n.t("ota.cancel_confirm"))) {
         return;
       }
 
       try {
         if (resmedUploadOperation) await resmedUploadOperation.cancel();
         await postResmedOta("/api/resmed-ota/abort", {});
-        AirCANnect.ui.message("resmedOtaMsg", "Cancelled", false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.cancelled"), false, true);
       } catch (error) {
-        AirCANnect.ui.message("resmedOtaMsg", error.message, false, true);
+        AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
       }
     }
 

@@ -97,9 +97,11 @@
       }
 
       function localizedFailure(key, params = {}) {
+        const code = typeof key === "string" &&
+          Object.hasOwn(catalogs.en || {}, "error." + key) ? "error." + key : key;
         const message = key && typeof key === "object" ? key :
-          localizedMessage(key, params);
-        return Object.assign(new Error(message.key), {
+          localizedMessage(code, params);
+        return Object.assign(new Error(typeof key === "string" ? key : message.key), {
           ui: message,
         });
       }
