@@ -195,7 +195,9 @@
         panel.appendChild(addControls);
       }
 
-      const fieldRow = AirCANnect.ui.row(field.label || field.key, panel, field.key);
+      const fieldRow = AirCANnect.ui.row(
+        AirCANnect.i18n.message("config.field." + field.key + ".label", {},
+          field.label || field.key), panel, field.key);
       fieldRow.classList.add("keybindings-field");
       root.appendChild(fieldRow);
     }
@@ -229,7 +231,9 @@
         ["false", "true"].forEach((value) => {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = value === "true" ? "On" : "Off";
+          AirCANnect.i18n.text(option, AirCANnect.i18n.message(
+            "config.option." + field.key + "." + (value === "true" ? "on" : "off"),
+            {}, value === "true" ? "On" : "Off"));
           if (String(data[field.key]) === value) option.selected = true;
           control.appendChild(option);
         });
@@ -251,9 +255,9 @@
           const option = document.createElement("option");
           option.value = value;
           AirCANnect.i18n.text(option,
-            field.key === "ui_language" && value === "auto" ?
-              AirCANnect.i18n.message("config.option.ui_language.auto") :
-              label || value);
+            field.key === "ui_language" && value !== "auto" ? label || value :
+              AirCANnect.i18n.message("config.option." + field.key + "." + value,
+                {}, label || value));
           if (String(data[field.key]) === value) option.selected = true;
           control.appendChild(option);
         });
@@ -282,9 +286,8 @@
       control.dataset.type = field.type;
       control.dataset.orig = String(control.value || "");
       const rendered = AirCANnect.forms.decorate(field.key, control);
-      const label = field.key === "ui_language" ?
-        AirCANnect.i18n.message("config.field.ui_language.label") :
-        field.label || field.key;
+      const label = AirCANnect.i18n.message(
+        "config.field." + field.key + ".label", {}, field.label || field.key);
       root.appendChild(AirCANnect.ui.row(label, rendered, field.key));
     }
 
@@ -481,7 +484,8 @@
 
           const heading = document.createElement("summary");
           heading.className = "section-title";
-          heading.textContent = section.title;
+          AirCANnect.i18n.text(heading, AirCANnect.i18n.message(
+            "config.section." + section.id, {}, section.title));
           wrapper.appendChild(heading);
 
           const fields = document.createElement("div");

@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,10 +87,42 @@ def check_language_header(root, catalogs, sync=False):
                          'python3 python/tools/web_localization.py --sync')
 
 
+def firmware_descriptors(root=ROOT):
+    root = Path(root).resolve()
+    subprocess.run(
+        ['pio', 'run', '-e', 'ui-descriptors'],
+        cwd=root, check=True, stdout=sys.stderr,
+    )
+
+    metadata = json.loads(subprocess.check_output(
+        ['pio', 'project', 'metadata', '-e', 'ui-descriptors', '--json-output'],
+        cwd=root, text=True,
+    ))
+    executable = metadata['ui-descriptors']['prog_path']
+    return json.loads(subprocess.check_output([executable], text=True))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sync', action='store_true')
+    parser.add_argument('--descriptors', action='store_true',
+                        help='check or synchronize English firmware metadata')
     args = parser.parse_args()
+    if args.descriptors:
+        descriptors = firmware_descriptors()
+        path = ROOT / 'www/i18n/en.json'
+        english = json.loads(path.read_text(encoding='utf-8'),
+                             object_pairs_hook=unique_object)
+        if args.sync:
+            english.update(descriptors)
+            path.write_text(json.dumps(english, ensure_ascii=False,
+                                       indent=2, sort_keys=True) + '\n',
+                            encoding='utf-8')
+        else:
+            stale = [key for key, value in descriptors.items()
+                     if english.get(key) != value]
+            if stale:
+                raise ValueError(f'English firmware descriptions differ: {stale}')
     catalogs = load_catalogs()
     check_language_header(ROOT, catalogs, args.sync)
     print(f"WebUI catalogs: {len(catalogs)} languages, "

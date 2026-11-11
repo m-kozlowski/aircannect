@@ -11,6 +11,7 @@
 #include "app_config_internal.h"
 #endif
 
+#include <array>
 #include <string.h>
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
@@ -22,6 +23,25 @@ namespace aircannect {
 namespace {
 
 #include "ui_languages_generated.inc"
+
+template <typename T, size_t N>
+constexpr size_t available_count(const T (&entries)[N]) {
+    size_t count = 0;
+    for (const auto &entry : entries) {
+        if (entry.available) ++count;
+    }
+    return count;
+}
+
+template <size_t Count, typename T, size_t N>
+constexpr std::array<T, Count> available_entries(const T (&entries)[N]) {
+    std::array<T, Count> result{};
+    size_t index = 0;
+    for (const auto &entry : entries) {
+        if (entry.available) result[index++] = entry;
+    }
+    return result;
+}
 
 enum ConfigLogCategoryIndex : int16_t {
     CONFIG_LOG_GENERAL = 0,
@@ -94,13 +114,13 @@ static constexpr AppConfigEnumValue OXIMETRY_ADVERTISE_VALUES[] = {
 };
 
 static constexpr AppConfigEnumValue AS11_TRANSPORT_VALUES[] = {
-#if AC_CAN_ENABLED
-    {"can", "CAN"},
-#endif
-#if AC_BLE_ENABLED
-    {"ble", "BLE"},
-#endif
+    {"can", "CAN", AC_CAN_ENABLED != 0},
+    {"ble", "BLE", AC_BLE_ENABLED != 0},
 };
+
+static constexpr auto AVAILABLE_AS11_TRANSPORT_VALUES =
+    available_entries<available_count(AS11_TRANSPORT_VALUES)>(
+        AS11_TRANSPORT_VALUES);
 
 static constexpr AppConfigEnumValue DISPLAY_ORIENTATION_VALUES[] = {
     {"default", "Board default"},
@@ -201,14 +221,12 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      "ResMed OTA key",
      "Device-specific key used for authenticated firmware installation.",
      nullptr, 0, -1, AC_CFG_OFFSET(as11_ota_key)},
-#if AC_CAN_ENABLED
     {"psu_90w", AppConfigFieldId::Psu90wEnabled, AppConfigGroup::As11,
      60, AppConfigFieldType::Bool, PROVISIONABLE, AC_CONFIG_DIRTY_PSU_90W,
      "Emulate 90 W PSU",
      "For a 90 W AC supply without CAN identification. Do not enable with "
      "a lower-power supply or an existing PSU CAN transmitter.",
-     nullptr, 0, -1, AC_CFG_OFFSET(psu_90w_enabled)},
-#endif
+     nullptr, 0, -1, AC_CFG_OFFSET(psu_90w_enabled), AC_CAN_ENABLED != 0},
 
     {"softap_mode", AppConfigFieldId::SoftApMode, AppConfigGroup::Network, 10,
      AppConfigFieldType::Enum, PROVISIONABLE, AC_CONFIG_DIRTY_SOFTAP,
@@ -330,18 +348,18 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_ALERTS, "High leak delay (seconds)",
      "Time above the threshold before raising the alert.", nullptr, 0, -1,
      AC_CFG_OFFSET(alert_leak_delay_s)},
-#if AC_AUDIO_DRIVER != AC_AUDIO_DRIVER_NONE
     {"alert_sound_en", AppConfigFieldId::AlertAudibleEnabled,
      AppConfigGroup::Alerts, 40, AppConfigFieldType::Bool, PROVISIONABLE,
      AC_CONFIG_DIRTY_ALERTS, "Audible alerts",
      "Play active alerts through the local speaker.", nullptr, 0, -1,
-     AC_CFG_OFFSET(alert_audible_enabled)},
+     AC_CFG_OFFSET(alert_audible_enabled),
+     AC_AUDIO_DRIVER != AC_AUDIO_DRIVER_NONE},
     {"alert_sound_vol", AppConfigFieldId::AlertAudibleVolume,
      AppConfigGroup::Alerts, 50, AppConfigFieldType::UInt16, PROVISIONABLE,
      AC_CONFIG_DIRTY_ALERTS, "Audible alert volume (%)",
      "Speaker volume from 0 to 100 percent.", nullptr, 0, -1,
-     AC_CFG_OFFSET(alert_audible_volume_percent)},
-#endif
+     AC_CFG_OFFSET(alert_audible_volume_percent),
+     AC_AUDIO_DRIVER != AC_AUDIO_DRIVER_NONE},
 
     {"smb_ep", AppConfigFieldId::SmbEndpoint, AppConfigGroup::Smb, 10,
      AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_SMB_SYNC,
@@ -381,15 +399,13 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      "SleepHQ mask ID for new post-therapy imports; empty disables it.",
      nullptr, 0, -1, AC_CFG_OFFSET(sleephq_mask_id)},
 
-#if AC_BUTTON_PROFILE != AC_BUTTON_PROFILE_NONE
     {"keybindings", AppConfigFieldId::Keybindings,
      AppConfigGroup::Keybindings, 10, AppConfigFieldType::Keybindings,
      AC_CONFIG_FIELD_NONE, AC_CONFIG_DIRTY_KEYBINDINGS,
      "Button bindings", "Actions assigned to local buttons.",
-     nullptr, 0, -1, AC_CFG_OFFSET(keybindings)},
-#endif
+     nullptr, 0, -1, AC_CFG_OFFSET(keybindings),
+     AC_BUTTON_PROFILE != AC_BUTTON_PROFILE_NONE},
 
-#if AC_DISPLAY_DRIVER != AC_DISPLAY_DRIVER_NONE
     {"display_orient", AppConfigFieldId::DisplayOrientation,
      AppConfigGroup::Display, 10, AppConfigFieldType::Enum,
      PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
@@ -397,21 +413,22 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      DISPLAY_ORIENTATION_VALUES,
      sizeof(DISPLAY_ORIENTATION_VALUES) /
          sizeof(DISPLAY_ORIENTATION_VALUES[0]),
-     -1, AC_CFG_OFFSET(display_orientation)},
-#if AC_MOTION_DRIVER != AC_MOTION_DRIVER_NONE
+     -1, AC_CFG_OFFSET(display_orientation),
+     AC_DISPLAY_DRIVER != AC_DISPLAY_DRIVER_NONE},
     {"display_autorot", AppConfigFieldId::DisplayAutoRotate,
      AppConfigGroup::Display, 20, AppConfigFieldType::Bool,
      PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
      "Automatic rotation", "Rotate the display with the device.",
-     nullptr, 0, -1, AC_CFG_OFFSET(display_auto_rotate)},
-#endif
+     nullptr, 0, -1, AC_CFG_OFFSET(display_auto_rotate),
+     AC_DISPLAY_DRIVER != AC_DISPLAY_DRIVER_NONE &&
+         AC_MOTION_DRIVER != AC_MOTION_DRIVER_NONE},
     {"display_timeout", AppConfigFieldId::DisplayTimeout,
      AppConfigGroup::Display, 30, AppConfigFieldType::UInt16,
      PROVISIONABLE, AC_CONFIG_DIRTY_DISPLAY,
      "Idle timeout (seconds)",
      "Turn off the backlight after inactivity; 0 disables the timeout.",
-     nullptr, 0, -1, AC_CFG_OFFSET(display_timeout)},
-#endif
+     nullptr, 0, -1, AC_CFG_OFFSET(display_timeout),
+     AC_DISPLAY_DRIVER != AC_DISPLAY_DRIVER_NONE},
 
     {"wg_mode", AppConfigFieldId::WireguardMode, AppConfigGroup::Vpn, 10,
      AppConfigFieldType::Enum, PROVISIONABLE, AC_CONFIG_DIRTY_VPN,
@@ -468,6 +485,18 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
 
 #undef AC_LOG_FIELD
 #undef AC_CFG_OFFSET
+
+// Filter at compile time so runtime users keep a contiguous, allocation-free view.
+static constexpr auto AVAILABLE_CONFIG_FIELDS = [] {
+    auto fields = available_entries<available_count(CONFIG_FIELDS)>(CONFIG_FIELDS);
+    for (auto &field : fields) {
+        if (field.id == AppConfigFieldId::As11Transport) {
+            field.enum_values = AVAILABLE_AS11_TRANSPORT_VALUES.data();
+            field.enum_value_count = AVAILABLE_AS11_TRANSPORT_VALUES.size();
+        }
+    }
+    return fields;
+}();
 
 }  // namespace
 
@@ -806,9 +835,14 @@ bool AppConfigFieldWriter::set_value(
 }
 #endif
 
-const AppConfigFieldDescriptor *app_config_fields(size_t &count) {
+const AppConfigFieldDescriptor *app_config_all_fields(size_t &count) {
     count = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_FIELDS[0]);
     return CONFIG_FIELDS;
+}
+
+const AppConfigFieldDescriptor *app_config_fields(size_t &count) {
+    count = AVAILABLE_CONFIG_FIELDS.size();
+    return AVAILABLE_CONFIG_FIELDS.data();
 }
 
 const char *app_config_supported_ui_language(const char *tag) {

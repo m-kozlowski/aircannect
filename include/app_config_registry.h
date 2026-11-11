@@ -163,6 +163,7 @@ enum class AppConfigFieldId : uint8_t {
 struct AppConfigEnumValue {
     const char *value;
     const char *label;
+    bool available = true;
 };
 
 struct AppConfigFieldDescriptor {
@@ -179,8 +180,13 @@ struct AppConfigFieldDescriptor {
     size_t enum_value_count;
     int16_t index;
     size_t offset;
+    bool available = true;
 };
 
+// Complete metadata, independent of the board's available features.
+const AppConfigFieldDescriptor *app_config_all_fields(size_t &count);
+
+// Runtime configuration exposes only fields and values supported by this build.
 const AppConfigFieldDescriptor *app_config_fields(size_t &count);
 const AppConfigFieldDescriptor *app_config_find_field(const char *key);
 const char *app_config_supported_ui_language(const char *tag);
