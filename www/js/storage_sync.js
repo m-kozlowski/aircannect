@@ -300,9 +300,11 @@
         const download = document.createElement("button");
         download.className = "btn primary storage-action";
         i18n.text(download, "\u2193");
-        i18n.text(download, entry.type === "dir" ?
-          i18n.message("storage.download_directory") : i18n.message("storage.download_file"), "title");
-        download.setAttribute("aria-label", download.title);
+        const downloadLabel = entry.type === "dir" ?
+          i18n.message("storage.download_directory") :
+          i18n.message("storage.download_file");
+        i18n.text(download, downloadLabel, "title");
+        i18n.text(download, downloadLabel, "aria-label");
         download.dataset.storageAction = entry.type === "dir" ? "archive" : "download";
         download.onclick = () => storageDownloadEntry(entry);
         actions.appendChild(rename);

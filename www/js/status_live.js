@@ -177,7 +177,9 @@
         if (notice) {
           notice.hidden = !issue.active;
           const text = issue.active ? AirCANnect.i18n.join([issue.text, issue.detail ? ": " + issue.detail : ""]) : "";
-          if (notice.textContent !== text) AirCANnect.i18n.text(notice, text);
+          if (notice.textContent !== AirCANnect.i18n.format(text)) {
+            AirCANnect.i18n.text(notice, text);
+          }
         }
         if (!list) return;
 
@@ -199,7 +201,9 @@
           list.appendChild(item);
         }
         const link = item.firstElementChild;
-        if (link.textContent !== issue.text) AirCANnect.i18n.text(link, issue.text);
+        if (link.textContent !== AirCANnect.i18n.format(issue.text)) {
+          AirCANnect.i18n.text(link, issue.text);
+        }
       });
       if (list) list.hidden = !list.childElementCount;
     }
