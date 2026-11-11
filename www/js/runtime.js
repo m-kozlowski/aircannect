@@ -62,6 +62,9 @@
 
       function localizedValue(value) {
         if (Array.isArray(value)) return value.map(localizedValue).join("");
+        if (value && typeof value === "object" && value.numberFormat) {
+          return localizedNumber(value.value, ...value.numberFormat);
+        }
         if (value && typeof value === "object" && value.key) {
           return translate(value.key, value.params, value.fallback);
         }
@@ -110,6 +113,13 @@
         const parts = values.flatMap((value, index) =>
           index ? [separator, value] : [value]);
         return localizedMessage("common.parts", {parts});
+      }
+
+      function localizedNumberMessage(value, maximumFractionDigits = 2,
+                                      minimumFractionDigits = 0) {
+        return localizedJoin([{
+          value, numberFormat: [maximumFractionDigits, minimumFractionDigits],
+        }]);
       }
 
       function localizedText(target, value, attribute = "textContent") {
@@ -950,6 +960,7 @@
           failure: localizedFailure,
           join: localizedJoin,
           number: localizedNumber,
+          numberMessage: localizedNumberMessage,
           translate: translateElements,
           onChange: onLanguageChange,
           language: () => uiLanguage,

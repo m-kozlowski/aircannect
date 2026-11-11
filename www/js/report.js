@@ -1,22 +1,27 @@
 (() => {
+
+    const i18n = AirCANnect.i18n;
     const REPORT_RETAINED_REASON = "report_source_changed_incomplete";
     const REPORT_LOW_SPACE_REASON = "report_storage_low_space";
-    const REPORT_LOW_SPACE_NOTICE = "Report deferred: SD space low";
+    const REPORT_LOW_SPACE_NOTICE = i18n.message("report.low_space");
 
     function reportFailureMessage(value) {
+      if (value && value.key) return value;
       let data = value;
       if (typeof value === "string") {
         try { data = JSON.parse(value); } catch (_) { data = {error: value}; }
       }
-      const error = data && data.error || "Report unavailable";
+      const error = data && data.error || i18n.message("report.unavailable");
       if (data && data.source_preservation_failed) {
-        return "Source preservation failed; data may expire: " + error;
+        return i18n.message("report.source_preservation_failed", {
+          error: i18n.error(error),
+        });
       }
-      return error === REPORT_LOW_SPACE_REASON ? REPORT_LOW_SPACE_NOTICE : error;
+      return error === REPORT_LOW_SPACE_REASON ? REPORT_LOW_SPACE_NOTICE : i18n.error(error);
     }
 
     const REPORT_RETAINED_NOTICE =
-      "Showing saved report; sources no longer cover a full rebuild.";
+      i18n.message("report.retained");
 
     function fmtMinutes(minutes) {
       const value = Number(minutes);
@@ -133,7 +138,7 @@
           JSON.stringify(Array.from(reportMarkersHidden)));
       } catch (error) {
         AirCANnect.ui.message("reportMsg",
-          "Event marker preference could not be saved in this browser", false);
+          i18n.message("report.marker_save_failed"), false);
       }
     }
 
@@ -203,7 +208,7 @@
           const result = await AirCANnect.snapshots.wait(
             "report_preferences",
             (data) => Number(data.update || 0) === requestId,
-            afterSerial, 8000, "report preferences save timed out");
+            afterSerial, 8000, i18n.message("report.preferences_timeout"));
 
           if (!result.update_ok) {
             if (result.update_error === "revision_conflict") {
@@ -212,15 +217,15 @@
               continue;
             }
             applyReportPreferencesSnapshot(result);
-            throw new Error(result.update_error ||
-              "report preferences save failed");
+            throw i18n.failure(result.update_error ||
+              i18n.message("report.preferences_failed"));
           }
           applyReportPreferencesSnapshot(result, reportPreferencesSaveQueued);
         }
       })().catch((error) => {
         const current = AirCANnect.snapshots.read("report_preferences").data;
         applyReportPreferencesSnapshot(current);
-        AirCANnect.ui.message("reportMsg", error.message, false);
+        AirCANnect.ui.message("reportMsg", i18n.error(error), false);
       }).finally(() => {
         reportPreferencesSavePromise = null;
         if (reportPreferencesSaveQueued) persistReportChartPreferences();
@@ -243,7 +248,7 @@
               AirCANnect.snapshots.read("report_preferences").serial;
             data = await AirCANnect.snapshots.wait(
               "report_preferences", (next) => next.state === "ready",
-              afterSerial, 5000, "report preferences load timed out");
+              afterSerial, 5000, i18n.message("report.preferences_load_timeout"));
           }
 
           const preserveDraft = !!reportPreferencesSavePromise;
@@ -355,7 +360,7 @@
       const host = document.getElementById("reportChartOptions");
       if (!host) return;
 
-      host.textContent = "";
+      i18n.text(host, "");
       const definitions = new Map(reportChartDefs.map((definition) =>
         [definition.key, definition]));
       reportChartPreferences.order.forEach((key, index) => {
@@ -378,8 +383,8 @@
           const button = document.createElement("button");
           button.className = "btn";
           button.type = "button";
-          button.textContent = delta < 0 ? "\u2191" : "\u2193";
-          button.title = delta < 0 ? "Move chart up" : "Move chart down";
+          i18n.text(button, delta < 0 ? "\u2191" : "\u2193");
+          i18n.text(button, delta < 0 ? i18n.message("report.move_up") : i18n.message("report.move_down"), "title");
           button.disabled = delta < 0 ? index === 0 :
             index === reportChartPreferences.order.length - 1;
           button.onclick = () => moveReportChartOption(key, delta);
@@ -412,22 +417,25 @@
       if (key !== "events") {
         const label = document.createElement("label");
         label.className = "report-chart-markers";
-        label.title = "Show event markers on this chart";
+        i18n.text(label, i18n.message("report.markers_hint"), "title");
         const markers = document.createElement("input");
         markers.type = "checkbox";
         markers.checked = !reportMarkersHidden.has(key);
-        markers.setAttribute("aria-label", "Event markers: " +
-          reportChartDefinition(key).title);
+        i18n.text(markers, i18n.message("report.markers_for", {
+          channel: reportChartDefinition(key).title,
+        }), "aria-label");
         markers.onchange = () => setReportMarkersVisible(key, markers.checked);
-        label.append(markers, document.createTextNode("Markers"));
+        const caption = document.createElement("span");
+        i18n.text(caption, i18n.message("report.markers"));
+        label.append(markers, caption);
         actions.appendChild(label);
       }
 
       const up = document.createElement("button");
       up.className = "btn report-chart-action";
       up.type = "button";
-      up.title = "Move chart up";
-      up.textContent = "\u2191";
+      i18n.text(up, i18n.message("report.move_up"), "title");
+      i18n.text(up, "\u2191");
       up.disabled = index <= 0;
       up.onclick = () => moveReportChart(key, -1);
       actions.appendChild(up);
@@ -435,8 +443,8 @@
       const down = document.createElement("button");
       down.className = "btn report-chart-action";
       down.type = "button";
-      down.title = "Move chart down";
-      down.textContent = "\u2193";
+      i18n.text(down, i18n.message("report.move_down"), "title");
+      i18n.text(down, "\u2193");
       down.disabled = index < 0 ||
         index >= visible.length - 1;
       down.onclick = () => moveReportChart(key, 1);
@@ -446,8 +454,8 @@
       const toggle = document.createElement("button");
       toggle.className = "btn report-chart-action";
       toggle.type = "button";
-      toggle.title = collapsed ? "Expand chart" : "Collapse chart";
-      toggle.textContent = collapsed ? "\u25b8" : "\u25be";
+      i18n.text(toggle, collapsed ? i18n.message("report.expand") : i18n.message("report.collapse"), "title");
+      i18n.text(toggle, collapsed ? "\u25b8" : "\u25be");
       toggle.onclick = () => toggleReportChartCollapsed(key);
       actions.appendChild(toggle);
 
@@ -497,11 +505,11 @@
       const label = document.getElementById("reportCalMonth");
       const grid = document.getElementById("reportCalGrid");
       if (!label || !grid || !reportCalView) return;
-      const months = ["January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"];
       const year = reportCalView.getFullYear();
       const month = reportCalView.getMonth();
-      label.textContent = months[month] + " " + year;
+      i18n.text(label, new Intl.DateTimeFormat(i18n.language(), {
+        month: "long", year: "numeric",
+      }).format(reportCalView));
 
       const byDay = {};
       reportNightsNewestFirst().forEach((night) => {
@@ -513,13 +521,14 @@
       const selected = selectedReportNight();
       const selId = selected ? String(selected.id) : "";
 
-      grid.textContent = "";
-      ["S", "M", "T", "W", "T", "F", "S"].forEach((name) => {
+      i18n.text(grid, "");
+      const weekday = new Intl.DateTimeFormat(i18n.language(), {weekday: "short"});
+      for (let day = 0; day < 7; day++) {
         const cell = document.createElement("div");
         cell.className = "np-dow";
-        cell.textContent = name;
+        i18n.text(cell, weekday.format(new Date(2023, 0, 1 + day)));
         grid.appendChild(cell);
-      });
+      }
       const lead = new Date(year, month, 1).getDay();
       for (let blank = 0; blank < lead; blank++) {
         const cell = document.createElement("div");
@@ -529,12 +538,12 @@
       const days = new Date(year, month + 1, 0).getDate();
       for (let day = 1; day <= days; day++) {
         const cell = document.createElement("div");
-        cell.textContent = String(day);
+        i18n.text(cell, String(day));
         const night = byDay[day];
         if (night) {
           cell.className = "np-day has" +
             (String(night.id) === selId ? " sel" : "");
-          cell.title = fmtMinutes(night.duration_min);
+          i18n.text(cell, fmtMinutes(night.duration_min), "title");
           cell.onclick = () => pickReportNight(night.id);
         } else {
           cell.className = "np-day";
@@ -574,7 +583,7 @@
     function renderReportSessions(sessions) {
       const container = document.getElementById("reportSessions");
       if (!container) return;
-      container.textContent = "";
+      i18n.text(container, "");
       if (!Array.isArray(sessions) || !sessions.length) return;
       const toggleable = sessions.length > 1;
       sessions.forEach((session) => {
@@ -584,8 +593,8 @@
         const minutes = Number(session.duration_min || 0);
         const explicitEnd = Number(session.end || 0);
         const end = explicitEnd > start ? explicitEnd : start + minutes * 60000;
-        item.textContent = fmtReportTime(start) + "-" + fmtReportTime(end) +
-          " " + fmtMinutes(minutes);
+        i18n.text(item, fmtReportTime(start) + "-" + fmtReportTime(end) +
+          " " + fmtMinutes(minutes));
         if (toggleable) {
           item.type = "button";
           item.setAttribute("aria-pressed", String(!reportHiddenSessions.has(start)));
@@ -615,7 +624,7 @@
     function renderReportEventCounts(result) {
       const container = document.getElementById("reportEventCounts");
       if (!container) return;
-      container.textContent = "";
+      i18n.text(container, "");
       // Event source not covered for this night: counts are unknown, not zero.
       const unavailable = !result || result.events_available === false ||
         !!(result.missing_event_mask & 1);
@@ -630,14 +639,14 @@
         chip.appendChild(dot);
         chip.appendChild(document.createTextNode(item.key));
         const value = document.createElement("b");
-        value.textContent = unavailable ? "--" : String(count);
+        i18n.text(value, unavailable ? "--" : String(count));
         chip.appendChild(value);
         container.appendChild(chip);
       });
       if (unavailable && result) {
         const note = document.createElement("span");
         note.className = "report-res-badge";
-        note.textContent = "events not captured";
+        i18n.text(note, i18n.message("report.events_not_captured"));
         container.appendChild(note);
       }
     }
@@ -671,7 +680,7 @@
       reportDrawPending = false;
       reportDrawRetryCount = 0;
       const charts = document.getElementById("reportCharts");
-      if (charts) charts.textContent = "";
+      if (charts) i18n.text(charts, "");
     }
 
     function lruGet(cache, key) {
@@ -987,7 +996,8 @@
     function svgNode(name, attrs) {
       const node = document.createElementNS(SVG_NS, name);
       Object.keys(attrs || {}).forEach((key) => {
-        node.setAttribute(key, attrs[key]);
+        if (key === "aria-label") i18n.text(node, attrs[key], key);
+        else node.setAttribute(key, attrs[key]);
       });
       return node;
     }
@@ -1000,12 +1010,12 @@
         "font-size": "10",
         "font-family": "SF Mono, Consolas, monospace",
       }, attrs || {}));
-      node.textContent = text;
+      i18n.text(node, text);
       return node;
     }
 
     function clearReportSvg(svg, width, height) {
-      svg.textContent = "";
+      i18n.text(svg, "");
       svg._selectionRect = null;
       svg._cursor = null;
       svg._timeTooltip = null;
@@ -1150,8 +1160,7 @@
 
       for (let i = 0; i <= 4; i++) {
         const value = maxY - (maxY - minY) * (i / 4);
-        const label = Math.abs(value) >= 10 ? value.toFixed(0) :
-          value.toFixed(1);
+        const label = i18n.numberMessage(value, Math.abs(value) >= 10 ? 0 : 1);
         svg.appendChild(svgText(label, pad.left - 6,
           pad.top + graphH * (i / 4) + 3, {"text-anchor": "end"}));
       }
@@ -1370,7 +1379,8 @@
 
     function fmtReportVal(v) {
       if (!Number.isFinite(v)) return "--";
-      return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+      const digits = Math.abs(v) >= 10 ? 1 : 2;
+      return i18n.number(v, digits, digits);
     }
 
     // Nearest point to time t (points sorted ascending). Returns null if the
@@ -1480,7 +1490,7 @@
       const maxCx = g.width - g.pad.right - boxW / 2;
       const cx = Math.max(minCx, Math.min(maxCx, x));
       const y = Math.max(g.pad.top + 2, g.height - boxH - 2);
-      tip.text.textContent = label;
+      i18n.text(tip.text, label);
       tip.rect.setAttribute("x", (cx - boxW / 2).toFixed(1));
       tip.rect.setAttribute("y", y.toFixed(1));
       tip.text.setAttribute("x", cx.toFixed(1));
@@ -1499,7 +1509,7 @@
         if (!inRange) {
           canvas._cursor.setAttribute("visibility", "hidden");
           hideReportTimeTooltip(canvas);
-          if (canvas._readout) canvas._readout.textContent = "";
+          if (canvas._readout) i18n.text(canvas._readout, "");
           return;
         }
         const x = reportTimeToX(canvas, t);
@@ -1508,7 +1518,7 @@
         canvas._cursor.setAttribute("visibility", "visible");
         updateReportTimeTooltip(canvas, x, t);
         if (canvas._readout) {
-          canvas._readout.textContent = reportReadoutText(item, t);
+          i18n.text(canvas._readout, reportReadoutText(item, t));
         }
       });
     }
@@ -1690,7 +1700,7 @@
 
     function attachReportChartPointer(canvas) {
       canvas.setAttribute("tabindex", "0");
-      canvas.setAttribute("aria-label", canvas._item?.key || "Report chart");
+      i18n.text(canvas, canvas._item?.key || i18n.message("report.chart"), "aria-label");
       const fraction = (x) => {
         const item = canvas._item;
         return (reportCanvasTime(canvas, x) - item.start) / (item.end - item.start);
@@ -1863,8 +1873,9 @@
     function reportStatusBadge(text, title) {
       const badge = document.createElement("span");
       badge.className = "report-res-badge";
-      badge.textContent = text;
-      if (title) badge.title = title;
+      badge.dataset.state = text;
+      i18n.text(badge, i18n.message("report.badge." + text, {}, text));
+      if (title) i18n.text(badge, title, "title");
       return badge;
     }
 
@@ -1883,10 +1894,10 @@
       const collapsed = reportChartPreferences.collapsed.has(item.key);
       const text = !collapsed && failure ? "unavailable" :
         !collapsed && loading ? "loading" : "";
-      const title = failure && failure.message ? failure.message : "";
+      const title = failure ? i18n.error(failure) : "";
       if (item.loadingBadge &&
-          (item.loadingBadge.textContent !== text ||
-           item.loadingBadge.title !== title)) {
+          (item.loadingBadge.dataset.state !== text ||
+           item.loadingBadge.title !== i18n.format(title))) {
         item.loadingBadge.remove();
         item.loadingBadge = null;
       }
@@ -1990,7 +2001,7 @@
       const title = document.createElement("div");
       title.className = "report-chart-title";
       const name = document.createElement("span");
-      name.textContent = definition.title;
+      i18n.text(name, definition.title);
       let loadingBadge = null;
       const pending = !failure &&
         (!reportBaseLoadedCharts.has(definition.key) ||
@@ -1999,7 +2010,7 @@
           (pending || failure)) {
         loadingBadge = reportStatusBadge(
           failure ? "unavailable" : "loading",
-          failure && failure.message ? failure.message : "");
+          failure ? i18n.error(failure) : "");
         name.appendChild(loadingBadge);
       }
       title.appendChild(name);
@@ -2053,7 +2064,7 @@
       const container = document.getElementById("reportCharts");
       if (!container) return;
       disconnectReportResizeObserver();
-      container.textContent = "";
+      i18n.text(container, "");
       reportDrawItems = [];
       reportDrawPending = false;
       reportDrawRetryCount = 0;
@@ -2065,8 +2076,7 @@
       if (reportResult.state === "partial") {
         const pnote = document.createElement("div");
         pnote.className = "report-chart-note";
-        pnote.textContent =
-          "Incomplete night - available data is shown; missing sources are marked below.";
+        i18n.text(pnote, i18n.message("report.incomplete_hint"));
         container.appendChild(pnote);
       }
       const range = reportZoom || reportRange();
@@ -2115,21 +2125,20 @@
           const ctitle = document.createElement("div");
           ctitle.className = "report-chart-title";
           const cname = document.createElement("span");
-          cname.textContent = def.title;
+          i18n.text(cname, def.title);
           ctitle.appendChild(cname);
           const cnote = document.createElement("span");
           cnote.className = "report-chart-note";
           if (!collapsed && failure) {
             cname.appendChild(reportStatusBadge(
-              "unavailable", failure.message || "Report chart unavailable"));
+              "unavailable", i18n.error(failure)));
           } else if (!collapsed && availableParts.length &&
               !reportBaseLoadedCharts.has(def.key)) {
-            cnote.textContent = "loading...";
+            i18n.text(cnote, i18n.message("report.badge.loading"));
           } else if (!collapsed) {
-            cnote.textContent =
-              reportResult && reportResult.missing_required > 0
-                ? "backfilling..."
-                : "not retained for this night";
+            i18n.text(cnote, reportResult && reportResult.missing_required > 0
+                ? i18n.message("report.backfilling")
+                : i18n.message("report.not_retained"));
           }
           if (!collapsed && cnote.textContent) ctitle.appendChild(cnote);
           appendReportChartActions(ctitle, def.key);
@@ -2152,22 +2161,21 @@
         const title = document.createElement("div");
         title.className = "report-chart-title";
         const name = document.createElement("span");
-        name.textContent = def.title;
+        i18n.text(name, def.title);
         const rangePending = !collapsed && !failure && !!reportZoom &&
           !signalStoreRangeChartReady(def.key);
         let loadingBadge = null;
         if (basePending || rangePending || (!collapsed && failure)) {
           loadingBadge = reportStatusBadge(
             failure ? "unavailable" : "loading",
-            failure && failure.message ? failure.message : "");
+            failure ? i18n.error(failure) : "");
           name.appendChild(loadingBadge);
         }
         if (seriesDefs.some((sd) => lowResByName[sd.key])) {
           const badge = document.createElement("span");
           badge.className = "report-res-badge";
-          badge.textContent = "1-min";
-          badge.title =
-            "High-res not retained for this night; showing the 1-minute trend.";
+          i18n.text(badge, "1-min");
+          i18n.text(badge, i18n.message("report.low_resolution"), "title");
           name.appendChild(badge);
         }
         title.appendChild(name);
@@ -2190,7 +2198,7 @@
           const unit = document.createElement("span");
           unit.style.marginLeft = "8px";
           unit.style.color = "var(--muted)";
-          unit.textContent = def.unit;
+          i18n.text(unit, def.unit);
           legend.appendChild(unit);
         }
         title.appendChild(legend);
@@ -2231,12 +2239,12 @@
     }
 
     const reportMetricTiles = [
-      {key: "duration", label: "Therapy time", unit: "", color: "#7dd3fc", scale: 1},
+      {key: "duration", label: i18n.message("report.therapy_time"), unit: "", color: "#7dd3fc", scale: 1},
       {key: "ahi", label: "AHI", unit: "/h", color: "#c084fc", scale: 1},
-      {key: "pressure", label: "Pressure · avg", unit: "cmH2O", color: "#34d399", scale: 1},
-      {key: "leak", label: "Leak · avg", unit: "L/min", color: "#fb923c", scale: 1},
-      {key: "tidal_volume", label: "Vt · avg", unit: "mL", color: "#f0abfc", scale: 1000},
-      {key: "minute_ventilation", label: "MV · avg", unit: "L/min", color: "#a78bfa", scale: 1},
+      {key: "pressure", label: i18n.message("report.pressure_mean"), unit: "cmH2O", color: "#34d399", scale: 1},
+      {key: "leak", label: i18n.message("report.leak_mean"), unit: "L/min", color: "#fb923c", scale: 1},
+      {key: "tidal_volume", label: i18n.message("report.vt_mean"), unit: "mL", color: "#f0abfc", scale: 1000},
+      {key: "minute_ventilation", label: i18n.message("report.mv_mean"), unit: "L/min", color: "#a78bfa", scale: 1},
     ];
     let reportHistoryMetric = "";
 
@@ -2282,8 +2290,10 @@
       const scaled = Math.abs(value * metric.scale);
       const text = metric.key === "duration"
         ? (Math.round(scaled) === 0 ? "0m" : fmtMinutes(Math.round(scaled)))
-        : scaled.toFixed(metric.scale === 1000 ? 0 : 2);
-      return (delta ? value < 0 ? "−" : value > 0 ? "+" : "" : value < 0 ? "−" : "") + text;
+        : i18n.numberMessage(scaled, metric.scale === 1000 ? 0 : 2,
+          metric.scale === 1000 ? 0 : 2);
+      const sign = delta ? value < 0 ? "−" : value > 0 ? "+" : "" : value < 0 ? "−" : "";
+      return i18n.join([sign, text]);
     }
 
     function reportTrend(metric, selected, value) {
@@ -2348,7 +2358,8 @@
         if (point.value === null) return;
         const dot = svgNode("circle", {cx: x(i), cy: y(point.value), r: expanded ? 3 : 1.3, fill: metric.color});
         const title = svgNode("title", {});
-        title.textContent = point.date + ": " + formatReportMetric(metric, point.value) + " " + metric.unit;
+        i18n.text(title, i18n.join([point.date, ": ",
+          formatReportMetric(metric, point.value), " ", metric.unit]));
         dot.appendChild(title);
         svg.appendChild(dot);
       });
@@ -2360,7 +2371,9 @@
             ((event.clientX - rect.left) * width / rect.width - left) / (width - left - right) * last)));
           const point = trend.points[index];
           if (selectPoint) selectPoint(point);
-          else AirCANnect.ui.text("reportHistoryValue", point.date + " · " + formatReportMetric(metric, point.value) + " " + metric.unit);
+          else AirCANnect.ui.text("reportHistoryValue", i18n.join([
+            point.date, " · ", formatReportMetric(metric, point.value), " ", metric.unit,
+          ]));
         };
         svg.onpointermove = show;
         svg.onpointerdown = show;
@@ -2374,11 +2387,11 @@
         value: available ? Number(result[item.field] || 0) : 0,
         color: reportEventDefs.find((def) => def.key === item.key).color}));
       const total = parts.reduce((sum, part) => sum + part.value, 0);
-      const label = !available ? "Event breakdown unavailable" : total === 0 ? "No apnea or hypopnea events" :
+      const label = !available ? i18n.message("report.events_unavailable") : total === 0 ? i18n.message("report.no_apneas") :
         parts.map((part) => part.key + " " + part.value).join(", ");
-      svg.setAttribute("aria-label", label);
+      i18n.text(svg, label, "aria-label");
       const title = svgNode("title", {});
-      title.textContent = label;
+      i18n.text(title, label);
       svg.appendChild(title);
 
       if (!total) {
@@ -2415,8 +2428,10 @@
         button.style.setProperty("--metric-color", metric.color);
         button.setAttribute("aria-expanded", String(reportHistoryMetric === metric.key));
         button.setAttribute("aria-controls", "reportMetricHistory");
-        button.title = metric.label + "; previous 7 days: " + formatReportMetric(metric, trend.mean) +
-          " " + metric.unit + " (" + trend.count + "/7 nights)";
+        i18n.text(button, i18n.message("report.metric_comparison", {
+          label: metric.label, value: formatReportMetric(metric, trend.mean),
+          unit: metric.unit, count: trend.count,
+        }), "title");
         if (period || selection) {
           delete button.dataset.action;
           delete button.dataset.value;
@@ -2424,24 +2439,28 @@
           button.removeAttribute("aria-controls");
           const coverage = metric.key === "duration" ? result?.nights
             : metric.key === "ahi" ? result?.ahi_nights : result?.statistics?.[metric.key]?.nights;
-          button.title = selection ? "Selected sessions; calculated from recorded data"
-            : (coverage || 0) + "/" + reportPeriodDays + " nights with data";
+          i18n.text(button, selection ? i18n.message("report.selected_calculated")
+            : i18n.message("report.coverage", {
+              count: coverage || 0, days: reportPeriodDays,
+            }), "title");
         }
 
         button.innerHTML = '<span class="report-metric-label"></span><span class="report-metric-main">' +
           '<span class="report-metric-value"></span></span><span class="report-metric-footer">' +
           '<span class="report-metric-unit"></span><span class="report-metric-delta"></span></span>';
-        button.querySelector(".report-metric-label").textContent = metric.label;
-        button.querySelector(".report-metric-value").textContent = formatReportMetric(metric, value);
-        button.querySelector(".report-metric-unit").textContent = metric.unit;
-        button.querySelector(".report-metric-delta").textContent = formatReportMetric(metric,
-          value === null || trend.mean === null ? null : value - trend.mean, true);
+        i18n.text(button.querySelector(".report-metric-label"), metric.label);
+        i18n.text(button.querySelector(".report-metric-value"), formatReportMetric(metric, value));
+        i18n.text(button.querySelector(".report-metric-unit"), metric.unit);
+        i18n.text(button.querySelector(".report-metric-delta"), formatReportMetric(metric,
+          value === null || trend.mean === null ? null : value - trend.mean, true));
         if (period || selection) {
-          button.querySelector(".report-metric-delta").textContent = "";
+          i18n.text(button.querySelector(".report-metric-delta"), "");
           if (period && metric.key === "duration") {
-            button.querySelector(".report-metric-label").textContent = "Therapy time · avg/night";
-            button.querySelector(".report-metric-unit").textContent = result?.nights
-              ? fmtMinutes(Math.round(result.duration_min)) + " total" : "--";
+            i18n.text(button.querySelector(".report-metric-label"), i18n.message("report.therapy_mean"));
+            i18n.text(button.querySelector(".report-metric-unit"), result?.nights
+              ? i18n.message("report.total_duration", {
+                duration: fmtMinutes(Math.round(result.duration_min)),
+              }) : "--");
           }
         }
 
@@ -2469,12 +2488,17 @@
 
       const selected = selectedReportNight();
       const trend = reportTrend(metric, selected, reportMetricValue(metric, reportResult, selected));
-      AirCANnect.ui.text("reportHistoryTitle", [metric.label, metric.unit,
-        trend.count + "/7 comparison nights"].filter(Boolean).join(" · "));
-      AirCANnect.ui.text("reportHistoryValue", "Previous 7 days: " + formatReportMetric(metric, trend.mean));
+      AirCANnect.ui.text("reportHistoryTitle", i18n.join([metric.label, metric.unit,
+        i18n.message("report.comparison_nights", {count: trend.count}),
+      ].filter(Boolean), " · "));
+      AirCANnect.ui.text("reportHistoryValue", i18n.message("report.previous_days", {
+        value: formatReportMetric(metric, trend.mean),
+      }));
 
       const plot = document.getElementById("reportHistoryPlot");
-      plot.setAttribute("aria-label", metric.label + ": " + trend.points.map((p) => p.date + " " + formatReportMetric(metric, p.value)).join(", "));
+      i18n.text(plot, i18n.join([metric.label, ": ", i18n.join(trend.points.map(
+        (p) => i18n.join([p.date, " ", formatReportMetric(metric, p.value)])), ", "),
+      ]), "aria-label");
       drawReportTrend(plot, trend, metric, true);
     }
 
@@ -2496,17 +2520,19 @@
             (!stats[key] || (period && !stats[key].nights))) return;
         const row = body.insertRow();
         const cell = row.insertCell();
-        cell.textContent = label;
+        i18n.text(cell, label);
         const small = document.createElement("small");
-        small.textContent = unit;
+        i18n.text(small, unit);
         cell.appendChild(small);
 
         ["min", "mean", "median", "p95", "max"].forEach((field) => {
           const value = reportNumber(stats[key] && stats[key][field]);
-          row.insertCell().textContent = value === null ? "--"
-            : (value * scale).toFixed(scale === 1000 ? 0 : 2) + (key === "ie_ratio" ? ":1" : "");
+          i18n.text(row.insertCell(), value === null ? "--"
+            : i18n.join([i18n.numberMessage(value * scale,
+              scale === 1000 ? 0 : 2, scale === 1000 ? 0 : 2),
+              key === "ie_ratio" ? ":1" : ""]));
         });
-        if (period) row.insertCell().textContent = (stats[key]?.nights || 0) + "/" + reportPeriodDays;
+        if (period) i18n.text(row.insertCell(), (stats[key]?.nights || 0) + "/" + reportPeriodDays);
       });
 
       const leak = result && result.leak_duration;
@@ -2515,10 +2541,11 @@
         footer.hidden = !leak || !leak.recorded_ms;
         if (!footer.hidden) {
           const seconds = Math.floor(leak.above_ms / 1000);
-          footer.textContent = "Leak > " + leak.threshold + " L/min: " +
-            Math.floor(seconds / 3600) + "h " + Math.floor(seconds % 3600 / 60) + "m " +
-            seconds % 60 + "s (" + (100 * leak.above_ms / leak.recorded_ms).toFixed(2) + "%)";
-          footer.title = "Percentage of recorded leak data";
+          i18n.text(footer, i18n.join(["Leak > ", leak.threshold, " L/min: ",
+            Math.floor(seconds / 3600), "h ", Math.floor(seconds % 3600 / 60), "m ",
+            seconds % 60, "s (", i18n.numberMessage(
+              100 * leak.above_ms / leak.recorded_ms, 2, 2), "%)"]));
+          i18n.text(footer, i18n.message("report.leak_percentage"), "title");
         }
       }
     }
@@ -2531,16 +2558,17 @@
       const modes = ["CPAP", "AutoSet", "AutoSet for Her", "S", "ST", "T", "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC"];
       const mode = reportNumber(values[0]);
       const needsRefresh = result && result.settings_need_refresh;
-      AirCANnect.ui.text("reportSettingsMode", needsRefresh ? "Needs refresh"
-        : mode === null ? "Unavailable" : modes[mode] || "Mode " + mode);
+      AirCANnect.ui.text("reportSettingsMode", needsRefresh ? i18n.message("report.needs_refresh")
+        : mode === null ? i18n.message("status.unavailable") : modes[mode] ||
+          i18n.message("report.unknown_mode", {mode}));
       AirCANnect.ui.text("reportSettingsSource", needsRefresh
-        ? "Saved settings require a fresh read from STR."
-        : mode === null ? "Historical settings are unavailable in this saved report."
+        ? i18n.message("report.settings_refresh")
+        : mode === null ? i18n.message("report.settings_unavailable")
         : "");
 
-      const labels = ["Mode", "Pressure", "Min pressure", "Max pressure", "IPAP", "EPAP",
+      const labels = [i18n.message("report.mode"), "Pressure", i18n.message("report.min_pressure"), i18n.message("report.max_pressure"), "IPAP", "EPAP",
         "Max IPAP", "Min EPAP", "Max EPAP", "PS", "Min PS", "Max PS", "Ti min", "Ti max",
-        "Ti", "Resp. rate", "Start pressure", "EPR", "EPR level", "EPR mode", "Ramp", "Ramp time", "Humidity"];
+        "Ti", "Resp. rate", i18n.message("report.start_pressure"), "EPR", i18n.message("report.epr_level"), i18n.message("report.epr_mode"), i18n.message("report.ramp"), i18n.message("report.ramp_time"), i18n.message("report.humidity")];
       values.forEach((value, i) => {
         if (reportNumber(value) === null || mode === null) return;
         if ((i === 18 || i === 19) && values[17] === 0) return;
@@ -2548,17 +2576,17 @@
 
         let text = String(value);
         if (i === 0) text = modes[value] || text;
-        else if ((i >= 1 && i <= 11) || i === 16 || i === 18) text = value.toFixed(1) + " cmH2O";
-        else if (i >= 12 && i <= 14) text = value.toFixed(2) + " s";
+        else if ((i >= 1 && i <= 11) || i === 16 || i === 18) text = i18n.join([i18n.numberMessage(value, 1, 1), " cmH2O"]);
+        else if (i >= 12 && i <= 14) text = i18n.join([i18n.numberMessage(value, 2, 2), " s"]);
         else if (i === 15) text += " /min";
-        else if (i === 17) text = ["Off", "On"][value] || text;
-        else if (i === 19) text = ["Ramp only", "Full time"][value] || text;
-        else if (i === 20) text = ["Off", "Timed", "Auto"][value] || text;
+        else if (i === 17) text = [i18n.message("ui.off"), i18n.message("ui.on")][value] || text;
+        else if (i === 19) text = [i18n.message("report.ramp_only"), i18n.message("report.full_time")][value] || text;
+        else if (i === 20) text = [i18n.message("ui.off"), i18n.message("report.timed"), i18n.message("report.auto")][value] || text;
         else if (i === 21) text += " min";
 
         const row = body.insertRow();
-        row.insertCell().textContent = labels[i];
-        row.insertCell().textContent = text;
+        i18n.text(row.insertCell(), labels[i]);
+        i18n.text(row.insertCell(), text);
       });
     }
 
@@ -2594,8 +2622,8 @@
       }
       document.querySelectorAll('[data-action="report.view"]').forEach((button) =>
         button.setAttribute("aria-pressed", String(button.dataset.value === reportViewMode)));
-      AirCANnect.ui.text("reportSummaryCaption", period ? "Period summary" : "Night summary");
-      AirCANnect.ui.text("reportStatisticsScope", period ? "Full period" : "Full night");
+      AirCANnect.ui.text("reportSummaryCaption", period ? i18n.message("report.period_summary") : i18n.message("ui.night.summary"));
+      AirCANnect.ui.text("reportStatisticsScope", period ? i18n.message("report.full_period") : i18n.message("ui.full.night"));
       const scope = document.getElementById("reportSummaryScope");
       if (scope) scope.hidden = period;
       document.querySelectorAll('[data-action="report.scope"]').forEach((button) => {
@@ -2603,8 +2631,8 @@
         button.disabled = !reportResult || (button.dataset.value === "sessions" && !!reportResult.active);
       });
       if (!period && reportSummaryScope === "sessions") {
-        AirCANnect.ui.text("reportSummaryCaption", "Selected sessions");
-        AirCANnect.ui.text("reportStatisticsScope", "Selected sessions");
+        AirCANnect.ui.text("reportSummaryCaption", i18n.message("ui.selected.sessions"));
+        AirCANnect.ui.text("reportStatisticsScope", i18n.message("ui.selected.sessions"));
       }
       if (period) {
         const history = document.getElementById("reportMetricHistory");
@@ -2622,7 +2650,9 @@
       AirCANnect.ui.text("reportPeriodRange", reportDayLabel(reportPeriodFirst()) + " – " + reportDayLabel(reportPeriodEnd));
       const next = document.getElementById("reportPeriodNext");
       if (next) next.disabled = !reportPeriodEnd || reportPeriodEnd >= (reportNightsNewestFirst()[0]?.id || "");
-      AirCANnect.ui.text("reportPeriodCoverage", data ? data.nights + "/" + data.days + " nights with data" : "");
+      AirCANnect.ui.text("reportPeriodCoverage", data ? i18n.message("report.coverage", {
+        count: data.nights, days: data.days,
+      }) : "");
 
       const result = data ? {...data, events_available: data.event_nights > 0,
         ca_count: data.events[0], oa_count: data.events[1], ua_count: data.events[2],
@@ -2631,8 +2661,10 @@
       renderReportStatistics(result, true);
       renderReportEventCounts(result);
       const events = document.getElementById("reportEventCounts");
-      if (events) events.title = (data?.event_nights || 0) + "/" + reportPeriodDays + " nights with event data";
-      AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) === null ? "--" : data.rdi.toFixed(2));
+      if (events) i18n.text(events, i18n.message("report.event_coverage", {
+        count: data?.event_nights || 0, days: reportPeriodDays,
+      }), "title");
+      AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) === null ? "--" : i18n.numberMessage(data.rdi, 2, 2));
       AirCANnect.ui.text("reportCsr", formatReportMetric(reportMetricTiles[0], reportNumber(data?.csr_minutes)));
       renderReportPeriodCharts();
     }
@@ -2648,9 +2680,10 @@
         const section = document.createElement("div");
         section.className = "report-period-chart";
         const heading = document.createElement("h4");
-        heading.textContent = metric.label + (metric.unit ? " · " + metric.unit : "");
+        i18n.text(heading, i18n.join([metric.label, metric.unit].filter(Boolean), " · "));
         section.appendChild(heading);
-        const svg = svgNode("svg", {role: "img", "aria-label": metric.label + " by night"});
+        const svg = svgNode("svg", {role: "img", "aria-label":
+          i18n.message("report.metric_by_night", {label: metric.label})});
         section.appendChild(svg);
         container.appendChild(section);
         const points = daily.map((night) => ({id: night.id, date: reportDayLabel(night.id),
@@ -2658,12 +2691,14 @@
         drawReportTrend(svg, {points, mean: null}, metric, true, (point) => {
           const readout = document.getElementById("reportPeriodReadout");
           if (!readout) return;
-          readout.replaceChildren(document.createTextNode(point.date + " · " + metric.label + ": " +
-            formatReportMetric(metric, point.value) + " " + metric.unit));
+          const caption = document.createElement("span");
+          i18n.text(caption, i18n.join([point.date, " · ", metric.label, ": ",
+            formatReportMetric(metric, point.value), " ", metric.unit]));
+          readout.replaceChildren(caption);
           if (point.value === null) return;
           const button = document.createElement("button");
           button.className = "btn";
-          button.textContent = "Open night";
+          i18n.text(button, i18n.message("report.open_night"));
           button.dataset.action = "report.period-night";
           button.dataset.value = point.id;
           readout.appendChild(button);
@@ -2698,7 +2733,7 @@
         "&sessions=" + selected.join(",") + "&v=" + version
         : "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays;
       let saved = null;
-      AirCANnect.ui.message("reportMsg", selection ? "Loading session statistics..." : "Loading period...", true, true);
+      AirCANnect.ui.message("reportMsg", selection ? i18n.message("report.loading_sessions") : i18n.message("report.loading_period"), true, true);
       try {
         saved = (await readReportCache([key])).get(key);
         if (!current()) return;
@@ -2706,12 +2741,12 @@
         if (!current()) return;
         if (response.status === 202) {
           reportPeriodWaiting = true;
-          AirCANnect.ui.message("reportMsg", selection ? "Preparing session statistics..." : "Preparing period...", true, true);
+          AirCANnect.ui.message("reportMsg", selection ? i18n.message("report.preparing_sessions") : i18n.message("report.preparing_period"), true, true);
           return;
         }
         if (response.status !== 200 && !(response.status === 304 && saved)) {
           const text = await response.text();
-          throw new Error(text || "Period unavailable");
+          throw i18n.failure(text || i18n.message("report.period_unavailable"));
         }
         const body = response.status === 304 ? saved.body : await response.json();
         if (!current()) return;
@@ -2723,12 +2758,12 @@
         }, bytes: JSON.stringify(body).length * 2}]);
         renderReportSummary();
         const notes = [];
-        if (body.active_nights) notes.push(body.active_nights + " recording night(s) excluded");
-        if (body.outdated_nights) notes.push(body.outdated_nights + " saved report(s) out of date");
-        if (body.checkpoint_missing) notes.push(body.checkpoint_missing + " night(s) without saved distributions");
-        if (body.layout_blocked) notes.push(body.layout_blocked + " night(s) skipped due to a storage layout conflict");
-        AirCANnect.ui.message("reportMsg", notes.join("; ") ||
-          (selection ? "Session statistics loaded" : "Period loaded"), true, !!notes.length);
+        if (body.active_nights) notes.push(i18n.message("report.active_excluded", {count: body.active_nights}));
+        if (body.outdated_nights) notes.push(i18n.message("report.outdated_count", {count: body.outdated_nights}));
+        if (body.checkpoint_missing) notes.push(i18n.message("report.distributions_missing", {count: body.checkpoint_missing}));
+        if (body.layout_blocked) notes.push(i18n.message("report.layout_blocked", {count: body.layout_blocked}));
+        AirCANnect.ui.message("reportMsg", notes.length ? i18n.join(notes, "; ") :
+          (selection ? i18n.message("report.sessions_loaded") : i18n.message("report.period_loaded")), true, !!notes.length);
       } catch (error) {
         if (!current()) return;
         reportPeriodWaiting = false;
@@ -2737,7 +2772,9 @@
           else reportPeriodResult = saved.body;
           renderReportSummary();
         }
-        AirCANnect.ui.message("reportMsg", (saved ? "Browser copy; freshness not verified. " : "") + error.message, false, true);
+        AirCANnect.ui.message("reportMsg", saved ? i18n.message("report.offline_error", {
+          error: i18n.error(error),
+        }) : i18n.error(error), false, true);
       } finally {
         if (current()) {
           reportPeriodController = null;
@@ -2758,10 +2795,11 @@
       const dateBtn = document.getElementById("reportDateBtn");
       if (dateBtn) {
         if (selected) {
-          dateBtn.textContent = fmtReportDate(selected.start) +
-            (selected.active ? " · Recording" : "");
+          i18n.text(dateBtn, selected.active ? i18n.message("report.recording_date", {
+            date: fmtReportDate(selected.start),
+          }) : fmtReportDate(selected.start));
         } else {
-          dateBtn.textContent = nights.length ? "Select night" : "No nights";
+          i18n.text(dateBtn, nights.length ? i18n.message("ui.select.night") : i18n.message("report.no_nights"));
         }
       }
       const selIndex = selected ?
@@ -2782,7 +2820,7 @@
       const statistics = selection && data ? {...data, events_available: data.event_nights > 0,
         ca_count: data.events[0], oa_count: data.events[1], ua_count: data.events[2],
         hypopnea_count: data.events[3], arousal_count: data.events[4]} : data;
-      AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) !== null ? Number(data.rdi).toFixed(2) : "--");
+      AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) !== null ? i18n.numberMessage(Number(data.rdi), 2, 2) : "--");
       renderReportTiles(statistics, selection ? null : selected, false, selection);
       renderReportStatistics(statistics);
       renderReportSettings(displayable ? reportResult : null);
@@ -3255,7 +3293,7 @@
       }
       const offline = () => {
         const cached = lruGet(reportResultClientCache, url);
-        if (!cached) throw new Error("Report unavailable; no browser copy");
+        if (!cached) throw i18n.failure("report.no_browser_copy");
         return {done: true, value: {
           status: 200, result: cached.decoded, cached: true,
         }};
@@ -3282,7 +3320,7 @@
           const update = response.headers.get("X-Report-Update") || "";
           if (response.status === 304) {
             const cached = lruGet(reportResultClientCache, url);
-            if (!cached) throw new Error("report cache revalidation failed");
+            if (!cached) throw i18n.failure("report.cache_revalidation_failed");
             return {done: true, value: {
               status: 304,
               result: cached.decoded,
@@ -3294,14 +3332,14 @@
             if (signal.aborted || token !== reportLoadToken) return null;
 
             const decoded = decodeSignalStoreNight(buffer);
-            if (!decoded.valid) throw new Error("invalid report metadata");
+            if (!decoded.valid) throw i18n.failure("report.invalid_metadata");
 
             const revision = reportArtifactRevision(response);
             const generation = Number(
               response.headers.get("X-Report-Generation") || 0);
             if ((revision && revision !== decoded.source_revision) ||
                 (generation && generation !== decoded.generation)) {
-              throw new Error("report metadata identity mismatch");
+              throw i18n.failure("report.metadata_identity");
             }
             lruSet(reportResultClientCache, url, {
               etag: response.headers.get("ETag") || "",
@@ -3315,7 +3353,7 @@
           if (response.status === 202) {
             timeoutValue.status = 202;
             AirCANnect.ui.message(
-              "reportMsg", "Preparing report...", true, true);
+              "reportMsg", i18n.message("report.preparing"), true, true);
             return {done: false, waitForReport: true};
           }
           if (response.status === 404) {
@@ -3329,7 +3367,7 @@
           if (response.status === 503 && isTransientReportError(text)) {
             return {done: false};
           }
-          throw new Error(reportFailureMessage(text || "report metadata request failed"));
+          throw i18n.failure(reportFailureMessage(text || i18n.message("report.metadata_failed")));
         },
       });
     }
@@ -3643,7 +3681,7 @@
             if (response.status === 503 && isTransientReportError(text)) {
               return {done: false};
             }
-            throw new Error(reportFailureMessage(text || "report signal request failed"));
+            throw i18n.failure(reportFailureMessage(text || i18n.message("report.signal_failed")));
           }
 
           const revision = reportArtifactRevision(response);
@@ -3661,7 +3699,7 @@
               present.length !== blockCount || /[^01]/.test(present) ||
               interval !== level.interval ||
               envelope !== (level.name !== "raw")) {
-            throw new Error("report signal identity mismatch");
+            throw i18n.failure("report.signal_identity");
           }
 
           const buffer = body;
@@ -3674,14 +3712,14 @@
             if (present[i] === "1") presentCount++;
           }
           if (buffer.byteLength !== presentCount * blockBytes) {
-            throw new Error("invalid report signal payload");
+            throw i18n.failure("report.signal_payload");
           }
 
           for (let i = 0; i < blockCount; i++) {
             const blockStart = from + i * SIGNAL_STORE_BLOCK_MS;
             const slot = (blockStart - track.firstBlock) / SIGNAL_STORE_BLOCK_MS;
             if ((present[i] === "1") !== signalStoreBlockPresent(track, slot)) {
-              throw new Error("report signal coverage mismatch");
+              throw i18n.failure("report.signal_coverage");
             }
           }
 
@@ -3718,7 +3756,7 @@
         },
       });
       if (!loaded && context.active()) {
-        throw new Error("report signal not ready");
+        throw i18n.failure("report.signal_not_ready");
       }
       return loaded;
     }
@@ -3768,7 +3806,7 @@
       }
 
       if (runs.length && context.offline) {
-        throw new Error("This range is not saved in the browser");
+        throw i18n.failure("report.range_not_saved");
       }
       await runReportFetchJobs(runs.map((run) => () =>
         fetchSignalStoreBlocks(
@@ -3818,7 +3856,7 @@
         const entry = present ? signalStoreTouchBlock(
           signalStoreCacheKey(track, level, block, context), track, context) : null;
 
-        if (present && !entry) throw new Error("report signal block unavailable");
+        if (present && !entry) throw i18n.failure("report.block_unavailable");
 
         if (rawBucketState && !entry) {
           markSignalStoreRawGap(rawBucketState, Math.max(block, lo));
@@ -3876,7 +3914,7 @@
           view.getUint32(20, true) !== expected.generation ||
           view.getBigUint64(24, true).toString(16).padStart(16, "0") !==
             expected.revision) {
-        throw new Error("invalid report events");
+        throw i18n.failure("report.invalid_events");
       }
 
       const blockCount = view.getUint16(40, true);
@@ -3884,7 +3922,7 @@
       const recordsOffset = SIGNAL_STORE_EVENT_HEADER_BYTES + blockCount * 8;
       if (!blockCount || blockCount > SIGNAL_STORE_MAX_BLOCKS ||
           recordsOffset + eventCount * 16 !== buffer.byteLength) {
-        throw new Error("invalid report events");
+        throw i18n.failure("report.invalid_events");
       }
 
       const events = [];
@@ -3917,7 +3955,7 @@
           return events;
         } catch (_) { /* Refetch an invalid browser entry. */ }
       }
-      if (context.offline) throw new Error("Events are not saved in the browser");
+      if (context.offline) throw i18n.failure("report.events_not_saved");
 
       const url = "/api/report/plot?night=" +
         encodeURIComponent(context.nightId) + "&part=events&v=" +
@@ -3939,7 +3977,7 @@
             if (response.status === 503 && isTransientReportError(text)) {
               return {done: false};
             }
-            throw new Error(reportFailureMessage(text || "report events request failed"));
+            throw i18n.failure(reportFailureMessage(text || i18n.message("report.events_failed")));
           }
           const decoded = decodeSignalStoreEvents(body, context);
           void writeReportCache([{key, value: body, bytes: body.byteLength}]);
@@ -3947,7 +3985,7 @@
         },
       });
       if (!context.active()) return [];
-      if (!events) throw new Error("report events not ready");
+      if (!events) throw i18n.failure("report.events_not_ready");
 
       lruSet(reportEventClientCache, key, events,
         SIGNAL_STORE_EVENT_CACHE_MAX);
@@ -4078,7 +4116,7 @@
         }
       } catch (error) {
         if (token === reportLoadToken && !controller.signal.aborted) {
-          AirCANnect.ui.message("reportMsg", error.message, false, true);
+          AirCANnect.ui.message("reportMsg", i18n.error(error), false, true);
         }
       } finally {
         if (ownsController && reportLoadAbortController === controller) {
@@ -4167,7 +4205,7 @@
             } catch (error) {
               if (!context.active()) return;
               entry.failedCharts.set(key, error);
-              AirCANnect.ui.message("reportMsg", error.message, false, true);
+              AirCANnect.ui.message("reportMsg", i18n.error(error), false, true);
               if (!updateRenderedReportChart(key)) renderReportCharts();
             }
           }), 4);
@@ -4181,7 +4219,7 @@
         }
       })().catch((error) => {
         if (context.active()) {
-          AirCANnect.ui.message("reportMsg", error.message, false, true);
+          AirCANnect.ui.message("reportMsg", i18n.error(error), false, true);
         }
       }).finally(() => {
         const restart = context.active() && entry.requestedCharts.size > 0;
@@ -4256,27 +4294,27 @@
         renderReportSummary();
       }
 
-      AirCANnect.ui.message("reportMsg", "Loading report...", true, true);
+      AirCANnect.ui.message("reportMsg", i18n.message("report.loading"), true, true);
       try {
         const res = await pollSignalStoreNight(
           token, nightId, controller.signal);
         if (!res || token !== reportLoadToken) return;
         if (res.status === 404) {
-          AirCANnect.ui.message("reportMsg", "Night not found", false, true);
+          AirCANnect.ui.message("reportMsg", i18n.message("report.night_not_found"), false, true);
           return;
         }
         if (res.status === 202 && !res.result) {
-          AirCANnect.ui.message("reportMsg", "Preparing report...", true, true);
+          AirCANnect.ui.message("reportMsg", i18n.message("report.preparing"), true, true);
           return;
         }
         if ((res.status !== 200 && res.status !== 304) || !res.result) {
-          AirCANnect.ui.message("reportMsg", "Report not ready", false, true);
+          AirCANnect.ui.message("reportMsg", i18n.message("report.not_ready"), false, true);
           renderReportSummary();
           return;
         }
         if (res.result.state !== "ready" && res.result.state !== "partial") {
           AirCANnect.ui.message(
-            "reportMsg", res.result.error || "Report incomplete", false, true);
+            "reportMsg", res.result.error || i18n.message("report.incomplete"), false, true);
           renderReportSummary();
           return;
         }
@@ -4312,23 +4350,24 @@
         renderReportSummary();
         const update = res.update === REPORT_RETAINED_REASON ? "" : res.update;
         AirCANnect.ui.message("reportMsg",
-          res.cached ? "Browser copy; freshness not verified" : update
+          res.cached ? i18n.message("report.browser_copy") : update
             ? update === "pending"
-              ? "Showing saved report; update pending"
+              ? i18n.message("report.update_pending")
               : update === REPORT_LOW_SPACE_REASON
               ? REPORT_LOW_SPACE_NOTICE
-              : "Showing saved report; update failed: " + update
+              : i18n.message("report.saved_update_failed", {error: i18n.error(update)})
             : reportResult.active
-            ? "Recording - data through " + fmtReportClock(reportResult.end)
+            ? i18n.message("report.recording_through", {time: fmtReportClock(reportResult.end)})
             : reportResult.state === "partial"
-            ? "Report loaded (incomplete - some data missing)"
-            : "Report loaded", !update || update === "pending" ||
+            ? i18n.message("report.loaded_partial")
+            : i18n.message("report.loaded"), !update || update === "pending" ||
                 update === REPORT_LOW_SPACE_REASON, !!(update || res.cached));
         if (reportSummaryScope === "sessions") void loadReportPeriod();
       } catch (error) {
         if (token !== reportLoadToken) return;
-        AirCANnect.ui.message("reportMsg", (reportOffline
-          ? "Browser copy; freshness not verified. " : "") + error.message, false, true);
+        AirCANnect.ui.message("reportMsg", reportOffline
+          ? i18n.message("report.offline_error", {error: i18n.error(error)})
+          : i18n.error(error), false, true);
       } finally {
         if (reportLoadAbortController === controller) {
           reportLoadAbortController = null;
@@ -4360,7 +4399,7 @@
             {cache: "no-cache", headers});
         } catch (_) { /* A saved index remains useful without the device. */ }
         if (response?.status === 202) {
-          AirCANnect.ui.message("reportMsg", "Preparing report index...", true, true);
+          AirCANnect.ui.message("reportMsg", i18n.message("report.preparing_index"), true, true);
           scheduleReportPoll(loadNight);
           return;
         }
@@ -4375,23 +4414,23 @@
           const text = await response.text();
           const error = AirCANnect.http.responseError(text, response.status);
           if (error === "storage_unavailable") {
-            throw new Error("Storage unavailable: SD card is not mounted.");
+            throw i18n.failure("report.sd_unmounted");
           }
           cached = response.status === 503 && error === "storage_usb";
-          if (!cached) throw new Error(error);
+          if (!cached) throw i18n.failure(error);
         }
-        if (!reportSummary) throw new Error("Report index unavailable; no browser copy");
+        if (!reportSummary) throw i18n.failure("report.index_unavailable");
         if (cached) AirCANnect.ui.message(
-          "reportMsg", "Browser copy; freshness not verified", true, true);
+          "reportMsg", i18n.message("report.browser_copy"), true, true);
 
         renderReportSummary();
         if (!reportNightsNewestFirst().length) {
-          AirCANnect.ui.message("reportMsg", "No nights", true);
+          AirCANnect.ui.message("reportMsg", i18n.message("report.no_nights"), true);
           return;
         }
         if (loadNight) await loadSelectedReportNight();
       } catch (error) {
-        AirCANnect.ui.message("reportMsg", error.message, false, true);
+        AirCANnect.ui.message("reportMsg", i18n.error(error), false, true);
       }
     }
 
@@ -4451,7 +4490,7 @@
           if (data.success) loadReportPeriod();
           else {
             cancelReportPeriodRequest();
-            AirCANnect.ui.message("reportMsg", data.error || "Session statistics unavailable", false, true);
+            AirCANnect.ui.message("reportMsg", data.error || i18n.message("report.sessions_unavailable"), false, true);
           }
         }
         return;
@@ -4462,7 +4501,7 @@
           if (data.success) loadReportPeriod();
           else {
             cancelReportPeriodRequest();
-            AirCANnect.ui.message("reportMsg", data.error || "Period unavailable", false, true);
+            AirCANnect.ui.message("reportMsg", data.error || i18n.message("report.period_unavailable"), false, true);
           }
         } else if (reportPeriodWaiting && AirCANnect.pages.isActive("report") && reportViewMode === "period") {
           loadReportPeriod();
@@ -4484,8 +4523,9 @@
 
           AirCANnect.ui.message(
             "reportMsg", retained ? REPORT_RETAINED_NOTICE :
-              (reportResult && !deferred ? "Report update failed: " : "") +
-                reportFailureMessage(data), retained || deferred, true);
+              reportResult && !deferred ? i18n.message("report.update_failed", {
+                error: reportFailureMessage(data),
+              }) : reportFailureMessage(data), retained || deferred, true);
         }
         return;
       }
@@ -4519,6 +4559,14 @@
         });
       }
     }
+
+    i18n.onChange(() => {
+      if (document.getElementById("reportCalPop")?.classList.contains("open")) {
+        renderReportCalendar();
+      }
+      // Redraw only the current plot labels/readouts; keep data and controls.
+      scheduleReportDraw();
+    });
 
     AirCANnect.events.subscribe("report", handleReportCompletion);
     AirCANnect.actions.register("report.view", (_event, element) => {
