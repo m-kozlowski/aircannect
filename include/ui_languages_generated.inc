@@ -4,4 +4,5 @@ static constexpr AppConfigEnumValue UI_LANGUAGE_VALUES[] = {
     {"auto", "Browser language"},
     {"en", "English"},
     {"pl", "Polski"},
+    {"zh-TW", "繁體中文"},
 };
