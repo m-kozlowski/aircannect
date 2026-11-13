@@ -86,6 +86,7 @@ bool As11ServiceManager::acquire(As11ServiceOwner owner) {
         return false;
     }
     if (owner == As11ServiceOwner::None) return false;
+    if (release_pending_) return false;
     if (tcp_reset_boot_wait_) return false;
     if (owner_ == owner) return true;
     if (owner_ != As11ServiceOwner::None || state_ != State::Idle) {
@@ -98,6 +99,27 @@ bool As11ServiceManager::acquire(As11ServiceOwner owner) {
 
 void As11ServiceManager::release(As11ServiceOwner owner) {
     if (owner == As11ServiceOwner::None || owner_ != owner) return;
+
+    if (owner == As11ServiceOwner::TcpBridge && pending() &&
+        request_frame_count_ != 0) {
+        if (release_pending_) return;
+
+        // Finish only the last INFO probe, without further entry attempts.
+        if (state_ == State::EntryProbing) {
+            state_ = State::WaitingRequestFlowControl;
+            request_started_ms_ = phase_activity_ms_;
+            release_entry_can_policy();
+        }
+
+        release_pending_ = true;
+        Log::logf(CAT_CAN, LOG_DEBUG,
+                  "[SERVICE] TCP disconnected; finishing command=%u "
+                  "sequence=%u phase=%s\n",
+                  static_cast<unsigned>(request_command_),
+                  static_cast<unsigned>(request_sequence_),
+                  state_name(state_));
+        return;
+    }
 
     cancel();
     owner_ = As11ServiceOwner::None;
@@ -816,6 +838,7 @@ void As11ServiceManager::note_device_boot(uint32_t now_ms) {
 }
 
 void As11ServiceManager::poll(uint32_t now_ms) {
+    if (release_pending_ && !pending()) release(owner_);
     if (!available_ && state_ != State::Failed) return;
 
     if (state_ == State::RequestWaitingQuiesce) {
@@ -914,6 +937,7 @@ bool As11ServiceManager::take_response(
     bool &close_after_send) {
     response.reset();
     close_after_send = false;
+    if (release_pending_) return false;
     if (owner == As11ServiceOwner::None || owner_ != owner) return false;
     if (state_ != State::ResponseReady || !response_) return false;
 
@@ -927,6 +951,7 @@ bool As11ServiceManager::take_error(
     As11ServiceOwner owner,
     As11ServiceTransactionError &error) {
     error = As11ServiceTransactionError::None;
+    if (release_pending_) return false;
     if (owner == As11ServiceOwner::None || owner_ != owner) return false;
     if (state_ != State::Failed) return false;
 
@@ -950,6 +975,7 @@ void As11ServiceManager::cancel() {
     release_entry_can_policy();
     clear_transaction();
     session_exclusive_ = false;
+    release_pending_ = false;
     entry_protocol_version_ = 0;
     entry_sequence_ = 0;
     entry_started_ms_ = 0;

@@ -472,13 +472,6 @@ void TcpBridge::disconnect_slot(size_t idx) {
     if (idx >= AC_MAX_TCP_CLIENTS) return;
 
     if (service_owner_ == idx) {
-        if (service_.pending()) {
-            Log::logf(CAT_TCP, LOG_DEBUG,
-                      "[CLIENT %u SERVICE] transaction cancelled on "
-                      "disconnect\n",
-                      static_cast<unsigned>(idx));
-        }
-
         service_.release(As11ServiceOwner::TcpBridge);
         reset_service_request();
         service_output_.reset();
