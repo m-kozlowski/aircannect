@@ -49,6 +49,7 @@ public:
         return available_ && model_ != ResmedDeviceModel::AirMini;
     }
     bool acquire(As11ServiceOwner owner);
+    // A departing TCP client leaves an on-wire transaction to finish first.
     void release(As11ServiceOwner owner);
     bool owned_by(As11ServiceOwner owner) const { return owner_ == owner; }
 
@@ -157,6 +158,7 @@ private:
     As11ServiceTransactionError error_ =
         As11ServiceTransactionError::None;
     bool session_exclusive_ = false;
+    bool release_pending_ = false;
     bool entry_info_pending_ = false;
     bool tcp_reset_boot_wait_ = false;
     bool close_after_response_ = false;
