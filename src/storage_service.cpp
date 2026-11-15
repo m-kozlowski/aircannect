@@ -2862,11 +2862,17 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
     bool report_busy,
     OperationTicket *ticket_out = nullptr,
     uint32_t ticket_generation = 0,
-    uint32_t lock_timeout_ms = 10) {
+    uint32_t lock_timeout_ms = 10,
+    EdfStorageEnqueueBlock *block = nullptr) {
+    if (block) *block = {};
     if (ticket_out) *ticket_out = {};
     if (!service_state.initialized) begin();
-    if (!service_state.available) return EdfStorageEnqueueResult::Busy;
+    if (!service_state.available) {
+        if (block) block->reason = "storage_unavailable";
+        return EdfStorageEnqueueResult::Busy;
+    }
     if (!lock_queue(lock_timeout_ms)) {
+        if (block) block->reason = "storage_lock";
         if (report_busy) {
             service_state.queue_drops++;
             set_error("queue_lock_failed");
@@ -2874,7 +2880,9 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
         }
         return EdfStorageEnqueueResult::Busy;
     }
+    if (block) block->used_slots = queued + (processing_job ? 1 : 0);
     if (!slot_storage_available()) {
+        if (block) block->reason = "storage_buffers";
         unlock_queue();
         return EdfStorageEnqueueResult::Busy;
     }
@@ -2885,11 +2893,13 @@ EdfStorageEnqueueResult try_enqueue_prepared_slot(
     }
 
     if (ticket_out && edf_str_completion.completion.ticket.valid()) {
+        if (block) block->reason = "storage_completion";
         unlock_queue();
         return EdfStorageEnqueueResult::Busy;
     }
 
     if (free_slots() == 0) {
+        if (block) block->reason = "storage_queue";
         unlock_queue();
         if (report_busy) {
             service_state.queue_drops++;
@@ -3185,13 +3195,14 @@ bool enqueue_edf_open_annotation(const char *path,
 
 EdfStorageEnqueueResult enqueue_edf_numeric_record(
     const EdfFileSchema &schema,
-    const EdfCompletedRecordView &record) {
+    const EdfCompletedRecordView &record,
+    EdfStorageEnqueueBlock *block) {
     return try_enqueue_prepared_slot(
         [&](JobSlot &job) {
             return prepare_numeric_record_job(job, schema, record);
         },
         "record_snapshot_failed",
-        false);
+        false, nullptr, 0, 10, block);
 }
 
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
@@ -3254,14 +3265,14 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
         "annotation_close_prepare_failed");
 }
 
-EdfStorageEnqueueResult enqueue_edf_close_all() {
+EdfStorageEnqueueResult enqueue_edf_close_all(EdfStorageEnqueueBlock *block) {
     return try_enqueue_prepared_slot(
         [](JobSlot &job) {
             job.type = JobType::CloseAll;
             return true;
         },
         "close_all_prepare_failed",
-        false);
+        false, nullptr, 0, 10, block);
 }
 
 StorageReadPort &read_port() {

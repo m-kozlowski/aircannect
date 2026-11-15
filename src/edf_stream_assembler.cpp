@@ -152,7 +152,9 @@ void EdfStreamAssembler::set_current_records(
 EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
     const StreamFrameData &frame,
     size_t max_records_to_publish) {
+    status_.blocked_reason = nullptr;
     if (!status_.active) return EdfFramePrepareStatus::Rejected;
+    if (frame_in_progress_) return EdfFramePrepareStatus::Ready;
 
     int64_t frame_start_ms = 0;
     if (!parse_frame_start_ms(frame, frame_start_ms) ||
@@ -178,6 +180,7 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
 
             if (span.sample_count && effective_start_ms +
                     static_cast<int64_t>(span.sample_count - 1) * interval >= limit) {
+                status_.blocked_reason = "file_open";
                 return EdfFramePrepareStatus::Deferred;
             }
         }
@@ -246,51 +249,57 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
 }
 
 bool EdfStreamAssembler::end_session() {
+    if (frame_in_progress_) return false;
     if (!flush_partial_records()) return false;
 
     status_.active = false;
     return true;
 }
 
-void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
-    if (!status_.active) return;
+bool EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
+    status_.blocked_reason = nullptr;
+    if (!status_.active) return true;
 
-    int64_t frame_start_ms = 0;
-    if (!parse_frame_start_ms(frame, frame_start_ms) ||
-        !ensure_session_epoch(frame_start_ms)) {
-        status_.timestamp_errors++;
-        set_error("timestamp");
-        return;
-    }
-    FrameTiming timing;
-    const bool have_timing =
-        resolve_frame_timing(frame, frame_start_ms, timing);
-    const int64_t effective_start_ms =
-        have_timing ? timing.effective_start_ms : frame_start_ms;
-    maybe_rebase_initial_epoch(frame, effective_start_ms);
+    if (!frame_in_progress_) {
+        int64_t frame_start_ms = 0;
+        if (!parse_frame_start_ms(frame, frame_start_ms) ||
+            !ensure_session_epoch(frame_start_ms)) {
+            status_.timestamp_errors++;
+            set_error("timestamp");
+            return true;
+        }
+        (void)resolve_frame_timing(frame, frame_start_ms, frame_timing_);
+        maybe_rebase_initial_epoch(frame, frame_timing_.effective_start_ms);
 
-    status_.frames++;
+        status_.frames++;
+        frame_series_ = 0;
+        frame_next_record_ = UINT32_MAX;
+        frame_in_progress_ = true;
 
-    for (size_t i = 0; i < frame.signal_count; ++i) {
-        const StreamSignalSpan &span = frame.signals[i];
-        EdfSignalTarget target;
-        if (!edf_signal_target_for_stream(span.id, target) &&
-            !status_.unmapped_signal[0]) {
-            strncpy(status_.unmapped_signal,
-                    span.name,
-                    sizeof(status_.unmapped_signal) - 1);
+        for (size_t i = 0; i < frame.signal_count; ++i) {
+            const StreamSignalSpan &span = frame.signals[i];
+            EdfSignalTarget target;
+            if (!edf_signal_target_for_stream(span.id, target) &&
+                !status_.unmapped_signal[0]) {
+                strncpy(status_.unmapped_signal,
+                        span.name,
+                        sizeof(status_.unmapped_signal) - 1);
+            }
         }
     }
 
     size_t series_count = 0;
     const EdfFileSchema *schemas = edf_numeric_schemas(series_count);
-    for (size_t i = 0; i < series_count; ++i) {
-        SeriesBuffer buffer = series(schemas[i].series);
-        ingest_series_frame(frame, effective_start_ms, buffer);
+    for (; frame_series_ < series_count; ++frame_series_) {
+        SeriesBuffer buffer = series(schemas[frame_series_].series);
+        if (!ingest_series_frame(frame, frame_timing_.effective_start_ms, buffer)) {
+            return false;
+        }
     }
-    if (have_timing) {
-        commit_frame_timing(frame, timing);
-    }
+
+    commit_frame_timing(frame, frame_timing_);
+    frame_in_progress_ = false;
+    return true;
 }
 
 EdfSa2IngestStatus EdfStreamAssembler::ingest_sa2_sample(
@@ -395,6 +404,10 @@ void EdfStreamAssembler::reset_timeline() {
     timeline_active_ = false;
     timeline_stream_id_ = 0;
     timeline_next_frame_start_ms_ = 0;
+    frame_in_progress_ = false;
+    frame_series_ = 0;
+    frame_next_record_ = UINT32_MAX;
+    frame_timing_ = {};
 }
 
 void EdfStreamAssembler::reset_record(SeriesBuffer &series) {
@@ -497,16 +510,21 @@ void EdfStreamAssembler::count_late_frame_samples(
     }
 }
 
-void EdfStreamAssembler::ingest_series_frame(const StreamFrameData &frame,
+bool EdfStreamAssembler::ingest_series_frame(const StreamFrameData &frame,
                                              int64_t frame_start_ms,
                                              SeriesBuffer &series) {
     if (!series.values || !series.present || !series.valid || !series.status ||
         series.samples_per_record == 0) {
         set_error("buffer_missing");
-        return;
+        return true;
     }
 
-    count_late_frame_samples(frame, frame_start_ms, series);
+    if (frame_next_record_ != UINT32_MAX) {
+        if (!advance_to_record(series, frame_next_record_)) return false;
+        frame_next_record_ = UINT32_MAX;
+    } else {
+        count_late_frame_samples(frame, frame_start_ms, series);
+    }
 
     while (true) {
         const uint32_t current_record = series.status->current_record;
@@ -565,8 +583,11 @@ void EdfStreamAssembler::ingest_series_frame(const StreamFrameData &frame,
             }
         }
 
-        if (!saw_future) break;
-        if (!advance_to_record(series, next_record)) break;
+        if (!saw_future) return true;
+        if (!advance_to_record(series, next_record)) {
+            frame_next_record_ = next_record;
+            return false;
+        }
     }
 }
 
@@ -721,7 +742,10 @@ bool EdfStreamAssembler::publish_current_record(SeriesBuffer &series) {
     if (!series.status) return true;
 
     const uint32_t missing = count_missing_record_samples(series);
-    if (!publish_record(series)) return false;
+    if (!publish_record(series)) {
+        status_.blocked_reason = "record_sink";
+        return false;
+    }
 
     series.status->records_completed++;
     series.status->missing_slots += missing;
@@ -736,7 +760,10 @@ bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
     }
 
     while (series.status->current_record < new_record) {
-        if (publish_budget && *publish_budget == 0) return false;
+        if (publish_budget && *publish_budget == 0) {
+            status_.blocked_reason = "record_budget";
+            return false;
+        }
         if (!publish_current_record(series)) return false;
 
         if (publish_budget) --(*publish_budget);

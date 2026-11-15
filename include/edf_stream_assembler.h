@@ -35,6 +35,7 @@ struct EdfStreamAssemblerStatus {
 
     char unmapped_signal[AC_STREAM_FRAME_SIGNAL_NAME_MAX] = {};
     char last_error[80] = {};
+    const char *blocked_reason = nullptr;
 
     EdfSeriesAssemblyStatus &for_series(EdfSeriesId id) {
         return series[edf_series_index(id)];
@@ -84,7 +85,9 @@ public:
 
     EdfFramePrepareStatus prepare_frame(const StreamFrameData &frame,
                                         size_t max_records_to_publish);
-    void ingest_frame(const StreamFrameData &frame);
+    // A false result retains assembly progress; retry the same immutable frame.
+    bool ingest_frame(const StreamFrameData &frame);
+    bool frame_in_progress() const { return frame_in_progress_; }
     EdfSa2IngestStatus ingest_sa2_sample(
         const EdfSa2Sample &sample,
         size_t max_records_to_publish);
@@ -135,7 +138,7 @@ private:
     void count_late_frame_samples(const StreamFrameData &frame,
                                   int64_t frame_start_ms,
                                   SeriesBuffer &series);
-    void ingest_series_frame(const StreamFrameData &frame,
+    bool ingest_series_frame(const StreamFrameData &frame,
                              int64_t frame_start_ms,
                              SeriesBuffer &series);
     bool resolve_frame_timing(const StreamFrameData &frame,
@@ -182,6 +185,12 @@ private:
     bool initial_epoch_rebase_allowed_ = false;
     bool awaiting_file_records_ = false;
     As11ClockTransform clock_transform_;
+
+    // Cursor into the frame retained by the recorder during storage pressure.
+    bool frame_in_progress_ = false;
+    size_t frame_series_ = 0;
+    uint32_t frame_next_record_ = UINT32_MAX;
+    FrameTiming frame_timing_;
 
     EdfStreamAssemblerStatus status_;
 };

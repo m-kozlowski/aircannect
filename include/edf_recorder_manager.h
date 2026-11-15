@@ -417,6 +417,10 @@ private:
     void drain_local_sa2();
     bool local_sa2_epoch_ms(uint32_t observed_ms, int64_t &epoch_ms) const;
 
+    // bounded per-session diagnostics
+    void note_stream_block(const StreamFrameData &frame, const char *reason);
+    void finish_stream_block();
+
     // record assembly/output
     bool roll_segment_if_needed(const StreamFrameData &frame,
                                 uint32_t now_ms);

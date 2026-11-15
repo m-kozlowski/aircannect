@@ -185,6 +185,14 @@ struct EdfRecorderManager::ColdState {
         bool published = false;
     };
 
+    struct StreamBlock {
+        const char *reason = nullptr;
+        uint32_t started_ms = 0;
+        uint32_t duration_ms = 0;
+        int storage_slots = -1;
+        char frame_start[AC_STREAM_FRAME_START_TIME_MAX] = {};
+    };
+
     explicit ColdState(RpcRequestPort &rpc) : history(rpc) {}
 
     EdfSessionMetadataPublisher metadata_publisher;
@@ -203,6 +211,13 @@ struct EdfRecorderManager::ColdState {
 
     NumericSchemaState numeric_schemas[AC_EDF_NUMERIC_SERIES_COUNT];
     EdfStartupTiming startup_timing;
+
+    EdfStorageEnqueueBlock record_block;
+    StreamBlock stream_block;
+    StreamBlock longest_stream_block;
+    uint32_t stream_block_count = 0;
+    uint32_t stream_block_ms = 0;
+    bool stream_loss_logged = false;
 };
 
 void EdfRecorderManager::begin(EventBroker &events,
@@ -294,7 +309,9 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     }
     if (storage_suspended_) {
         cold_->history.cancel("storage_usb");
-        if (segment_close_pending_ && close_recording_segment()) {
+        if (status_.active) {
+            end_session(session_->status(), now_ms, "storage_usb");
+        } else if (segment_close_pending_ && close_recording_segment()) {
             segment_close_pending_ = false;
         }
         return;
@@ -894,6 +911,16 @@ void EdfRecorderManager::close_recording_gate(const char *end_time,
 bool EdfRecorderManager::close_recording_segment() {
     log_startup_timing("closed_before_ready");
     release_stream();
+    if (assembler_.frame_in_progress() && pending_stream_frame_) {
+        cold_->record_block = {};
+        if (!assembler_.ingest_frame(*pending_stream_frame_)) {
+            note_stream_block(*pending_stream_frame_,
+                              assembler_.status().blocked_reason);
+            return false;
+        }
+    }
+    pending_stream_frame_.reset();
+    finish_stream_block();
     drain_local_sa2();
 
     if (!assembler_.end_session()) {
@@ -1174,8 +1201,10 @@ void EdfRecorderManager::dispatch_session_edges(uint32_t now_ms) {
         static_cast<int32_t>(now_ms - next_session_start_ms_) >= 0) {
         start_session(session, now_ms, "active_session");
     }
-    if (session.state != SessionState::Active && status_.active) {
-        end_session(session, now_ms, "session_idle");
+    if (status_.active &&
+        (!status_.enabled || session.state != SessionState::Active)) {
+        end_session(session, now_ms,
+                    status_.enabled ? "session_idle" : "disabled");
     }
 }
 
@@ -1210,6 +1239,13 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     release_stream();
     const StatusCarryover carryover = preserve_status_carryover(status_);
     assembler_.reset();
+
+    cold_->record_block = {};
+    cold_->stream_block = {};
+    cold_->longest_stream_block = {};
+    cold_->stream_block_count = 0;
+    cold_->stream_block_ms = 0;
+    cold_->stream_loss_logged = false;
 
     status_ = {};
     restore_status_carryover(status_, carryover);
@@ -1386,6 +1422,17 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
                       status_.local_sa2_queue_drops),
                   static_cast<unsigned long>(status_.numeric_record_drops),
                   static_cast<unsigned long>(enqueue_failures));
+    }
+    if (cold_->stream_block_count) {
+        const ColdState::StreamBlock &longest = cold_->longest_stream_block;
+        Log::logf(CAT_EDF, stream_queue_drops ? LOG_WARN : LOG_DEBUG,
+                  "recorder waits id=%lu count=%lu ms=%lu max_ms=%lu "
+                  "reason=%s slots=%d frame=%s\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  static_cast<unsigned long>(cold_->stream_block_count),
+                  static_cast<unsigned long>(cold_->stream_block_ms),
+                  static_cast<unsigned long>(longest.duration_ms),
+                  longest.reason, longest.storage_slots, longest.frame_start);
     }
     if (status_.file_open_failures) {
         Log::logf(CAT_EDF, LOG_WARN,
@@ -1819,7 +1866,7 @@ bool EdfRecorderManager::close_session_files() {
         return true;
     }
 
-    if (StorageService::enqueue_edf_close_all() !=
+    if (StorageService::enqueue_edf_close_all(&cold_->record_block) !=
         EdfStorageEnqueueResult::Accepted) {
         return false;
     }
@@ -2917,12 +2964,17 @@ void EdfRecorderManager::release_stream() {
     if (!stream_) return;
     if (status_.stream_handle != STREAM_CONSUMER_INVALID &&
         stream_->consumer_active(status_.stream_handle)) {
+        update_stream_queue_drops();
         stream_->release(status_.stream_handle);
     }
     status_.stream_handle = STREAM_CONSUMER_INVALID;
     status_.stream_attached = false;
     last_queue_drops_ = 0;
-    pending_stream_frame_.reset();
+    // A partially consumed frame still belongs to the assembler until close.
+    if (!assembler_.frame_in_progress()) {
+        pending_stream_frame_.reset();
+        finish_stream_block();
+    }
     numeric_open_frame_buffer_.clear();
 }
 
@@ -2941,6 +2993,19 @@ void EdfRecorderManager::update_stream_queue_drops() {
         const uint32_t delta = queue_drops - last_queue_drops_;
         last_queue_drops_ = queue_drops;
         status_.frame_drops += delta;
+        if (!cold_->stream_loss_logged) {
+            cold_->stream_loss_logged = true;
+            const ColdState::StreamBlock &block = cold_->stream_block;
+            Log::logf(CAT_EDF, LOG_WARN,
+                      "recorder stream loss id=%lu drops=%lu wait=%s "
+                      "ms=%lu slots=%d frame=%s\n",
+                      static_cast<unsigned long>(status_.session_id),
+                      static_cast<unsigned long>(delta),
+                      block.reason ? block.reason : "not_drained",
+                      static_cast<unsigned long>(
+                          block.reason ? millis() - block.started_ms : 0),
+                      block.storage_slots, block.frame_start);
+        }
     }
 }
 
@@ -3022,21 +3087,58 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
             break;
         }
         if (!frame) continue;
+        cold_->record_block = {};
         if (!roll_segment_if_needed(*frame, now_ms)) {
             pending_stream_frame_ = frame;
+            note_stream_block(*frame, "segment_rollover");
             break;
         }
         const EdfFramePrepareStatus prepared =
             assembler_.prepare_frame(*frame, AC_EDF_GAP_RECORD_BUDGET);
         if (prepared == EdfFramePrepareStatus::Deferred) {
             pending_stream_frame_ = frame;
+            note_stream_block(*frame, assembler_.status().blocked_reason);
             break;
         }
         if (prepared == EdfFramePrepareStatus::Rejected) {
+            finish_stream_block();
             continue;
         }
-        assembler_.ingest_frame(*frame);
+        if (!assembler_.ingest_frame(*frame)) {
+            pending_stream_frame_ = frame;
+            note_stream_block(*frame, assembler_.status().blocked_reason);
+            break;
+        }
+        finish_stream_block();
     }
+}
+
+void EdfRecorderManager::note_stream_block(const StreamFrameData &frame,
+                                           const char *reason) {
+    if (cold_->record_block.reason) reason = cold_->record_block.reason;
+    if (!reason) reason = "unknown";
+    ColdState::StreamBlock &block = cold_->stream_block;
+    if (block.reason && strcmp(block.reason, reason) == 0) return;
+
+    finish_stream_block();
+    block.reason = reason;
+    block.started_ms = millis();
+    block.storage_slots = cold_->record_block.used_slots;
+    copy_cstr(block.frame_start, sizeof(block.frame_start), frame.start_time);
+    cold_->stream_block_count++;
+}
+
+void EdfRecorderManager::finish_stream_block() {
+    if (!cold_ || !cold_->stream_block.reason) return;
+
+    ColdState::StreamBlock &block = cold_->stream_block;
+    block.duration_ms = millis() - block.started_ms;
+    cold_->stream_block_ms += block.duration_ms;
+    if (!cold_->longest_stream_block.reason ||
+        block.duration_ms >= cold_->longest_stream_block.duration_ms) {
+        cold_->longest_stream_block = block;
+    }
+    block = {};
 }
 
 void EdfRecorderManager::drain_local_sa2() {
@@ -3183,7 +3285,10 @@ bool EdfRecorderManager::roll_segment_if_needed(
 
 bool EdfRecorderManager::handle_completed_record(
     const EdfCompletedRecordView &record) {
-    if (!numeric_files_open_ || !numeric_open_synced_) return false;
+    if (!numeric_files_open_ || !numeric_open_synced_) {
+        cold_->record_block = {"file_open", -1};
+        return false;
+    }
 
     const size_t index = edf_series_index(record.series);
     const NumericSchemaState *state = edf_series_id_valid(record.series)
@@ -3192,7 +3297,8 @@ bool EdfRecorderManager::handle_completed_record(
     if (numeric_files_open_ && state && state->open) {
         const EdfStorageEnqueueResult result =
             StorageService::enqueue_edf_numeric_record(state->layout.schema,
-                                                       record);
+                                                       record,
+                                                       &cold_->record_block);
         if (result == EdfStorageEnqueueResult::Busy) return false;
         if (result == EdfStorageEnqueueResult::Rejected) {
             status_.record_enqueue_failures++;

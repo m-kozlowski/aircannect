@@ -106,6 +106,12 @@ enum class EdfStorageEnqueueResult : uint8_t {
     Rejected,
 };
 
+struct EdfStorageEnqueueBlock {
+    const char *reason = nullptr;
+    // Includes the worker's occupied slot; -1 means no snapshot was available.
+    int used_slots = -1;
+};
+
 struct StorageWorkloadSnapshot {
     bool valid = false;
     bool available = false;
@@ -190,7 +196,8 @@ bool enqueue_edf_open_annotation(const char *path,
 // EDF record writes
 EdfStorageEnqueueResult enqueue_edf_numeric_record(
     const EdfFileSchema &schema,
-    const EdfCompletedRecordView &record);
+    const EdfCompletedRecordView &record,
+    EdfStorageEnqueueBlock *block = nullptr);
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
                                    const EdfAnnotationRecord &record);
 // Replacement requires a complete day, including previously saved fields.
@@ -200,7 +207,8 @@ StorageEdfStrPort &edf_str_port();
 bool enqueue_edf_identification_files(const std::string &json);
 bool enqueue_edf_close_numeric(EdfFileKind kind);
 bool enqueue_edf_close_annotation(EdfAnnotationKind kind);
-EdfStorageEnqueueResult enqueue_edf_close_all();
+EdfStorageEnqueueResult enqueue_edf_close_all(
+    EdfStorageEnqueueBlock *block = nullptr);
 EdfStorageOpenRead edf_open_result(const EdfStorageOpenHandle &handle,
                                    EdfStorageOpenResult &result);
 
