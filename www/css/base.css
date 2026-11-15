@@ -626,6 +626,8 @@
       margin-top: 12px;
     }
 
+    .device-actions .btn { padding: 8px 10px; }
+
     .endpoint-config {
       border-top: 1px solid #30364166;
       margin-top: 12px;

@@ -15,6 +15,7 @@ class AsyncWebServerRequest;
 namespace aircannect {
 
 class As11DeviceService;
+class As11SettingsManager;
 class As11BleRpcLink;
 class RpcRequestPort;
 class TimeSyncService;
@@ -25,6 +26,7 @@ public:
 
     bool begin(RpcRequestPort &rpc,
                As11DeviceService &device,
+               As11SettingsManager &settings,
                TimeSyncService &time_sync,
                As11BleRpcLink &ble_link,
                BleConnectCommand connect_ble,
@@ -44,6 +46,7 @@ private:
         TimeReset,
         TherapyStart,
         TherapyStop,
+        Warmup,
         BleConnect,
         BlePairScan,
         BlePairSelect,
@@ -71,12 +74,14 @@ private:
 
     RpcRequestPort *rpc_ = nullptr;
     As11DeviceService *device_ = nullptr;
+    As11SettingsManager *settings_ = nullptr;
     TimeSyncService *time_sync_ = nullptr;
     As11BleRpcLink *ble_link_ = nullptr;
     BleConnectCommand connect_ble_ = nullptr;
     void *connect_context_ = nullptr;
     MainLoopInbox<Command, CommandQueueDepth, InboxStorage::Psram> commands_;
     std::atomic<bool> as11_unavailable_{true};
+    std::atomic<bool> warmup_supported_{false};
 
     PublishedJsonSnapshot ble_pairing_snapshot_;
     LargeTextBuffer ble_pairing_build_json_;

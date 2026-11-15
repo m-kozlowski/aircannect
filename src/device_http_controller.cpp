@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "as11_device_service.h"
+#include "as11_settings_manager.h"
 #include "as11_ble_rpc_link.h"
 #include "board_net.h"
 #include "debug_log.h"
@@ -54,12 +55,14 @@ bool build_ble_pairing_json(LargeTextBuffer &json,
 
 bool DeviceHttpController::begin(RpcRequestPort &rpc,
                                  As11DeviceService &device,
+                                 As11SettingsManager &settings,
                                  TimeSyncService &time_sync,
                                  As11BleRpcLink &ble_link,
                                  BleConnectCommand connect_ble,
                                  void *connect_context) {
     rpc_ = &rpc;
     device_ = &device;
+    settings_ = &settings;
     time_sync_ = &time_sync;
     ble_link_ = &ble_link;
     connect_ble_ = connect_ble;
@@ -106,6 +109,8 @@ void DeviceHttpController::poll() {
         device_->unavailable() ||
             device_->state().model() == ResmedDeviceModel::Unknown,
         std::memory_order_release);
+    warmup_supported_.store(settings_->warmup_supported(device_->state()),
+                            std::memory_order_release);
 
     for (size_t i = 0; i < CommandsPerPoll; ++i) {
         Command command;
@@ -150,6 +155,12 @@ void DeviceHttpController::execute(Command command) {
             (void)device_->request_therapy(
                 *rpc_, As11TherapyTarget::Standby, RpcSource::HttpApi,
                 millis());
+            break;
+        case CommandKind::Warmup:
+            if (!settings_->request_warmup(
+                    *rpc_, device_->state(), RpcSource::HttpApi).accepted()) {
+                Log::logf(CAT_RPC, LOG_WARN, "warm-up request rejected\n");
+            }
             break;
         case CommandKind::BleConnect:
             if (!connect_ble_ || !connect_ble_(connect_context_, millis())) {
@@ -232,6 +243,13 @@ void DeviceHttpController::send_therapy_action(
     } else if (strcmp(action, "stop") == 0 ||
                strcmp(action, "standby") == 0) {
         command.kind = CommandKind::TherapyStop;
+    } else if (strcmp(action, "warmup") == 0) {
+        if (!warmup_supported_.load(std::memory_order_acquire)) {
+            request->send(409, "application/json",
+                          "{\"ok\":false,\"error\":\"warmup_unsupported\"}");
+            return;
+        }
+        command.kind = CommandKind::Warmup;
     } else {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"unknown_action\"}");

@@ -159,10 +159,12 @@
                 <label data-i18n="ui.motor.hours"></label>
                 <span class="value" id="motorHours">--</span>
               </div>
-              <div class="btns">
+              <div class="btns device-actions">
                 <button class="btn" id="therapyStart" data-action="therapy.command" data-value="start" data-i18n="ui.therapy"></button>
                 <button class="btn" id="therapyStop" data-action="therapy.command" data-value="stop" data-i18n="ui.standby"></button>
+                <button class="btn" id="warmupStart" hidden data-action="therapy.command" data-value="warmup" data-i18n="ui.warm.up" title="Warm up the humidifier" data-i18n-title="ui.warm.up.humidifier"></button>
               </div>
+              <div class="msg" id="warmupMsg" role="status" hidden></div>
             </div>
 
             <div class="card">

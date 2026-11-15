@@ -9,6 +9,7 @@
 #include "board.h"
 #include "json_util.h"
 #include "resmed_device_protocol.h"
+#include "resmed_firmware_image.h"
 #include "string_util.h"
 #include "utc_time.h"
 
@@ -235,6 +236,15 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
     }
     if (get_string(result, identity.software_identifier, text)) {
         software_identifier_ = text;
+        char version[16];
+        unsigned major = 0, minor = 0;
+
+        stock_warmup_supported_ =
+            resmed_firmware_version_from_text(
+                text.c_str(), version, sizeof(version)) &&
+            sscanf(version, "%*u.%u.%u", &major, &minor) == 2 &&
+            (major > 8 || (major == 8 && minor >= 8));
+
         updated = true;
     }
     if (get_string(result, identity.bootloader_identifier, text)) {

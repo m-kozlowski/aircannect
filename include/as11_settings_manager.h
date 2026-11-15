@@ -9,6 +9,8 @@
 
 namespace aircannect {
 
+class As11DeviceState;
+
 class As11SettingsManager {
 public:
     const As11SettingsState &state() const { return state_; }
@@ -22,6 +24,13 @@ public:
                               const As11PreparedSettingsWrite &write,
                               RpcSource source,
                               uint32_t now_ms);
+
+    // Warm-up shares the settings write ticket; it has no persistent readback.
+    bool warmup_supported(const As11DeviceState &device) const;
+    OperationSubmission request_warmup(RpcRequestPort &rpc,
+                                      const As11DeviceState &device,
+                                      RpcSource source);
+    const char *warmup_status() const { return warmup_status_; }
 
     void invalidate(RpcRequestPort &rpc,
                     RpcSource source,
@@ -60,6 +69,7 @@ private:
 
     OperationTicket write_ticket_;
     RpcSource write_source_ = RpcSource::Internal;
+    const char *warmup_status_ = "idle";
 
     OperationTicket refresh_ticket_;
     RpcSource refresh_source_ = RpcSource::Scheduler;

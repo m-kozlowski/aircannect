@@ -66,6 +66,7 @@ public:
     const std::string &software_identifier() const {
         return software_identifier_;
     }
+    bool stock_warmup_supported() const { return stock_warmup_supported_; }
     const std::string &bootloader_identifier() const {
         return bootloader_identifier_;
     }
@@ -145,6 +146,7 @@ private:
     std::string serial_number_;
     std::string product_name_;
     std::string software_identifier_;
+    bool stock_warmup_supported_ = false;
     std::string bootloader_identifier_;
     std::string active_therapy_profile_;
     std::string mhr_;

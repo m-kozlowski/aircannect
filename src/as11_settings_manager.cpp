@@ -1,6 +1,12 @@
 #include "as11_settings_manager.h"
 
+#include <string.h>
+
+#include "as11_device_state.h"
 #include "board.h"
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
 
 namespace aircannect {
 
@@ -64,6 +70,29 @@ OperationSubmission As11SettingsManager::submit_write(
     return submitted;
 }
 
+bool As11SettingsManager::warmup_supported(const As11DeviceState &device) const {
+    return device.model() == ResmedDeviceModel::AirSense11 &&
+        (device.stock_warmup_supported() || state_.airbreak_present());
+}
+
+OperationSubmission As11SettingsManager::request_warmup(
+    RpcRequestPort &rpc, const As11DeviceState &device, RpcSource source) {
+    if (strcmp(warmup_status_, "pending") == 0) {
+        return OperationSubmission::busy();
+    }
+
+    OperationSubmission submitted = OperationSubmission::rejected();
+    if (warmup_supported(device) && device.available() &&
+        device.therapy_state() == As11TherapyState::Standby &&
+        !device.therapy_command_pending()) {
+        submitted = submit_write(rpc, "{\"_WUP\":\"On\"}", source);
+    }
+
+    warmup_status_ = submitted.accepted() ? "pending" : "failed";
+    note_change();
+    return submitted;
+}
+
 void As11SettingsManager::invalidate(RpcRequestPort &rpc,
                                      RpcSource source,
                                      uint32_t now_ms) {
@@ -90,6 +119,7 @@ void As11SettingsManager::device_reset(RpcRequestPort &rpc) {
     if (refresh_ticket_.valid()) (void)rpc.cancel(refresh_ticket_);
 
     state_.clear();
+    warmup_status_ = "idle";
     refresh_retry_pending_ = false;
     refresh_again_pending_ = false;
     history_change_pending_ = false;
@@ -200,6 +230,19 @@ void As11SettingsManager::complete_write(
     RpcRequestPort &rpc,
     const RpcRequestCompletion &completion,
     uint32_t now_ms) {
+    if (strcmp(warmup_status_, "pending") == 0) {
+        const bool succeeded = completion_succeeded(completion);
+        warmup_status_ = succeeded ? "accepted" : "failed";
+        note_change();
+#ifdef ARDUINO
+        Log::logf(CAT_RPC, succeeded ? LOG_INFO : LOG_WARN,
+                  "warm-up %s%s%s\n", warmup_status_,
+                  completion.reason.empty() ? "" : " reason=",
+                  completion.reason.c_str());
+#endif
+        return;
+    }
+
     if (completion.cause == RpcCompletionCause::Response) {
         state_.note_set_response(!completion_succeeded(completion), now_ms);
     } else {

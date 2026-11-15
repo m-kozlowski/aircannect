@@ -714,6 +714,7 @@ As11SettingsState::~As11SettingsState() {
 void As11SettingsState::set_device_model(ResmedDeviceModel model) {
     if (!catalog_.set_device_model(model)) return;
 
+    airbreak_present_ = false;
     release_storage();
     pending_count_ = 0;
     last_write_status_.clear();
@@ -848,6 +849,9 @@ bool As11SettingsState::apply_settings_get_response(
 
     const ResmedDeviceProtocol *protocol = resmed_device_protocol(device_model());
     if (!protocol) return false;
+
+    airbreak_present_ = protocol->settings_extensions &&
+        !result[protocol->settings_extensions].as<JsonObjectConst>().isNull();
 
     bool catalog_changed = false;
     if (protocol->settings_extensions && !catalog_.apply_airbreak_info(
@@ -1061,6 +1065,8 @@ bool As11SettingsState::expire_pending(uint32_t now_ms,
 }
 
 void As11SettingsState::clear() {
+    airbreak_present_ = false;
+
     if (!values_) {
         pending_count_ = 0;
         last_write_status_ = "";

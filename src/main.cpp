@@ -1170,6 +1170,9 @@ static void refresh_status_presentations(uint32_t now_ms) {
 
     snapshot.therapy_elapsed_valid = session_manager.elapsed_seconds(
         snapshot.now_ms, snapshot.therapy_elapsed_s);
+    snapshot.as11.warmup_supported =
+        as11_settings_manager.warmup_supported(as11_device_service.state());
+    snapshot.as11.warmup_status = as11_settings_manager.warmup_status();
 
     alert_manager.observe(
         AlertMetric::StorageFreeMiB,
@@ -1599,6 +1602,7 @@ void setup() {
     }
     if (!device_http_controller.begin(rpc_transport,
                                       as11_device_service,
+                                      as11_settings_manager,
                                       time_sync_service,
                                       as11_ble_rpc_link,
                                       connect_cpap)) {

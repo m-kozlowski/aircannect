@@ -208,6 +208,7 @@ public:
     void set_device_model(ResmedDeviceModel model);
 
     bool valid() const { return valid_; }
+    bool airbreak_present() const { return airbreak_present_; }
     uint32_t updated_ms() const { return updated_ms_; }
 
     std::string value(size_t index, int mode = -1) const;
@@ -270,6 +271,7 @@ private:
     uint32_t updated_ms_ = 0;
     uint16_t supported_mode_mask_ = 0;
     bool valid_ = false;
+    bool airbreak_present_ = false;
 };
 
 size_t as11_setting_count();

@@ -485,11 +485,37 @@
       stop.className = "btn" + (shown === "standby" ? " primary" : "");
       start.disabled = unavailable || !!pending || shown === "running";
       stop.disabled = unavailable || !!pending || shown === "standby";
+
+      const warmup = document.getElementById("warmupStart");
+      const warmupMessage = document.getElementById("warmupMsg");
+      if (warmup) {
+        warmup.hidden = !data.warmup_supported;
+        warmup.disabled = data.as11_state !== "available" || !!pending ||
+          shown !== "standby" || data.as11_link_connected === false ||
+          data.warmup_status === "pending";
+      }
+
+      const messages = {
+        pending: "status.warmup_pending",
+        accepted: "status.warmup_accepted",
+        failed: "status.warmup_failed",
+      };
+      const message = data.warmup_supported && messages[data.warmup_status];
+      if (warmupMessage) {
+        warmupMessage.hidden = !message;
+        if (message) {
+          AirCANnect.ui.message("warmupMsg", AirCANnect.i18n.message(message),
+            data.warmup_status !== "failed", true);
+        } else {
+          AirCANnect.ui.clearMessage("warmupMsg");
+        }
+      }
     }
 
     function applyTherapyPending(action) {
       const data = Object.assign({}, statusData || {});
-      data.therapy_pending = action === "start" ? "running" : "standby";
+      if (action === "warmup") data.warmup_status = "pending";
+      else data.therapy_pending = action === "start" ? "running" : "standby";
       if (!data.therapy) data.therapy = "unknown";
       statusData = data;
       renderStatus(data);
