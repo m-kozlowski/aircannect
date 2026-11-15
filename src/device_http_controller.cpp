@@ -123,13 +123,24 @@ void DeviceHttpController::poll() {
     }
 }
 
-bool DeviceHttpController::enqueue(Command command) {
-    const bool queued = commands_.push(std::move(command));
-    if (!queued) {
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "HTTP device command queue full\n");
+void DeviceHttpController::enqueue(AsyncWebServerRequest *request,
+                                   Command command) {
+    // Only the HTTP task waits; the main loop keeps nonblocking pops.
+    const auto result = commands_.try_push(std::move(command), pdMS_TO_TICKS(10));
+    if (result == InboxPushResult::Queued) {
+        request->send(202, "application/json",
+                      "{\"ok\":true,\"result\":\"queued\"}");
+        return;
     }
-    return queued;
+
+    const char *reason = result == InboxPushResult::Full ? "queue_full"
+        : result == InboxPushResult::Busy ? "queue_busy" : "queue_unavailable";
+    Log::logf(CAT_GENERAL, LOG_WARN,
+              "HTTP device command rejected reason=%s\n", reason);
+
+    char json[64];
+    snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", reason);
+    request->send(503, "application/json", json);
 }
 
 void DeviceHttpController::execute(Command command) {
@@ -221,10 +232,7 @@ void DeviceHttpController::send_time_action(
         return;
     }
 
-    const bool queued = enqueue(command);
-    request->send(queued ? 202 : 503, "application/json",
-                  queued ? "{\"ok\":true,\"result\":\"queued\"}"
-                         : "{\"ok\":false,\"error\":\"queue_full\"}");
+    enqueue(request, std::move(command));
 }
 
 void DeviceHttpController::send_therapy_action(
@@ -270,10 +278,7 @@ void DeviceHttpController::send_therapy_action(
         return;
     }
 
-    const bool queued = enqueue(command);
-    request->send(queued ? 202 : 503, "application/json",
-                  queued ? "{\"ok\":true,\"result\":\"queued\"}"
-                         : "{\"ok\":false,\"error\":\"queue_full\"}");
+    enqueue(request, std::move(command));
 }
 
 void DeviceHttpController::send_ble_status(
@@ -360,10 +365,7 @@ void DeviceHttpController::send_ble_action(
         return;
     }
 
-    const bool queued = enqueue(std::move(command));
-    request->send(queued ? 202 : 503, "application/json",
-                  queued ? "{\"ok\":true,\"result\":\"queued\"}"
-                         : "{\"ok\":false,\"error\":\"queue_full\"}");
+    enqueue(request, std::move(command));
 }
 
 }  // namespace aircannect

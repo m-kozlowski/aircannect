@@ -12,6 +12,7 @@
 namespace aircannect {
 
 enum class InboxStorage { Internal, Psram };
+enum class InboxPushResult { Queued, Full, Busy, Unavailable };
 
 // Bounded handoff for commands produced by another task and consumed by the
 // main loop. The contained FixedQueue destroys each popped owning value.
@@ -42,11 +43,16 @@ public:
     }
 
     bool push(T &&value, TickType_t wait = 0) {
-        if (!mutex_ || xSemaphoreTake(mutex_, wait) != pdTRUE) return false;
+        return try_push(std::move(value), wait) == InboxPushResult::Queued;
+    }
+
+    InboxPushResult try_push(T &&value, TickType_t wait = 0) {
+        if (!mutex_) return InboxPushResult::Unavailable;
+        if (xSemaphoreTake(mutex_, wait) != pdTRUE) return InboxPushResult::Busy;
 
         const bool accepted = queue()->push(std::move(value));
         xSemaphoreGive(mutex_);
-        return accepted;
+        return accepted ? InboxPushResult::Queued : InboxPushResult::Full;
     }
 
     bool pop(T &value) {

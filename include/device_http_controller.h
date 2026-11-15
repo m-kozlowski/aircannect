@@ -64,7 +64,7 @@ private:
     static constexpr size_t CommandQueueDepth = 4;
     static constexpr size_t CommandsPerPoll = 2;
 
-    bool enqueue(Command command);
+    void enqueue(AsyncWebServerRequest *request, Command command);
     void execute(Command command);
     bool publish_ble_pairing_snapshot();
 

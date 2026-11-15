@@ -501,16 +501,12 @@
           data.warmup_status === "pending";
       }
 
-      const messages = {
-        pending: "status.warmup_pending",
-        failed: "status.warmup_failed",
-      };
-      const message = data.warmup_supported && messages[data.warmup_status];
+      const failed = data.warmup_supported && data.warmup_status === "failed";
       if (warmupMessage) {
-        warmupMessage.hidden = !message;
-        if (message) {
-          AirCANnect.ui.message("warmupMsg", AirCANnect.i18n.message(message),
-            data.warmup_status !== "failed", true);
+        warmupMessage.hidden = !failed;
+        if (failed) {
+          AirCANnect.ui.message("warmupMsg",
+            AirCANnect.i18n.message("status.warmup_failed"), false, true);
         } else {
           AirCANnect.ui.clearMessage("warmupMsg");
         }
@@ -524,6 +520,7 @@
       if (!data.therapy) data.therapy = "unknown";
       statusData = data;
       renderStatus(data);
+      return data;
     }
 
     function applyStatusSnapshot(data) {
@@ -847,16 +844,23 @@
       const command = {action};
       if (action === "warmup") command.enabled = statusData?.warmup_active !== true;
 
-      applyTherapyPending(action);
+      const previous = statusData;
+      const pending = applyTherapyPending(action);
       try {
-        const response = await AirCANnect.http.requestOk("/api/therapy", {
+        const response = await AirCANnect.http.request("/api/therapy", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(command),
         });
+        if (!response.ok) {
+          throw new Error(AirCANnect.http.responseError(
+            await response.text(), response.status));
+        }
+
         const data = await response.json();
         if (!data.ok) throw AirCANnect.i18n.failure("status.therapy_failed");
       } catch (error) {
+        if (statusData === pending) applyStatusSnapshot(previous || {});
         alert(AirCANnect.i18n.format(AirCANnect.i18n.error(error)));
         loadStatus();
       }
