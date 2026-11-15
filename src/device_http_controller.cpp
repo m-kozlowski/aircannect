@@ -158,7 +158,8 @@ void DeviceHttpController::execute(Command command) {
             break;
         case CommandKind::Warmup:
             if (!settings_->request_warmup(
-                    *rpc_, device_->state(), RpcSource::HttpApi).accepted()) {
+                    *rpc_, device_->state(), command.warmup_enabled,
+                    RpcSource::HttpApi).accepted()) {
                 Log::logf(CAT_RPC, LOG_WARN, "warm-up request rejected\n");
             }
             break;
@@ -244,12 +245,19 @@ void DeviceHttpController::send_therapy_action(
                strcmp(action, "standby") == 0) {
         command.kind = CommandKind::TherapyStop;
     } else if (strcmp(action, "warmup") == 0) {
+        if (!doc["enabled"].isUnbound() && !doc["enabled"].is<bool>()) {
+            request->send(400, "application/json",
+                          "{\"ok\":false,\"error\":\"bad_json\"}");
+            return;
+        }
+
         if (!warmup_supported_.load(std::memory_order_acquire)) {
             request->send(409, "application/json",
                           "{\"ok\":false,\"error\":\"warmup_unsupported\"}");
             return;
         }
         command.kind = CommandKind::Warmup;
+        command.warmup_enabled = doc["enabled"] | true;
     } else {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"unknown_action\"}");

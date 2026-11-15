@@ -58,6 +58,7 @@ private:
     struct Command {
         CommandKind kind = CommandKind::TimeNtp;
         std::string value;
+        bool warmup_enabled = true;
     };
 
     static constexpr size_t CommandQueueDepth = 4;

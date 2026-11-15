@@ -50,6 +50,10 @@ public:
     bool clock_write_active() const { return clock_write_ticket_.valid(); }
     void cancel_clock_write(RpcRequestPort &rpc, const char *reason);
 
+    // One-shot state read on capability discovery or transport recovery.
+    void set_warmup_supported(bool supported, uint32_t now_ms);
+    void refresh_warmup_state(uint32_t now_ms);
+
     bool apply_activity_event_frame(const As11EventFrame &frame,
                                     uint32_t now_ms);
     bool unavailable() const {
@@ -73,6 +77,7 @@ private:
         MotorRuntime,
         Timezone,
         Clock,
+        Humidifier,
         Count,
     };
 
@@ -125,6 +130,8 @@ private:
     RpcSource active_query_source_ = RpcSource::Scheduler;
     OperationTicket query_ticket_;
     uint8_t consecutive_query_timeouts_ = 0;
+    bool warmup_supported_ = false;
+    uint32_t humidifier_query_revision_ = 0;
 
     OperationTicket therapy_ticket_;
     std::string therapy_method_;

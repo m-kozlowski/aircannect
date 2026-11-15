@@ -76,7 +76,8 @@ bool As11SettingsManager::warmup_supported(const As11DeviceState &device) const 
 }
 
 OperationSubmission As11SettingsManager::request_warmup(
-    RpcRequestPort &rpc, const As11DeviceState &device, RpcSource source) {
+    RpcRequestPort &rpc, const As11DeviceState &device,
+    bool enabled, RpcSource source) {
     if (strcmp(warmup_status_, "pending") == 0) {
         return OperationSubmission::busy();
     }
@@ -85,7 +86,8 @@ OperationSubmission As11SettingsManager::request_warmup(
     if (warmup_supported(device) && device.available() &&
         device.therapy_state() == As11TherapyState::Standby &&
         !device.therapy_command_pending()) {
-        submitted = submit_write(rpc, "{\"_WUP\":\"On\"}", source);
+        submitted = submit_write(rpc, enabled ? "{\"_WUP\":\"On\"}"
+                                               : "{\"_WUP\":\"Off\"}", source);
     }
 
     warmup_status_ = submitted.accepted() ? "pending" : "failed";

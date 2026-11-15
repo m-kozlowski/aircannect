@@ -488,8 +488,14 @@
 
       const warmup = document.getElementById("warmupStart");
       const warmupMessage = document.getElementById("warmupMsg");
+      const warmupActive = data.warmup_active === true &&
+        data.as11_state === "available" && data.as11_link_connected !== false;
       if (warmup) {
         warmup.hidden = !data.warmup_supported;
+        warmup.className = "btn" + (warmupActive ? " primary" : "");
+        warmup.setAttribute("aria-pressed", String(warmupActive));
+        AirCANnect.i18n.text(warmup, AirCANnect.i18n.message(warmupActive
+          ? "ui.stop.warm.up" : "ui.warm.up.humidifier"), "title");
         warmup.disabled = data.as11_state !== "available" || !!pending ||
           shown !== "standby" || data.as11_link_connected === false ||
           data.warmup_status === "pending";
@@ -497,7 +503,6 @@
 
       const messages = {
         pending: "status.warmup_pending",
-        accepted: "status.warmup_accepted",
         failed: "status.warmup_failed",
       };
       const message = data.warmup_supported && messages[data.warmup_status];
@@ -839,12 +844,15 @@
     }
 
     async function therapy(action) {
+      const command = {action};
+      if (action === "warmup") command.enabled = statusData?.warmup_active !== true;
+
       applyTherapyPending(action);
       try {
         const response = await AirCANnect.http.requestOk("/api/therapy", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({action}),
+          body: JSON.stringify(command),
         });
         const data = await response.json();
         if (!data.ok) throw AirCANnect.i18n.failure("status.therapy_failed");

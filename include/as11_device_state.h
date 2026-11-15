@@ -16,6 +16,12 @@ enum class As11Availability : uint8_t {
     Unavailable,
 };
 
+enum class As11WarmupState : uint8_t {
+    Unknown,
+    Inactive,
+    Active,
+};
+
 class As11DeviceState {
 public:
     void reset();
@@ -111,6 +117,9 @@ public:
         return last_therapy_transition_state_;
     }
     As11TherapyState therapy_state() const { return therapy_state_; }
+    As11WarmupState warmup_state() const { return warmup_state_; }
+    uint32_t warmup_revision() const { return warmup_revision_; }
+    void invalidate_warmup();
     bool therapy_command_pending() const {
         return pending_therapy_target_ != As11TherapyTarget::None;
     }
@@ -131,6 +140,7 @@ private:
     void update_fg_state(const std::string &value, uint32_t now_ms);
     void update_rop(const std::string &value, uint32_t now_ms);
     void confirm_pending_if_matched(uint32_t now_ms);
+    void update_warmup(As11WarmupState state);
 
     As11Availability availability_ = As11Availability::Unknown;
 
@@ -159,6 +169,8 @@ private:
 
     std::string rop_;
     As11TherapyState therapy_state_ = As11TherapyState::Unknown;
+    As11WarmupState warmup_state_ = As11WarmupState::Unknown;
+    uint32_t warmup_revision_ = 0;
     As11TherapyState runtime_event_state_ = As11TherapyState::Unknown;
     uint32_t runtime_event_subscription_id_ = 0;
     std::string last_activity_event_;

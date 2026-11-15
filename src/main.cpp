@@ -562,6 +562,7 @@ static void sync_rpc_transport_generation(uint32_t now_ms) {
 
     event_broker.transport_reset(rpc_transport, now_ms);
     stream_broker.transport_reset(rpc_transport, now_ms);
+    as11_device_service.refresh_warmup_state(now_ms);
     rpc_transport_generation_seen = generation;
 }
 
@@ -1800,6 +1801,9 @@ void loop() {
         rpc_transport, now_ms,
         as11_application_quiesce_requested ||
             resmed_ota_transport_active || !as11_rpc_available);
+    as11_device_service.set_warmup_supported(
+        as11_settings_manager.warmup_supported(as11_device_service.state()), now_ms);
+
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();

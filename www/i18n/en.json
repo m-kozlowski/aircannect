@@ -1,8 +1,8 @@
 {
   "ui.warm.up": "Warm up",
   "ui.warm.up.humidifier": "Warm up the humidifier",
+  "ui.stop.warm.up": "Stop humidifier warm-up",
   "status.warmup_pending": "Sending warm-up request...",
-  "status.warmup_accepted": "Warm-up request accepted",
   "status.warmup_failed": "Warm-up request failed",
   "error.warmup_unsupported": "Warm-up is not supported by this firmware",
   "clinical.catalog_changed": "settings catalog changed during refresh",

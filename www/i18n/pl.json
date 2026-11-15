@@ -1,8 +1,8 @@
 {
   "ui.warm.up": "Rozgrzej",
   "ui.warm.up.humidifier": "Rozgrzej nawilżacz",
+  "ui.stop.warm.up": "Zatrzymaj rozgrzewanie nawilżacza",
   "status.warmup_pending": "Wysyłanie żądania rozgrzania...",
-  "status.warmup_accepted": "Żądanie rozgrzania przyjęte",
   "status.warmup_failed": "Żądanie rozgrzania nie powiodło się",
   "error.warmup_unsupported": "Ten firmware nie obsługuje rozgrzewania",
   "clinical.catalog_changed": "Katalog ustawień zmienił się podczas odświeżania",

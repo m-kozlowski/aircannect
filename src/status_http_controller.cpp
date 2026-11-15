@@ -98,6 +98,12 @@ bool build_status_json(LargeTextBuffer &json,
     json_add_string_view(json, "software_id", as11.software_identifier);
     json_add_bool(json, "warmup_supported", as11.warmup_supported);
     json_add_string(json, "warmup_status", as11.warmup_status);
+    if (as11.warmup_state == As11WarmupState::Unknown) {
+        json += ",\"warmup_active\":null";
+    } else {
+        json_add_bool(json, "warmup_active",
+                      as11.warmup_state == As11WarmupState::Active);
+    }
     json_add_string(json, "therapy",
                     As11DeviceState::therapy_state_name(as11.therapy_state));
     json_add_string(json, "therapy_pending",

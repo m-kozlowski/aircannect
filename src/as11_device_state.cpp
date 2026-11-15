@@ -175,6 +175,7 @@ bool As11DeviceState::set_availability(As11Availability availability,
 
     availability_ = availability;
     if (availability == As11Availability::Unavailable) {
+        invalidate_warmup();
         therapy_state_ = As11TherapyState::Unknown;
         runtime_event_state_ = As11TherapyState::Unknown;
         if (therapy_command_pending()) {
@@ -226,6 +227,21 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
     if (!protocol) return updated;
 
     std::string text;
+    if (model() == ResmedDeviceModel::AirSense11 &&
+        get_string(result, "_HUS", text)) {
+        if (text == "WarmingUp" || text == "WarmingUpInError" ||
+            text == "WarmReady") {
+            update_warmup(As11WarmupState::Active);
+        } else if (text == "Reset" || text == "Idle" || text == "CoolDown" ||
+                   text == "HumidifyActive" || text == "HumidifyInactive" ||
+                   text == "Error" || text == "MockDown") {
+            update_warmup(As11WarmupState::Inactive);
+        } else {
+            invalidate_warmup();
+        }
+        updated = true;
+    }
+
     if (get_string(result, identity.product_name, text)) {
         product_name_ = text;
         updated = true;
@@ -391,6 +407,12 @@ bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
         if (event.name.empty()) continue;
         As11TherapyState event_state = therapy_state_for_event(event.name);
 
+        if (event.name == "WarmupStarted") {
+            update_warmup(As11WarmupState::Active);
+        } else if (event.name == "WarmupStopped") {
+            update_warmup(As11WarmupState::Inactive);
+        }
+
         last_activity_event_ = event.name;
         last_activity_event_report_time_ = event.report_time;
         last_activity_event_ms_ = now_ms;
@@ -407,6 +429,16 @@ bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
         updated = true;
     }
     return updated;
+}
+
+void As11DeviceState::update_warmup(As11WarmupState state) {
+    warmup_state_ = state;
+    // Even a repeated event supersedes an older in-flight snapshot.
+    warmup_revision_++;
+}
+
+void As11DeviceState::invalidate_warmup() {
+    update_warmup(As11WarmupState::Unknown);
 }
 
 void As11DeviceState::mark_therapy_command_sent(const std::string &method,

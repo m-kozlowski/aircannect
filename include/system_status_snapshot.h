@@ -53,6 +53,7 @@ struct As11StatusSnapshot {
     As11TherapyState therapy_state = As11TherapyState::Unknown;
     As11TherapyTarget pending_therapy_target = As11TherapyTarget::None;
     bool warmup_supported = false;
+    As11WarmupState warmup_state = As11WarmupState::Unknown;
     const char *warmup_status = "idle";
     bool clock_valid = false;
     uint32_t clock_sample_ms = 0;

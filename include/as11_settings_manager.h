@@ -29,6 +29,7 @@ public:
     bool warmup_supported(const As11DeviceState &device) const;
     OperationSubmission request_warmup(RpcRequestPort &rpc,
                                       const As11DeviceState &device,
+                                      bool enabled,
                                       RpcSource source);
     const char *warmup_status() const { return warmup_status_; }
 

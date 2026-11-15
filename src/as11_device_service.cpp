@@ -320,6 +320,24 @@ bool As11DeviceService::apply_activity_event_frame(
     return true;
 }
 
+void As11DeviceService::set_warmup_supported(bool supported, uint32_t now_ms) {
+    if (warmup_supported_ == supported) return;
+
+    warmup_supported_ = supported;
+    if (supported) {
+        schedule_query(QueryKind::Humidifier, now_ms, RpcSource::Scheduler);
+    } else {
+        refresh_warmup_state(now_ms);
+    }
+}
+
+void As11DeviceService::refresh_warmup_state(uint32_t now_ms) {
+    state_.invalidate_warmup();
+    queries_[query_index(QueryKind::Humidifier)] = {};
+    schedule_query(QueryKind::Humidifier, now_ms, RpcSource::Scheduler);
+    note_change();
+}
+
 void As11DeviceService::device_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     cancel_ticket(rpc, query_ticket_);
     cancel_ticket(rpc, therapy_ticket_);
@@ -331,6 +349,7 @@ void As11DeviceService::device_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     for (ScheduledQuery &query : queries_) query = {};
 
     state_.reset();
+    warmup_supported_ = false;
     consecutive_query_timeouts_ = 0;
     schedule_initialized_ = false;
     initialize_schedule(now_ms);
@@ -441,6 +460,7 @@ void As11DeviceService::initialize_recovery_schedule(uint32_t now_ms) {
     schedule_query(QueryKind::Clock,
                    now_ms + AC_RPC_DEFAULT_TIMEOUT_MS,
                    RpcSource::Scheduler);
+    schedule_query(QueryKind::Humidifier, now_ms, RpcSource::Scheduler);
 }
 
 void As11DeviceService::clear_schedule() {
@@ -525,12 +545,26 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
     query_ticket_ = submitted.ticket;
     active_query_kind_ = kind;
     active_query_source_ = command.source;
+    if (kind == QueryKind::Humidifier) {
+        humidifier_query_revision_ = state_.warmup_revision();
+    }
     return true;
 }
 
 void As11DeviceService::complete_query(
     const RpcRequestCompletion &completion,
     uint32_t now_ms) {
+    if (active_query_kind_ == QueryKind::Humidifier) {
+        // Optional one-shot read: never retry or overwrite a newer event/reset.
+        if (completion_succeeded(completion) &&
+            humidifier_query_revision_ == state_.warmup_revision() &&
+            state_.apply_status_get_response(
+                rpc_payload_view(completion.payload), now_ms)) {
+            note_change();
+        }
+        return;
+    }
+
     if (completion.cause == RpcCompletionCause::Response) {
         note_query_response(now_ms);
     }
@@ -623,6 +657,7 @@ void As11DeviceService::complete_query(
                            RpcSource::Scheduler);
             break;
         case QueryKind::None:
+        case QueryKind::Humidifier:
         case QueryKind::Count:
             break;
     }
@@ -765,6 +800,9 @@ bool As11DeviceService::completion_succeeded(
 bool As11DeviceService::query_supported(QueryKind kind) const {
     if (kind == QueryKind::None || kind == QueryKind::Count) return false;
     if (kind == QueryKind::Platform) return true;
+    if (kind == QueryKind::Humidifier) {
+        return warmup_supported_ && state_.model() == ResmedDeviceModel::AirSense11;
+    }
 
     const ResmedDeviceProtocol *protocol = resmed_device_protocol(state_.model());
     return protocol && (kind != QueryKind::Timezone || protocol->timezone);
@@ -781,6 +819,7 @@ std::string As11DeviceService::query_params(QueryKind kind) const {
         case QueryKind::MotorRuntime:
             return build_get_params({RESMED_MOTOR_RUNTIME});
         case QueryKind::Timezone: return build_get_params({protocol->timezone});
+        case QueryKind::Humidifier: return "[\"_HUS\"]";
         case QueryKind::Clock:
         case QueryKind::None:
         case QueryKind::Count:

@@ -113,6 +113,7 @@ SystemStatusSnapshot collect_system_status(
     out.as11.rop = as11.rop();
     out.as11.device_datetime = as11.device_datetime();
     out.as11.therapy_state = as11.therapy_state();
+    out.as11.warmup_state = as11.warmup_state();
     out.as11.pending_therapy_target = as11.pending_therapy_target();
     out.as11.clock_valid = as11.clock_valid();
     out.as11.clock_sample_ms = as11.clock_sample_ms();
