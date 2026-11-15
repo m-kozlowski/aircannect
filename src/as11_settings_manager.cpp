@@ -90,6 +90,7 @@ OperationSubmission As11SettingsManager::request_warmup(
                                                : "{\"_WUP\":\"Off\"}", source);
     }
 
+    if (submitted.accepted()) warmup_requested_on_ = enabled;
     warmup_status_ = submitted.accepted() ? "pending" : "failed";
     note_change();
     return submitted;
@@ -237,10 +238,15 @@ void As11SettingsManager::complete_write(
         warmup_status_ = succeeded ? "accepted" : "failed";
         note_change();
 #ifdef ARDUINO
-        Log::logf(CAT_RPC, succeeded ? LOG_INFO : LOG_WARN,
-                  "warm-up %s%s%s\n", warmup_status_,
-                  completion.reason.empty() ? "" : " reason=",
-                  completion.reason.c_str());
+        const char *reason = completion.reason.empty()
+            ? (completion.response_error ? "rpc_error" : "")
+            : completion.reason.c_str();
+
+        Log::logf(CAT_RPC, succeeded ? LOG_DEBUG : LOG_WARN,
+                  "warm-up request _WUP=%s rpc=%s%s%s\n",
+                  warmup_requested_on_ ? "On" : "Off",
+                  succeeded ? "ok" : "failed",
+                  *reason ? " reason=" : "", reason);
 #endif
         return;
     }

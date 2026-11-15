@@ -12,6 +12,9 @@
 #include "resmed_firmware_image.h"
 #include "string_util.h"
 #include "utc_time.h"
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
 
 namespace aircannect {
 namespace {
@@ -407,10 +410,16 @@ bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
         if (event.name.empty()) continue;
         As11TherapyState event_state = therapy_state_for_event(event.name);
 
-        if (event.name == "WarmupStarted") {
-            update_warmup(As11WarmupState::Active);
-        } else if (event.name == "WarmupStopped") {
-            update_warmup(As11WarmupState::Inactive);
+        if (event.name == "WarmupStarted" || event.name == "WarmupStopped") {
+            const bool started = event.name == "WarmupStarted";
+            update_warmup(started ? As11WarmupState::Active
+                                  : As11WarmupState::Inactive);
+
+#ifdef ARDUINO
+            Log::logf(CAT_GENERAL, LOG_INFO, "[WARMUP] %s time=%s\n",
+                      started ? "started" : "stopped",
+                      event.report_time.empty() ? "--" : event.report_time.c_str());
+#endif
         }
 
         last_activity_event_ = event.name;

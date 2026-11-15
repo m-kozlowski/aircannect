@@ -171,7 +171,9 @@ void DeviceHttpController::execute(Command command) {
             if (!settings_->request_warmup(
                     *rpc_, device_->state(), command.warmup_enabled,
                     RpcSource::HttpApi).accepted()) {
-                Log::logf(CAT_RPC, LOG_WARN, "warm-up request rejected\n");
+                Log::logf(CAT_RPC, LOG_WARN,
+                          "warm-up request _WUP=%s rejected\n",
+                          command.warmup_enabled ? "On" : "Off");
             }
             break;
         case CommandKind::BleConnect:

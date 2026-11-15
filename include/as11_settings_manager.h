@@ -71,6 +71,7 @@ private:
     OperationTicket write_ticket_;
     RpcSource write_source_ = RpcSource::Internal;
     const char *warmup_status_ = "idle";
+    bool warmup_requested_on_ = false;
 
     OperationTicket refresh_ticket_;
     RpcSource refresh_source_ = RpcSource::Scheduler;
