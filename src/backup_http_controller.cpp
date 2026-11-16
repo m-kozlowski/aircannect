@@ -98,18 +98,30 @@ void BackupHttpController::publish_result() {
     json_add_int(json, "plan", result.plan);
     if (result.plan) {
         const auto &plan = service_->clinical_plan();
+        const auto *config = service_->config_plan();
+        const auto &entries = config ? config->entries() : plan.entries;
         json_add_string(json, "serial", plan.source_serial.c_str());
+        json_add_string(json, "device_name", plan.source_name.c_str());
         json_add_string(json, "created", plan.created.c_str());
-        json_add_int(json, "unchanged", plan.unchanged);
+        size_t unchanged = 0;
+        for (const auto &entry : entries) unchanged += entry.unchanged;
+        json_add_int(json, "unchanged", unchanged);
         json += ",\"entries\":[";
         bool first = true;
-        for (const auto &entry : plan.entries) {
+        for (const auto &entry : entries) {
             if (!first) json += ',';
             first = false;
             json += '{';
             json_add_string(json, "key", entry.key.c_str(), false);
+            json_add_string(json, "label", entry.label.c_str());
+            json_add_bool(json, "stock", entry.stock);
             json_add_string(json, "before", entry.before.c_str());
             json_add_string(json, "value", entry.value.c_str());
+            if (entry.before_option >= 0) json_add_int(json, "before_option", entry.before_option);
+            if (entry.value_option >= 0) json_add_int(json, "value_option", entry.value_option);
+            if (entry.unchanged) json_add_bool(json, "unchanged", true);
+            if (entry.secret) json_add_bool(json, "secret", true);
+            if (entry.kept) json_add_bool(json, "kept", true);
             if (entry.reason) json_add_string(json, "reason", entry.reason);
             json += '}';
         }

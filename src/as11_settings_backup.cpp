@@ -126,6 +126,7 @@ const char *as11_settings_backup_prepare(
     }
     plan.mode = mode;
     plan.source_serial = document["device"]["serial"] | "";
+    plan.source_name = document["device"]["name"] | "";
     plan.created = document["created"] | "";
 
     JsonDocument changes(&allocator);
@@ -142,8 +143,12 @@ const char *as11_settings_backup_prepare(
         }
         if (index == catalog.count()) {
             row.reason = "unknown";
+            row.before = "--";
+            row.value = entry.value().as<std::string>();
         } else {
             const auto &def = catalog.setting(index);
+            row.label = def.label;
+            row.stock = !catalog.overlaid(def.key);
             if (!catalog.supports(def) || !as11_setting_readable_via_rpc(def)) {
                 row.reason = "unknown";
             } else if (!def.writable) {
@@ -157,16 +162,20 @@ const char *as11_settings_backup_prepare(
             if (!available && !row.reason) row.reason = "unknown";
             row.before = display_value(def, current.as<JsonVariantConst>());
             row.value = display_value(def, entry.value());
+            if (def.kind == As11SettingKind::Enum) {
+                if (available) row.before_option = current.as<int>();
+                if (!row.reason) row.value_option = entry.value().as<int>();
+            }
 
             const bool same = def.kind == As11SettingKind::Number
                 ? std::fabs(current.as<double>() - entry.value().as<double>()) <= 1e-6
                 : current.as<JsonVariantConst>() == entry.value();
             if (!row.reason && same) {
                 ++plan.unchanged;
-                continue;
+                row.unchanged = true;
             }
         }
-        if (!row.reason) changes[row.key] = entry.value();
+        if (!row.reason && !row.unchanged) changes[row.key] = entry.value();
         plan.entries.push_back(std::move(row));
     }
     if (changes.overflowed() || current.overflowed()) return "backup_alloc";

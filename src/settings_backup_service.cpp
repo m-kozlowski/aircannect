@@ -171,10 +171,21 @@ void SettingsBackupService::complete_read() {
         target_serial_ = device_->state().serial_number();
         settings_revision_ = settings_->revision();
         preview_file_.reset();
-    } else if (memchr(preview_file_->data(), 0, preview_file_->size())) {
-        finish("invalid_backup");
-        clear_preview();
-        return;
+    } else {
+        if (memchr(preview_file_->data(), 0, preview_file_->size())) {
+            finish("invalid_backup");
+            clear_preview();
+            return;
+        }
+        config_plan_ = config_->prepare_restore(
+            reinterpret_cast<const char *>(preview_file_->data()), preview_file_->size());
+        preview_file_.reset();
+        const char *error = config_plan_ ? config_plan_->prepare().error : "backup_unavailable";
+        if (error) {
+            finish(error);
+            clear_preview();
+            return;
+        }
     }
     preview_id_ = generation_;
     preview_ms_ = started_ms_;
@@ -191,8 +202,7 @@ void SettingsBackupService::restore(uint32_t plan, uint32_t now_ms) {
     }
     result_.path = preview_path_;
     if (kind_ == SettingsBackupKind::Config) {
-        result_.config = config_->restore_text(
-            reinterpret_cast<const char *>(preview_file_->data()), preview_file_->size());
+        result_.config = config_plan_->finish();
         const auto &restored = result_.config;
         finish(restored.error ? restored.error :
                !restored.wifi_saved ? "wifi_not_saved" :
@@ -303,6 +313,7 @@ void SettingsBackupService::finish(const char *error) {
 
 void SettingsBackupService::clear_preview() {
     preview_file_.reset();
+    config_plan_.reset();
     clinical_plan_ = {};
     preview_path_.clear();
     target_serial_.clear();

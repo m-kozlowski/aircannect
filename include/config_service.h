@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <memory>
 
 #include <Arduino.h>
 
@@ -40,6 +41,18 @@ struct ConfigTransactionResult {
 
 class ConfigService {
 public:
+    class PreparedUpdate {
+    public:
+        bool valid() const { return store_ != nullptr; }
+        const AppConfigData &data() const { return store_->data(); }
+        const ConfigTransactionResult &result() const { return result_; }
+
+    private:
+        friend class ConfigService;
+        std::unique_ptr<AppConfig> store_;
+        ConfigTransactionResult result_;
+    };
+
     using ApplyRuntimeEffects = void (*)(void *context,
                                          const AppConfigData &config,
                                          uint32_t dirty);
@@ -70,6 +83,9 @@ public:
     ConfigFieldUpdate set_transaction_keybindings(
         const ButtonBindingConfig &keybindings);
     ConfigTransactionResult commit_transaction();
+    PreparedUpdate prepare_transaction();
+    ConfigTransactionResult commit_prepared(PreparedUpdate update);
+    void cancel_transaction() { clear_transaction(); }
 
     ConfigFieldUpdate set_value(const char *key,
                                 const String &value,

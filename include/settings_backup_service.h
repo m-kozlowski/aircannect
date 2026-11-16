@@ -49,6 +49,7 @@ public:
     bool busy() const { return phase_ != Phase::Idle; }
     const SettingsBackupResult &result() const { return result_; }
     const As11SettingsBackupPlan &clinical_plan() const { return clinical_plan_; }
+    const ConfigRestore *config_plan() const { return config_plan_.get(); }
 
 private:
     enum class Phase : uint8_t { Idle, Reading, Writing, Readback, Directory };
@@ -86,6 +87,7 @@ private:
     // Only the previewed bytes/prepared write may be restored. No reread and
     // no automatic backup, including when a restore fails.
     std::shared_ptr<const LargeByteBuffer> preview_file_;
+    std::shared_ptr<ConfigRestore> config_plan_;
     As11SettingsBackupPlan clinical_plan_;
     std::string preview_path_;
     std::string target_serial_;

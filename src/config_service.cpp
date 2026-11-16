@@ -114,8 +114,13 @@ ConfigFieldUpdate ConfigService::set_transaction_keybindings(
 }
 
 ConfigTransactionResult ConfigService::commit_transaction() {
-    ConfigTransactionResult result;
-    if (!transaction_active_) return result;
+    return commit_prepared(prepare_transaction());
+}
+
+ConfigService::PreparedUpdate ConfigService::prepare_transaction() {
+    PreparedUpdate prepared;
+    auto &result = prepared.result_;
+    if (!transaction_active_) return prepared;
 
     result.accepted_fields = transaction_accepted_;
     result.changed_fields = transaction_changed_;
@@ -131,28 +136,41 @@ ConfigTransactionResult ConfigService::commit_transaction() {
         Log::logf(CAT_CONFIG, LOG_WARN,
                   "config transaction rejected reason=%s\n", result.error);
         clear_transaction();
+        return prepared;
+    }
+
+    prepared.store_.reset(transaction_store_);
+    transaction_store_ = nullptr;
+    clear_transaction();
+    return prepared;
+}
+
+ConfigTransactionResult ConfigService::commit_prepared(PreparedUpdate prepared) {
+    ConfigTransactionResult result = prepared.result_;
+    if (!prepared.valid()) return result;
+    if (transaction_active_ || result.revision != revision_) {
+        result.error = transaction_active_ ? "transaction_busy" : "config_changed";
         return result;
     }
 
-    result.persisted = transaction_store_->commit_update(store_.data());
+    result.persisted = prepared.store_->commit_update(store_.data());
     if (!result.persisted) {
         result.error = "persist_failed";
         Log::logf(CAT_CONFIG, LOG_WARN, "config transaction persist failed\n");
     }
 
-    if (result.persisted && transaction_dirty_ != 0) {
-        store_ = std::move(*transaction_store_);
+    if (result.persisted && result.dirty != 0) {
+        store_ = std::move(*prepared.store_);
         revision_++;
         if (revision_ == 0) revision_ = 1;
-        publish_changes(transaction_dirty_);
-    } else if (!result.persisted && transaction_dirty_ != 0 &&
-               !store_.save_changed_fields(transaction_store_->data())) {
+        publish_changes(result.dirty);
+    } else if (!result.persisted && result.dirty != 0 &&
+               !store_.save_changed_fields(prepared.store_->data())) {
         Log::logf(CAT_CONFIG, LOG_ERROR,
                   "failed to restore config after transaction error\n");
     }
     result.revision = revision_;
 
-    clear_transaction();
     return result;
 }
 

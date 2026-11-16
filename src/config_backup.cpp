@@ -1,6 +1,8 @@
 #include "config_backup.h"
 
 #include <string.h>
+#include <algorithm>
+#include <set>
 
 #include "ble_sensor_source.h"
 #include "board_storage.h"
@@ -23,6 +25,20 @@ bool same_ssid(const String &saved, const std::string &restored) {
     left.trim();
     right.trim();
     return left.length() > 0 && left == right;
+}
+
+bool same_sensor(const OximetrySensorDevice &a, const OximetrySensorDevice &b) {
+    return strcmp(a.addr, b.addr) == 0 && strcmp(a.name, b.name) == 0 &&
+           a.addr_type == b.addr_type && a.autoconnect == b.autoconnect;
+}
+
+std::string sensor_value(const OximetrySensorDevice &device) {
+    ConfigBackupSensor sensor;
+    sensor.address = device.addr;
+    sensor.address_type = device.addr_type;
+    sensor.name = device.name;
+    sensor.autoconnect = device.autoconnect;
+    return config_backup_format_sensor(sensor);
 }
 
 void append_comment(LargeTextBuffer &out, const char *text) {
@@ -123,19 +139,60 @@ void ConfigRestore::add_text(const char *text, size_t length) {
 }
 
 ConfigRestoreResult ConfigRestore::finish() {
-    ConfigRestoreResult result = std::move(parsed_);
-    parsed_ = {};
+    prepare();
+    ConfigRestoreResult result = parsed_;
+    result.applied = 0;
+    if (result.error) return result;
 
-    apply_config(result);
-    apply_wifi(result);
-    apply_sensors(result);
+    if (config_.revision() != result.config_revision || !lists_unchanged()) {
+        result.error = "config_changed";
+        return result;
+    }
+
+    if (config_update_.valid()) {
+        const auto committed = config_.commit_prepared(std::move(config_update_));
+        result.config_persisted = committed.persisted;
+        result.config_revision = committed.revision;
+        result.error = committed.error;
+        if (!result.config_persisted || result.error) return result;
+    } else {
+        result.config_persisted = true;
+    }
+    result.applied = parsed_.applied;
+
+    if (wifi_changed_) {
+        result.wifi_saved = wifi_.replace_profiles(wifi_after_.data(), wifi_after_.size(), false);
+        if (result.wifi_saved) result.applied += wifi_after_.size();
+    }
+    if (sensors_changed_) {
+        result.sensors_saved = sensors_->replace_known_sensors(sensors_after_.data(), sensors_after_.size());
+        if (result.sensors_saved) result.applied += sensors_after_.size();
+    }
     return result;
 }
 
-void ConfigRestore::apply_config(ConfigRestoreResult &result) {
+const ConfigRestoreResult &ConfigRestore::prepare() {
+    if (prepared_) return parsed_;
+    prepared_ = true;
+
+    prepare_config(parsed_);
+    if (parsed_.error) return parsed_;
+
+    describe_config();
+    prepare_wifi(parsed_);
+    prepare_sensors(parsed_);
+    for (const auto &issue : parsed_.issues) {
+        BackupSettingChange row;
+        row.key = issue.key;
+        row.reason = issue.reason;
+        entries_.push_back(std::move(row));
+    }
+    return parsed_;
+}
+
+void ConfigRestore::prepare_config(ConfigRestoreResult &result) {
     result.config_revision = config_.revision();
     if (config_entries_.empty()) {
-        result.config_persisted = true;
         return;
     }
 
@@ -144,18 +201,18 @@ void ConfigRestore::apply_config(ConfigRestoreResult &result) {
         has_vpn = has_vpn || entry.field->group == AppConfigGroup::Vpn;
     }
 
-    // WireGuard is validated as a whole when the transaction commits. If its
+    // WireGuard is validated as a whole when the candidate is prepared. If its
     // restored fields are incomplete, keep the current VPN and apply the rest.
     for (int attempt = 0; attempt < 2; ++attempt) {
         const bool skip_vpn = attempt == 1;
         ConfigRestoreResult pass;
-        if (!apply_config_pass(skip_vpn, pass)) {
+        if (!prepare_config_pass(skip_vpn, pass)) {
             result.error = pass.error;
             result.config_revision = config_.revision();
             return;
         }
 
-        if (pass.config_persisted) {
+        if (config_update_.valid()) {
             result.applied += pass.applied;
             result.kept += pass.kept;
             result.rejected += pass.rejected;
@@ -163,7 +220,6 @@ void ConfigRestore::apply_config(ConfigRestoreResult &result) {
                 if (result.issues.size() >= MaxIssues) break;
                 result.issues.push_back(std::move(issue));
             }
-            result.config_persisted = true;
             result.config_revision = pass.config_revision;
             return;
         }
@@ -181,34 +237,42 @@ void ConfigRestore::apply_config(ConfigRestoreResult &result) {
     }
 }
 
-bool ConfigRestore::apply_config_pass(bool skip_vpn,
+bool ConfigRestore::prepare_config_pass(bool skip_vpn,
                                       ConfigRestoreResult &pass) {
     if (!config_.begin_transaction()) {
         pass.error = "transaction_busy";
         return false;
     }
 
-    for (const PendingConfig &entry : config_entries_) {
-        if (skip_vpn && entry.field->group == AppConfigGroup::Vpn) {
-            reject(pass, entry.key, "wireguard_rejected");
-            continue;
+    try {
+        for (PendingConfig &entry : config_entries_) {
+            entry.accepted = false;
+            entry.kept = false;
+            if (skip_vpn && entry.field->group == AppConfigGroup::Vpn) {
+                reject(pass, entry.key, "wireguard_rejected");
+                continue;
+            }
+            prepare_config_entry(entry, pass);
         }
-        apply_config_entry(entry, pass);
+        config_update_ = config_.prepare_transaction();
+    } catch (...) {
+        config_.cancel_transaction();
+        throw;
     }
 
-    const ConfigTransactionResult committed = config_.commit_transaction();
-    pass.config_persisted = committed.persisted && !committed.error;
-    pass.config_revision = committed.revision;
-    pass.error = committed.error;
+    pass.config_revision = config_update_.result().revision;
+    pass.error = config_update_.result().error;
     return true;
 }
 
-void ConfigRestore::apply_config_entry(const PendingConfig &entry,
+void ConfigRestore::prepare_config_entry(PendingConfig &entry,
                                        ConfigRestoreResult &pass) {
     const AppConfigFieldDescriptor &field = *entry.field;
     if (app_config_field_is_secret(field) &&
         config_backup_is_keep_marker(entry.value)) {
         pass.kept++;
+        entry.accepted = true;
+        entry.kept = true;
         return;
     }
 
@@ -223,6 +287,7 @@ void ConfigRestore::apply_config_entry(const PendingConfig &entry,
             return;
         }
         pass.applied++;
+        entry.accepted = true;
         return;
     }
 
@@ -233,13 +298,48 @@ void ConfigRestore::apply_config_entry(const PendingConfig &entry,
         return;
     }
     pass.applied++;
+    entry.accepted = true;
 }
 
-void ConfigRestore::apply_wifi(ConfigRestoreResult &result) {
+void ConfigRestore::describe_config() {
+    if (!config_update_.valid()) return;
+
+    std::set<const AppConfigFieldDescriptor *> described;
+    for (auto it = config_entries_.rbegin(); it != config_entries_.rend(); ++it) {
+        if (!it->accepted || !described.insert(it->field).second) continue;
+
+        const auto &field = *it->field;
+        String before, after;
+        app_config_field_get_raw_value(config_.data(), field, before);
+        app_config_field_get_raw_value(config_update_.data(), field, after);
+        BackupSettingChange row;
+        row.key = field.key;
+        row.label = field.label;
+        row.unchanged = before == after;
+        row.secret = app_config_field_is_secret(field);
+        row.kept = it->kept && row.unchanged;
+        if (row.secret) {
+            row.before = before.length() ? "set" : "";
+            row.value = after.length() ? "set" : "";
+        } else {
+            const bool before_empty = before.isEmpty();
+            const bool after_empty = after.isEmpty();
+            app_config_field_get_console_value(config_.data(), field, before);
+            app_config_field_get_console_value(config_update_.data(), field, after);
+            row.before = before_empty ? "" : before.c_str();
+            row.value = after_empty ? "" : after.c_str();
+        }
+        entries_.push_back(std::move(row));
+    }
+    std::reverse(entries_.begin(), entries_.end());
+}
+
+void ConfigRestore::prepare_wifi(ConfigRestoreResult &result) {
     if (!wifi_touched_) return;
 
-    WifiProfile profiles[AC_WIFI_PROFILE_MAX];
-    size_t count = 0;
+    for (size_t i = 0; i < wifi_.profile_count(); ++i) wifi_before_.push_back(wifi_.profile(i));
+
+    bool kept[AC_WIFI_PROFILE_MAX] = {};
     size_t missing_passwords = 0;
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) {
         const PendingWifi &entry = wifi_entries_[i];
@@ -275,24 +375,41 @@ void ConfigRestore::apply_wifi(ConfigRestoreResult &result) {
             result.kept++;
         }
 
-        profiles[count].ssid = ssid;
-        profiles[count].password = password;
-        count++;
+        kept[wifi_after_.size()] = config_backup_is_keep_marker(entry.password);
+        wifi_after_.push_back({ssid, password});
     }
 
     // A backup whose profiles all need passwords missing on this device
     // leaves the current profiles in place instead of removing them.
-    if (count == 0 && missing_passwords > 0) return;
+    if (wifi_after_.empty() && missing_passwords > 0) return;
 
-    result.wifi_saved = wifi_.replace_profiles(profiles, count, false);
-    if (result.wifi_saved) result.applied += count;
+    const WifiProfile empty;
+    for (size_t i = 0; i < std::max(wifi_before_.size(), wifi_after_.size()); ++i) {
+        const auto &before = i < wifi_before_.size() ? wifi_before_[i] : empty;
+        const auto &after = i < wifi_after_.size() ? wifi_after_[i] : empty;
+        for (bool password : {false, true}) {
+            BackupSettingChange row;
+            row.key = index_key(password ? "pass_" : "ssid_", i);
+            row.label = std::string("Wi-Fi ") + std::to_string(i + 1) +
+                        (password ? " password" : " SSID");
+            row.secret = password;
+            row.unchanged = password ? before.password == after.password : before.ssid == after.ssid;
+            row.kept = password && kept[i] && row.unchanged;
+            row.before = password ? (before.password.length() ? "set" : "") : before.ssid.c_str();
+            row.value = password ? (after.password.length() ? "set" : "") : after.ssid.c_str();
+            wifi_changed_ = wifi_changed_ || !row.unchanged;
+            entries_.push_back(std::move(row));
+        }
+    }
 }
 
-void ConfigRestore::apply_sensors(ConfigRestoreResult &result) {
+void ConfigRestore::prepare_sensors(ConfigRestoreResult &result) {
     if (!sensors_touched_) return;
 
-    OximetrySensorDevice devices[AC_OXIMETRY_SENSOR_MAX_KNOWN];
-    size_t count = 0;
+    if (sensors_) {
+        sensors_before_.resize(AC_OXIMETRY_SENSOR_MAX_KNOWN);
+        sensors_before_.resize(sensors_->known_sensors(sensors_before_.data(), sensors_before_.size()));
+    }
     for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
         const PendingSensor &entry = sensor_entries_[i];
         if (!entry.set) continue;
@@ -304,18 +421,50 @@ void ConfigRestore::apply_sensors(ConfigRestoreResult &result) {
             continue;
         }
 
-        OximetrySensorDevice &device = devices[count++];
+        if (std::any_of(sensors_after_.begin(), sensors_after_.end(), [&](const auto &device) {
+                return strcasecmp(entry.sensor.address.c_str(), device.addr) == 0;
+            })) continue;
+
+        OximetrySensorDevice device;
         strncpy(device.addr, entry.sensor.address.c_str(),
                 sizeof(device.addr) - 1);
         device.addr_type = entry.sensor.address_type;
         device.autoconnect = entry.sensor.autoconnect;
         strncpy(device.name, entry.sensor.name.c_str(),
                 sizeof(device.name) - 1);
+        sensors_after_.push_back(device);
     }
-    if (!sensors_ || count == 0) return;
+    if (!sensors_ || sensors_after_.empty()) return;
 
-    result.sensors_saved = sensors_->replace_known_sensors(devices, count);
-    if (result.sensors_saved) result.applied += count;
+    for (size_t i = 0; i < std::max(sensors_before_.size(), sensors_after_.size()); ++i) {
+        BackupSettingChange row;
+        row.key = index_key(AC_CONFIG_BACKUP_SENSOR_PREFIX, i);
+        row.label = "Oximeter " + std::to_string(i + 1);
+        row.before = i < sensors_before_.size() ? sensor_value(sensors_before_[i]) : "";
+        row.value = i < sensors_after_.size() ? sensor_value(sensors_after_[i]) : "";
+        row.unchanged = row.before == row.value;
+        sensors_changed_ = sensors_changed_ || !row.unchanged;
+        entries_.push_back(std::move(row));
+    }
+}
+
+bool ConfigRestore::lists_unchanged() const {
+    if (wifi_touched_) {
+        if (wifi_.profile_count() != wifi_before_.size()) return false;
+        for (size_t i = 0; i < wifi_before_.size(); ++i) {
+            if (wifi_.profile(i).ssid != wifi_before_[i].ssid ||
+                wifi_.profile(i).password != wifi_before_[i].password) return false;
+        }
+    }
+    if (sensors_touched_ && sensors_) {
+        OximetrySensorDevice current[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+        const size_t count = sensors_->known_sensors(current, AC_OXIMETRY_SENSOR_MAX_KNOWN);
+        if (count != sensors_before_.size()) return false;
+        for (size_t i = 0; i < count; ++i) {
+            if (!same_sensor(current[i], sensors_before_[i])) return false;
+        }
+    }
+    return true;
 }
 
 void ConfigRestore::reject(ConfigRestoreResult &result,
@@ -429,6 +578,16 @@ ConfigRestoreResult ConfigBackup::restore_text(const char *text,
     ConfigRestore restore(*config_, *wifi_, sensors_);
     restore.add_text(text, length);
     return restore.finish();
+}
+
+std::shared_ptr<ConfigRestore> ConfigBackup::prepare_restore(const char *text, size_t length) {
+    if (!ready()) return {};
+
+    auto plan = std::allocate_shared<ConfigRestore>(LargeAllocator<ConfigRestore>{},
+                                                   *config_, *wifi_, sensors_);
+    plan->add_text(text, length);
+    plan->prepare();
+    return plan;
 }
 
 }  // namespace aircannect

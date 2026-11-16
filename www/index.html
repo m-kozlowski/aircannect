@@ -863,18 +863,14 @@
             <summary data-i18n="backup.title"></summary>
             <div style="display: flex; flex-direction: column; gap: 6px; margin: 10px 0">
               <label class="check">
-                <input type="checkbox" id="configBackupSecrets"
-                  data-change-action="backup.options">
+                <input type="checkbox" id="configBackupSecrets">
                 <span data-i18n="config.backup.secrets"></span>
               </label>
               <label class="check">
-                <input type="checkbox" id="configBackupPairing"
-                  data-change-action="backup.options">
+                <input type="checkbox" id="configBackupPairing">
                 <span data-i18n="config.backup.pairing"></span>
               </label>
             </div>
-            <small id="configBackupWarning" style="color: var(--orange)" hidden
-              data-i18n="config.backup.plain_text"></small>
             <div data-backup-controls></div>
           </details>
         </section>

@@ -3,22 +3,17 @@
 #include "as11_settings.h"
 #include "large_allocator.h"
 #include "large_byte_buffer.h"
+#include "settings_backup_preview.h"
 
 namespace aircannect {
 
 class As11DeviceState;
 
-struct BackupSettingChange {
-    std::string key;
-    std::string before;
-    std::string value;
-    const char *reason = nullptr;
-};
-
 struct As11SettingsBackupPlan {
     As11PreparedSettingsWrite write;
-    std::vector<BackupSettingChange, LargeAllocator<BackupSettingChange>> entries;
+    BackupSettingChanges entries;
     std::string source_serial;
+    std::string source_name;
     std::string created;
     size_t unchanged = 0;
     int mode = -1;

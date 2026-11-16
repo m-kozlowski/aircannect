@@ -7,8 +7,12 @@
 #include <vector>
 
 #include "config_backup_format.h"
+#include "config_service.h"
 #include "large_allocator.h"
 #include "large_text_buffer.h"
+#include "oximetry_status.h"
+#include "settings_backup_preview.h"
+#include "wifi_manager.h"
 
 namespace aircannect {
 
@@ -39,8 +43,8 @@ struct ConfigRestoreResult {
 };
 
 // One restore of backup text. SD provisioning and the WebUI submit lines;
-// each owner applies its part only in finish(): one ConfigService
-// transaction, one Wi-Fi profile replacement and one saved-oximeter list.
+// prepare() resolves the accepted values without writing. finish() applies
+// that same candidate only while the previewed current settings still match.
 class ConfigRestore {
 public:
     static constexpr size_t MaxIssues = 32;
@@ -51,6 +55,8 @@ public:
 
     void add_line(const std::string &line, bool too_long = false);
     void add_text(const char *text, size_t length);
+    const ConfigRestoreResult &prepare();
+    const BackupSettingChanges &entries() const { return entries_; }
     ConfigRestoreResult finish();
 
 private:
@@ -58,6 +64,8 @@ private:
         std::string key;
         std::string value;
         const AppConfigFieldDescriptor *field = nullptr;
+        bool accepted = false;
+        bool kept = false;
     };
 
     struct PendingWifi {
@@ -73,14 +81,16 @@ private:
     };
 
     // config transaction
-    void apply_config(ConfigRestoreResult &result);
-    bool apply_config_pass(bool skip_vpn, ConfigRestoreResult &pass);
-    void apply_config_entry(const PendingConfig &entry,
+    void prepare_config(ConfigRestoreResult &result);
+    bool prepare_config_pass(bool skip_vpn, ConfigRestoreResult &pass);
+    void prepare_config_entry(PendingConfig &entry,
                             ConfigRestoreResult &pass);
+    void describe_config();
 
     // Wi-Fi profiles and saved oximeters
-    void apply_wifi(ConfigRestoreResult &result);
-    void apply_sensors(ConfigRestoreResult &result);
+    void prepare_wifi(ConfigRestoreResult &result);
+    void prepare_sensors(ConfigRestoreResult &result);
+    bool lists_unchanged() const;
 
     static void reject(ConfigRestoreResult &result,
                        const std::string &key,
@@ -92,14 +102,22 @@ private:
 
     ConfigRestoreResult parsed_;
     size_t line_number_ = 0;
+    bool prepared_ = false;
+    ConfigService::PreparedUpdate config_update_;
+    BackupSettingChanges entries_;
 
     std::vector<PendingConfig, LargeAllocator<PendingConfig>> config_entries_;
 
     PendingWifi wifi_entries_[AC_WIFI_PROFILE_MAX];
     bool wifi_touched_ = false;
+    std::vector<WifiProfile, LargeAllocator<WifiProfile>> wifi_before_, wifi_after_;
+    bool wifi_changed_ = false;
 
     PendingSensor sensor_entries_[AC_OXIMETRY_SENSOR_MAX_KNOWN];
     bool sensors_touched_ = false;
+    std::vector<OximetrySensorDevice, LargeAllocator<OximetrySensorDevice>>
+        sensors_before_, sensors_after_;
+    bool sensors_changed_ = false;
 };
 
 // Owns configuration backup text for every persisted setting owner.
@@ -114,6 +132,7 @@ public:
     bool export_text(const ConfigBackupOptions &options,
                      LargeTextBuffer &out) const;
     ConfigRestoreResult restore_text(const char *text, size_t length);
+    std::shared_ptr<ConfigRestore> prepare_restore(const char *text, size_t length);
 
 private:
     void export_config(const ConfigBackupOptions &options,
