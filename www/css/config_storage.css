@@ -376,3 +376,7 @@
       min-height: 32px;
       padding: 6px 10px;
     }
+.backup-panel { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.backup-panel summary { cursor: pointer; }
+.backup-panel [data-backup-preview] { border-top: 1px solid var(--border); margin-top: 12px; overflow-wrap: anywhere; }
+.backup-panel [data-backup-preview] > button { margin: 4px 8px 4px 0; }

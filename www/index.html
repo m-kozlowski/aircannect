@@ -685,6 +685,11 @@
             </div>
             <div class="msg" id="settingsMsg"></div>
           </div>
+
+          <details class="backup-panel" data-backup-kind="clinical">
+            <summary data-i18n="backup.title"></summary>
+            <div data-backup-controls></div>
+          </details>
         </section>
 
         <section class="pane" id="p-wifi">
@@ -853,6 +858,25 @@
             </div>
             <div class="msg" id="configMsg"></div>
           </div>
+
+          <details class="backup-panel" data-backup-kind="config">
+            <summary data-i18n="backup.title"></summary>
+            <div style="display: flex; flex-direction: column; gap: 6px; margin: 10px 0">
+              <label class="check">
+                <input type="checkbox" id="configBackupSecrets"
+                  data-change-action="backup.options">
+                <span data-i18n="config.backup.secrets"></span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="configBackupPairing"
+                  data-change-action="backup.options">
+                <span data-i18n="config.backup.pairing"></span>
+              </label>
+            </div>
+            <small id="configBackupWarning" style="color: var(--orange)" hidden
+              data-i18n="config.backup.plain_text"></small>
+            <div data-backup-controls></div>
+          </details>
         </section>
 
         <section class="pane" id="p-console">
@@ -939,6 +963,7 @@
   <script src="js/firmware.js" data-inline></script>
   <script src="js/console.js" data-inline></script>
   <script src="js/config_onboarding.js" data-inline></script>
+  <script src="js/backups.js" data-inline></script>
   <script src="js/boot.js" data-inline></script>
 </body>
 </html>

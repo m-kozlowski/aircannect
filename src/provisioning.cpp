@@ -2,7 +2,10 @@
 
 #include <string.h>
 
+#include <string>
+
 #include "board.h"
+#include "config_backup.h"
 #include "config_service.h"
 #include "debug_log.h"
 #include "storage_path_port.h"
@@ -15,94 +18,6 @@ namespace {
 static constexpr size_t PROVISION_FILE_MAX_BYTES = 64 * 1024;
 static constexpr size_t PROVISION_READ_CHUNK_BYTES = 512;
 static constexpr uint32_t PROVISION_STORAGE_TIMEOUT_MS = 10 * 1000;
-
-struct ProvisionState {
-    bool wifi_profile_touched = false;
-    WifiProfile wifi[AC_WIFI_PROFILE_MAX];
-    bool wifi_touched[AC_WIFI_PROFILE_MAX] = {};
-};
-
-struct ProvisionCounts {
-    size_t source_lines = 0;
-    size_t applied = 0;
-    size_t rejected = 0;
-};
-
-String parse_key(String key) {
-    key.trim();
-    return key;
-}
-
-void strip_line_ending(String &line) {
-    while (line.length() > 0 && line[line.length() - 1] == '\r') {
-        line.remove(line.length() - 1);
-    }
-}
-
-bool parse_wifi_key(const String &key, size_t &index, String &field) {
-    index = 0;
-    field = "";
-    if (key.startsWith("ssid_")) field = "ssid";
-    else if (key.startsWith("pass_")) field = "pass";
-    else return false;
-
-    String index_text = key.substring(5);
-    if (!index_text.length()) return false;
-    for (size_t i = 0; i < index_text.length(); ++i) {
-        if (!isDigit(index_text[i])) return false;
-    }
-    const int parsed = index_text.toInt();
-    if (parsed < 0 || parsed >= static_cast<int>(AC_WIFI_PROFILE_MAX)) {
-        return false;
-    }
-    index = static_cast<size_t>(parsed);
-    return true;
-}
-
-bool apply_wifi_key(ProvisionState &state,
-                    const String &key,
-                    const String &value,
-                    bool &known) {
-    size_t index = 0;
-    String field;
-    known = parse_wifi_key(key, index, field);
-    if (!known) return true;
-
-    if (index >= AC_WIFI_PROFILE_MAX) return false;
-    if (field == "ssid") {
-        state.wifi_profile_touched = true;
-        state.wifi_touched[index] = true;
-        state.wifi[index].ssid = value;
-        return true;
-    }
-    if (field == "pass") {
-        state.wifi[index].password = value;
-        return true;
-    }
-    return false;
-}
-
-bool apply_app_key(ConfigService &config_service,
-                   const String &key,
-                   const String &value,
-                   bool &known) {
-    const ConfigFieldUpdate update = config_service.set_transaction_value(
-        key.c_str(), value, false, true);
-    known = update.disposition != ConfigFieldDisposition::UnknownKey;
-    return update.accepted();
-}
-
-bool commit_wifi(WifiManager &wifi_manager, ProvisionState &state) {
-    if (!state.wifi_profile_touched) return true;
-
-    WifiProfile profiles[AC_WIFI_PROFILE_MAX];
-    size_t count = 0;
-    for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) {
-        if (!state.wifi_touched[i]) continue;
-        profiles[count++] = state.wifi[i];
-    }
-    return wifi_manager.replace_profiles(profiles, count, false);
-}
 
 bool wait_for_read(StorageReadPort &port,
                    OperationTicket ticket,
@@ -204,60 +119,11 @@ bool prepare_config_file(StorageReadPort &port,
     return true;
 }
 
-void apply_config_line(ConfigService &config_service,
-                       ProvisionState &state,
-                       ProvisionCounts &counts,
-                       String line,
-                       bool too_long) {
-    counts.source_lines++;
-    if (too_long) {
-        counts.rejected++;
-        Log::logf(CAT_CONFIG, LOG_WARN,
-                  "[PROVISION] line %u is too long\n",
-                  static_cast<unsigned>(counts.source_lines));
-        return;
-    }
-
-    strip_line_ending(line);
-    String line_for_control = line;
-    line_for_control.trim();
-    if (!line_for_control.length() || line_for_control[0] == '#' ||
-        line_for_control[0] == ';') {
-        return;
-    }
-
-    const int eq = line.indexOf('=');
-    if (eq <= 0) {
-        counts.rejected++;
-        Log::logf(CAT_CONFIG, LOG_WARN,
-                  "[PROVISION] invalid line %u\n",
-                  static_cast<unsigned>(counts.source_lines));
-        return;
-    }
-
-    String key = parse_key(line.substring(0, eq));
-    String value = line.substring(eq + 1);
-
-    bool known = false;
-    bool ok = apply_wifi_key(state, key, value, known);
-    if (!known) ok = apply_app_key(config_service, key, value, known);
-    if (known && ok) {
-        counts.applied++;
-        return;
-    }
-
-    counts.rejected++;
-    Log::logf(CAT_CONFIG, LOG_WARN,
-              "[PROVISION] rejected key=%s\n", key.c_str());
-}
-
 bool parse_config_file(StorageReadPort &port,
-                       ConfigService &config_service,
                        StoragePreparedRead prepared,
-                       ProvisionState &state,
-                       ProvisionCounts &counts) {
+                       ConfigRestore &restore) {
     uint8_t bytes[PROVISION_READ_CHUNK_BYTES];
-    String line;
+    std::string line;
     line.reserve(AC_PROVISION_LINE_MAX + 1);
     bool too_long = false;
     size_t offset = 0;
@@ -274,15 +140,14 @@ bool parse_config_file(StorageReadPort &port,
         for (size_t i = 0; i < read.bytes; ++i) {
             const char value = static_cast<char>(bytes[i]);
             if (value == '\n') {
-                apply_config_line(config_service, state, counts, line,
-                                  too_long);
-                line = "";
+                restore.add_line(line, too_long);
+                line.clear();
                 too_long = false;
                 continue;
             }
             if (too_long) continue;
-            if (line.length() >= AC_PROVISION_LINE_MAX) {
-                line = "";
+            if (line.size() >= AC_PROVISION_LINE_MAX) {
+                line.clear();
                 too_long = true;
                 continue;
             }
@@ -290,9 +155,7 @@ bool parse_config_file(StorageReadPort &port,
         }
         offset += read.bytes;
     }
-    if (line.length() > 0 || too_long) {
-        apply_config_line(config_service, state, counts, line, too_long);
-    }
+    if (!line.empty() || too_long) restore.add_line(line, too_long);
     return true;
 }
 
@@ -314,42 +177,41 @@ bool mark_config_consumed(StoragePathPort &port) {
 
 void consume_config_file(ConfigService &config_service,
                          WifiManager &wifi_manager,
+                         BleSensorSource *sensors,
                          StorageReadPort &read_port,
                          StoragePathPort &path_port,
                          size_t file_size) {
     StoragePreparedRead prepared;
     if (!prepare_config_file(read_port, file_size, prepared)) return;
 
-    ProvisionState state;
-    ProvisionCounts counts;
+    // Provisioning runs before WifiManager::begin(); a file without
+    // passwords keeps the ones already saved for the same networks.
+    wifi_manager.load_saved_profiles();
 
-    if (!config_service.begin_transaction()) {
-        read_port.release_prepared(prepared);
-        Log::logf(CAT_CONFIG, LOG_WARN,
-                  "[PROVISION] config transaction busy\n");
-        return;
-    }
-
-    const bool parsed = parse_config_file(
-        read_port, config_service, prepared, state, counts);
+    ConfigRestore restore(config_service, wifi_manager, sensors);
+    const bool parsed = parse_config_file(read_port, prepared, restore);
     read_port.release_prepared(prepared);
 
-    const ConfigTransactionResult transaction =
-        config_service.commit_transaction();
-    if (transaction.error) {
+    const ConfigRestoreResult result = restore.finish();
+    if (result.error) {
         Log::logf(CAT_CONFIG, LOG_WARN,
                   "[PROVISION] config transaction failed reason=%s\n",
-                  transaction.error);
+                  result.error);
+    }
+    for (const ConfigRestoreIssue &issue : result.issues) {
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "[PROVISION] rejected key=%s reason=%s\n",
+                  issue.key.c_str(), issue.reason);
     }
 
-    bool ok = parsed && transaction.persisted;
-    ok = commit_wifi(wifi_manager, state) && ok;
-
+    const bool ok = parsed && result.ok();
     const bool renamed = mark_config_consumed(path_port);
     Log::logf(CAT_CONFIG, ok ? LOG_INFO : LOG_WARN,
-              "[PROVISION] config.txt applied=%u rejected=%u status=%s\n",
-              static_cast<unsigned>(counts.applied),
-              static_cast<unsigned>(counts.rejected),
+              "[PROVISION] config.txt applied=%u kept=%u rejected=%u "
+              "status=%s\n",
+              static_cast<unsigned>(result.applied),
+              static_cast<unsigned>(result.kept),
+              static_cast<unsigned>(result.rejected),
               ok ? "ok" : "partial");
     if (!renamed) {
         Log::logf(CAT_CONFIG, LOG_WARN,
@@ -362,6 +224,7 @@ void consume_config_file(ConfigService &config_service,
 
 void apply_storage_provisioning(ConfigService &config_service,
                                 WifiManager &wifi_manager,
+                                BleSensorSource *sensors,
                                 StorageReadPort &read_port,
                                 StoragePathPort &path_port) {
     StoragePathCompletion metadata;
@@ -384,8 +247,8 @@ void apply_storage_provisioning(ConfigService &config_service,
 
     Log::logf(CAT_CONFIG, LOG_INFO, "[PROVISION] found %s\n",
               AC_PROVISION_CONFIG_PATH);
-    consume_config_file(config_service, wifi_manager, read_port, path_port,
-                        static_cast<size_t>(metadata.size));
+    consume_config_file(config_service, wifi_manager, sensors, read_port,
+                        path_port, static_cast<size_t>(metadata.size));
 }
 
 }  // namespace aircannect

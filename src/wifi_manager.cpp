@@ -229,6 +229,10 @@ void WifiManager::poll() {
     }
 }
 
+void WifiManager::load_saved_profiles() {
+    load_config();
+}
+
 void WifiManager::load_config() {
     Preferences prefs;
     if (!prefs.begin(WIFI_PREF_NS, true)) {

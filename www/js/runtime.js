@@ -977,7 +977,7 @@
           onChange: onLanguageChange,
           language: () => uiLanguage,
         }),
-        actions: Object.freeze({register: registerAction, start: startActions}),
+        actions: Object.freeze({register: registerAction, start: startActions, invoke: invokeAction}),
         events: Object.freeze({
           start: startEvents,
           stop: stopEvents,

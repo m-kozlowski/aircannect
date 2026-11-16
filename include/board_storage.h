@@ -31,7 +31,7 @@
 #define AC_PROVISION_OK_PATH "/config.ok"
 #endif
 
-static constexpr size_t AC_PROVISION_LINE_MAX = 256;
+static constexpr size_t AC_PROVISION_LINE_MAX = 1024;
 
 #ifndef AC_SDMMC_WIDTH
 #define AC_SDMMC_WIDTH 4

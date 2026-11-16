@@ -11,6 +11,7 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 - **Web UI** 
   - live dashboard with device status and identity
   - read/write all therapy settings
+  - keep and restore SD backups of therapy settings and AirCANnect configuration
   - live pressure / flow / leak / SpO2 charts
 - **EDF capture**
   - record active therapy sessions to ResMed-style EDF files on SD card

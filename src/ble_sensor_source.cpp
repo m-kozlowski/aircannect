@@ -658,6 +658,48 @@ bool BleSensorSource::set_autoconnect(const char *addr, bool enabled) {
     return changed;
 }
 
+bool BleSensorSource::replace_known_sensors(
+    const OximetrySensorDevice *devices,
+    size_t count) {
+    if (count > AC_OXIMETRY_SENSOR_MAX_KNOWN || (count && !devices)) {
+        return false;
+    }
+    load_known();
+
+    bool should_start = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        known_[i] = OximetrySensorDevice{};
+        auto_holdoffs_[i] = AutoconnectHoldoff{};
+    }
+
+    size_t write = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (!devices[i].addr[0]) continue;
+
+        size_t existing = 0;
+        if (find_addr(devices[i].addr, existing)) continue;
+
+        known_[write] = devices[i];
+        known_[write].addr[sizeof(known_[write].addr) - 1] = 0;
+        known_[write].name[sizeof(known_[write].name) - 1] = 0;
+        known_[write].rssi = 0;
+        write++;
+    }
+    refresh_autoconnect_available_locked();
+    should_start = enabled_ && auto_allowed_ && !suspend_requested_ &&
+                   autoconnect_available_ && !task_started_;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
+
+    const bool saved = save_known();
+    if (should_start) ensure_task();
+    return saved;
+}
+
 void BleSensorSource::ensure_task() {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);

@@ -53,7 +53,8 @@ OperationSubmission As11SettingsManager::submit_write(
     if (device_model() == ResmedDeviceModel::Unknown) {
         return OperationSubmission::rejected();
     }
-    if (write_ticket_.valid()) return OperationSubmission::busy();
+    // The readback still belongs to the previous write after Set completes.
+    if (write_active()) return OperationSubmission::busy();
 
     RpcRequestCommand command;
     command.method = "Set";

@@ -118,6 +118,9 @@ public:
                      bool open_network);
     bool replace_profiles(const WifiProfile *profiles, size_t count,
                           bool reconnect_now);
+    // Before begin(), reads the saved profiles so a boot-time restore can
+    // keep passwords that its file leaves out.
+    void load_saved_profiles();
     bool remove_profile(size_t index);
     void clear_sta_config();
     bool reconnect();

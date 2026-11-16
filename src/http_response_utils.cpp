@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <memory>
 #include <new>
+#include <stdio.h>
 #include <string.h>
 
 #include "large_allocator.h"
@@ -51,6 +52,19 @@ bool http_prepare_json_response(LargeTextBuffer &&json,
     } catch (const std::bad_alloc &) {
         return false;
     }
+}
+
+std::unique_ptr<AsyncWebServerResponse> http_json_error_response(
+    int status, const char *error) {
+    char body[160] = {};
+    snprintf(body,
+             sizeof(body),
+             "{\"ok\":false,\"error\":\"%s\"}",
+             error ? error : "error");
+    std::unique_ptr<AsyncWebServerResponse> response(
+        new (std::nothrow) AsyncBasicResponse(status, "application/json", body));
+    if (response) response->addHeader("Cache-Control", "no-store");
+    return response;
 }
 
 }  // namespace aircannect

@@ -22,6 +22,8 @@
 #include "can_driver.h"
 #include "can_rpc_link.h"
 #include "psu_can_identity.h"
+#include "config_backup.h"
+#include "backup_http_controller.h"
 #include "config_http_controller.h"
 #include "config_service.h"
 #include "console_command_router.h"
@@ -157,6 +159,9 @@ static WireguardService wireguard_service;
 static TcpBridge tcp_bridge(as11_service_manager);
 static TelnetConsole telnet_console;
 static ConfigService config_service;
+static ConfigBackup config_backup;
+static SettingsBackupService settings_backup_service;
+static BackupHttpController backup_http_controller;
 static CrashDiagnostics crash_diagnostics;
 static CrashHttpController crash_http_controller(crash_diagnostics);
 static WebUI web_ui;
@@ -207,6 +212,7 @@ static HttpRouteModule *web_route_modules[] = {
     &ota_http_controller,
     &settings_http_controller,
     &config_http_controller,
+    &backup_http_controller,
     &device_http_controller,
     &oximetry_http_controller,
     &wifi_http_controller,
@@ -1439,6 +1445,7 @@ void setup() {
         reset_status.state == FactoryReset::State::Idle) {
         apply_storage_provisioning(config_service,
                                    wifi_manager,
+                                   &oximetry_sensor_source,
                                    StorageService::read_port(),
                                    StorageService::path_port());
     }
@@ -1584,6 +1591,15 @@ void setup() {
     firmware_installer.begin();
     firmware_url_source.begin();
     update_checker.begin(config_service.data(), export_task);
+    config_backup.begin(config_service, wifi_manager,
+                        &oximetry_sensor_source);
+    settings_backup_service.begin(config_backup, as11_settings_manager,
+        as11_device_service, rpc_transport, StorageService::read_port(),
+        StorageService::atomic_write_port(), StorageService::path_port());
+    if (!backup_http_controller.begin(settings_backup_service)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR, "[INIT] backup HTTP controller failed to start\n");
+    }
+
     if (!config_http_controller.begin(config_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] config HTTP controller failed to start\n");
@@ -1698,6 +1714,7 @@ static void poll_usb_storage() {
     if (!requested && !suspended) return;
 
     edf_recorder_manager.set_storage_suspended(requested);
+    if (requested) settings_backup_service.set_storage_available(false);
     report_task.set_storage_suspended(requested);
     export_task.set_storage_suspended(requested);
     report_preferences_service.set_storage_suspended(requested);
@@ -1804,6 +1821,10 @@ void loop() {
     as11_device_service.set_warmup_supported(
         as11_settings_manager.warmup_supported(as11_device_service.state()), now_ms);
 
+    settings_backup_service.set_storage_available(
+        Storage::mounted() && !StorageUsb::suspended() && !esp_ota_quiesce_requested &&
+        !resmed_ota_transport_active);
+    backup_http_controller.poll();
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();

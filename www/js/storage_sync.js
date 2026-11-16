@@ -6,6 +6,7 @@
     let storageLimit = 64;
     let storageNextOffset = null;
     let storageListRequestSeq = 0;
+    let storageRefreshOnOpen = false;
     let storageOperationData = null;
     let storageUsbState = "local";
     let storageUsbRequestPending = false;
@@ -309,6 +310,16 @@
         download.onclick = () => storageDownloadEntry(entry);
         actions.appendChild(rename);
         actions.appendChild(download);
+        if (entry.type !== "dir" &&
+            /^\/aircannect\/backups\/(ac|airsense)\//.test(entry.path || "")) {
+          const restore = document.createElement("button");
+          restore.className = "btn";
+          restore.dataset.action = "backup.preview";
+          restore.dataset.storageAction = "restore";
+          restore.dataset.path = entry.path;
+          i18n.text(restore, i18n.message("backup.restore"));
+          actions.appendChild(restore);
+        }
         row.appendChild(select);
         row.appendChild(info);
         row.appendChild(actions);
@@ -1200,6 +1211,13 @@
     }
 
     AirCANnect.actions.register("storage.up", () => storageUp());
+    AirCANnect.actions.register("storage.open-path", (_event, element) => {
+      storagePath = element.dataset.path || "/";
+      storageOffset = 0;
+      storageClearSelection();
+      storageRefreshOnOpen = true;
+      AirCANnect.pages.show("storage");
+    });
     AirCANnect.actions.register("storage.usb", () =>
       storageSetUsb(storageUsbState === "local"));
     AirCANnect.actions.register("storage.upload-choose", () =>
@@ -1230,7 +1248,8 @@
       loadSleepHqSyncStatus();
     });
     AirCANnect.pages.onLoad("storage", (refresh) => {
-      loadStorageList(refresh);
+      loadStorageList(refresh || storageRefreshOnOpen);
+      storageRefreshOnOpen = false;
       loadSmbSyncStatus();
     });
     AirCANnect.events.subscribe("exports", (data) => {

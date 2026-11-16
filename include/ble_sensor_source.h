@@ -51,6 +51,9 @@ public:
     bool request_disconnect(bool hold_until_absent = true);
     bool forget(const char *addr_or_all);
     bool set_autoconnect(const char *addr, bool enabled);
+    // Replaces the saved sensor list, as when restoring a backup.
+    bool replace_known_sensors(const OximetrySensorDevice *devices,
+                               size_t count);
 
     bool take_event(BleSensorEvent &event);
     BleSensorStatus status() const;

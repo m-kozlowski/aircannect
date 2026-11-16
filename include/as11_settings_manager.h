@@ -41,6 +41,7 @@ public:
     void poll(RpcRequestPort &rpc, uint32_t now_ms, bool suspended = false);
 
     bool refresh_pending() const;
+    bool write_active() const { return write_ticket_.valid() || state_.pending_count() != 0; }
     uint32_t revision() const { return revision_; }
 
 private:

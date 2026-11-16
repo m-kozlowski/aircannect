@@ -20,6 +20,7 @@
 #include "async_prepared_response.h"
 #include "async_deferred_response.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "large_allocator.h"
 #include "night_catalog.h"
@@ -60,23 +61,17 @@ enum class PendingKind : uint8_t {
     Signal,
 };
 
-std::unique_ptr<AsyncWebServerResponse> json_error_response(
-    int status, const char *error) {
-    char body[160] = {};
-    snprintf(body,
-             sizeof(body),
-             "{\"ok\":false,\"error\":\"%s\"}",
-             error ? error : "error");
-    auto response = std::unique_ptr<AsyncWebServerResponse>(
-        new AsyncBasicResponse(status, "application/json", body));
-    response->addHeader("Cache-Control", "no-store");
-    return response;
-}
-
 void send_json_error(AsyncWebServerRequest *request,
                      int status,
                      const char *error) {
-    if (request) request->send(json_error_response(status, error).release());
+    if (!request) return;
+
+    auto response = http_json_error_response(status, error);
+    if (response) {
+        request->send(response.release());
+    } else {
+        request->send(status);
+    }
 }
 
 void send_preparing(AsyncWebServerRequest *request) {
@@ -706,7 +701,7 @@ bool ReportHttpController::release_media() {
         if (!entry.used()) continue;
         if (entry.stream) stream_port_->finish(*entry.stream, false);
         if (entry.sidecar_stream) stream_port_->finish(*entry.sidecar_stream, false);
-        entry.response->publish(json_error_response(503, "storage_usb"));
+        entry.response->publish(http_json_error_response(503, "storage_usb"));
         entry = {};
     }
     xSemaphoreGive(pending_->mutex);
@@ -896,21 +891,21 @@ void ReportHttpController::poll() {
             finish_stream(ready.stream);
             finish_stream(ready.sidecar_stream);
             ready.response->publish(
-                json_error_response(409, "report_version_changed"));
+                http_json_error_response(409, "report_version_changed"));
             return;
         }
         if (timed_out) {
             finish_stream(ready.stream);
             finish_stream(ready.sidecar_stream);
             ready.response->publish(
-                json_error_response(503, "report_stream_timeout"));
+                http_json_error_response(503, "report_stream_timeout"));
             return;
         }
         if (status.state == StorageStreamState::Error ||
             status.state == StorageStreamState::Cancelled) {
             finish_stream(ready.stream);
             finish_stream(ready.sidecar_stream);
-            ready.response->publish(json_error_response(
+            ready.response->publish(http_json_error_response(
                 503, status.error[0] ? status.error : "report_stream_failed"));
             return;
         }
@@ -930,7 +925,7 @@ void ReportHttpController::poll() {
             finish_stream(ready.stream);
             finish_stream(ready.sidecar_stream);
             ready.response->publish(
-                json_error_response(503, "report_stream_unavailable"));
+                http_json_error_response(503, "report_stream_unavailable"));
             return;
         }
 
@@ -938,7 +933,7 @@ void ReportHttpController::poll() {
         if (!ref) {
             finish_stream(ready.stream);
             finish_stream(ready.sidecar_stream);
-            ready.response->publish(json_error_response(503, "response_alloc"));
+            ready.response->publish(http_json_error_response(503, "response_alloc"));
             return;
         }
         ref->port = stream_port_;
@@ -979,7 +974,7 @@ void ReportHttpController::poll() {
             ref->finish(false);
             finish_stream(ready.stream);
             finish_stream(ready.sidecar_stream);
-            ready.response->publish(json_error_response(503, "response_alloc"));
+            ready.response->publish(http_json_error_response(503, "response_alloc"));
             return;
         }
 
