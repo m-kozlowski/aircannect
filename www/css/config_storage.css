@@ -376,18 +376,9 @@
       min-height: 32px;
       padding: 6px 10px;
     }
-    .backup-panel {
-      margin-top: 16px;
-      border-top: 1px solid var(--line);
-      padding-top: 12px;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-
-    .backup-panel [hidden] { display: none !important; }
-    .backup-panel summary { cursor: pointer; }
-    .backup-panel > summary { font-weight: 600; }
-    .backup-panel .btn { font-family: inherit; }
+    .backup-dialog[hidden], .backup-dialog [hidden] { display: none !important; }
+    .backup-dialog summary { cursor: pointer; }
+    .backup-dialog .btn { font-family: inherit; }
 
     .backup-dialog {
       width: min(660px, calc(100vw - 24px));
@@ -400,6 +391,8 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       font: inherit;
+      font-size: 13px;
+      line-height: 1.5;
       letter-spacing: 0;
       box-shadow: 0 16px 48px #0006;
     }
@@ -410,6 +403,8 @@
     .backup-dialog h2 { font-size: 18px; font-weight: 650; line-height: 1.35; }
     .backup-file { margin-top: 6px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .backup-body { padding: 0 20px 16px; overflow-y: auto; min-height: 0; }
+    .backup-options { width: min(440px, calc(100vw - 24px)); }
+    .backup-options .check { display: flex; margin-bottom: 10px; }
 
     .backup-source {
       display: grid;

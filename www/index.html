@@ -665,7 +665,7 @@
         </section>
 
         <section class="pane" id="p-clinical">
-          <div class="card">
+          <div class="card" data-backup-kind="clinical">
             <h3 data-i18n="ui.clinical.settings"></h3>
             <div
               id="settingsMeta"
@@ -673,7 +673,7 @@
               style="display: none; text-align: left; margin-bottom: 8px"
             ></div>
             <div id="settingsFields"></div>
-            <div class="btns">
+            <div class="btns" data-backup-toolbar>
               <button class="btn primary" id="settingsSave" data-action="settings.save" data-i18n="ui.save"></button>
               <button
                 class="btn"
@@ -684,12 +684,8 @@
               <button class="btn" data-action="settings.refresh" data-i18n="ui.refresh"></button>
             </div>
             <div class="msg" id="settingsMsg"></div>
-          </div>
-
-          <details class="backup-panel" data-backup-kind="clinical">
-            <summary data-i18n="backup.title"></summary>
             <div data-backup-controls></div>
-          </details>
+          </div>
         </section>
 
         <section class="pane" id="p-wifi">
@@ -850,29 +846,15 @@
         </section>
 
         <section class="pane" id="p-config">
-          <div class="card">
+          <div class="card" data-backup-kind="config">
             <h3 data-i18n="ui.device.config"></h3>
             <div id="configFields"></div>
-            <div class="btns">
+            <div class="btns" data-backup-toolbar>
               <button class="btn primary" data-action="config.save" data-i18n="ui.save"></button>
             </div>
             <div class="msg" id="configMsg"></div>
-          </div>
-
-          <details class="backup-panel" data-backup-kind="config">
-            <summary data-i18n="backup.title"></summary>
-            <div style="display: flex; flex-direction: column; gap: 6px; margin: 10px 0">
-              <label class="check">
-                <input type="checkbox" id="configBackupSecrets">
-                <span data-i18n="config.backup.secrets"></span>
-              </label>
-              <label class="check">
-                <input type="checkbox" id="configBackupPairing">
-                <span data-i18n="config.backup.pairing"></span>
-              </label>
-            </div>
             <div data-backup-controls></div>
-          </details>
+          </div>
         </section>
 
         <section class="pane" id="p-console">

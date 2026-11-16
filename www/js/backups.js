@@ -23,7 +23,8 @@
     if (state.busy) return;
     state.busy = true;
     state.node.setAttribute("aria-busy", "true");
-    state.node.querySelectorAll("button").forEach(node => node.disabled = true);
+    const buttons = state.node.querySelectorAll("button[data-action^='backup.']");
+    buttons.forEach(node => node.disabled = true);
     AirCANnect.ui.clearMessage(state.message);
     try {
       await work();
@@ -32,18 +33,19 @@
     } finally {
       state.busy = false;
       state.node.removeAttribute("aria-busy");
-      state.node.querySelectorAll("button").forEach(node => {
+      buttons.forEach(node => {
         node.disabled = node.dataset.action === "backup.restore" && !state.canRestore;
       });
-      const dialog = state.node.querySelector("[data-backup-preview]");
-      if (dialog.open) {
+      const dialog = state.node.querySelector(".backup-dialog[open]");
+      if (dialog) {
         dialog.querySelector("[data-action='backup.cancel']").focus({preventScroll: true});
       }
     }
   }
 
-  function showPreview(state, visible) {
-    const dialog = state.node.querySelector("[data-backup-preview]");
+  function showDialog(state, name, visible) {
+    const dialog = state.node.querySelector(`[data-backup-${name}]`);
+    if (!dialog || (!visible && !dialog.open)) return;
     const message = document.getElementById(state.message);
     if (visible) {
       dialog.querySelector("[data-backup-notice]").append(message);
@@ -160,9 +162,9 @@
     }
 
     state.node.querySelector("[data-action='backup.restore']").hidden = !state.canRestore;
-    i18n.text(state.node.querySelector("[data-action='backup.cancel']"),
+    i18n.text(state.node.querySelector("[data-backup-preview] [data-action='backup.cancel']"),
       i18n.message(state.canRestore ? "ui.cancel" : "ui.close"));
-    showPreview(state, true);
+    showDialog(state, "preview", true);
   }
 
   function selected(element) {
@@ -171,13 +173,21 @@
 
   AirCANnect.actions.register("backup.create", (_event, element) => {
     const state = selected(element);
+    if (state.busy) return;
+    if (state.kind === "config" && !element.closest("[data-backup-options]")) {
+      AirCANnect.ui.clearMessage(state.message);
+      showDialog(state, "options", true);
+      return;
+    }
+
     run(state, async () => {
-      showPreview(state, false);
+      showDialog(state, "preview", false);
       state.plan = 0;
-      const data = await command(state, "create", {
+      const data = await command(state, "create", state.kind === "config" ? {
         secrets: !!document.getElementById("configBackupSecrets")?.checked,
         internal: !!document.getElementById("configBackupPairing")?.checked,
-      });
+      } : {});
+      showDialog(state, "options", false);
       state.node.querySelector("[data-action='backup.history']").dataset.path =
         data.path.slice(0, data.path.lastIndexOf("/"));
       AirCANnect.ui.message(state.message, i18n.message("backup.saved"), true, false);
@@ -189,9 +199,8 @@
     const state = panels.get(path.startsWith("/aircannect/backups/ac/") ? "config" : "clinical");
     if (state.busy) return;
     AirCANnect.pages.show(state.kind);
-    state.node.open = true;
     run(state, async () => {
-      showPreview(state, false);
+      showDialog(state, "preview", false);
       state.plan = 0;
       state.canRestore = false;
       const data = await command(state, "preview", {path});
@@ -214,7 +223,7 @@
     if (!state.canRestore) return;
     run(state, async () => {
       const data = await command(state, "restore", {plan: state.plan});
-      showPreview(state, false);
+      showDialog(state, "preview", false);
       state.plan = 0;
       AirCANnect.ui.message(state.message, state.kind === "config" ?
         i18n.message("config.backup.restored", data) :
@@ -232,10 +241,17 @@
 
   AirCANnect.actions.register("backup.cancel", (_event, element) => {
     const state = selected(element);
+    if (state.busy) return;
+    if (element.closest("[data-backup-options]")) {
+      AirCANnect.ui.clearMessage(state.message);
+      showDialog(state, "options", false);
+      return;
+    }
+
     run(state, async () => {
       await command(state, "cancel", {plan: state.plan});
       state.plan = 0;
-      showPreview(state, false);
+      showDialog(state, "preview", false);
     });
   });
 
@@ -245,11 +261,29 @@
       const root = "/aircannect/backups/" + (kind === "config" ? "ac" : "airsense");
       const state = {node, kind, plan: 0, canRestore: false, message: kind + "BackupMsg"};
       panels.set(kind, state);
-      node.querySelector("[data-backup-controls]").innerHTML = `
-        <div class="btns" data-backup-toolbar>
+      node.querySelector("[data-backup-toolbar]").insertAdjacentHTML("beforeend", `
           <button class="btn" data-action="backup.create" data-i18n="backup.create"></button>
-          <button class="btn" data-action="backup.history" data-path="${root}" data-i18n="backup.history"></button>
-        </div>
+          <button class="btn" data-action="backup.history" data-path="${root}" data-i18n="backup.restore"></button>`);
+      node.querySelector("[data-backup-controls]").innerHTML = `
+        ${kind === "config" ? `
+        <dialog class="backup-dialog backup-options" data-backup-options hidden aria-labelledby="configBackupOptionsHeading">
+          <header><h2 id="configBackupOptionsHeading" data-i18n="backup.create"></h2></header>
+          <div class="backup-body">
+            <label class="check">
+              <input type="checkbox" id="configBackupSecrets">
+              <span data-i18n="config.backup.secrets"></span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="configBackupPairing">
+              <span data-i18n="config.backup.pairing"></span>
+            </label>
+            <div data-backup-notice></div>
+          </div>
+          <footer class="btns">
+            <button class="btn" autofocus data-action="backup.cancel" data-i18n="ui.cancel"></button>
+            <button class="btn primary" data-action="backup.create" data-i18n="backup.create"></button>
+          </footer>
+        </dialog>` : ""}
         <dialog class="backup-dialog" data-backup-preview hidden aria-labelledby="${kind}BackupHeading">
           <header>
             <h2 id="${kind}BackupHeading" data-backup-heading></h2>
@@ -269,12 +303,12 @@
           </footer>
         </dialog>
         <div class="msg" id="${state.message}"></div><div data-backup-issues></div>`;
-      node.querySelector("[data-backup-preview]").addEventListener("cancel", event => {
-        event.preventDefault();
-        if (!state.busy) {
+      node.querySelectorAll(".backup-dialog").forEach(dialog => {
+        dialog.addEventListener("cancel", event => {
+          event.preventDefault();
           AirCANnect.actions.invoke("backup.cancel", event,
-            node.querySelector("[data-action='backup.cancel']"));
-        }
+            dialog.querySelector("[data-action='backup.cancel']"));
+        });
       });
       i18n.translate(node);
     });
