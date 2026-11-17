@@ -8,6 +8,7 @@
 
 #include "as11_service_manager.h"
 #include "board.h"
+#include "can_rpc_link.h"
 #include "fixed_queue.h"
 #include "large_byte_buffer.h"
 #include "line_protocol_server.h"
@@ -19,11 +20,13 @@ enum class TcpBridgeClientProtocol : uint8_t {
     Unknown,
     Rpc,
     Service,
+    Modem,
 };
 
 class TcpBridge : private LineProtocolServerBase {
 public:
-    explicit TcpBridge(As11ServiceManager &service) : service_(service) {}
+    TcpBridge(As11ServiceManager &service, CanRpcLink &can)
+        : service_(service), can_(can) {}
 
     // Lifecycle
     bool begin(uint16_t port = AC_TCP_BRIDGE_PORT);
@@ -43,7 +46,7 @@ private:
     void accept_clients();
     void poll_service_completion();
     void pump_outputs();
-    LineOutputPumpResult pump_rpc_output(size_t idx);
+    LineOutputPumpResult pump_payload_output(size_t idx, bool append_lf);
     LineOutputPumpResult pump_service_output(size_t idx);
     void poll_inputs(RpcPassthroughPort &rpc,
                      bool service_entry_allowed);
@@ -55,7 +58,16 @@ private:
     void reset_service_request();
     void disconnect_slot(size_t idx);
 
+    // Modem lines and channel ownership
+    bool select_protocol(size_t idx, uint8_t value, RpcPassthroughPort &rpc);
+    bool begin_modem_client(size_t idx);
+    bool accept_modem_byte(size_t idx, uint8_t value);
+    bool send_modem_line();
+    void release_modem_channel();
+    static void receive_modem(void *context, const DatagramFeedResult &result);
+
     As11ServiceManager &service_;
+    CanRpcLink &can_;
     WiFiClient clients_[AC_MAX_TCP_CLIENTS];
     TcpBridgeClientProtocol protocols_[AC_MAX_TCP_CLIENTS] = {};
     String lines_[AC_MAX_TCP_CLIENTS];
@@ -74,6 +86,12 @@ private:
     bool service_close_after_output_ = false;
     uint32_t service_last_activity_ms_ = 0;
     size_t service_owner_ = AC_MAX_TCP_CLIENTS;
+
+    std::unique_ptr<LargeByteBuffer> modem_line_;
+    size_t modem_line_size_ = 0;
+    size_t modem_owner_ = AC_MAX_TCP_CLIENTS;
+    bool modem_line_ready_ = false;
+    bool modem_needs_off_ = false;
 
 };
 

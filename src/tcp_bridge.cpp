@@ -7,6 +7,15 @@
 #include "debug_log.h"
 
 namespace aircannect {
+namespace {
+
+constexpr char MODEM_ON[] = "AT-PASSTHROUGH-ON\r\n";
+constexpr char MODEM_OFF[] = "AT-PASSTHROUGH-OFF\r\n";
+// A complete datagram must fit the existing atomic CAN enqueue operation.
+constexpr size_t MODEM_LINE_MAX = std::min<size_t>(
+    AC_TCP_LINE_MAX, 3 + 7 * (AC_CAN_TX_QUEUE_DEPTH - 1));
+
+}  // namespace
 
 bool TcpBridge::begin(uint16_t port) {
     return begin_line_server(port, "BRIDGE");
@@ -26,6 +35,12 @@ void TcpBridge::stop() {
 
 void TcpBridge::poll(RpcPassthroughPort &rpc,
                      bool service_entry_allowed) {
+    if (modem_owner_ < AC_MAX_TCP_CLIENTS &&
+        (!can_.modem_available() || service_.exclusive_requested())) {
+        disconnect_slot(modem_owner_);
+    }
+
+    release_modem_channel();
     if (!started()) return;
 
     accept_clients();
@@ -113,7 +128,9 @@ void TcpBridge::pump_outputs() {
         if (protocols_[i] == TcpBridgeClientProtocol::Service) {
             result = pump_service_output(i);
         } else if (protocols_[i] == TcpBridgeClientProtocol::Rpc) {
-            result = pump_rpc_output(i);
+            result = pump_payload_output(i, true);
+        } else if (protocols_[i] == TcpBridgeClientProtocol::Modem) {
+            result = pump_payload_output(i, false);
         }
 
         if (result.fatal_error) {
@@ -123,7 +140,7 @@ void TcpBridge::pump_outputs() {
     }
 }
 
-LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
+LineOutputPumpResult TcpBridge::pump_payload_output(size_t idx, bool append_lf) {
     LineOutputPumpResult result;
     if (idx >= AC_MAX_TCP_CLIENTS) return result;
     WiFiClient &client = clients_[idx];
@@ -139,7 +156,7 @@ LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
 
     const RpcPayloadView payload = rpc_payload_view(output_current_[idx]);
     const size_t payload_len = payload.size();
-    const size_t total_len = payload_len + 1;
+    const size_t total_len = payload_len + (append_lf ? 1 : 0);
     if (output_pos_[idx] >= total_len) {
         output_current_[idx].reset();
         output_pos_[idx] = 0;
@@ -242,26 +259,148 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc,
             continue;
         }
 
+        if (protocols_[i] == TcpBridgeClientProtocol::Modem &&
+            modem_line_ready_ && !send_modem_line()) {
+            continue;
+        }
+
         size_t budget = AC_TCP_READ_BYTES_PER_POLL;
         while (budget > 0 && clients_[i].available()) {
             budget--;
             const uint8_t value = static_cast<uint8_t>(clients_[i].read());
-            const uint32_t now_ms = millis();
-
             if (protocols_[i] == TcpBridgeClientProtocol::Unknown) {
-                if (value == AS11_SERVICE_PACKET_MAGIC) {
-                    if (!begin_service_client(i, now_ms)) break;
+                if (!lines_[i].length() && value == AS11_SERVICE_PACKET_MAGIC) {
+                    if (!begin_service_client(i, millis())) break;
                     service_header_[0] = value;
                     service_header_received_ = 1;
                     (void)pump_service_input(i, service_entry_allowed);
                     break;
-                } else {
-                    protocols_[i] = TcpBridgeClientProtocol::Rpc;
                 }
-            }
 
-            if (!accept_rpc_byte(i, value, rpc)) break;
+                if (!select_protocol(i, value, rpc)) break;
+            } else if (protocols_[i] == TcpBridgeClientProtocol::Modem) {
+                if (!accept_modem_byte(i, value)) break;
+            } else {
+                if (!accept_rpc_byte(i, value, rpc)) break;
+            }
         }
+    }
+}
+
+bool TcpBridge::select_protocol(size_t idx, uint8_t value,
+                                RpcPassthroughPort &rpc) {
+    const size_t matched = lines_[idx].length();
+    if (value == static_cast<uint8_t>(MODEM_ON[matched])) {
+        if (!lines_[idx].concat(static_cast<char>(value))) {
+            disconnect_slot(idx);
+            return false;
+        }
+        if (matched + 1 < sizeof(MODEM_ON) - 1) return true;
+
+        release_line_string(lines_[idx]);
+        return begin_modem_client(idx);
+    }
+
+    // A nonmatching prefix remains ordinary RPC input, including its CRs.
+    String prefix = std::move(lines_[idx]);
+    protocols_[idx] = TcpBridgeClientProtocol::Rpc;
+    for (size_t i = 0; i < prefix.length(); ++i) {
+        if (!accept_rpc_byte(idx, prefix.c_str()[i], rpc)) return false;
+    }
+    return accept_rpc_byte(idx, value, rpc);
+}
+
+bool TcpBridge::begin_modem_client(size_t idx) {
+    if (modem_owner_ < AC_MAX_TCP_CLIENTS || modem_needs_off_ ||
+        !can_.modem_available() || service_.exclusive_requested()) {
+        disconnect_slot(idx);
+        return false;
+    }
+
+    modem_line_ = LargeByteBuffer::allocate(MODEM_LINE_MAX);
+    if (!modem_line_ || !can_.set_modem_observer(receive_modem, this)) {
+        modem_line_.reset();
+        disconnect_slot(idx);
+        return false;
+    }
+
+    modem_owner_ = idx;
+    protocols_[idx] = TcpBridgeClientProtocol::Modem;
+    memcpy(modem_line_->data(), MODEM_ON, sizeof(MODEM_ON) - 1);
+    modem_line_size_ = sizeof(MODEM_ON) - 1;
+    modem_line_ready_ = true;
+    return send_modem_line();
+}
+
+bool TcpBridge::accept_modem_byte(size_t idx, uint8_t value) {
+    if (modem_line_size_ == modem_line_->size()) {
+        Log::logf(CAT_TCP, LOG_WARN, "[CLIENT %u MODEM] line too long\n",
+                  static_cast<unsigned>(idx));
+        disconnect_slot(idx);
+        return false;
+    }
+
+    uint8_t *data = modem_line_->data();
+    data[modem_line_size_++] = value;
+    modem_line_ready_ = modem_line_size_ >= 2 && value == '\n' &&
+                        data[modem_line_size_ - 2] == '\r';
+    return !modem_line_ready_ || send_modem_line();
+}
+
+bool TcpBridge::send_modem_line() {
+    const char *data = reinterpret_cast<const char *>(modem_line_->data());
+    const RpcLinkSendResult result = can_.send_modem(
+        RpcPayloadView(data, modem_line_size_));
+
+    if (result == RpcLinkSendResult::Busy) return false;
+
+    const bool on = modem_line_size_ == sizeof(MODEM_ON) - 1 &&
+                    memcmp(data, MODEM_ON, modem_line_size_) == 0;
+    const bool off = modem_line_size_ == sizeof(MODEM_OFF) - 1 &&
+                     memcmp(data, MODEM_OFF, modem_line_size_) == 0;
+    if (on) modem_needs_off_ = true;
+
+    if (result != RpcLinkSendResult::Accepted) {
+        Log::logf(CAT_TCP, LOG_WARN, "[MODEM] CAN send failed; closing TCP\n");
+        disconnect_slot(modem_owner_);
+        return false;
+    }
+
+    if (off) modem_needs_off_ = false;
+    modem_line_size_ = 0;
+    modem_line_ready_ = false;
+    return true;
+}
+
+void TcpBridge::release_modem_channel() {
+    if (modem_owner_ < AC_MAX_TCP_CLIENTS || !modem_needs_off_) return;
+
+    // Keep OFF pending across CAN backpressure, even when the server is stopped.
+    if (can_.send_modem(RpcPayloadView(MODEM_OFF, sizeof(MODEM_OFF) - 1)) ==
+        RpcLinkSendResult::Accepted) {
+        modem_needs_off_ = false;
+    }
+}
+
+void TcpBridge::receive_modem(void *context, const DatagramFeedResult &result) {
+    auto &self = *static_cast<TcpBridge *>(context);
+    const size_t owner = self.modem_owner_;
+    if (owner >= AC_MAX_TCP_CLIENTS) return;
+    if (result.status == DatagramStatus::Complete && result.payload_len == 0) {
+        return;
+    }
+
+    RpcPayloadRef payload;
+    if (result.status == DatagramStatus::Complete) {
+        payload = copy_rpc_payload(result.payload_data, result.payload_len);
+    }
+
+    if (!payload || !self.output_queues_[owner].push(std::move(payload))) {
+        Log::logf(CAT_TCP, LOG_WARN,
+                  "[MODEM] response lost; closing TCP error=%s\n",
+                  result.status == DatagramStatus::Error
+                      ? result.error.c_str() : "output_queue_full_or_no_memory");
+        self.disconnect_slot(owner);
     }
 }
 
@@ -470,6 +609,15 @@ void TcpBridge::reset_service_request() {
 
 void TcpBridge::disconnect_slot(size_t idx) {
     if (idx >= AC_MAX_TCP_CLIENTS) return;
+
+    if (modem_owner_ == idx) {
+        (void)can_.set_modem_observer(nullptr, nullptr);
+        modem_owner_ = AC_MAX_TCP_CLIENTS;
+        modem_line_.reset();
+        modem_line_size_ = 0;
+        modem_line_ready_ = false;
+        release_modem_channel();
+    }
 
     if (service_owner_ == idx) {
         service_.release(As11ServiceOwner::TcpBridge);

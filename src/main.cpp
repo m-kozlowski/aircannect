@@ -156,7 +156,7 @@ static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
 static WireguardService wireguard_service;
-static TcpBridge tcp_bridge(as11_service_manager);
+static TcpBridge tcp_bridge(as11_service_manager, can_rpc_link);
 static TelnetConsole telnet_console;
 static ConfigService config_service;
 static ConfigBackup config_backup;

@@ -1,6 +1,7 @@
 #include "can_rpc_link.h"
 
 #include <stdio.h>
+#include <new>
 #include <utility>
 
 #include "board.h"
@@ -12,6 +13,8 @@ namespace {
 
 constexpr uint32_t AIRMINI_NCP_TX_ID = 0x381;
 constexpr uint32_t AIRMINI_NCP_RX_ID = 0x380;
+constexpr uint32_t MODEM_TX_ID = 0x7EA;
+constexpr uint32_t MODEM_RX_ID = 0x7EB;
 }  // namespace
 
 bool CanRpcLink::begin() {
@@ -34,6 +37,7 @@ bool CanRpcLink::set_physical_enabled(bool enabled) {
     rpc_rx_.reset();
     log_rx_.reset();
     ncp_rx_.reset();
+    if (modem_rx_) modem_rx_->reset();
     link_events_.clear();
     side_events_.clear();
 
@@ -62,6 +66,13 @@ void CanRpcLink::poll_physical(uint32_t now_ms) {
         const DatagramFeedResult log_timeout = log_rx_.poll(now_ms);
         if (log_timeout.status == DatagramStatus::Error) {
             push_side_error(log_timeout.error.c_str());
+        }
+
+        if (modem_rx_ && modem_available()) {
+            const DatagramFeedResult timeout = modem_rx_->poll(now_ms);
+            if (timeout.status == DatagramStatus::Error) {
+                modem_observer_(modem_context_, timeout);
+            }
         }
     }
 
@@ -164,6 +175,7 @@ void CanRpcLink::set_application_enabled(bool enabled) {
     application_enabled_ = enabled;
     ncp_rx_.reset();
     rpc_rx_.reset();
+    if (modem_rx_) modem_rx_->reset();
     link_events_.clear();
 }
 
@@ -178,12 +190,37 @@ void CanRpcLink::set_service_frame_observer(
     service_frame_context_ = observer ? context : nullptr;
 }
 
+bool CanRpcLink::modem_available() const {
+    return application_enabled_ && physical_enabled() &&
+           rx_mode_requested_ == CanRxMode::All &&
+           can_.rx_mode() == CanRxMode::All;
+}
+
+RpcLinkSendResult CanRpcLink::send_modem(RpcPayloadView payload) {
+    return send_datagram(payload, MODEM_TX_ID);
+}
+
+bool CanRpcLink::set_modem_observer(CanModemObserver observer, void *context) {
+    modem_rx_.reset();
+    modem_observer_ = nullptr;
+    modem_context_ = nullptr;
+    if (!observer) return true;
+
+    modem_rx_.reset(new (std::nothrow) DatagramRx());
+    if (!modem_rx_) return false;
+
+    modem_observer_ = observer;
+    modem_context_ = context;
+    return true;
+}
+
 bool CanRpcLink::recover_can(const char *reason) {
     if (!physical_enabled()) return false;
 
     rpc_rx_.reset();
     log_rx_.reset();
     ncp_rx_.reset();
+    if (modem_rx_) modem_rx_->reset();
     link_events_.clear();
 
     CanSideEvent event;
@@ -199,6 +236,7 @@ void CanRpcLink::request_rx_mode(CanRxMode mode) {
 
     rx_mode_requested_ = mode;
     log_rx_.reset();
+    if (modem_rx_) modem_rx_->reset();
     if (mode == CanRxMode::AckOnly) {
         reset();
         side_events_.clear();
@@ -230,6 +268,18 @@ bool CanRpcLink::enqueue_datagram_frame(void *context,
 
 void CanRpcLink::handle_frame(const RawCanFrame &frame, uint32_t now_ms) {
     if (frame.extended || frame.remote) return;
+
+    if (frame.id == MODEM_RX_ID) {
+        if (modem_rx_ && modem_available()) {
+            const DatagramFeedResult result = modem_rx_->feed(
+                frame.data, frame.len, now_ms);
+
+            if (result.status != DatagramStatus::InProgress) {
+                modem_observer_(modem_context_, result);
+            }
+        }
+        return;
+    }
 
     if (frame.id == AC_CAN_RX_ID) {
         if (application_enabled_) {

@@ -14,6 +14,10 @@ using As11ServiceFrameObserver = void (*)(void *context,
                                           const RawCanFrame &frame,
                                           uint32_t now_ms);
 
+// The result's payload is borrowed until the observer returns.
+using CanModemObserver = void (*)(void *context,
+                                  const DatagramFeedResult &result);
+
 enum class CanSideEventKind : uint8_t {
     DebugPayload,
     DebugFramingError,
@@ -55,6 +59,12 @@ public:
     bool take_side_event(CanSideEvent &event);
     void set_service_frame_observer(As11ServiceFrameObserver observer,
                                     void *context);
+
+    bool modem_available() const;
+    RpcLinkSendResult send_modem(RpcPayloadView payload);
+    bool set_modem_observer(CanModemObserver observer, void *context);
+
+    // CAN maintenance
     bool can_available() const override { return physical_enabled(); }
     bool recover_can(const char *reason) override;
     void request_rx_mode(CanRxMode mode) override;
@@ -88,6 +98,11 @@ private:
 
     As11ServiceFrameObserver service_frame_observer_ = nullptr;
     void *service_frame_context_ = nullptr;
+
+    std::unique_ptr<DatagramRx> modem_rx_;
+    CanModemObserver modem_observer_ = nullptr;
+    void *modem_context_ = nullptr;
+
     bool physical_enabled_ = false;
     bool application_enabled_ = true;
     CanRxMode rx_mode_requested_ = CanRxMode::All;
