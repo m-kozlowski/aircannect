@@ -22,14 +22,13 @@ public:
                           EventBroker &events,
                           StreamBroker &streams);
 
-    bool begin();
     void update(bool requested,
                 bool controlled_disconnect_required,
                 bool ble_selected,
                 uint32_t now_ms,
                 RpcQuiesceMode mode = RpcQuiesceMode::RemoteStop);
 
-    // Intentional connection hold, shared by local commands and AS11.
+    // Intentional connection hold requested by local commands.
     void request_connection_hold() { connection_held_ = true; }
     void release_connection_hold() { connection_held_ = false; }
     bool connection_held() const { return connection_held_; }
@@ -44,10 +43,6 @@ public:
     }
 
 private:
-    static void event_observer(void *context, const As11EventFrame &frame,
-                               uint32_t now_ms);
-    void configure_ble_control(bool selected);
-
     void begin(uint32_t now_ms);
     void end(uint32_t now_ms);
     void poll_quiesce(uint32_t now_ms);
@@ -61,10 +56,7 @@ private:
     EventBroker &events_;
     StreamBroker &streams_;
 
-    bool event_observer_registered_ = false;
-    bool ble_selected_ = false;
     bool connection_held_ = false;
-    EventConsumerHandle ble_events_ = EVENT_CONSUMER_INVALID;
 
     bool requested_ = false;
     RpcQuiesceMode mode_ = RpcQuiesceMode::RemoteStop;

@@ -1455,11 +1455,6 @@ void setup() {
     // Device/session/report managers
     session_manager.begin();
 
-    if (!rpc_quiesce_coordinator.begin()) {
-        Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[INIT] AS11 disconnect event observer unavailable\n");
-    }
-
     stream_broker.set_frame_observer(note_session_stream_frame,
                                      &session_manager);
     (void)event_broker.add_frame_observer(note_as11_device_event,

@@ -15,57 +15,12 @@ RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcQuiescePort &transport,
                                              StreamBroker &streams)
     : transport_(transport), can_(can), events_(events), streams_(streams) {}
 
-bool RpcQuiesceCoordinator::begin() {
-    if (!event_observer_registered_) {
-        event_observer_registered_ = events_.add_frame_observer(event_observer, this);
-    }
-    return event_observer_registered_;
-}
-
-void RpcQuiesceCoordinator::configure_ble_control(bool selected) {
-    ble_selected_ = selected;
-
-    if (!selected) {
-        events_.release(ble_events_);
-        ble_events_ = EVENT_CONSUMER_INVALID;
-        release_connection_hold();
-    } else if (event_observer_registered_ &&
-               ble_events_ == EVENT_CONSUMER_INVALID) {
-        ble_events_ = events_.acquire("_SRM").handle;
-    }
-}
-
-void RpcQuiesceCoordinator::event_observer(
-    void *context, const As11EventFrame &frame, uint32_t) {
-    auto &self = *static_cast<RpcQuiesceCoordinator *>(context);
-    const EventBrokerStatus events = self.events_.status();
-
-    if (!self.ble_selected_ || self.connection_held_ ||
-        !events.subscription_active ||
-        frame.subscription_id != events.subscription_id || frame.data_id != "_SRM") {
-        return;
-    }
-
-    for (size_t i = 0; i < frame.event_count; ++i) {
-        int32_t value = 0;
-        if (!as11_event_record_value_change(frame.events[i], value) || value != 1) {
-            continue;
-        }
-
-        self.request_connection_hold();
-#ifdef ARDUINO
-        Log::logf(CAT_BLE, LOG_INFO, "AS11 requested disconnect (_SRM=1)\n");
-#endif
-        return;
-    }
-}
-
 void RpcQuiesceCoordinator::update(bool requested,
                                    bool controlled_disconnect_required,
                                    bool ble_selected,
                                    uint32_t now_ms,
                                    RpcQuiesceMode mode) {
-    configure_ble_control(ble_selected);
+    if (!ble_selected) release_connection_hold();
     if (ble_selected) mode = RpcQuiesceMode::RemoteStop;
     requested = requested || connection_held_;
     controlled_disconnect_required =
