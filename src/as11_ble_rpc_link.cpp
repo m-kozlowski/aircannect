@@ -354,6 +354,12 @@ bool As11BleRpcLink::request_reconnect() {
 #endif
 }
 
+void As11BleRpcLink::set_pairing_admission(PairingAdmission admission,
+                                           void *context) {
+    pairing_admission_ = admission;
+    pairing_admission_context_ = context;
+}
+
 bool As11BleRpcLink::request_pairing_scan() {
     PairingCommand command;
     command.kind = PairingCommandKind::Scan;
@@ -364,13 +370,15 @@ bool As11BleRpcLink::request_pairing_device(const char *address) {
     PairingCommand command;
     command.kind = PairingCommandKind::SelectDevice;
     if (!copy_text(command.value, sizeof(command.value), address)) {
-        return false;
+        return reject_pairing_command("invalid_address");
     }
     return enqueue_pairing_command(command);
 }
 
 bool As11BleRpcLink::submit_pairing_passkey(const char *passkey) {
-    if (!as11_ble_pairing_passkey_valid(passkey)) return false;
+    if (!as11_ble_pairing_passkey_valid(passkey)) {
+        return reject_pairing_command("invalid_passkey");
+    }
 
     PairingCommand command;
     command.kind = PairingCommandKind::SubmitPasskey;
@@ -412,6 +420,14 @@ void As11BleRpcLink::task_loop() {
         const uint32_t now_ms = millis();
 
         if (controlled_disconnect_requested()) {
+            if (const char *error = pairing_blocker_.load()) {
+                PairingCommand command;
+                if (pairing_commands_.pop(command)) {
+                    memset(&command, 0, sizeof(command));
+                    reject_pairing_command(error);
+                }
+            }
+
             if (!controlled_disconnect_started) {
                 controlled_disconnect_started = true;
                 set_authenticated(false);
@@ -436,6 +452,7 @@ void As11BleRpcLink::task_loop() {
 
             if (!controlled_disconnect_complete()) {
                 disconnect_and_clear();
+                if (pairing_active()) fail_pairing("connection_paused");
                 ready_seen = false;
                 set_status(As11BleLinkState::Quiesced);
                 set_controlled_disconnect_complete(true);
@@ -460,9 +477,21 @@ void As11BleRpcLink::task_loop() {
 
         PairingCommand pairing_command;
         if (pairing_commands_.pop(pairing_command)) {
-            (void)handle_pairing_command(config, client_callbacks,
-                                         pairing_command);
+            if (const char *error = pairing_blocker_.load()) {
+                reject_pairing_command(error);
+            } else {
+                (void)handle_pairing_command(config, client_callbacks,
+                                             pairing_command);
+            }
             memset(&pairing_command, 0, sizeof(pairing_command));
+        }
+
+        if (const char *error = pairing_blocker_.load()) {
+            if (pairing_active()) {
+                disconnect_and_clear();
+                clear_pairing_context();
+                fail_pairing(error);
+            }
         }
 
         const As11BlePairingStatus pairing = pairing_status();
@@ -619,8 +648,33 @@ void As11BleRpcLink::release_client() {
 }
 
 bool As11BleRpcLink::enqueue_pairing_command(PairingCommand command) {
-    if (!begin()) return false;
-    return pairing_commands_.push(std::move(command));
+    if (!begin()) return reject_pairing_command("ble_unavailable");
+
+    const char *error = pairing_admission_
+        ? pairing_admission_(pairing_admission_context_)
+        : pairing_blocker_.load();
+    if (error) return reject_pairing_command(error);
+
+    const InboxPushResult result = pairing_commands_.try_push(std::move(command));
+    memset(&command, 0, sizeof(command));
+    if (result == InboxPushResult::Queued) return true;
+
+    return reject_pairing_command(result == InboxPushResult::Full ? "queue_full"
+        : result == InboxPushResult::Busy ? "queue_busy" : "queue_unavailable");
+}
+
+bool As11BleRpcLink::reject_pairing_command(const char *error) {
+#if AC_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    copy_text(pairing_status_.error, sizeof(pairing_status_.error), error);
+    bump_pairing_revision_locked();
+#if AC_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
+
+    Log::logf(CAT_BLE, LOG_WARN, "AS11 pairing command rejected error=%s\n", error);
+    return false;
 }
 
 bool As11BleRpcLink::pairing_active() const {
@@ -789,6 +843,11 @@ bool As11BleRpcLink::start_pairing_device(
         runtime_.acquire_scan(pdMS_TO_TICKS(AS11_BLE_SCANNER_WAIT_MS));
     if (!connect_lease) {
         fail_pairing("scanner_busy");
+        return false;
+    }
+
+    if (const char *error = pairing_blocker_.load()) {
+        fail_pairing(error);
         return false;
     }
 
@@ -1304,6 +1363,9 @@ As11BleRpcLink::PlainResponseResult As11BleRpcLink::wait_plain_response(
     size_t field_count) {
     const uint32_t deadline = millis() + AC_AS11_BLE_SESSION_TIMEOUT_MS;
     while (static_cast<int32_t>(millis() - deadline) < 0) {
+        if (pairing_blocker_.load() && pairing_active()) {
+            return {"connection_paused"};
+        }
 #if AC_BLE_ENABLED
         if (!client_ || !client_->isConnected()) return {"disconnected"};
 #endif

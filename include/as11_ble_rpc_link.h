@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <stdint.h>
@@ -93,6 +94,7 @@ public:
                                      const char *address,
                                      const char *client_id,
                                      const char *master_key_hex);
+    using PairingAdmission = const char *(*)(void *context);
 
     explicit As11BleRpcLink(BleRuntime &runtime) : runtime_(runtime) {}
 
@@ -120,6 +122,9 @@ public:
     bool request_reconnect();
 
     // First pairing
+    void set_pairing_admission(PairingAdmission admission, void *context);
+    // Main-loop policy; non-null reasons must have static lifetime.
+    void set_pairing_blocker(const char *reason) { pairing_blocker_.store(reason); }
     bool request_pairing_scan();
     bool request_pairing_device(const char *address);
     bool submit_pairing_passkey(const char *passkey);
@@ -181,6 +186,7 @@ private:
 
     // First pairing
     bool enqueue_pairing_command(PairingCommand command);
+    bool reject_pairing_command(const char *error);
     bool pairing_active() const;
     bool handle_pairing_command(const Configuration &config,
                                 As11BleClientCallbacks &callbacks,
@@ -271,6 +277,9 @@ private:
     As11BlePairingStatus pairing_status_;
     CredentialStore credential_store_ = nullptr;
     void *credential_store_context_ = nullptr;
+    PairingAdmission pairing_admission_ = nullptr;
+    void *pairing_admission_context_ = nullptr;
+    std::atomic<const char *> pairing_blocker_{nullptr};
     bool task_started_ = false;
     bool reset_requested_ = false;
     bool reconnect_requested_ = false;

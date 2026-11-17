@@ -385,10 +385,23 @@ static bool disconnect_cpap(void *, uint32_t) {
     return true;
 }
 
+static const char *ble_pairing_blocker() {
+    if (local_poweroff_requested) return "poweroff_pending";
+    if (firmware_installer.active()) return "esp_ota_active";
+    if (resmed_ota_manager.active()) return "resmed_ota_active";
+    if (as11_service_manager.exclusive_requested()) return "resmed_service_active";
+    return nullptr;
+}
+
+static const char *prepare_ble_pairing(void *) {
+    if (const char *error = ble_pairing_blocker()) return error;
+
+    rpc_quiesce_coordinator.release_connection_hold();
+    return nullptr;
+}
+
 static bool connect_cpap(void *, uint32_t) {
-    if (rpc_link_selector.selected() != As11Transport::Ble ||
-        local_poweroff_requested || firmware_installer.active() ||
-        resmed_ota_manager.active() ||
+    if (rpc_link_selector.selected() != As11Transport::Ble || ble_pairing_blocker() ||
         (rpc_quiesce_coordinator.requested() &&
          !rpc_quiesce_coordinator.connection_held())) {
         return false;
@@ -1264,6 +1277,7 @@ void setup() {
     config_service.begin();
     as11_ble_rpc_link.set_credential_store(
         store_as11_ble_credentials, &config_service);
+    as11_ble_rpc_link.set_pairing_admission(prepare_ble_pairing, nullptr);
     time_sync_service.initialize_timezone(config_service.data());
     log_memory_profile_checkpoint("core");
 
@@ -1743,6 +1757,7 @@ void loop() {
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
+    as11_ble_rpc_link.set_pairing_blocker(ble_pairing_blocker());
     rpc_quiesce_coordinator.update(
         esp_ota_quiesce_requested || as11_service_exclusive ||
             local_poweroff_requested,
