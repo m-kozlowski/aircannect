@@ -112,11 +112,10 @@ void TcpBridge::poll_service_completion() {
         return;
     }
 
-    if (!service_output_) {
+    ServiceClient &slot = service_clients_[owner];
+    if (!slot.output) {
         (void)service_.take_response(As11ServiceOwner::TcpBridge,
-                                     service_output_,
-                                     service_close_after_output_);
-        service_output_pos_ = 0;
+                                     slot.output, slot.close_after_output);
     }
 }
 
@@ -191,44 +190,24 @@ LineOutputPumpResult TcpBridge::pump_payload_output(size_t idx, bool append_lf) 
 
 LineOutputPumpResult TcpBridge::pump_service_output(size_t idx) {
     LineOutputPumpResult result;
-    if (idx >= AC_MAX_TCP_CLIENTS || idx != service_owner_ ||
-        !service_output_) {
-        return result;
-    }
+    ServiceClient &slot = service_clients_[idx];
+    if (!slot.output) return result;
 
-    WiFiClient &client = clients_[idx];
-    if (!client || !client.connected()) return result;
-
-    const size_t total = service_output_->size();
-    if (service_output_pos_ >= total) {
-        service_output_.reset();
-        service_output_pos_ = 0;
-        result.completed = true;
-        if (service_close_after_output_) {
-            service_close_after_output_ = false;
-            disconnect_slot(idx);
-        }
-        return result;
-    }
-
-    const size_t remaining = total - service_output_pos_;
+    const size_t remaining = slot.output->size() - slot.output_pos;
     const size_t chunk = std::min<size_t>(remaining, AC_TCP_WRITE_CHUNK);
-    const uint8_t *data = service_output_->data() + service_output_pos_;
+    const uint8_t *data = slot.output->data() + slot.output_pos;
 
-    result.written = write_line_nonblocking(client, idx, "SERVICE", data,
+    result.written = write_line_nonblocking(clients_[idx], idx, "SERVICE", data,
                                             chunk, result.fatal_error);
     if (result.fatal_error || result.written == 0) return result;
 
-    service_output_pos_ += result.written;
-    service_last_activity_ms_ = millis();
-    if (service_output_pos_ >= total) {
-        service_output_.reset();
-        service_output_pos_ = 0;
+    slot.output_pos += result.written;
+    slot.last_activity_ms = millis();
+    if (slot.output_pos == slot.output->size()) {
+        slot.output.reset();
+        slot.output_pos = 0;
         result.completed = true;
-        if (service_close_after_output_) {
-            service_close_after_output_ = false;
-            disconnect_slot(idx);
-        }
+        if (slot.close_after_output) disconnect_slot(idx);
     }
     return result;
 }
@@ -250,10 +229,6 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc,
             continue;
         }
 
-        if (protocols_[i] == TcpBridgeClientProtocol::Service &&
-            (service_.pending() || service_output_)) {
-            continue;
-        }
         if (protocols_[i] == TcpBridgeClientProtocol::Service) {
             (void)pump_service_input(i, service_entry_allowed);
             continue;
@@ -271,8 +246,8 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc,
             if (protocols_[i] == TcpBridgeClientProtocol::Unknown) {
                 if (!lines_[i].length() && value == AS11_SERVICE_PACKET_MAGIC) {
                     if (!begin_service_client(i, millis())) break;
-                    service_header_[0] = value;
-                    service_header_received_ = 1;
+                    service_clients_[i].header[0] = value;
+                    service_clients_[i].received = 1;
                     (void)pump_service_input(i, service_entry_allowed);
                     break;
                 }
@@ -413,35 +388,43 @@ bool TcpBridge::begin_service_client(size_t idx, uint32_t now_ms) {
         return false;
     }
 
-    if (service_owner_ < AC_MAX_TCP_CLIENTS && service_owner_ != idx) {
-        Log::logf(CAT_TCP, LOG_WARN,
-                  "[CLIENT %u SERVICE] rejected; client %u owns service\n",
-                  static_cast<unsigned>(idx),
-                  static_cast<unsigned>(service_owner_));
-        disconnect_slot(idx);
-        return false;
-    }
-    if (!service_.acquire(As11ServiceOwner::TcpBridge)) {
-        Log::logf(CAT_TCP, LOG_WARN,
-                  "[CLIENT %u SERVICE] rejected; service is in use\n",
-                  static_cast<unsigned>(idx));
-        disconnect_slot(idx);
-        return false;
+    if (service_owner_ == AC_MAX_TCP_CLIENTS &&
+        service_.acquire(As11ServiceOwner::TcpBridge)) {
+        service_owner_ = idx;
     }
 
-    service_owner_ = idx;
     protocols_[idx] = TcpBridgeClientProtocol::Service;
-    service_last_activity_ms_ = now_ms;
+    service_clients_[idx].last_activity_ms = now_ms;
     Log::logf(CAT_TCP, LOG_INFO,
               "[CLIENT %u] protocol=service\n",
               static_cast<unsigned>(idx));
     return true;
 }
 
+bool TcpBridge::ServiceClient::prepare_busy_reply() {
+    As11ServicePacketHeader parsed;
+    if (as11_service_validate_packet(request->data(), request->size(), parsed) !=
+            As11ServicePacketError::None) {
+        return false;
+    }
+
+    size_t written = 0;
+    if (!as11_service_encode_packet(parsed.protocol_version, parsed.command,
+                                    AS11_SERVICE_STATUS_BUSY, parsed.sequence,
+                                    nullptr, 0, request->data(), request->size(),
+                                    written) || !request->truncate(written)) {
+        return false;
+    }
+
+    output = LargeByteBuffer::freeze(std::move(request));
+    close_after_output = true;
+    return true;
+}
+
 bool TcpBridge::pump_service_input(size_t idx,
                                    bool service_entry_allowed) {
-    if (idx >= AC_MAX_TCP_CLIENTS || idx != service_owner_ ||
-        service_.pending() || service_output_) {
+    ServiceClient &slot = service_clients_[idx];
+    if (slot.output || (idx == service_owner_ && service_.pending())) {
         return false;
     }
 
@@ -452,21 +435,12 @@ bool TcpBridge::pump_service_input(size_t idx,
     while (budget > 0 && client.available()) {
         uint8_t *destination = nullptr;
         size_t remaining = 0;
-        if (service_header_received_ < AS11_SERVICE_PACKET_HEADER_BYTES) {
-            destination = service_header_ + service_header_received_;
-            remaining = AS11_SERVICE_PACKET_HEADER_BYTES -
-                        service_header_received_;
+        if (!slot.request) {
+            destination = slot.header + slot.received;
+            remaining = sizeof(slot.header) - slot.received;
         } else {
-            if (!service_request_ ||
-                service_request_received_ >= service_request_->size()) {
-                disconnect_slot(idx);
-                return false;
-            }
-
-            destination = service_request_->data() +
-                          service_request_received_;
-            remaining = service_request_->size() -
-                        service_request_received_;
+            destination = slot.request->data() + slot.received;
+            remaining = slot.request->size() - slot.received;
         }
 
         const size_t available = static_cast<size_t>(client.available());
@@ -485,19 +459,16 @@ bool TcpBridge::pump_service_input(size_t idx,
 
         const size_t received_size = static_cast<size_t>(received);
         budget -= received_size;
-        service_last_activity_ms_ = millis();
+        slot.last_activity_ms = millis();
+        slot.received += received_size;
 
-        if (service_header_received_ < AS11_SERVICE_PACKET_HEADER_BYTES) {
-            service_header_received_ += received_size;
-            if (service_header_received_ <
-                AS11_SERVICE_PACKET_HEADER_BYTES) {
-                continue;
-            }
+        if (!slot.request) {
+            if (slot.received < sizeof(slot.header)) continue;
 
             size_t packet_size = 0;
             const As11ServicePacketError packet_error =
                 as11_service_packet_size_from_header(
-                    service_header_, service_header_received_, packet_size);
+                    slot.header, slot.received, packet_size);
             if (packet_error != As11ServicePacketError::None) {
                 Log::logf(CAT_TCP, LOG_WARN,
                           "[CLIENT %u SERVICE] invalid request error=%s\n",
@@ -507,8 +478,8 @@ bool TcpBridge::pump_service_input(size_t idx,
                 return false;
             }
 
-            service_request_ = LargeByteBuffer::allocate(packet_size);
-            if (!service_request_) {
+            slot.request = LargeByteBuffer::allocate(packet_size);
+            if (!slot.request) {
                 Log::logf(
                     CAT_TCP, LOG_WARN,
                     "[CLIENT %u SERVICE] request allocation failed size=%u\n",
@@ -518,22 +489,22 @@ bool TcpBridge::pump_service_input(size_t idx,
                 return false;
             }
 
-            memcpy(service_request_->data(), service_header_,
-                   AS11_SERVICE_PACKET_HEADER_BYTES);
-            service_request_received_ =
-                AS11_SERVICE_PACKET_HEADER_BYTES;
+            memcpy(slot.request->data(), slot.header, sizeof(slot.header));
             continue;
         }
 
-        service_request_received_ += received_size;
-        if (service_request_received_ < service_request_->size()) continue;
+        if (slot.received < slot.request->size()) continue;
 
-        std::unique_ptr<LargeByteBuffer> complete =
-            std::move(service_request_);
-        reset_service_request();
+        slot.received = 0;
+
+        if (idx != service_owner_) {
+            if (slot.prepare_busy_reply()) return true;
+            disconnect_slot(idx);
+            return false;
+        }
 
         if (!service_.submit_packet(As11ServiceOwner::TcpBridge,
-                                    std::move(complete),
+                                    std::move(slot.request),
                                     service_entry_allowed, millis())) {
             Log::logf(CAT_TCP, LOG_WARN,
                       "[CLIENT %u SERVICE] request rejected error=%s\n",
@@ -585,26 +556,17 @@ bool TcpBridge::accept_rpc_byte(size_t idx, uint8_t value,
 }
 
 void TcpBridge::poll_service_idle(uint32_t now_ms) {
-    if (service_owner_ >= AC_MAX_TCP_CLIENTS) return;
+    for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
+        if (protocols_[i] != TcpBridgeClientProtocol::Service) continue;
 
-    const size_t owner = service_owner_;
-    if (service_.pending() || service_output_) return;
-    if (static_cast<uint32_t>(now_ms - service_last_activity_ms_) <
-        AC_AS11_SERVICE_TCP_IDLE_TIMEOUT_MS) {
-        return;
+        const auto &slot = service_clients_[i];
+        if (i == service_owner_ && (service_.pending() || slot.output)) continue;
+        if (now_ms - slot.last_activity_ms < AC_AS11_SERVICE_TCP_IDLE_TIMEOUT_MS) continue;
+
+        Log::logf(CAT_TCP, LOG_INFO, "[CLIENT %u SERVICE] idle timeout\n",
+                  static_cast<unsigned>(i));
+        disconnect_slot(i);
     }
-
-    Log::logf(CAT_TCP, LOG_INFO,
-              "[CLIENT %u SERVICE] idle timeout\n",
-              static_cast<unsigned>(owner));
-    disconnect_slot(owner);
-}
-
-void TcpBridge::reset_service_request() {
-    service_request_.reset();
-    memset(service_header_, 0, sizeof(service_header_));
-    service_header_received_ = 0;
-    service_request_received_ = 0;
 }
 
 void TcpBridge::disconnect_slot(size_t idx) {
@@ -621,13 +583,9 @@ void TcpBridge::disconnect_slot(size_t idx) {
 
     if (service_owner_ == idx) {
         service_.release(As11ServiceOwner::TcpBridge);
-        reset_service_request();
-        service_output_.reset();
-        service_output_pos_ = 0;
-        service_close_after_output_ = false;
-        service_last_activity_ms_ = 0;
         service_owner_ = AC_MAX_TCP_CLIENTS;
     }
+    service_clients_[idx] = {};
 
     clients_[idx].stop();
     protocols_[idx] = TcpBridgeClientProtocol::Unknown;

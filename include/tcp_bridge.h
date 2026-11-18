@@ -43,6 +43,18 @@ public:
     uint16_t port() const { return line_server_port(); }
 
 private:
+    struct ServiceClient {
+        bool prepare_busy_reply();
+
+        uint8_t header[AS11_SERVICE_PACKET_HEADER_BYTES] = {};
+        size_t received = 0;
+        std::unique_ptr<LargeByteBuffer> request;
+        std::shared_ptr<const LargeByteBuffer> output;
+        size_t output_pos = 0;
+        bool close_after_output = false;
+        uint32_t last_activity_ms = 0;
+    };
+
     void accept_clients();
     void poll_service_completion();
     void pump_outputs();
@@ -55,7 +67,6 @@ private:
     bool accept_rpc_byte(size_t idx, uint8_t value,
                          RpcPassthroughPort &rpc);
     void poll_service_idle(uint32_t now_ms);
-    void reset_service_request();
     void disconnect_slot(size_t idx);
 
     // Modem lines and channel ownership
@@ -77,14 +88,7 @@ private:
     RpcPayloadRef output_current_[AC_MAX_TCP_CLIENTS];
     size_t output_pos_[AC_MAX_TCP_CLIENTS] = {};
 
-    uint8_t service_header_[AS11_SERVICE_PACKET_HEADER_BYTES] = {};
-    size_t service_header_received_ = 0;
-    std::unique_ptr<LargeByteBuffer> service_request_;
-    size_t service_request_received_ = 0;
-    std::shared_ptr<const LargeByteBuffer> service_output_;
-    size_t service_output_pos_ = 0;
-    bool service_close_after_output_ = false;
-    uint32_t service_last_activity_ms_ = 0;
+    ServiceClient service_clients_[AC_MAX_TCP_CLIENTS];
     size_t service_owner_ = AC_MAX_TCP_CLIENTS;
 
     std::unique_ptr<LargeByteBuffer> modem_line_;
