@@ -1757,10 +1757,10 @@ void loop() {
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
+    const bool external_quiesce = esp_ota_quiesce_requested || local_poweroff_requested;
     as11_ble_rpc_link.set_pairing_blocker(ble_pairing_blocker());
     rpc_quiesce_coordinator.update(
-        esp_ota_quiesce_requested || as11_service_exclusive ||
-            local_poweroff_requested,
+        external_quiesce || as11_service_exclusive,
         esp_reboot_pending || local_poweroff_requested,
         rpc_link_selector.selected() == As11Transport::Ble,
         now_ms,
@@ -2020,8 +2020,9 @@ void loop() {
     web_ui.poll(drain_can_rx);
     drain_can_rx();
 
+    // The service owner checks its own session when TCP submits the packet.
     const bool service_entry_allowed =
-        !as11_application_quiesce_requested &&
+        !external_quiesce && !rpc_quiesce_coordinator.connection_held() &&
         !firmware_installer.active() &&
         !resmed_ota_manager.active();
     tcp_bridge.poll(rpc_transport, service_entry_allowed);

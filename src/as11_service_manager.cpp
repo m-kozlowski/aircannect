@@ -100,7 +100,12 @@ bool As11ServiceManager::acquire(As11ServiceOwner owner) {
 void As11ServiceManager::release(As11ServiceOwner owner) {
     if (owner == As11ServiceOwner::None || owner_ != owner) return;
 
-    if (owner == As11ServiceOwner::TcpBridge && pending() &&
+    // Without the first Flow Control, the peer never received a complete INFO.
+    const bool unanswered_probe =
+        state_ == State::WaitingRequestFlowControl && !entry_info_pending_ &&
+        request_command_ == AS11_SERVICE_COMMAND_INFO && request_frame_count_ == 1;
+
+    if (owner == As11ServiceOwner::TcpBridge && !unanswered_probe && pending() &&
         request_frame_count_ != 0) {
         if (release_pending_) return;
 
