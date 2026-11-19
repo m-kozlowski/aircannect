@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "debug_log.h"
 #include "oximetry_codec.h"
@@ -107,7 +108,7 @@ void BleSensorProtocolEngine::viatom_on_connected() {
     viatom_clear_pending();
     viatom_.last_poll_ms = 0;
     viatom_.initial_probe_complete = false;
-    viatom_.need_time_sync = true;
+    viatom_.clock_step = ClockStep::Probe;
 }
 
 void BleSensorProtocolEngine::viatom_reset() {
@@ -116,7 +117,7 @@ void BleSensorProtocolEngine::viatom_reset() {
     viatom_clear_pending();
     viatom_.last_poll_ms = 0;
     viatom_.initial_probe_complete = false;
-    viatom_.need_time_sync = false;
+    viatom_.clock_step = ClockStep::Done;
     viatom_.file_open = false;
     recordings_ = nullptr;
 }
@@ -181,12 +182,28 @@ void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
         return;
     }
 
-    if (viatom_.need_time_sync && !(recordings_ && recordings_->awaiting_list())) {
+    if (viatom_.clock_step == ClockStep::Probe) {
+        if (!original_ring_) viatom_.clock_step = ClockStep::Set;
+        else if (recordings_ && time(nullptr) >= 1704067200 &&
+                 viatom_send_command(uint8_t(FileCommand::Info), nullptr, 0, now_ms)) {
+            viatom_.clock_step = ClockStep::AwaitInfo;
+            return;
+        } else viatom_.clock_step = ClockStep::Done;
+    }
+    if (viatom_.clock_step == ClockStep::Save) {
+        const auto state = recordings_ ? recordings_->poll_clock() : OperationDisposition::Failed;
+        if (state == OperationDisposition::Succeeded) viatom_.clock_step = ClockStep::Set;
+        else if (state != OperationDisposition::Retry) {
+            Log::logf(CAT_OXI, LOG_WARN, "O2Ring clock not set: observation not saved\n");
+            viatom_.clock_step = ClockStep::Done;
+        }
+    }
+    if (viatom_.clock_step == ClockStep::Set) {
         if (viatom_sync_datetime()) {
             viatom_.pending_cmd = VIATOM_CMD_CONFIG;
             viatom_.pending_ms = now_ms;
         }
-        viatom_.need_time_sync = false;
+        viatom_.clock_step = ClockStep::Done;
         return;
     }
 
@@ -271,7 +288,18 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     if (is_file_command(pending_command)) {
         const auto cmd = static_cast<FileCommand>(pending_command);
         const uint16_t index = uint16_t(rx[3]) | uint16_t(rx[4]) << 8;
+        const auto elapsed = millis() - viatom_.pending_ms;
         viatom_clear_pending();
+        if (cmd == FileCommand::Info && viatom_.clock_step == ClockStep::AwaitInfo) {
+            struct timeval now = {};
+            gettimeofday(&now, nullptr);
+            const bool saved = frame.command == 0 && recordings_ &&
+                recordings_->save_clock(frame.payload, frame.payload_len,
+                    int64_t(now.tv_sec) * 1000 + now.tv_usec / 1000, elapsed);
+            viatom_.clock_step = saved ? ClockStep::Save : ClockStep::Done;
+            if (!saved) Log::logf(CAT_OXI, LOG_WARN, "O2Ring clock not set: invalid observation\n");
+            return;
+        }
         if (cmd == FileCommand::Close) viatom_.file_open = false;
         if (frame.command != 0) {
             if (recordings_ && cmd == FileCommand::Open) recordings_->skip_open();
@@ -319,7 +347,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     const bool charging = battery_state == 1 || battery_state == 2;
     if (recordings_) recordings_->observe_contact(lead_state != 0, charging, millis());
     viatom_.initial_probe_complete = !charging || (recordings_ && recordings_->active());
-    if (charging) viatom_.need_time_sync = false;
+    if (charging && viatom_.clock_step == ClockStep::Probe) viatom_.clock_step = ClockStep::Done;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",

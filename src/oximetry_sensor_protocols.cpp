@@ -155,9 +155,11 @@ void BleSensorProtocolEngine::reset() {
     active_protocol_ = ActiveProtocol::None;
 }
 
-void BleSensorProtocolEngine::poll(uint32_t now_ms, O2RingRecordingImport *recordings) {
+void BleSensorProtocolEngine::poll(uint32_t now_ms, O2RingRecordingImport *recordings,
+                                   bool original_ring) {
 #if AC_OXIMETRY_BLE_ENABLED
     recordings_ = recordings;
+    original_ring_ = original_ring || recordings;
     drain_notifications();
     if (!client_ || !client_->isConnected()) return;
 
@@ -176,6 +178,7 @@ void BleSensorProtocolEngine::poll(uint32_t now_ms, O2RingRecordingImport *recor
 #else
     (void)now_ms;
     (void)recordings;
+    (void)original_ring;
 #endif
 }
 

@@ -36,7 +36,8 @@ public:
     void on_connected();
     void invalidate_connection();
     void reset();
-    void poll(uint32_t now_ms, O2RingRecordingImport *recordings = nullptr);
+    void poll(uint32_t now_ms, O2RingRecordingImport *recordings = nullptr,
+              bool original_ring = false);
     bool uses_viatom() const { return active_protocol_ == ActiveProtocol::Viatom; }
 
 private:
@@ -91,6 +92,7 @@ private:
                              bool is_notify);
 
     // Viatom
+    enum class ClockStep : uint8_t { Probe, AwaitInfo, Save, Set, Done };
     struct ViatomState {
         NimBLERemoteCharacteristic *write = nullptr;
         uint8_t rx[64] = {};
@@ -100,7 +102,7 @@ private:
         uint32_t pending_ms = 0;
         uint32_t last_poll_ms = 0;
         bool initial_probe_complete = false;
-        bool need_time_sync = false;
+        ClockStep clock_step = ClockStep::Done;
         bool file_open = false;
         std::unique_ptr<LargeByteBuffer> file_rx;
     };
@@ -181,6 +183,7 @@ private:
     NimBLEClient *client_ = nullptr;
     ViatomState viatom_;
     O2RingRecordingImport *recordings_ = nullptr;
+    bool original_ring_ = false;
     OxyiiState oxyii_;
 #endif
 

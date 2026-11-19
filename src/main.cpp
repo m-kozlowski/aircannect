@@ -1981,6 +1981,7 @@ void loop() {
     if (!resmed_ota_transport_active &&
         !as11_application_quiesce_requested) {
         time_sync_service.poll(session_manager.idle_for(now_ms, 10 * 1000));
+        oximetry_sensor_source.publish_clock_source(time_sync_service.esp_clock_source_name());
     }
 
     drain_can_rx();

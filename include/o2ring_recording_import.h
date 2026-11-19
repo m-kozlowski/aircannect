@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <atomic>
 
 #include "storage_path_port.h"
 #include "storage_range_write_port.h"
@@ -13,7 +14,10 @@ public:
     enum class Command : uint8_t { None, Open = 3, Read = 4, Close = 5, Info = 0x14 };
     static constexpr size_t BlockSize = 512;
 
-    void begin(const char *peer, StoragePathPort &paths, StorageRangeWritePort &writes);
+    void begin(const char *peer, StoragePathPort &paths, StorageRangeWritePort &writes,
+               StorageAtomicWritePort *clock_storage = nullptr);
+    void end();
+    void enable_downloads(bool enabled);
     void observe_contact(bool on_finger, bool charging, uint32_t now_ms);
     bool off_finger_timeout(uint32_t now_ms) const;
     bool needs_connection(uint32_t now_ms) const;
@@ -26,6 +30,11 @@ public:
     void reply(Command cmd, uint16_t index, const uint8_t *data, size_t size);
     void fail(const char *reason);
     void skip_open();
+
+    // FileList and CurTIME must be durable before the sensor clock changes.
+    bool save_clock(const uint8_t *info, size_t size, int64_t utc_ms, uint32_t rtt_ms);
+    OperationDisposition poll_clock();
+    void publish_clock_source(const char *name) { clock_source_.store(name); }
 
 private:
     enum class Window { Unknown, Worn, OffFinger, Charging };
@@ -45,6 +54,11 @@ private:
     std::optional<uint32_t> last_write_ms_;
     StoragePathPort *paths_ = nullptr;
     StorageRangeWritePort *writes_ = nullptr;
+    bool downloads_ = true;
+    StorageAtomicWritePort *clock_storage_ = nullptr;
+    std::atomic<const char *> clock_source_{"unknown"};
+    StorageAtomicWriteCommand clock_write_;
+    OperationTicket clock_ticket_;
     OperationTicket ticket_{};
     std::shared_ptr<const LargeByteBuffer> list_, chunk_;
     size_t cursor_ = 0;

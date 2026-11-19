@@ -41,6 +41,7 @@ public:
     bool begin(bool enabled, const char *runtime_name);
     void configure(bool enabled, const char *runtime_name);
     void set_auto_allowed(bool allowed);
+    void publish_clock_source(const char *name) { recordings_.publish_clock_source(name); }
     bool has_autoconnect() const;
 
     void set_suspended(bool suspended);

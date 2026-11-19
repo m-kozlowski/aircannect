@@ -1034,7 +1034,7 @@ void BleSensorSource::task_loop() {
         portEXIT_CRITICAL(&mux_);
 #endif
         if (reset_protocols || !enabled || suspend) {
-            recordings_.reset();
+            recordings_.end();
             import_session = false;
         }
         if (reset_protocols) protocols_.reset();
@@ -1082,6 +1082,7 @@ void BleSensorSource::task_loop() {
         bool manual_connect = false;
         OximetrySensorDevice manual_target_device;
         char import_peer[sizeof(connected_addr_)]{};
+        bool downloads = false;
         const uint32_t policy_ms = millis();
         const bool keep_for_import = recordings_.needs_connection(policy_ms);
         const bool off_finger_timeout = import_session && recordings_.off_finger_timeout(policy_ms);
@@ -1106,8 +1107,10 @@ void BleSensorSource::task_loop() {
         manual_target_device = manual_target_device_;
         size_t known_index = 0;
         if (connected_addr_[0] && find_addr(connected_addr_, known_index) &&
-            known_[known_index].recordings && known_[known_index].supports_recordings())
+            known_[known_index].supports_recordings()) {
             memcpy(import_peer, connected_addr_, sizeof(import_peer));
+            downloads = known_[known_index].recordings;
+        }
         disconnect_requested_ = false;
         disconnect_hold_until_absent_ = false;
         disconnect_holdoff_kind_ = AutoconnectHoldoffKind::Standard;
@@ -1141,11 +1144,13 @@ void BleSensorSource::task_loop() {
                             Storage::mounted() && !StorageUsb::suspended();
         if (import != import_session) {
             if (import) recordings_.begin(import_peer, StorageService::path_port(),
-                                          StorageService::range_write_port());
-            else recordings_.reset();
+                                          StorageService::range_write_port(),
+                                          &StorageService::atomic_write_port());
+            else recordings_.end();
             import_session = import;
         }
-        protocols_.poll(now_ms, import_session ? &recordings_ : nullptr);
+        if (import_session) recordings_.enable_downloads(downloads);
+        protocols_.poll(now_ms, import_session ? &recordings_ : nullptr, import_peer[0] != 0);
         update_autoconnect_holdoffs(
             now_ms, runtime_.passive_observation_active());
 

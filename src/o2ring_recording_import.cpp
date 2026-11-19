@@ -3,21 +3,114 @@
 #include <algorithm>
 #include <cstring>
 #include <string_view>
+#include <ctime>
 #include "board_oximetry.h"
 #include "debug_log.h"
 #include "large_json_allocator.h"
 #include "storage_space_policy.h"
+#include "utc_time.h"
+#include "oximetry_archive.h"
 
 namespace aircannect {
 
 void O2RingRecordingImport::begin(const char *peer, StoragePathPort &paths,
-                                  StorageRangeWritePort &writes) {
-    reset();
+                                  StorageRangeWritePort &writes,
+                                  StorageAtomicWritePort *clock_storage) {
+    end();
     paths_ = &paths;
     writes_ = &writes;
+    clock_storage_ = clock_storage;
+    downloads_ = true;
     source_ = peer;
     source_.erase(std::remove(source_.begin(), source_.end(), ':'), source_.end());
     window_ = Window::Unknown;
+}
+
+void O2RingRecordingImport::end() {
+    reset();
+    if (clock_ticket_.valid()) clock_storage_->abandon(clock_ticket_);
+    clock_ticket_ = {};
+    clock_write_ = {};
+    clock_storage_ = nullptr;
+}
+
+void O2RingRecordingImport::enable_downloads(bool enabled) {
+    if (enabled == downloads_) return;
+    reset();
+    window_ = Window::Unknown;
+    downloads_ = enabled;
+}
+
+bool O2RingRecordingImport::save_clock(const uint8_t *info, size_t size,
+                                       int64_t utc_ms, uint32_t rtt_ms) {
+    if (!clock_storage_ || utc_ms < 1704067200000LL || clock_write_.bytes) return false;
+    LargeJsonAllocator allocator;
+    JsonDocument doc(&allocator);
+    if (deserializeJson(doc, info, size)) return false;
+    const JsonString clock = doc["CurTIME"].as<JsonString>();
+    const JsonString list = doc["FileList"].as<JsonString>();
+    if (clock.size() != 19 || clock.c_str()[10] != ',' || list.isNull()) return false;
+    char iso[22] = {};
+    memcpy(iso, clock.c_str(), 19);
+    iso[10] = 'T';
+    iso[19] = 'Z';
+    int64_t wall_ms = 0;
+    if (!parse_utc_iso8601_ms(iso, wall_ms)) return false;
+
+    const char *sn = doc["SN"] | "";
+    if (oximetry_source_valid(sn)) source_ = sn;
+    if (!oximetry_source_valid(source_)) return false;
+
+    // Use the midpoint of INFO, keeping the observation's round-trip uncertainty.
+    const int64_t observed = utc_ms - rtt_ms / 2;
+    const time_t seconds = observed / 1000;
+    struct tm local = {};
+    char month[12] = {};
+    char zone[8] = {};
+    if (!localtime_r(&seconds, &local) || !strftime(month, sizeof(month), "%Y/%m", &local) ||
+        !strftime(zone, sizeof(zone), "%z", &local)) return false;
+
+    JsonDocument observation(&allocator);
+    observation["utc_ms"] = observed;
+    observation["ring_minus_utc_s"] = wall_ms / 1000 - seconds;
+    observation["reference"] = clock_source_.load();
+    observation["local_offset"] = zone;
+    observation["rtt_ms"] = rtt_ms;
+    observation["FileList"] = list;
+    if (observation.overflowed()) return false;
+    auto bytes = LargeByteBuffer::allocate(measureJson(observation));
+    if (!bytes || serializeJson(observation, bytes->data(), bytes->size()) != bytes->size())
+        return false;
+
+    clock_write_.path = std::string(OximetryArchiveRoot) + "/" + source_ + "/clock/" +
+        month + "/" + std::to_string(observed) + ".json";
+    clock_write_.bytes = LargeByteBuffer::freeze(std::move(bytes));
+    clock_write_.replace_existing = false;
+    clock_write_.generation = 1;
+    return true;
+}
+
+OperationDisposition O2RingRecordingImport::poll_clock() {
+    if (!clock_storage_ || !clock_write_.bytes) return OperationDisposition::Failed;
+    if (!clock_ticket_.valid()) {
+        const auto submission = clock_storage_->request_write(clock_write_);
+        if (submission.admission == OperationAdmission::Busy) return OperationDisposition::Retry;
+        if (submission.accepted()) {
+            clock_ticket_ = submission.ticket;
+            return OperationDisposition::Retry;
+        }
+        clock_write_ = {};
+        return OperationDisposition::Failed;
+    }
+
+    StorageAtomicWriteCompletion completion;
+    if (!clock_storage_->take_completion(clock_ticket_, completion)) return OperationDisposition::Retry;
+    const bool ok = completion.outcome.disposition == OperationDisposition::Succeeded &&
+                    completion.bytes_written == clock_write_.bytes->size();
+    clock_write_ = {};
+    clock_ticket_ = {};
+    if (ok) oximetry_archive_published();
+    return ok ? OperationDisposition::Succeeded : OperationDisposition::Failed;
 }
 
 bool O2RingRecordingImport::off_finger_timeout(uint32_t now_ms) const {
@@ -35,6 +128,7 @@ bool O2RingRecordingImport::needs_connection(uint32_t now_ms) const {
 }
 
 void O2RingRecordingImport::observe_contact(bool on_finger, bool charging, uint32_t now_ms) {
+    if (!downloads_) return;
     last_contact_ms_ = now_ms;
     const Window next = charging ? Window::Charging :
                         on_finger ? Window::Worn : Window::OffFinger;
@@ -114,7 +208,7 @@ bool O2RingRecordingImport::take_list(const uint8_t *data, size_t size) {
     const JsonString serial = doc["SN"].as<JsonString>();
     if (!serial.isNull() && serial.size() && serial.size() <= 32) {
         const std::string_view sn(serial.c_str(), serial.size());
-        if (sn.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_") == sn.npos)
+        if (oximetry_source_valid(sn))
             source_ = std::string(sn);
     }
     return true;
@@ -133,7 +227,7 @@ void O2RingRecordingImport::next_file() {
         }
 
         memcpy(id_, id.data(), 14);
-        final_ = "/aircannect/oximetry/" + source_ + "/" + std::string(id.substr(0, 8))
+        final_ = std::string(OximetryArchiveRoot) + "/" + source_ + "/" + std::string(id.substr(0, 8))
                + "/" + id_ + ".bin";
         offset_ = size_ = 0;
         skip_publication_ = false;
@@ -261,6 +355,7 @@ void O2RingRecordingImport::step_path() {
                   id_, unsigned(size_), unsigned(offset_));
     } else {
         ++saved_;
+        oximetry_archive_published();
         phase_ = Phase::Select;
     }
 }
