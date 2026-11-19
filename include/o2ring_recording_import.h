@@ -35,6 +35,7 @@ public:
     bool save_clock(const uint8_t *info, size_t size, int64_t utc_ms, uint32_t rtt_ms);
     OperationDisposition poll_clock();
     void publish_clock_source(const char *name) { clock_source_.store(name); }
+    const char *serial() const { return serial_; }
 
 private:
     enum class Window { Unknown, Worn, OffFinger, Charging };
@@ -63,6 +64,7 @@ private:
     std::shared_ptr<const LargeByteBuffer> list_, chunk_;
     size_t cursor_ = 0;
     std::string source_, final_, part_;
+    char peer_[18]{}, serial_[33]{};
     char id_[15]{};
     uint32_t offset_ = 0, size_ = 0;
     bool skip_publication_ = false;

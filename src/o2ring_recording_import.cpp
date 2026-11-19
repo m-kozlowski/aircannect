@@ -22,12 +22,14 @@ void O2RingRecordingImport::begin(const char *peer, StoragePathPort &paths,
     clock_storage_ = clock_storage;
     downloads_ = true;
     source_ = peer;
+    snprintf(peer_, sizeof(peer_), "%s", peer);
     source_.erase(std::remove(source_.begin(), source_.end(), ':'), source_.end());
     window_ = Window::Unknown;
 }
 
 void O2RingRecordingImport::end() {
     reset();
+    serial_[0] = peer_[0] = 0;
     if (clock_ticket_.valid()) clock_storage_->abandon(clock_ticket_);
     clock_ticket_ = {};
     clock_write_ = {};
@@ -58,7 +60,10 @@ bool O2RingRecordingImport::save_clock(const uint8_t *info, size_t size,
     if (!parse_utc_iso8601_ms(iso, wall_ms)) return false;
 
     const char *sn = doc["SN"] | "";
-    if (oximetry_source_valid(sn)) source_ = sn;
+    if (oximetry_source_valid(sn)) {
+        source_ = sn;
+        strcpy(serial_, sn);
+    }
     if (!oximetry_source_valid(source_)) return false;
 
     // Use the midpoint of INFO, keeping the observation's round-trip uncertainty.
@@ -74,6 +79,8 @@ bool O2RingRecordingImport::save_clock(const uint8_t *info, size_t size,
     observation["utc_ms"] = observed;
     observation["ring_minus_utc_s"] = wall_ms / 1000 - seconds;
     observation["reference"] = clock_source_.load();
+    observation["ble"] = peer_;
+    if (serial_[0]) observation["serial"] = serial_;
     observation["local_offset"] = zone;
     observation["rtt_ms"] = rtt_ms;
     observation["FileList"] = list;
@@ -208,8 +215,10 @@ bool O2RingRecordingImport::take_list(const uint8_t *data, size_t size) {
     const JsonString serial = doc["SN"].as<JsonString>();
     if (!serial.isNull() && serial.size() && serial.size() <= 32) {
         const std::string_view sn(serial.c_str(), serial.size());
-        if (oximetry_source_valid(sn))
+        if (oximetry_source_valid(sn)) {
             source_ = std::string(sn);
+            strcpy(serial_, source_.c_str());
+        }
     }
     return true;
 }

@@ -1611,6 +1611,7 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
     sample.observed_ms = millis();
     sample.pi_percent = pi_percent;
     snprintf(sample.peer, sizeof(sample.peer), "%s", connected_addr_);
+    memcpy(sample.serial, recordings_.serial(), sizeof(sample.serial));
     if (connected_name_[0]) {
         snprintf(sample.detail, sizeof(sample.detail),
                  "%s %s", connected_addr_, connected_name_);

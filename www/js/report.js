@@ -2382,6 +2382,7 @@
         carry = lines.pop();
         if (carry.length > 256) throw new Error("invalid_oximetry_csv");
         for (const line of lines) {
+          if (!columns && line.startsWith("# Source=")) continue;
           const fields = line.trimEnd().split(",");
           if (!columns) {
             const names = ["UTC", "Oxygen Level", "Pulse Rate", "Motion", "PI"];

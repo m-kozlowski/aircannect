@@ -12,6 +12,7 @@
 
 #include "debug_log.h"
 #include "calendar_utils.h"
+#include "edf_time.h"
 #include "large_byte_buffer.h"
 #include "memory_manager.h"
 #include "oximetry_archive.h"
@@ -21,24 +22,6 @@
 #include "utc_time.h"
 
 namespace aircannect::OximetryCsv {
-
-size_t format_row(char (&out)[MaxRow], int64_t utc_ms, int oxygen, int pulse,
-                  int motion, float pi_percent) {
-    const time_t epoch = utc_ms / 1000;
-    tm local{};
-    char time[32], utc[32], movement[6]{}, pi[12]{};
-    if (!localtime_r(&epoch, &local) ||
-        !strftime(time, sizeof(time), "%H:%M:%S %b %d %Y", &local) ||
-        !format_utc_iso8601_ms(utc_ms, utc, sizeof(utc))) return 0;
-
-    if (motion >= 0) snprintf(movement, sizeof(movement), "%d", motion);
-    if (pi_percent >= 0)
-        snprintf(pi, sizeof(pi), "%.6g", double(pi_percent));
-
-    const int n = snprintf(out, sizeof(out), "%s,%d,%d,%s,,,%s,%s\r\n",
-                           time, oxygen, pulse, movement, utc, pi);
-    return n > 0 && size_t(n) < sizeof(out) ? size_t(n) : 0;
-}
 
 bool write_chunk(const char *path, size_t offset, const void *data, size_t size,
                  bool replace_partial) {
@@ -62,6 +45,8 @@ struct Input {
     float pi;
     bool measured, removed;
     char source[18];
+    char peer[18], serial[33];
+    int32_t device_offset;
 };
 struct Live {
     std::string source, part, final;
@@ -70,6 +55,8 @@ struct Live {
     uint32_t first = 0, last = 0, dirty = 0;
     int64_t last_utc = 0;
     int night = 0;
+    int32_t offset_minutes = 0;
+    size_t serial_pos = 0;
 };
 
 std::vector<Live, LargeAllocator<Live>> live;
@@ -121,13 +108,24 @@ bool recover(const std::string &path, const char *name) {
 
     const int fd = Storage::open_descriptor(path.c_str(), O_RDWR);
     if (fd < 0) return false;
-    char header[sizeof(Columns)], tail[MaxRow];
+    char header[MaxHeader], tail[MaxRow];
     const off_t size = lseek(fd, 0, SEEK_END);
-    const size_t header_n = sizeof(Columns) - 1;
+    size_t header_n = sizeof(Columns) - 1;
     const size_t count = size >= 0 ? std::min<size_t>(size, sizeof(tail)) : 0;
-    bool ok = size >= off_t(header_n) && lseek(fd, 0, SEEK_SET) == 0 &&
-              read(fd, header, header_n) == ssize_t(header_n) &&
-              !memcmp(header, Columns, header_n) &&
+    const ssize_t got = size >= off_t(header_n) && lseek(fd, 0, SEEK_SET) == 0
+        ? read(fd, header, sizeof(header)) : -1;
+    const std::string_view prefix(header, got > 0 ? size_t(got) : 0);
+    size_t columns_at = 0;
+    if (prefix.substr(0, 9) == "# Source=") {
+        const size_t eol = prefix.find("\r\n");
+        if (eol == prefix.npos || prefix.substr(0, eol).find(" Version=2 ") == prefix.npos) {
+            Storage::close_descriptor(path.c_str(), fd);
+            return false;
+        }
+        columns_at = eol + 2;
+    }
+    header_n += columns_at;
+    bool ok = prefix.substr(columns_at, sizeof(Columns)-1) == Columns &&
               lseek(fd, size - count, SEEK_SET) == size - off_t(count) &&
               read(fd, tail, count) == ssize_t(count);
 
@@ -192,6 +190,9 @@ bool append(const Input &in, uint32_t now) {
 
     if (it == live.end()) {
         Live f;
+        f.offset_minutes = in.device_offset;
+        if (f.offset_minutes == INT32_MIN &&
+            !edf_configured_timezone_offset_minutes(in.utc_ms, f.offset_minutes)) return false;
         f.buffer = LargeByteBuffer::allocate(Batch);
         if (!f.buffer) return false;
         char day[12], id[72];
@@ -202,16 +203,31 @@ bool append(const Input &in, uint32_t now) {
         f.part = base + id + ".part";
         f.final = base + day + "/" + id;
         if (!Storage::ensure_parent_directories(f.part.c_str())) return false;
-        memcpy(f.buffer->data(), Columns, sizeof(Columns)-1);
-        f.used = sizeof(Columns)-1;
+        char header[MaxHeader];
+        f.used = format_header(header, in.source, id, f.offset_minutes, in.peer, in.serial);
+        if (!f.used) return false;
+        memcpy(f.buffer->data(), header, f.used);
+        if (in.peer[0] && !in.serial[0])
+            f.serial_pos = f.used - (sizeof(Columns) - 1) - 2 - 32;
         f.first = f.last = in.observed;
         f.dirty = now;
         f.source = in.source;
         live.push_back(std::move(f));
         it = live.end()-1;
     }
+    // The first valid reading can precede the ring's identity response.
+    if (it->serial_pos && in.serial[0]) {
+        const int fd = Storage::open_descriptor(it->part.c_str(), O_WRONLY);
+        if (fd < 0) return false;
+        const size_t n = strlen(in.serial);
+        const bool ok = lseek(fd, it->serial_pos, SEEK_SET) == off_t(it->serial_pos) &&
+                        write(fd, in.serial, n) == ssize_t(n) && fsync(fd) == 0;
+        if (Storage::close_descriptor(it->part.c_str(), fd) != 0 || !ok) return false;
+        it->serial_pos = 0;
+    }
+
     char row[MaxRow];
-    const size_t len = format_row(row, in.utc_ms, in.oxygen, in.pulse, -1, in.pi);
+    const size_t len = format_row(row, in.utc_ms, it->offset_minutes, in.oxygen, in.pulse, -1, in.pi);
     if (!len || (it->used + len > Batch && !flush(*it))) return false;
     if (!it->used) it->dirty = now;
     memcpy(it->buffer->data() + it->used, row, len);
@@ -242,7 +258,7 @@ bool begin(void (*wake)()) {
     return queue != nullptr;
 }
 
-void observe(const OximetrySample &s, int64_t utc_ms) {
+void observe(const OximetrySample &s, int64_t utc_ms, int32_t device_offset_minutes) {
     if (!mounted.load() || !queue || paused.load() || StorageUsb::suspended()) return;
     Input in{};
     if (s.source == OximetrySource::Udp) strcpy(in.source, "udp");
@@ -257,6 +273,9 @@ void observe(const OximetrySample &s, int64_t utc_ms) {
         if (n != 16) return;
     } else return;
 
+    memcpy(in.peer, s.peer, sizeof(in.peer));
+    memcpy(in.serial, s.serial, sizeof(in.serial));
+    in.device_offset = device_offset_minutes;
     in.utc_ms = utc_ms;
     in.observed = s.observed_ms ? s.observed_ms : millis();
     in.removed = s.contact_known && !s.contact_present;

@@ -3715,7 +3715,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if ((oximetry_consumer_ || runtime.oximetry_requested.load()) && summary_media_available &&
         !runtime.activity.ota_install_active && !runtime.activity.realtime_stream_active) {
         const auto before = runtime.oximetry_archive.catalog();
-        worked = runtime.oximetry_archive.poll(now_ms) || worked;
+        worked = runtime.oximetry_archive.poll(now_ms, runtime.catalog.get()) || worked;
         const auto catalog = runtime.oximetry_archive.catalog();
         if (before != catalog) {
             if (oximetry_consumer_ && runtime.oximetry_archive.ring_changed()) oximetry_consumer_(catalog);

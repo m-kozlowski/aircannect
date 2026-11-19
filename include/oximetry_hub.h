@@ -31,6 +31,7 @@ struct OximetrySample {
     uint32_t observed_ms = 0;
     char detail[48] = {};
     char peer[18] = {};
+    char serial[33] = {};
     float pi_percent = -1;
 };
 

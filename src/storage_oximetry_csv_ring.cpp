@@ -98,18 +98,18 @@ bool step(uint32_t now) {
 
     if (!chunk) chunk = LargeByteBuffer::allocate(4096);
     if (!chunk) return retry(now, "buffer unavailable");
-    size_t used = 0, prefix = 0;
+    size_t used = 0;
     if (!sample) {
-        const int n = snprintf(reinterpret_cast<char *>(chunk->data()), chunk->size(),
-            "# Source=%s/%s\r\n%s", r.source, r.id, Columns);
-        if (n < 0 || size_t(n) >= chunk->size()) return retry(now, "header too long");
-        prefix = used = size_t(n);
+        char header[MaxHeader];
+        used = format_header(header, r.source, r.id, r.offset_minutes, r.peer, r.serial);
+        if (!used) return retry(now, "header too long");
+        memcpy(chunk->data(), header, used);
     }
     for (size_t i = 0; i < count; ++i) {
         const auto *v = records + i * 5;
         char row[MaxRow];
         const size_t n = format_row(row, r.start_ms + int64_t(sample + i) * r.interval_s * 1000,
-                                    v[0], v[1], v[3], -1);
+                                    r.offset_minutes, v[0], v[1], v[3], -1);
         if (!n || used + n > chunk->size()) return retry(now, "invalid row");
         memcpy(chunk->data() + used, row, n);
         used += n;
@@ -122,7 +122,7 @@ bool step(uint32_t now) {
 
             // A later clock observation can change the first timestamp. Never
             // replace an unrelated file delivered by a user over USB.
-            uint8_t first[300];
+            char first[MaxHeader + MaxRow];
             if (used > sizeof(first)) return retry(now, "CSV prefix too long");
             const int csv = Storage::open_descriptor(final.c_str(), O_RDONLY);
             if (csv < 0) return retry(now, "CSV open failed");
@@ -133,7 +133,11 @@ bool step(uint32_t now) {
                 next();
                 return true;
             }
-            if (size_t(got) < prefix || memcmp(first, chunk->data(), prefix)) {
+            const std::string identity = std::string("# Source=") + r.source + "/" + r.id;
+            const std::string_view existing(first, got);
+            if (existing.substr(0, identity.size()) != identity ||
+                (existing.substr(identity.size(), 12) != " Version=2 O" &&
+                 existing.substr(identity.size(), sizeof(Columns)+1) != std::string("\r\n") + Columns)) {
                 Log::logf(CAT_OXI, LOG_WARN, "ring CSV name occupied: %s\n", final.c_str());
                 next();
                 return true;

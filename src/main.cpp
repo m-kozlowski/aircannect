@@ -1592,7 +1592,12 @@ void setup() {
         const uint32_t delay = sample.observed_ms ? millis() - sample.observed_ms : 0;
         const int64_t utc_ms = time_sync_service.esp_clock_valid()
             ? int64_t(tv.tv_sec) * 1000 + tv.tv_usec / 1000 - delay : 0;
-        OximetryCsv::observe(sample, utc_ms);
+        int32_t offset = INT32_MIN;
+        const auto &device = as11_device_service.state();
+        if (!edf_recorder_manager.session_offset_minutes(offset) &&
+            device.timezone_offset_valid()) offset = device.timezone_offset_minutes();
+
+        OximetryCsv::observe(sample, utc_ms, offset);
     }, nullptr);
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);

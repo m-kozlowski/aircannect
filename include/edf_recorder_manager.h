@@ -164,6 +164,11 @@ public:
     bool finalization_pending() const;
     bool latest_catalog_refresh_hint(EdfCatalogRefreshHint &out) const;
     bool active_segment_metadata(EdfSessionMetadata &out) const;
+    bool session_offset_minutes(int32_t &out) const {
+        if (!status_.active || !session_timezone_frozen_) return false;
+        out = session_timezone_offset_minutes_;
+        return true;
+    }
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }

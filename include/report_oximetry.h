@@ -10,6 +10,8 @@
 
 namespace aircannect {
 
+class NightCatalog;
+
 struct ReportOximetryRecording {
     char source[33]{};
     char id[37]{};
@@ -19,6 +21,8 @@ struct ReportOximetryRecording {
     int64_t csv_end_ms = 0;
     uint64_t modified = 0;
     bool listed = false;
+    char peer[18]{}, serial[33]{};
+    int32_t offset_minutes = 0;
     char day[9]{};
     int64_t noon_s = 0, next_noon_s = 0;
 
@@ -39,13 +43,13 @@ class ReportOximetryArchive {
 public:
     void begin(StorageScanPort &scan, StorageReadPort &read);
     void reset();
-    bool poll(uint32_t now_ms);
+    bool poll(uint32_t now_ms, const NightCatalog *nights = nullptr);
     bool ring_changed() const { return ring_changed_; }
     std::shared_ptr<const ReportOximetryCatalog> catalog() const { return published_; }
 
 private:
     void release();
-    bool step(uint32_t now_ms);
+    bool step(uint32_t now_ms, const NightCatalog *nights);
     void consume(const StorageScanEntryView &entry, std::string_view source, std::string_view id,
                  const uint8_t *bytes, size_t length);
 

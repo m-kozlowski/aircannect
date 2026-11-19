@@ -6,6 +6,8 @@
 #include <ctime>
 #include "calendar_utils.h"
 #include "large_json_allocator.h"
+#include "edf_time.h"
+#include "night_catalog.h"
 #include "oximetry_archive.h"
 #include "utc_time.h"
 
@@ -143,15 +145,15 @@ void ReportOximetryArchive::reset() {
     published_ring_revision_ = 0;
 }
 
-bool ReportOximetryArchive::poll(uint32_t now_ms) try {
-    return step(now_ms);
+bool ReportOximetryArchive::poll(uint32_t now_ms, const NightCatalog *nights) try {
+    return step(now_ms, nights);
 } catch (const std::bad_alloc &) {
     release();
     retry_at_ = now_ms + 60000;
     return false;
 }
 
-bool ReportOximetryArchive::step(uint32_t now_ms) {
+bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     if (!files_) {
         if (!scan_ticket_.valid()) {
             ring_revision_ = oximetry_archive_revision.load();
@@ -186,6 +188,21 @@ bool ReportOximetryArchive::step(uint32_t now_ms) {
             for (size_t i = 0; i < originals; ++i) {
                 auto slice = (*building_)[i];
                 if (!night_window(slice.start_ms / 1000, slice)) continue;
+                if (!slice.csv_bytes) {
+                    edf_configured_timezone_offset_minutes(slice.start_ms, slice.offset_minutes);
+                    // The EDF day may differ from the ESP sleep day near noon.
+                    const int64_t utc_day = slice.start_ms / 86400000;
+                    for (int delta = -2; nights && delta <= 1; ++delta) {
+                        SleepDayId day;
+                        if (!SleepDayId::from_epoch_days(utc_day + delta, day)) continue;
+                        const auto *record = nights->find(day);
+                        if (record && record->timezone_offset_valid &&
+                            record->day_start_ms <= slice.start_ms && slice.start_ms < record->day_end_ms) {
+                            slice.offset_minutes = record->timezone_offset_minutes;
+                            break;
+                        }
+                    }
+                }
                 (*building_)[i] = slice;
                 while (slice.next_noon_s * 1000 < slice.end_ms() && night_window(slice.next_noon_s, slice))
                     building_->push_back(slice);
@@ -269,6 +286,9 @@ void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::stri
             recording.csv_bytes = entry.size;
         } else {
             if (!decode_header(bytes, length, entry.size, id, recording)) return;
+            // Legacy imports used SN, or twelve MAC digits when INFO had no SN.
+            if (source.size() != 12 || source.find_first_not_of("0123456789abcdefABCDEF") != source.npos)
+                memcpy(recording.serial, source.data(), source.size());
             ring_changed_ = true;
         }
         memcpy(recording.source, source.data(), source.size());
@@ -293,8 +313,13 @@ void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::stri
     // Membership is stronger evidence than comparing wall times across a
     // backward step. A later sync must never reinterpret an already listed file.
     for (auto &recording : *building_) {
-        if (recording.csv_bytes || source != recording.source ||
-            (recording.listed && recording.observation_ms <= utc)) continue;
+        if (recording.csv_bytes || source != recording.source) continue;
+        const char *peer = doc["ble"] | "";
+        const char *serial = doc["serial"] | "";
+        if (strlen(peer) == 17 && strspn(peer, "0123456789abcdefABCDEF:") == 17)
+            strcpy(recording.peer, peer);
+        if (oximetry_source_valid(serial) && source == serial) strcpy(recording.serial, serial);
+        if (recording.listed && recording.observation_ms <= utc) continue;
         const auto pos = list.find(recording.id);
         const bool listed = pos != list.npos && (!pos || list[pos-1] == ',') &&
             (pos + 14 == list.size() || list[pos+14] == ',');
