@@ -11,18 +11,13 @@ namespace aircannect {
 
 class LocalActionRouter {
 public:
-    using Handler = bool (*)(void *context, uint32_t now_ms);
+    // Null means accepted; other results describe the rejection.
+    using Handler = const char * (*)(void *context, uint32_t now_ms);
 
     bool register_handler(LocalActionId action,
                           Handler handler,
                           void *context);
-    void apply_bindings(const ButtonBinding *bindings, size_t count);
-    bool dispatch(ButtonInput input,
-                  ButtonGesture gesture,
-                  uint32_t now_ms) const;
-
-    LocalActionId effective_action(ButtonInput input,
-                                   ButtonGesture gesture) const;
+    const char *dispatch(LocalActionId action, uint32_t now_ms) const;
 
 private:
     struct HandlerEntry {
@@ -31,7 +26,6 @@ private:
         void *context = nullptr;
     };
 
-    std::vector<ButtonBinding> bindings_;
     std::vector<HandlerEntry> handlers_;
 };
 

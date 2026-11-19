@@ -173,7 +173,8 @@ static ResmedOtaManager resmed_ota_manager;
 static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static DisplayManager display_manager;
-static LocalInputController local_inputs;
+static LocalActionRouter local_actions;
+static LocalInputController local_inputs(local_actions);
 static LiveChartService live_chart_service;
 static TherapyTelemetryBroker therapy_telemetry_broker;
 static DisplayTelemetryAdapter display_telemetry_adapter;
@@ -302,21 +303,21 @@ static void note_session_stream_frame(void *context,
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
 }
 
-static bool toggle_display_backlight(void *, uint32_t) {
-    if (!display_manager.available()) return false;
+static const char *toggle_display_backlight(void *, uint32_t) {
+    if (!display_manager.available()) return "display_unavailable";
     display_manager.toggle_backlight();
-    return true;
+    return nullptr;
 }
 
-static bool display_previous_page(void *, uint32_t) {
-    return display_manager.previous_page();
+static const char *display_previous_page(void *, uint32_t) {
+    return display_manager.previous_page() ? nullptr : "display_unavailable";
 }
 
-static bool display_next_page(void *, uint32_t) {
-    return display_manager.next_page();
+static const char *display_next_page(void *, uint32_t) {
+    return display_manager.next_page() ? nullptr : "display_unavailable";
 }
 
-static bool toggle_therapy(void *, uint32_t now_ms) {
+static const char *toggle_therapy(void *, uint32_t now_ms) {
     const As11TherapyState therapy =
         as11_device_service.state().therapy_state();
     const As11TherapyTarget target =
@@ -327,31 +328,32 @@ static bool toggle_therapy(void *, uint32_t now_ms) {
         as11_device_service.request_therapy(
             rpc_transport, target, RpcSource::Internal, now_ms);
 
-    return submission.accepted();
+    if (submission.accepted()) return nullptr;
+    return submission.admission == OperationAdmission::Busy ? "busy" : "therapy_rejected";
 }
 
-static bool power_off_aircannect(void *, uint32_t) {
+static const char *power_off_aircannect(void *, uint32_t) {
     if (!board_power_off_supported() || local_poweroff_requested ||
         StorageUsb::suspended() ||
         firmware_installer.active() || resmed_ota_manager.active()) {
-        return false;
+        return "power_off_unavailable";
     }
 
     local_poweroff_backlight_was_on = display_manager.backlight_on();
     display_manager.set_backlight(false);
     local_poweroff_requested = true;
     local_poweroff_attempted = false;
-    return true;
+    return nullptr;
 }
 
-static bool restart_aircannect(void *, uint32_t) {
+static const char *restart_aircannect(void *, uint32_t) {
     if (StorageUsb::suspended() || firmware_installer.active() ||
         resmed_ota_manager.active()) {
-        return false;
+        return "usb_or_update_active";
     }
 
     firmware_installer.schedule_reboot(500);
-    return true;
+    return nullptr;
 }
 
 static const char *factory_reset_blocked() {
@@ -365,8 +367,8 @@ static const char *factory_reset_blocked() {
     return nullptr;
 }
 
-static bool trigger_export_sync(void *, uint32_t) {
-    return export_coordinator.request_sync();
+static const char *trigger_export_sync(void *, uint32_t) {
+    return export_coordinator.request_sync() ? nullptr : "sync_unavailable";
 }
 
 static bool disconnect_cpap(void *, uint32_t) {
@@ -1298,25 +1300,27 @@ void setup() {
         display_manager.note_interaction();
     }, nullptr);
 
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::DisplayPreviousPage,
         display_previous_page, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::DisplayNextPage,
         display_next_page, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::DisplayToggleBacklight,
         toggle_display_backlight, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::TherapyToggle, toggle_therapy, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::PowerOff, power_off_aircannect, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::RestartAirCANnect, restart_aircannect, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::TriggerSync, trigger_export_sync, nullptr);
-    (void)local_inputs.register_action(
-        LocalActionId::DisconnectCpap, disconnect_cpap, nullptr);
+    (void)local_actions.register_handler(
+        LocalActionId::DisconnectCpap, [](void *ctx, uint32_t ms) -> const char * {
+            return disconnect_cpap(ctx, ms) ? nullptr : "disconnect_unavailable";
+        }, nullptr);
     if (!local_inputs.begin() ||
         !local_inputs.apply_config(config_service.data().keybindings,
                                    millis())) {

@@ -21,35 +21,16 @@ bool LocalActionRouter::register_handler(LocalActionId action,
     return true;
 }
 
-void LocalActionRouter::apply_bindings(const ButtonBinding *bindings,
-                                       size_t count) {
-    std::vector<ButtonBinding> next;
-    if (bindings && count > 0) {
-        next.assign(bindings, bindings + count);
-    }
-    bindings_.swap(next);
-}
-
-LocalActionId LocalActionRouter::effective_action(
-    ButtonInput input,
-    ButtonGesture gesture) const {
-    const ButtonBinding *binding = button_binding_find(
-        bindings_.data(), bindings_.size(), input, gesture);
-    return binding ? binding->action : LocalActionId::None;
-}
-
-bool LocalActionRouter::dispatch(ButtonInput input,
-                                 ButtonGesture gesture,
-                                 uint32_t now_ms) const {
-    const LocalActionId action = effective_action(input, gesture);
-    if (action == LocalActionId::None) return true;
+const char *LocalActionRouter::dispatch(LocalActionId action,
+                                       uint32_t now_ms) const {
+    if (action == LocalActionId::None) return nullptr;
 
     for (const HandlerEntry &entry : handlers_) {
         if (entry.action == action && entry.handler) {
             return entry.handler(entry.context, now_ms);
         }
     }
-    return false;
+    return "action_unavailable";
 }
 
 }  // namespace aircannect

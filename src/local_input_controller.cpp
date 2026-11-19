@@ -38,13 +38,6 @@ void LocalInputController::set_interaction_handler(
     interaction_context_ = context;
 }
 
-bool LocalInputController::register_action(
-    LocalActionId action,
-    LocalActionRouter::Handler handler,
-    void *context) {
-    return actions_.register_handler(action, handler, context);
-}
-
 bool LocalInputController::apply_config(const ButtonBindingConfig &config,
                                         uint32_t now_ms) {
     size_t count = 0;
@@ -92,7 +85,8 @@ void LocalInputController::apply_bindings(const ButtonBinding *bindings,
                 : BUTTON_GESTURE_LONG;
     }
 
-    actions_.apply_bindings(bindings, count);
+    bindings_.clear();
+    if (count) bindings_.assign(bindings, bindings + count);
     buttons_.set_chords(chords.data(), chords.size(), now_ms);
 }
 
@@ -107,28 +101,29 @@ void LocalInputController::handle_button_event(void *context,
 void LocalInputController::dispatch(ButtonInput input,
                                     ButtonGesture gesture,
                                     uint32_t now_ms) {
-    const LocalActionId action =
-        actions_.effective_action(input, gesture);
+    const ButtonBinding *binding = button_binding_find(
+        bindings_.data(), bindings_.size(), input, gesture);
+    const auto action = binding ? binding->action : LocalActionId::None;
     const LocalActionDefinition *definition = local_action_find(action);
-    const bool accepted = actions_.dispatch(input, gesture, now_ms);
+    const char *error = actions_.dispatch(action, now_ms);
 
     if (interaction_handler_) interaction_handler_(interaction_context_);
 
     if (input.chord()) {
-        Log::logf(CAT_GENERAL, accepted ? LOG_DEBUG : LOG_WARN,
+        Log::logf(CAT_GENERAL, error ? LOG_WARN : LOG_DEBUG,
                   "[INPUT] buttons=%u+%u gesture=%s action=%s %s\n",
                   static_cast<unsigned>(input.first_button_key),
                   static_cast<unsigned>(input.second_button_key),
                   button_gesture_name(gesture),
                   definition ? definition->name : "unknown",
-                  accepted ? "accepted" : "rejected");
+                  error ? error : "accepted");
     } else {
-        Log::logf(CAT_GENERAL, accepted ? LOG_DEBUG : LOG_WARN,
+        Log::logf(CAT_GENERAL, error ? LOG_WARN : LOG_DEBUG,
                   "[INPUT] button=%u gesture=%s action=%s %s\n",
                   static_cast<unsigned>(input.first_button_key),
                   button_gesture_name(gesture),
                   definition ? definition->name : "unknown",
-                  accepted ? "accepted" : "rejected");
+                  error ? error : "accepted");
     }
 }
 
