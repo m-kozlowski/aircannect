@@ -103,7 +103,7 @@ struct ReportOximetrySignalBuilder::Work {
     StoragePreparedRead prepared;
     std::string path;
     bool atomic = false;
-    bool retry = false;
+    bool retry = false, verified = false;
     uint64_t offset = 0;
     size_t sent = 0, chunk = 0;
 
@@ -239,6 +239,7 @@ bool ReportOximetrySignalBuilder::finished() const {
 }
 
 bool ReportOximetrySignalBuilder::retryable() const { return work_ && work_->retry; }
+bool ReportOximetrySignalBuilder::verified() const { return work_ && work_->verified; }
 
 bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
     const bool manifest_only = mode == Mode::Manifest;
@@ -258,6 +259,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             return true;
         }
         if (mode == Mode::Build) work_->blocks.resize(work_->slots);
+        if (mode == Mode::VerifyOriginal) work_->phase = Phase::Samples;
     }
     auto &w = *work_;
     auto fail = [&](bool retry = true) {
@@ -326,8 +328,13 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         const bool probe = w.phase == Phase::Probe;
         if (!probe && w.read_offset == r.size()) {
             if (!w.reader.complete()) return fail(false);
-            if (!w.finish_block()) return fail();
-            w.phase = Phase::Plane;
+            if (mode == Mode::VerifyOriginal) {
+                w.verified = true;
+                w.phase = Phase::Done;
+            } else {
+                if (!w.finish_block()) return fail();
+                w.phase = Phase::Plane;
+            }
             reads_->release_handle();
             return true;
         }
@@ -364,6 +371,10 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
                 r.planes = std::allocate_shared<ReportOximetryPlanes>(LargeAllocator<ReportOximetryPlanes>(), w.product);
                 w.phase = Phase::Done;
             } else { w.product = {}; w.phase = manifest_only ? Phase::Done : Phase::Samples; }
+        } else if (mode == Mode::VerifyOriginal) {
+            if (view.length != w.read.length || !w.reader.consume(view.data, view.length, nullptr,
+                [](void *, const ReportOximetrySample &) { return true; })) return fail(false);
+            w.read_offset += view.length;
         } else {
             if (view.length != w.read.length) return fail();
             const size_t max_rows = r.csv_bytes ? view.length / 24 + 2 : view.length / 5;

@@ -21,7 +21,7 @@ inline constexpr const char *ReportOximetryChannels[] = {"spo2", "pulse", "movem
 
 class ReportOximetrySignalBuilder {
 public:
-    enum class Mode { Build, Manifest };
+    enum class Mode { Build, Manifest, VerifyOriginal };
     ~ReportOximetrySignalBuilder();
     void begin(StorageReadPort &reads, StorageRangeWritePort &ranges,
                StorageAtomicWritePort &writes);
@@ -29,6 +29,7 @@ public:
     bool step(ReportOximetryRecording &recording, Mode mode = Mode::Build);
     bool finished() const;
     bool retryable() const;
+    bool verified() const;
 
 private:
     struct Work;

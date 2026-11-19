@@ -1230,7 +1230,9 @@ struct ReportTask::Runtime {
             !store_catalog_loader.status().active();
 
         const auto space = storage_status ? storage_status->space_snapshot() : StorageSpaceSnapshot{};
+        const auto before = oximetry_archive.catalog();
         const bool worked = generation_cleanup.poll(allowed, now_ms, space);
+        if (before != oximetry_archive.catalog()) publish_state();
         auto metadata = generation_cleanup.take_published_metadata();
         if (metadata.metadata) accept_store_metadata(metadata);
         return worked;
@@ -3220,6 +3222,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->oximetry_archive.set_signal_builder(runtime_->oximetry_signals);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port, &write_port);
+        if (path_port) runtime_->generation_cleanup.oximetry().begin(runtime_->oximetry_archive,
+            scan_port, read_port, range_write_port, write_port, *delete_port, *path_port);
         runtime_->date_repair.begin(read_port, write_port, range_write_port, scan_port, *delete_port);
     }
     runtime_->signal_tile_backfill.begin(read_port, range_write_port, write_port);
@@ -3723,6 +3727,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
     worked = runtime.apply_pending_activity() || worked;
+    if (runtime.local_background_work_blocked()) runtime.oximetry_archive.pause_signals();
 
     if (runtime.staging_generation && !runtime.refresh_generation &&
         (runtime.local_background_work_blocked() || !runtime.pending_refresh.valid() ||

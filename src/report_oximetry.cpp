@@ -158,6 +158,7 @@ void ReportOximetryArchive::reset() {
     if (signals_) signals_->reset();
     preparing_.reset();
     ring_sources_.reset();
+    originals_.reset();
     prepare_pending_ = offsets_dirty_ = false;
     signal_retry_at_ = 0;
     published_.reset();
@@ -256,6 +257,7 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             manifest_only_ = true;
             signal_retry_at_ = 0;
             if (ring_changed_) ring_sources_ = building_;
+            originals_ = building_;
             published_ = std::move(building_);
             scanning_ = {};
             release();
@@ -322,11 +324,15 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     return true;
 }
 
+void ReportOximetryArchive::pause_signals() {
+    if (signals_ && preparing_ && !manifest_only_) signals_->reset();
+}
+
 bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowed) try {
     if (!signals_ || !prepare_pending_ || !published_ ||
         (!preparing_ && signal_retry_at_ && int32_t(now_ms - signal_retry_at_) < 0)) return false;
     if (!manifest_only_ && !background_allowed) {
-        signals_->reset();
+        pause_signals();
         return false;
     }
     if (!preparing_) {
@@ -358,6 +364,20 @@ bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowe
     preparing_.reset();
     signal_retry_at_ = now_ms + 60000;
     return false;
+}
+
+void ReportOximetryArchive::withdraw(const ReportOximetryRecording &recording) {
+    auto revised = std::allocate_shared<ReportOximetryCatalog>(
+        LargeAllocator<ReportOximetryCatalog>(), *published_);
+    for (auto &r : *revised) {
+        if (r.key() == recording.key() && r.noon_s == recording.noon_s) r.planes.reset();
+    }
+
+    if (signals_) signals_->reset();
+    preparing_.reset();
+    published_ = std::move(revised);
+    manifest_only_ = false;
+    prepare_pending_ = true;
 }
 
 void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::string_view source,

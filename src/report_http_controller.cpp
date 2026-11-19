@@ -882,7 +882,7 @@ void ReportHttpController::poll() {
             if (!version_changed && current->oximetry != entry.archive) {
                 const auto &previous = *entry.recording;
                 version_changed = std::none_of(current->oximetry->begin(), current->oximetry->end(),
-                    [&](const auto &r) { return r.key() == previous.key() &&
+                    [&](const auto &r) { return r.planes && r.key() == previous.key() &&
                         r.noon_s == previous.noon_s && r.next_noon_s == previous.next_noon_s &&
                         r.start_ms == previous.start_ms &&
                         r.modified == previous.modified && r.size() == previous.size(); });

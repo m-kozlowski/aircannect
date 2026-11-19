@@ -51,7 +51,12 @@ public:
     bool poll(uint32_t now_ms, const NightCatalog *nights = nullptr);
     void night_offsets_changed() { offsets_dirty_ = true; }
     bool poll_signals(uint32_t now_ms, bool background_allowed);
+    void pause_signals();
     auto ring_sources() const { return ring_sources_; }
+    auto originals() const {
+        return scanning_.pending || pending_.pending ? nullptr : originals_;
+    }
+    void withdraw(const ReportOximetryRecording &recording);
     std::shared_ptr<const ReportOximetryCatalog> catalog() const { return published_; }
 
 private:
@@ -74,6 +79,7 @@ private:
     uint32_t signal_retry_at_ = 0;
     std::shared_ptr<ReportOximetryCatalog> preparing_;
     std::shared_ptr<const ReportOximetryCatalog> ring_sources_;
+    std::shared_ptr<const ReportOximetryCatalog> originals_;
     ReportOximetryChange pending_{true, true}, scanning_;
     uint32_t generation_ = 0, retry_at_ = 0;
     std::shared_ptr<ReportOximetryCatalog> building_;
