@@ -325,7 +325,7 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
 }
 
 void ReportOximetryArchive::pause_signals() {
-    if (signals_ && preparing_ && !manifest_only_) signals_->reset();
+    if (signals_ && preparing_ && !manifest_only_) signals_->pause();
 }
 
 bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowed) try {

@@ -28,6 +28,7 @@ public:
     void begin(StorageReadPort &reads, StorageRangeWritePort &ranges,
                StorageAtomicWritePort &writes);
     void reset();
+    void pause();
     bool step(ReportOximetryRecording &recording, Mode mode = Mode::Build);
     bool finished() const;
     bool retryable() const;
@@ -35,6 +36,7 @@ public:
 
 private:
     struct Work;
+    bool complete_write(Work &work);
     Work *work_ = nullptr;
     StorageReadPort *reads_ = nullptr;
     StorageRangeWritePort *ranges_ = nullptr;

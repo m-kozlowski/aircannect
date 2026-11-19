@@ -11,6 +11,9 @@
 #include "report_oximetry_samples.h"
 #include "report_signal_tile.h"
 #include "storage_space_policy.h"
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
 
 namespace aircannect {
 namespace {
@@ -84,7 +87,7 @@ bool report_oximetry_overview_tile(const ReportOximetryRecording &r, ReportSigna
 }
 
 struct ReportOximetrySignalBuilder::Work {
-    enum class Phase { Probe, Samples, Plane, Tile, Histograms, Index, Publish, Done };
+    enum class Phase { Probe, Samples, Plane, Tile, Histograms, Index, Publish, Published, Done };
     Phase phase = Phase::Probe;
     ReportOximetryPlanes product;
     ReportOximetrySampleReader reader;
@@ -105,6 +108,9 @@ struct ReportOximetrySignalBuilder::Work {
     std::string path;
     bool atomic = false;
     bool retry = false, verified = false;
+#ifdef ARDUINO
+    uint32_t build_started_ms = 0;
+#endif
     uint64_t offset = 0;
     size_t sent = 0, chunk = 0;
 
@@ -242,6 +248,57 @@ bool ReportOximetrySignalBuilder::finished() const {
 bool ReportOximetrySignalBuilder::retryable() const { return work_ && work_->retry; }
 bool ReportOximetrySignalBuilder::verified() const { return work_ && work_->verified; }
 
+bool ReportOximetrySignalBuilder::complete_write(Work &w) {
+    bool ok;
+    if (w.atomic) {
+        StorageAtomicWriteCompletion done;
+        if (!writes_->take_completion(w.write_ticket, done)) return false;
+        ok = done.outcome.disposition == OperationDisposition::Succeeded;
+    } else {
+        StorageRangeWriteCompletion done;
+        if (!ranges_->take_completion(w.write_ticket, done)) return false;
+        ok = done.outcome.disposition == OperationDisposition::Succeeded &&
+             done.bytes_written == w.chunk;
+    }
+    w.write_ticket = {};
+    if (!ok) {
+        w.retry = true;
+        w.phase = Work::Phase::Done;
+        return true;
+    }
+
+    w.sent += w.chunk;
+    if (!w.atomic && w.sent < w.output->size()) return true;
+    w.sent = 0;
+    w.output.reset();
+    if (w.atomic) {
+        w.phase = Work::Phase::Published;
+#ifdef ARDUINO
+        Log::logf(CAT_REPORT, LOG_DEBUG, "oximetry tracks id=%s rows=%lu elapsed_ms=%lu",
+                  w.record->id, static_cast<unsigned long>(w.product.rows),
+                  static_cast<unsigned long>(millis() - w.build_started_ms));
+#endif
+    }
+    return true;
+}
+
+void ReportOximetrySignalBuilder::pause() {
+    if (!work_) return;
+    auto &w = *work_;
+    // An unconsumed read can be requested again at read_offset. A write
+    // already submitted must be acknowledged, not replayed after the pause.
+    if (w.read_ticket.valid() && reads_->abandon(w.read_ticket)) w.read_ticket = {};
+    if (w.prepared.valid()) {
+        reads_->release_prepared(w.prepared);
+        w.prepared = {};
+    }
+    if (!w.read_ticket.valid() && w.read.retain_handle) {
+        reads_->release_handle();
+        w.read.retain_handle = false;
+    }
+    if (w.write_ticket.valid()) complete_write(w);
+}
+
 bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
     const bool manifest_only = mode == Mode::Manifest;
     using Phase = Work::Phase;
@@ -268,28 +325,11 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         w.phase = Phase::Done;
         return true;
     };
-    if (w.write_ticket.valid()) {
-        bool ok;
-        if (w.atomic) {
-            StorageAtomicWriteCompletion done;
-            if (!writes_->take_completion(w.write_ticket, done)) return false;
-            ok = done.outcome.disposition == OperationDisposition::Succeeded;
-        } else {
-            StorageRangeWriteCompletion done;
-            if (!ranges_->take_completion(w.write_ticket, done)) return false;
-            ok = done.outcome.disposition == OperationDisposition::Succeeded &&
-                 done.bytes_written == w.chunk;
-        }
-        w.write_ticket = {};
-        if (!ok) return fail();
-        w.sent += w.chunk;
-        if (!w.atomic && w.sent < w.output->size()) return true;
-        w.sent = 0;
-        w.output.reset();
-        if (w.atomic) {
-            r.planes = std::allocate_shared<ReportOximetryPlanes>(LargeAllocator<ReportOximetryPlanes>(), w.product);
-            w.phase = Phase::Done;
-        }
+    if (w.write_ticket.valid()) return complete_write(w);
+    if (w.phase == Phase::Done) return false;
+    if (w.phase == Phase::Published) {
+        r.planes = std::allocate_shared<ReportOximetryPlanes>(LargeAllocator<ReportOximetryPlanes>(), w.product);
+        w.phase = Phase::Done;
         return true;
     }
     if (w.output) {
@@ -348,6 +388,10 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             const auto submit = reads_->request_read(w.read);
             if (submit.admission == OperationAdmission::Rejected) return fail();
             w.read_ticket = submit.ticket;
+#ifdef ARDUINO
+            if (!w.build_started_ms && !probe && mode == Mode::Build && submit.accepted())
+                w.build_started_ms = millis();
+#endif
             return submit.accepted();
         }
         if (!w.prepared.valid()) {
