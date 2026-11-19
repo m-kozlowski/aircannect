@@ -196,6 +196,20 @@ void append_keybinding_input_schema(LargeTextBuffer &json,
     json += "]}";
 }
 
+void append_action_choices(LargeTextBuffer &json) {
+    json += ",\"actions\":[";
+    size_t count = 0;
+    const auto *actions = local_action_catalog(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (i) json += ',';
+        json += '{';
+        json_add_string(json, "value", actions[i].name, false);
+        json_add_string(json, "label", actions[i].label);
+        json += '}';
+    }
+    json += ']';
+}
+
 void append_keybindings_schema(LargeTextBuffer &json) {
     json += ",\"buttons\":[";
 
@@ -229,18 +243,7 @@ void append_keybindings_schema(LargeTextBuffer &json) {
     }
     json += "]";
 
-    json += ",\"actions\":[";
-    size_t action_count = 0;
-    const LocalActionDefinition *actions =
-        local_action_catalog(action_count);
-    for (size_t i = 0; i < action_count; ++i) {
-        if (i) json += ',';
-        json += '{';
-        json_add_string(json, "value", actions[i].name, false);
-        json_add_string(json, "label", actions[i].label);
-        json += '}';
-    }
-    json += ']';
+    append_action_choices(json);
 }
 
 bool parse_keybindings_update(JsonVariantConst value,
@@ -407,6 +410,7 @@ void build_schema_json(LargeTextBuffer &json) {
                             false);
             json_add_string(json, "label",
                             app_config_group_label(current_group));
+            if (current_group == AppConfigGroup::Schedule) append_action_choices(json);
             json += ",\"fields\":[";
             group_open = true;
             first_field = true;

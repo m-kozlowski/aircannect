@@ -638,6 +638,17 @@
       border-bottom: 1px solid #30364166;
     }
 
+    .schedule-rule, .schedule-days, .schedule-rule label {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .schedule-rule { min-width: 0; }
+    .schedule-rule select, .schedule-rule input { width: auto; max-width: 100%; }
+    .schedule-rule label { gap: 3px; white-space: nowrap; }
+
     .keybindings-field {
       display: block;
     }
