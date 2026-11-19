@@ -638,7 +638,13 @@
       border-bottom: 1px solid #30364166;
     }
 
-    .schedule-rule, .schedule-days, .schedule-rule label {
+    .schedule-field {
+      display: grid;
+      grid-template-columns: 5em minmax(0, 1fr);
+      align-items: baseline;
+    }
+
+    .schedule-rule, .schedule-timing, .schedule-days, .schedule-rule label {
       display: flex;
       align-items: center;
       flex-wrap: wrap;
@@ -646,8 +652,9 @@
     }
 
     .schedule-rule { min-width: 0; }
-    .schedule-rule select, .schedule-rule input { width: auto; max-width: 100%; }
-    .schedule-rule input[type="number"] { width: 7em; }
+    .schedule-timing { flex: 0 1 19rem; min-width: 0; flex-wrap: nowrap; }
+    .schedule-rule select, .schedule-rule input { width: auto; min-width: 0; max-width: 100%; }
+    .schedule-rule input[type="number"] { width: 6em; }
     .schedule-rule [hidden] { display: none; }
     .schedule-rule label { gap: 3px; white-space: nowrap; }
 

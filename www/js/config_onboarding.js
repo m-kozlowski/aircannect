@@ -302,9 +302,14 @@
       });
       update();
       raw.dataset.orig = raw.value;
-      panel.append(action, enabledLabel, kind, time, weekdays, count, unit, raw);
+      const timing = document.createElement("div");
+      timing.className = "schedule-timing";
+      timing.append(kind, time, count, unit);
+      panel.append(action, enabledLabel, timing, weekdays, raw);
       const label = AirCANnect.i18n.message("config.field." + field.key + ".label", {}, field.label);
-      root.appendChild(AirCANnect.ui.row(label, panel));
+      const row = AirCANnect.ui.row(label, panel);
+      row.classList.add("schedule-field");
+      root.appendChild(row);
     }
 
     function renderSleepHqMasks(control, selected) {
