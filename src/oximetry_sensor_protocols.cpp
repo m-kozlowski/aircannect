@@ -32,11 +32,11 @@ void BleSensorProtocolEngine::emit_sample(uint16_t spo2_raw,
                                           bool invalid,
                                           bool contact_known,
                                           bool contact_present,
-                                          bool charging) {
+                                          bool charging, float pi_percent) {
     if (!sample_callback_) return;
 
     sample_callback_(sample_context_, spo2_raw, pulse_raw, invalid,
-                     contact_known, contact_present, charging);
+                     contact_known, contact_present, charging, pi_percent);
 }
 
 #if AC_OXIMETRY_BLE_ENABLED

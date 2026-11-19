@@ -1507,12 +1507,12 @@ void BleSensorSource::protocol_sample_callback(
     bool invalid,
     bool contact_known,
     bool contact_present,
-    bool charging) {
+    bool charging, float pi_percent) {
     auto *source = static_cast<BleSensorSource *>(context);
     if (!source) return;
 
     source->publish_sample(spo2_raw, pulse_raw, invalid,
-                           contact_known, contact_present, charging);
+                           contact_known, contact_present, charging, pi_percent);
 }
 
 void BleSensorSource::advertisement_callback(
@@ -1572,7 +1572,7 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
                                      bool from_invalid_packet,
                                      bool contact_known,
                                      bool contact_present,
-                                     bool charging) {
+                                     bool charging, float pi_percent) {
     bool spo2_valid = false;
     bool pulse_valid = false;
     const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
@@ -1609,6 +1609,8 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
     sample.contact_known = contact_known;
     sample.contact_present = contact_present;
     sample.observed_ms = millis();
+    sample.pi_percent = pi_percent;
+    snprintf(sample.peer, sizeof(sample.peer), "%s", connected_addr_);
     if (connected_name_[0]) {
         snprintf(sample.detail, sizeof(sample.detail),
                  "%s %s", connected_addr_, connected_name_);

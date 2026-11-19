@@ -30,6 +30,7 @@
 #include "storage_browser_service.h"
 #include "storage_delete_service.h"
 #include "storage_file_log_sink.h"
+#include "storage_oximetry_csv.h"
 #include "storage_internal.h"
 #include "storage_io_diagnostics.h"
 #include "storage_path.h"
@@ -1261,6 +1262,7 @@ bool initialize_storage_resources() {
 #if AC_FILE_LOG_ENABLED
     if (!file_log_sink.begin(wake_service_task)) ready = false;
 #endif
+    if (!OximetryCsv::begin(wake_service_task)) ready = false;
     if (!browser_service.begin(wake_service_task)) ready = false;
     if (!archive_service.begin(wake_service_task,
                                claim_archive_maintenance,
@@ -2598,6 +2600,8 @@ bool process_usb_mode() {
         unlock_queue();
         if (!edf_drained) return false;
 
+        if (!OximetryCsv::release_media()) return true;
+
         if (!released) {
             (void)process_close_all();
             const bool overview_released = edf_overview.release_media();
@@ -2725,6 +2729,7 @@ void task_entry(void *) {
             bool edf_queue_drained = false;
             size_t slot_index = SIZE_MAX;
             const bool storage_mounted = Storage::mounted();
+            OximetryCsv::set_mounted(storage_mounted);
             if (lock_queue(50)) {
                 if (storage_mounted && slot_storage_available() &&
                     queued > 0 && !processing_job) {
@@ -2804,7 +2809,9 @@ void task_entry(void *) {
                     file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
                 const bool tail_read_active = file_log_tail_read_active();
 
-                if (!foreground_due && !tail_read_active &&
+                if (storage_mounted && OximetryCsv::live_step(now_ms)) {
+                    did_work = true;
+                } else if (!foreground_due && !tail_read_active &&
                     file_log_sink.step()) {
                     did_work = true;
                     file_log_burst++;
@@ -2827,6 +2834,9 @@ void task_entry(void *) {
                            file_log_sink.step()) {
                     did_work = true;
                     file_log_burst++;
+                } else if (storage_mounted && !capture_running &&
+                           overview_scan_allowed.load() && OximetryCsv::archive_step(now_ms)) {
+                    did_work = true;
                 } else if (Storage::poll(capacity_update_allowed.load() &&
                                          !capture_running)) {
                     did_work = true;

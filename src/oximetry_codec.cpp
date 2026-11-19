@@ -7,8 +7,7 @@ uint16_t encode_sfloat_int_value(int16_t value) {
     return static_cast<uint16_t>(value) & 0x0fff;
 }
 
-int16_t decode_sfloat_int_value(uint16_t raw, bool &valid) {
-    valid = false;
+static float decode_sfloat(uint16_t raw) {
     if (raw == PLX_SFLOAT_NAN || raw == PLX_SFLOAT_NRES ||
         raw == PLX_SFLOAT_POS_INF || raw == PLX_SFLOAT_NEG_INF ||
         raw == PLX_SFLOAT_RESERVED) {
@@ -30,9 +29,26 @@ int16_t decode_sfloat_int_value(uint16_t raw, bool &valid) {
         exponent++;
     }
 
-    if (value < 0.0f || value > 300.0f) return -1;
-    valid = true;
-    return static_cast<int16_t>(value + 0.5f);
+    return value;
+}
+
+int16_t decode_sfloat_int_value(uint16_t raw, bool &valid) {
+    const float value = decode_sfloat(raw);
+    valid = value >= 0 && value <= 300;
+    return valid ? static_cast<int16_t>(value + 0.5f) : -1;
+}
+
+float decode_plx_pi(const uint8_t *packet, size_t size, bool spot_check) {
+    if (!packet || size < 7) return -1;
+    const unsigned flags = packet[0];
+    if (!(flags & (spot_check ? 0x08 : 0x10))) return -1;
+
+    // PLXS tables 3.3 and 3.7: the optional index follows all other fields.
+    const size_t offset = 5 + (spot_check
+        ? 7 * bool(flags & 1) + 2 * bool(flags & 2) + 3 * bool(flags & 4)
+        : 4 * bool(flags & 1) + 4 * bool(flags & 2) + 2 * bool(flags & 4) + 3 * bool(flags & 8));
+    if (offset + 2 > size) return -1;
+    return decode_sfloat(packet[offset] | (uint16_t(packet[offset + 1]) << 8));
 }
 
 bool decode_nonin_df19(const uint8_t *packet,
@@ -41,6 +57,7 @@ bool decode_nonin_df19(const uint8_t *packet,
     if (!packet || len < 10) return false;
 
     reading.spo2 = packet[7];
+    reading.pi_percent = ((uint16_t(packet[3]) << 8) | packet[4]) / 100.0f;
     reading.pulse_bpm =
         (static_cast<uint16_t>(packet[8]) << 8) | packet[9];
     reading.valid = reading.spo2 != 127 && reading.spo2 <= 100 &&

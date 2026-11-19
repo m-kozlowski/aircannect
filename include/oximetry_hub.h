@@ -30,6 +30,8 @@ struct OximetrySample {
     bool contact_present = false;
     uint32_t observed_ms = 0;
     char detail[48] = {};
+    char peer[18] = {};
+    float pi_percent = -1;
 };
 
 using OximetrySampleObserver = void (*)(void *context,
@@ -66,6 +68,10 @@ struct OximetryHubSnapshot {
 class OximetryHub {
 public:
     void set_enabled(bool enabled);
+    void set_archive_observer(OximetrySampleObserver observer, void *context) {
+        archive_observer_ = observer;
+        archive_context_ = context;
+    }
     void set_sample_observer(OximetrySampleObserver observer,
                              void *context);
     bool ingest(const OximetrySample &sample,
@@ -91,6 +97,8 @@ private:
 
     OximetrySampleObserver sample_observer_ = nullptr;
     void *sample_observer_context_ = nullptr;
+    OximetrySampleObserver archive_observer_ = nullptr;
+    void *archive_context_ = nullptr;
 };
 
 }  // namespace aircannect

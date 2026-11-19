@@ -58,7 +58,7 @@ void BleSensorProtocolEngine::process_nonin_notification(
     emit_sample(
         valid ? encode_sfloat_int_value(reading.spo2) : PLX_SFLOAT_NAN,
         valid ? encode_sfloat_int_value(reading.pulse_bpm) : PLX_SFLOAT_NAN,
-        !valid);
+        !valid, false, false, false, reading.pi_percent);
 }
 #endif
 

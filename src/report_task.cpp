@@ -3712,13 +3712,18 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     const bool summary_media_available = runtime.storage_status && runtime.storage_status->mounted();
-    if (runtime.oximetry_requested.load() && summary_media_available &&
+    if ((oximetry_consumer_ || runtime.oximetry_requested.load()) && summary_media_available &&
         !runtime.activity.ota_install_active && !runtime.activity.realtime_stream_active) {
         const auto before = runtime.oximetry_archive.catalog();
         worked = runtime.oximetry_archive.poll(now_ms) || worked;
-        if (before != runtime.oximetry_archive.catalog()) runtime.publish_state();
+        const auto catalog = runtime.oximetry_archive.catalog();
+        if (before != catalog) {
+            if (oximetry_consumer_) oximetry_consumer_(catalog);
+            runtime.publish_state();
+        }
     }
     if (runtime.summary_media_available && !summary_media_available) {
+        runtime.oximetry_archive.reset();
         if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
         runtime.summary_archive.forget_media();
     }

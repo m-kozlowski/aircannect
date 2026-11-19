@@ -31,6 +31,8 @@ bool OximetryHub::ingest(const OximetrySample &sample,
                          OximetryHubAction &actions) {
     actions = OximetryHubAction::None;
     if (!enabled_ || sample.source == OximetrySource::None) return false;
+    if (archive_observer_) archive_observer_(archive_context_, sample);
+
     if (source_present_ && source_ != sample.source) return false;
     if (!source_present_ && !sample.valid &&
         sample.source != OximetrySource::Ble) {

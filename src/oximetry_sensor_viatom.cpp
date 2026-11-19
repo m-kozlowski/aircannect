@@ -359,7 +359,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
               static_cast<unsigned>(battery_state),
               static_cast<double>(pi) / 10.0);
     emit_sample(spo2_raw, pulse_raw, invalid, true, lead_state != 0,
-                charging);
+                charging, pi == 0xff ? -1.0f : pi / 10.0f);
 }
 
 void BleSensorProtocolEngine::viatom_reset_rx() {

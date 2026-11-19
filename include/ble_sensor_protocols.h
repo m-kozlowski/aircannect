@@ -24,7 +24,7 @@ public:
                                     bool invalid,
                                     bool contact_known,
                                     bool contact_present,
-                                    bool charging);
+                                    bool charging, float pi_percent);
 
     bool begin();
     void set_sample_callback(SampleCallback callback, void *context);
@@ -54,7 +54,7 @@ private:
                      bool invalid,
                      bool contact_known = false,
                      bool contact_present = false,
-                     bool charging = false);
+                     bool charging = false, float pi_percent = -1);
 
 #if AC_OXIMETRY_BLE_ENABLED
     // NimBLE host callback -> sensor worker SPSC mailbox.
@@ -78,6 +78,7 @@ private:
     void reset_fragment_assemblers();
 
     // PLX and Nonin
+    bool plx_spot_check_ = false;
     bool subscribe_plx();
     bool subscribe_nonin();
     void process_plx_notification(const uint8_t *data, size_t len);

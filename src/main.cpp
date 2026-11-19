@@ -56,6 +56,7 @@
 #include "ota_http_controller.h"
 #include "ble_runtime.h"
 #include "oximetry_hub.h"
+#include "oximetry_csv_capture.h"
 #include "oximetry_http_controller.h"
 #include "plx_peripheral.h"
 #include "provisioning.h"
@@ -1585,6 +1586,14 @@ void setup() {
                                report_spool_service);
     oximetry_hub.set_sample_observer(route_oximetry_sample,
                                      &edf_recorder_manager);
+    oximetry_hub.set_archive_observer([](void *, const OximetrySample &sample) {
+        timeval tv{};
+        gettimeofday(&tv, nullptr);
+        const uint32_t delay = sample.observed_ms ? millis() - sample.observed_ms : 0;
+        const int64_t utc_ms = time_sync_service.esp_clock_valid()
+            ? int64_t(tv.tv_sec) * 1000 + tv.tv_usec / 1000 - delay : 0;
+        OximetryCsv::observe(sample, utc_ms);
+    }, nullptr);
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);
 
@@ -1610,6 +1619,7 @@ void setup() {
         Log::logf(CAT_BLE, LOG_ERROR,
                   "AS11 reconnect recovery failed to start\n");
     }
+    report_task.set_oximetry_catalog_consumer(OximetryCsv::publish_catalog);
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
@@ -1812,6 +1822,7 @@ void loop() {
     const bool esp_ota_quiesce_requested =
         firmware_installer.as11_quiesce_required();
     oximetry_sensor_source.set_suspended(esp_ota_quiesce_requested);
+    OximetryCsv::pause(esp_ota_quiesce_requested);
     plx_peripheral.set_suspended(esp_ota_quiesce_requested);
 
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
@@ -1909,7 +1920,8 @@ void loop() {
         esp_ota_quiesce_requested &&
             !as11_service_exclusive &&
             rpc_quiesce_coordinator.timed_out(),
-        oximetry_sensor_source.suspended() && plx_peripheral.suspended());
+        oximetry_sensor_source.suspended() && plx_peripheral.suspended() &&
+            OximetryCsv::drained());
 
     drain_can_rx();
 
