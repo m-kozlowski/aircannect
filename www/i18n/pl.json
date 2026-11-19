@@ -1212,7 +1212,7 @@
   "status.api_unavailable": "API niedostępne",
   "status.autoconnect_off": "Automatyczne łączenie wyłączone",
   "status.autoconnect_on": "Automatyczne łączenie włączone",
-  "status.import_recordings": "Zapisuj nagrania na SD",
+  "status.import_recordings": "Pobieraj nagrania z pulsoksymetru",
   "status.ble_off": "BLE wyłączone",
   "status.build_target": "Wariant sprzętowy: {target}",
   "status.clock": "Zegar",
