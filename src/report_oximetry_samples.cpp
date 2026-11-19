@@ -1,6 +1,7 @@
 #include "report_oximetry_samples.h"
 
 #include <cmath>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include "utc_time.h"
@@ -29,9 +30,18 @@ bool ReportOximetrySampleReader::csv_row(ReportOximetrySample &sample) {
     for (size_t i = 0; i < ReportOximetrySample::Channels; ++i) {
         const char *value = field[indices[i]];
         if (!*value) continue;
-        char *end;
-        const float v = strtof(value, &end);
-        if (*end || !std::isfinite(v) || v < 0) return false;
+        const char *end = i == 3 ? value + strlen(value) : field[indices[i] + 1] - 1;
+        unsigned integer;
+        const auto parsed = std::from_chars(value, end, integer);
+        float v;
+        if (parsed.ec == std::errc{} && parsed.ptr == end && integer <= (1u << 24)) {
+            v = static_cast<float>(integer);
+        } else {
+            char *tail;
+            v = strtof(value, &tail);
+            if (*tail) return false;
+        }
+        if (!std::isfinite(v) || v < 0) return false;
         if (i == ReportOximetrySample::Oxygen && (v < 1 || v > 100)) continue;
         if (i == ReportOximetrySample::Pulse && (v < 1 || v == 255)) continue;
         sample.values[i] = v;
