@@ -93,6 +93,7 @@ bool BleSensorProtocolEngine::subscribe(NimBLEClient *client) {
     if (!client || !notification_queue_) return false;
 
     client_ = client;
+    notification_worker_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
     active_.store(this, std::memory_order_release);
     active_protocol_ = ActiveProtocol::Plx;
     if (subscribe_plx()) {
@@ -154,8 +155,9 @@ void BleSensorProtocolEngine::reset() {
     active_protocol_ = ActiveProtocol::None;
 }
 
-void BleSensorProtocolEngine::poll(uint32_t now_ms) {
+void BleSensorProtocolEngine::poll(uint32_t now_ms, O2RingRecordingImport *recordings) {
 #if AC_OXIMETRY_BLE_ENABLED
+    recordings_ = recordings;
     drain_notifications();
     if (!client_ || !client_->isConnected()) return;
 
@@ -173,6 +175,7 @@ void BleSensorProtocolEngine::poll(uint32_t now_ms) {
     }
 #else
     (void)now_ms;
+    (void)recordings;
 #endif
 }
 
@@ -212,6 +215,7 @@ bool BleSensorProtocolEngine::enqueue_notification(
     memcpy(slot.bytes, data, len);
     notification_write_sequence_.store(write + 1,
                                        std::memory_order_release);
+    xTaskNotifyGive(notification_worker_.load(std::memory_order_acquire));
     return true;
 }
 

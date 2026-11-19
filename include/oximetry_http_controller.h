@@ -44,6 +44,7 @@ private:
         SensorConnect,
         SensorForget,
         SensorAutoconnect,
+        SensorRecordings,
     };
 
     struct Command {

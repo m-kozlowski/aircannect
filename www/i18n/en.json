@@ -1200,6 +1200,7 @@
   "status.api_unavailable": "API unavailable",
   "status.autoconnect_off": "Auto-connect Off",
   "status.autoconnect_on": "Auto-connect On",
+  "status.import_recordings": "Save recordings to SD",
   "status.ble_off": "BLE Off",
   "status.build_target": "Build target: {target}",
   "status.clock": "Clock",

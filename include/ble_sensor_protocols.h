@@ -6,12 +6,15 @@
 
 #include "board.h"
 #include "ble_sensor_frame.h"
+#include "large_byte_buffer.h"
 
 #if AC_OXIMETRY_BLE_ENABLED
 #include <NimBLEDevice.h>
 #endif
 
 namespace aircannect {
+
+class O2RingRecordingImport;
 
 class BleSensorProtocolEngine {
 public:
@@ -33,7 +36,8 @@ public:
     void on_connected();
     void invalidate_connection();
     void reset();
-    void poll(uint32_t now_ms);
+    void poll(uint32_t now_ms, O2RingRecordingImport *recordings = nullptr);
+    bool uses_viatom() const { return active_protocol_ == ActiveProtocol::Viatom; }
 
 private:
     enum class ActiveProtocol : uint8_t {
@@ -97,6 +101,8 @@ private:
         uint32_t last_poll_ms = 0;
         bool initial_probe_complete = false;
         bool need_time_sync = false;
+        bool file_open = false;
+        std::unique_ptr<LargeByteBuffer> file_rx;
     };
 
     bool subscribe_viatom();
@@ -106,9 +112,10 @@ private:
     void viatom_notify(const uint8_t *data, size_t len);
     void viatom_reset_rx();
     void viatom_clear_pending();
+    bool viatom_poll_recordings(uint32_t now_ms);
     bool viatom_write_packet(uint8_t command,
                              const uint8_t *payload,
-                             size_t payload_len);
+                             size_t payload_len, uint16_t index = 0);
     bool viatom_sync_datetime();
     bool viatom_send_command(uint8_t command,
                              const uint8_t *payload,
@@ -169,9 +176,11 @@ private:
     std::atomic<uint32_t> notification_fault_generation_{0};
     std::atomic<uint32_t> notification_drops_{0};
     NotificationSlot *notification_queue_ = nullptr;
+    std::atomic<TaskHandle_t> notification_worker_{nullptr};
     uint32_t reported_notification_drops_ = 0;
     NimBLEClient *client_ = nullptr;
     ViatomState viatom_;
+    O2RingRecordingImport *recordings_ = nullptr;
     OxyiiState oxyii_;
 #endif
 

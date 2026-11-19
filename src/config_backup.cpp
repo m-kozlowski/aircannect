@@ -29,7 +29,8 @@ bool same_ssid(const String &saved, const std::string &restored) {
 
 bool same_sensor(const OximetrySensorDevice &a, const OximetrySensorDevice &b) {
     return strcmp(a.addr, b.addr) == 0 && strcmp(a.name, b.name) == 0 &&
-           a.addr_type == b.addr_type && a.autoconnect == b.autoconnect;
+           a.addr_type == b.addr_type && a.autoconnect == b.autoconnect &&
+           a.recordings == b.recordings;
 }
 
 std::string sensor_value(const OximetrySensorDevice &device) {
@@ -38,6 +39,7 @@ std::string sensor_value(const OximetrySensorDevice &device) {
     sensor.address_type = device.addr_type;
     sensor.name = device.name;
     sensor.autoconnect = device.autoconnect;
+    sensor.recordings = device.recordings;
     return config_backup_format_sensor(sensor);
 }
 
@@ -430,6 +432,7 @@ void ConfigRestore::prepare_sensors(ConfigRestoreResult &result) {
                 sizeof(device.addr) - 1);
         device.addr_type = entry.sensor.address_type;
         device.autoconnect = entry.sensor.autoconnect;
+        device.recordings = entry.sensor.recordings;
         strncpy(device.name, entry.sensor.name.c_str(),
                 sizeof(device.name) - 1);
         sensors_after_.push_back(device);
@@ -555,15 +558,9 @@ void ConfigBackup::export_sensors(LargeTextBuffer &out) const {
     const size_t count =
         sensors_->known_sensors(devices, AC_OXIMETRY_SENSOR_MAX_KNOWN);
     for (size_t i = 0; i < count; ++i) {
-        ConfigBackupSensor sensor;
-        sensor.address = devices[i].addr;
-        sensor.address_type = devices[i].addr_type;
-        sensor.autoconnect = devices[i].autoconnect;
-        sensor.name = devices[i].name;
-
         append_checked(out,
                        index_key(AC_CONFIG_BACKUP_SENSOR_PREFIX, i),
-                       config_backup_format_sensor(sensor));
+                       sensor_value(devices[i]));
     }
 }
 

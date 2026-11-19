@@ -9,6 +9,7 @@
 #include "fixed_queue.h"
 #include "oximetry_hub.h"
 #include "oximetry_status.h"
+#include "o2ring_recording_import.h"
 
 #if AC_OXIMETRY_BLE_ENABLED
 #include <NimBLEDevice.h>
@@ -51,6 +52,7 @@ public:
     bool request_disconnect(bool hold_until_absent = true);
     bool forget(const char *addr_or_all);
     bool set_autoconnect(const char *addr, bool enabled);
+    bool set_recordings(const char *addr, bool enabled);
     // Replaces the saved sensor list, as when restoring a backup.
     bool replace_known_sensors(const OximetrySensorDevice *devices,
                                size_t count);
@@ -132,6 +134,7 @@ private:
 
     BleRuntime &runtime_;
     BleSensorProtocolEngine protocols_;
+    O2RingRecordingImport recordings_;
 #if AC_OXIMETRY_BLE_ENABLED
     NimBLEClient *client_ = nullptr;
     portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;

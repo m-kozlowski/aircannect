@@ -446,6 +446,20 @@
             device.addr, !device.autoconnect);
           controls.appendChild(auto);
 
+          if (typeof device.recordings === "boolean") {
+            const label = document.createElement("label");
+            label.className = "check";
+            const check = document.createElement("input");
+            check.type = "checkbox";
+            check.checked = device.recordings;
+            check.onchange = () => oxiAction("sensor_recordings",
+              {addr: device.addr, enabled: check.checked}, "oxiKnownMsg");
+            const caption = document.createElement("span");
+            AirCANnect.i18n.text(caption, AirCANnect.i18n.message("status.import_recordings"));
+            label.append(check, caption);
+            controls.appendChild(label);
+          }
+
           const connect = document.createElement("button");
           connect.className = "btn primary";
           AirCANnect.i18n.text(connect, isActive ? AirCANnect.i18n.message("status.connected") : AirCANnect.i18n.message("ui.connect"));

@@ -84,12 +84,13 @@ void config_backup_append_entry(LargeTextBuffer &out,
                                 const std::string &key,
                                 const std::string &value);
 
-// saved oximeters: "address,address_type,on|off,name"
+// saved oximeters: "address,address_type,on|off[+recordings],name"
 struct ConfigBackupSensor {
     std::string address;
     uint8_t address_type = 1;
     bool autoconnect = true;
     std::string name;
+    bool recordings = false;
 };
 
 std::string config_backup_format_sensor(const ConfigBackupSensor &sensor);

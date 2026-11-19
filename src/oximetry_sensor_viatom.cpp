@@ -5,6 +5,7 @@
 
 #include "debug_log.h"
 #include "oximetry_codec.h"
+#include "o2ring_recording_import.h"
 
 namespace aircannect {
 
@@ -17,6 +18,12 @@ static constexpr uint32_t VIATOM_SENSOR_POLL_MS = 1000;
 static constexpr uint32_t VIATOM_RESPONSE_TIMEOUT_MS = 1500;
 static constexpr size_t VIATOM_WRITE_CHUNK_LEN = 20;
 static constexpr uint32_t VIATOM_WRITE_CHUNK_DELAY_MS = 50;
+using FileCommand = O2RingRecordingImport::Command;
+
+bool is_file_command(uint8_t cmd) {
+    return cmd == uint8_t(FileCommand::Info) || cmd == uint8_t(FileCommand::Open) ||
+           cmd == uint8_t(FileCommand::Close) || cmd == uint8_t(FileCommand::Read);
+}
 
 const char *viatom_command_name(uint8_t command) {
     switch (command) {
@@ -110,6 +117,32 @@ void BleSensorProtocolEngine::viatom_reset() {
     viatom_.last_poll_ms = 0;
     viatom_.initial_probe_complete = false;
     viatom_.need_time_sync = false;
+    viatom_.file_open = false;
+    recordings_ = nullptr;
+}
+
+bool BleSensorProtocolEngine::viatom_poll_recordings(uint32_t now_ms) {
+    // A cancelled import still releases the remote file on this connection.
+    const bool importing = recordings_ && recordings_->active();
+    FileCommand cmd = FileCommand::None;
+    if (viatom_.file_open && (!importing || recordings_->awaiting_list())) {
+        cmd = FileCommand::Close;
+    } else if (importing) {
+        cmd = recordings_->next();
+    }
+    if (cmd == FileCommand::None) return false;
+
+    const bool open = cmd == FileCommand::Open;
+    const auto *payload = open ? reinterpret_cast<const uint8_t *>(recordings_->recording()) : nullptr;
+    const uint16_t index = cmd == FileCommand::Read ? recordings_->block() : 0;
+    if (!viatom_write_packet(uint8_t(cmd), payload, open ? 15 : 0, index)) {
+        if (recordings_) recordings_->fail("ble_write_failed");
+        client_->disconnect();
+        return true;
+    }
+    viatom_.pending_cmd = uint8_t(cmd);
+    viatom_.pending_ms = now_ms;
+    return true;
 }
 
 void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
@@ -121,6 +154,13 @@ void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor Viatom response timeout cmd=%s\n",
                   viatom_command_name(viatom_.pending_cmd));
+        if (is_file_command(viatom_.pending_cmd)) {
+            // Legacy replies carry status, not an opcode. Do not let a late
+            // file response be mistaken for a live reading on this link.
+            if (recordings_) recordings_->fail("ble_response_timeout");
+            client_->disconnect();
+            return;
+        }
         viatom_reset_rx();
         viatom_clear_pending();
     }
@@ -141,7 +181,7 @@ void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
         return;
     }
 
-    if (viatom_.need_time_sync) {
+    if (viatom_.need_time_sync && !(recordings_ && recordings_->awaiting_list())) {
         if (viatom_sync_datetime()) {
             viatom_.pending_cmd = VIATOM_CMD_CONFIG;
             viatom_.pending_ms = now_ms;
@@ -152,6 +192,8 @@ void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
 
     if (static_cast<int32_t>(now_ms - viatom_.last_poll_ms) <
         static_cast<int32_t>(VIATOM_SENSOR_POLL_MS)) {
+        if (now_ms - viatom_.last_poll_ms < VIATOM_SENSOR_POLL_MS / 2)
+            viatom_poll_recordings(now_ms);
         return;
     }
 
@@ -177,8 +219,34 @@ void BleSensorProtocolEngine::viatom_notify_callback(
 }
 
 void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
+    // The first seven bytes declare the frame length; a notification can
+    // split that header too. Only file replies can outgrow the live buffer.
+    if (is_file_command(viatom_.pending_cmd) && !viatom_.rx_want) {
+        const size_t count = std::min(len, 7 - viatom_.rx_len);
+        memcpy(viatom_.rx + viatom_.rx_len, data, count);
+        viatom_.rx_len += count;
+        data += count;
+        len -= count;
+        if (viatom_.rx_len < 7) return;
+        if (!ble_sensor_frame_size(viatom_.rx, 7, 0x55, viatom_.rx_want)) {
+            viatom_reset_rx();
+            return;
+        }
+        if (viatom_.rx_want > sizeof(viatom_.rx)) {
+            if (viatom_.pending_cmd != uint8_t(FileCommand::Info) &&
+                viatom_.rx_want > O2RingRecordingImport::BlockSize + 8) {
+                viatom_reset_rx();
+                return;
+            }
+            viatom_.file_rx = LargeByteBuffer::allocate(viatom_.rx_want);
+            if (!viatom_.file_rx) { viatom_reset_rx(); return; }
+            memcpy(viatom_.file_rx->data(), viatom_.rx, 7);
+        }
+    }
+    auto *rx = viatom_.file_rx ? viatom_.file_rx->data() : viatom_.rx;
+    const size_t capacity = viatom_.file_rx ? viatom_.file_rx->size() : sizeof(viatom_.rx);
     const auto result = append_ble_sensor_frame(
-        data, len, 0x55, viatom_.rx, sizeof(viatom_.rx),
+        data, len, 0x55, rx, capacity,
         viatom_.rx_len, viatom_.rx_want);
 
     if (result == BleSensorFrameResult::Incomplete) return;
@@ -189,9 +257,10 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     }
 
     BleSensorFrameView frame;
-    const bool valid_frame = decode_ble_sensor_frame(
-        viatom_.rx, viatom_.rx_len, viatom_.rx_want, 0, frame);
+    const bool valid_frame = viatom_.rx_len == viatom_.rx_want &&
+        decode_ble_sensor_frame(rx, viatom_.rx_len, viatom_.rx_want, 0, frame);
 
+    const auto owner = std::move(viatom_.file_rx);
     viatom_reset_rx();
     if (!valid_frame) {
         Log::logf(CAT_OXI, LOG_DEBUG, "Sensor Viatom RX decode failed\n");
@@ -199,6 +268,21 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     }
 
     const uint8_t pending_command = viatom_.pending_cmd;
+    if (is_file_command(pending_command)) {
+        const auto cmd = static_cast<FileCommand>(pending_command);
+        const uint16_t index = uint16_t(rx[3]) | uint16_t(rx[4]) << 8;
+        viatom_clear_pending();
+        if (cmd == FileCommand::Close) viatom_.file_open = false;
+        if (frame.command != 0) {
+            if (recordings_ && cmd == FileCommand::Open) recordings_->skip_open();
+            else if (recordings_) recordings_->fail("sensor_rejected_file_command");
+            return;
+        }
+        if (cmd == FileCommand::Open) viatom_.file_open = true;
+        if (recordings_ && recordings_->active())
+            recordings_->reply(cmd, index, frame.payload, frame.payload_len);
+        return;
+    }
     if (pending_command == VIATOM_CMD_CONFIG) {
         viatom_clear_pending();
         return;
@@ -233,7 +317,8 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
 
     viatom_clear_pending();
     const bool charging = battery_state == 1 || battery_state == 2;
-    viatom_.initial_probe_complete = !charging;
+    viatom_.initial_probe_complete = !charging || (recordings_ && recordings_->active());
+    if (charging) viatom_.need_time_sync = false;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",
@@ -251,6 +336,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
 void BleSensorProtocolEngine::viatom_reset_rx() {
     viatom_.rx_len = 0;
     viatom_.rx_want = 0;
+    viatom_.file_rx.reset();
 }
 
 void BleSensorProtocolEngine::viatom_clear_pending() {
@@ -261,7 +347,7 @@ void BleSensorProtocolEngine::viatom_clear_pending() {
 bool BleSensorProtocolEngine::viatom_write_packet(
     uint8_t command,
     const uint8_t *payload,
-    size_t payload_len) {
+    size_t payload_len, uint16_t index) {
     if (!viatom_.write) return false;
 
     uint8_t packet[80] = {};
@@ -270,6 +356,8 @@ bool BleSensorProtocolEngine::viatom_write_packet(
         return false;
     }
     const size_t packet_len = payload_len + 8;
+    packet[3] = static_cast<uint8_t>(index);
+    packet[4] = static_cast<uint8_t>(index >> 8);
     if (payload && payload_len) memcpy(packet + 7, payload, payload_len);
     write_ble_sensor_frame_crc(packet, packet_len);
 

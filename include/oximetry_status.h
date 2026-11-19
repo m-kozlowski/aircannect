@@ -2,8 +2,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <cstring>
 
 #include "board_oximetry.h"
+#include "board_storage.h"
 #include "oximetry_hub.h"
 #include "oximetry_types.h"
 
@@ -24,6 +26,13 @@ struct OximetrySensorDevice {
     char name[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
     int rssi = 0;
     bool autoconnect = true;
+    bool recordings = false;
+
+    bool supports_recordings() const {
+        return AC_STORAGE_HAS_SDCARD &&
+               (std::strcmp(name, "O2Ring") == 0 ||
+                (std::strncmp(name, "O2Ring ", 7) == 0 && name[7] >= '0' && name[7] <= '9'));
+    }
 };
 
 struct UdpOximeterStatus {
