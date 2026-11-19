@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 
 #include "as11_ble_recovery.h"
 #include "as11_ble_rpc_link.h"
@@ -304,21 +305,23 @@ static void note_session_stream_frame(void *context,
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
 }
 
-static const char *toggle_display_backlight(void *, uint32_t) {
+static const char *toggle_display_backlight(void *, ActionInvocation) {
     if (!display_manager.available()) return "display_unavailable";
     display_manager.toggle_backlight();
     return nullptr;
 }
 
-static const char *display_previous_page(void *, uint32_t) {
-    return display_manager.previous_page() ? nullptr : "display_unavailable";
+static const char *display_previous_page(void *, ActionInvocation call) {
+    return display_manager.previous_page(call.source == ActionSource::Button)
+        ? nullptr : "display_unavailable";
 }
 
-static const char *display_next_page(void *, uint32_t) {
-    return display_manager.next_page() ? nullptr : "display_unavailable";
+static const char *display_next_page(void *, ActionInvocation call) {
+    return display_manager.next_page(call.source == ActionSource::Button)
+        ? nullptr : "display_unavailable";
 }
 
-static const char *toggle_therapy(void *, uint32_t now_ms) {
+static const char *toggle_therapy(void *, ActionInvocation call) {
     const As11TherapyState therapy =
         as11_device_service.state().therapy_state();
     const As11TherapyTarget target =
@@ -327,14 +330,14 @@ static const char *toggle_therapy(void *, uint32_t now_ms) {
             : As11TherapyTarget::Running;
     const OperationSubmission submission =
         as11_device_service.request_therapy(
-            rpc_transport, target, RpcSource::Internal, now_ms);
+            rpc_transport, target, RpcSource::Internal, call.now_ms);
 
     if (submission.accepted()) return nullptr;
     return submission.admission == OperationAdmission::Busy ? "busy" : "therapy_rejected";
 }
 
 template <LocalActionId Action>
-static const char *set_warmup(void *, uint32_t) {
+static const char *set_warmup(void *, ActionInvocation) {
     const auto &device = as11_device_service.state();
     const auto state = device.warmup_state();
     if (state == As11WarmupState::Unknown) return "warmup_state_unknown";
@@ -356,22 +359,25 @@ static void poll_scheduled_actions(uint32_t now_ms) {
     last_check = now_ms;
 
     const time_t now = time_sync_service.esp_clock_valid() ? time(nullptr) : 0;
-    const uint8_t due = action_schedule.take_due(now);
+    const uint8_t due = action_schedule.take_due(now, esp_timer_get_time() / 1000);
     if (!due) return;
 
     const auto &rules = config_service.data().schedule;
     for (size_t i = 0; i < rules.size(); ++i) {
         if (!(due & (1u << i))) continue;
         const auto action = rules[i].action;
-        const char *error = local_actions.dispatch(action, now_ms);
-        Log::logf(CAT_GENERAL, error ? LOG_WARN : LOG_INFO,
+        const char *error = local_actions.dispatch(action, {ActionSource::Schedule, now_ms});
+        if (!action_schedule.should_log_result(i, error)) continue;
+
+        const auto level = error ? LOG_WARN : rules[i].interval_s ? LOG_DEBUG : LOG_INFO;
+        Log::logf(CAT_GENERAL, level,
                   "[SCHEDULE] slot=%u action=%s result=%s\n",
                   unsigned(i + 1), local_action_find(action)->name,
                   error ? error : "accepted");
     }
 }
 
-static const char *power_off_aircannect(void *, uint32_t) {
+static const char *power_off_aircannect(void *, ActionInvocation) {
     if (!board_power_off_supported() || local_poweroff_requested ||
         StorageUsb::suspended() ||
         firmware_installer.active() || resmed_ota_manager.active()) {
@@ -385,7 +391,7 @@ static const char *power_off_aircannect(void *, uint32_t) {
     return nullptr;
 }
 
-static const char *restart_aircannect(void *, uint32_t) {
+static const char *restart_aircannect(void *, ActionInvocation) {
     if (StorageUsb::suspended() || firmware_installer.active() ||
         resmed_ota_manager.active()) {
         return "usb_or_update_active";
@@ -406,7 +412,7 @@ static const char *factory_reset_blocked() {
     return nullptr;
 }
 
-static const char *trigger_export_sync(void *, uint32_t) {
+static const char *trigger_export_sync(void *, ActionInvocation) {
     return export_coordinator.request_sync() ? nullptr : "sync_unavailable";
 }
 
@@ -1037,7 +1043,7 @@ static void apply_config_runtime_effects(void *,
         edf_recorder_manager.set_enabled(config.edf_capture_enabled);
     }
     if (dirty & AC_CONFIG_DIRTY_SCHEDULE) {
-        action_schedule.configure(config.schedule, time(nullptr));
+        action_schedule.configure(config.schedule, time(nullptr), esp_timer_get_time() / 1000);
     }
     if (dirty & AC_CONFIG_DIRTY_KEYBINDINGS) {
         if (!local_inputs.apply_config(config.keybindings, millis())) {
@@ -1338,7 +1344,7 @@ void setup() {
                   "[INIT] display manager failed to start\n");
     }
 
-    action_schedule.configure(config_service.data().schedule, time(nullptr));
+    action_schedule.configure(config_service.data().schedule, time(nullptr), esp_timer_get_time() / 1000);
     local_inputs.set_interaction_handler([](void *) {
         display_manager.note_interaction();
     }, nullptr);
@@ -1361,8 +1367,8 @@ void setup() {
     (void)local_actions.register_handler(
         LocalActionId::TriggerSync, trigger_export_sync, nullptr);
     (void)local_actions.register_handler(
-        LocalActionId::DisconnectCpap, [](void *ctx, uint32_t ms) -> const char * {
-            return disconnect_cpap(ctx, ms) ? nullptr : "disconnect_unavailable";
+        LocalActionId::DisconnectCpap, [](void *ctx, ActionInvocation call) -> const char * {
+            return disconnect_cpap(ctx, call.now_ms) ? nullptr : "disconnect_unavailable";
         }, nullptr);
     (void)local_actions.register_handler(LocalActionId::WarmupStart,
         set_warmup<LocalActionId::WarmupStart>, nullptr);

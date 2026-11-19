@@ -9,15 +9,22 @@
 
 namespace aircannect {
 
+enum class ActionSource : uint8_t { Button, Schedule };
+
+struct ActionInvocation {
+    ActionSource source;
+    uint32_t now_ms;
+};
+
 class LocalActionRouter {
 public:
-    // Null means accepted; other results describe the rejection.
-    using Handler = const char * (*)(void *context, uint32_t now_ms);
+    // Null means accepted; otherwise return a stable, static reason string.
+    using Handler = const char * (*)(void *context, ActionInvocation call);
 
     bool register_handler(LocalActionId action,
                           Handler handler,
                           void *context);
-    const char *dispatch(LocalActionId action, uint32_t now_ms) const;
+    const char *dispatch(LocalActionId action, ActionInvocation call) const;
 
 private:
     struct HandlerEntry {

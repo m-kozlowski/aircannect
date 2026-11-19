@@ -536,7 +536,7 @@ bool raw_value(const AppConfigData &cfg,
     out = "";
     switch (field.type) {
         case AppConfigFieldType::Schedule:
-            out = format_weekly_action(cfg.schedule[field.index]).c_str();
+            out = format_scheduled_action(cfg.schedule[field.index]).c_str();
             return true;
         case AppConfigFieldType::Bool:
             out = config_field_ref<bool>(cfg, field) ? "1" : "0";
@@ -773,8 +773,8 @@ bool AppConfigFieldWriter::set_value(
                                         level);
         }
         case AppConfigFieldId::Schedule: {
-            WeeklyAction parsed;
-            return parse_weekly_action(value.c_str(), parsed) &&
+            ScheduledAction parsed;
+            return parse_scheduled_action(value.c_str(), parsed) &&
                    config.set_schedule(field.index, parsed);
         }
         case AppConfigFieldId::Keybindings:

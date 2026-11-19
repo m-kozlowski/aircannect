@@ -93,11 +93,15 @@ individual overrides can be changed with
 
 | Key | Values | Default | Description |
 | --- | --- | --- | --- |
-| `schedule_1` ... `schedule_4` | `STATE HH:MM DAYS ACTION`, or empty | empty | One rule per slot. `on` enables the rule; `off` keeps it disabled. Any button action can be scheduled. |
+| `schedule_1` ... `schedule_4` | `STATE HH:MM DAYS ACTION`, `STATE every DURATION ACTION`, or empty | empty | One rule per slot. `on` enables the rule; `off` keeps it disabled. Any button action can be scheduled. |
 
 Times use the local timezone (`tz`). Use `*` for every day or a comma-separated
 list of days or ranges, e.g. `on 22:30 mon-fri warmup_start`. Missed times
 are skipped; a repeated hour does not run the same rule twice.
+
+Intervals use whole positive seconds (`s`), minutes (`m`), or hours (`h`),
+e.g. `on every 15s display_next_page`. The first interval starts at boot or
+when the rule is enabled or changed. No clock synchronization is required.
 
 ## Display
 

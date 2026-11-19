@@ -342,7 +342,7 @@ void load_config_field(Preferences &prefs,
         case AppConfigFieldType::Schedule:
             if (stored_type == PT_STR) {
                 const String text = prefs.getString(load_key);
-                if (!parse_weekly_action(text.c_str(), data.schedule[field.index])) {
+                if (!parse_scheduled_action(text.c_str(), data.schedule[field.index])) {
                     Log::logf(CAT_CONFIG, LOG_WARN, "invalid rule key=%s\n", field.key);
                 }
             }
@@ -966,7 +966,7 @@ bool AppConfig::set_edf_capture_enabled(bool enabled) {
     return mark_dirty(AC_CONFIG_DIRTY_EDF_CAPTURE);
 }
 
-bool AppConfig::set_schedule(size_t slot, const WeeklyAction &rule) {
+bool AppConfig::set_schedule(size_t slot, const ScheduledAction &rule) {
     if (slot >= data_.schedule.size()) return false;
     if (data_.schedule[slot] == rule) return true;
 

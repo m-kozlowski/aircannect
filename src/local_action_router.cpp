@@ -22,12 +22,12 @@ bool LocalActionRouter::register_handler(LocalActionId action,
 }
 
 const char *LocalActionRouter::dispatch(LocalActionId action,
-                                       uint32_t now_ms) const {
+                                       ActionInvocation call) const {
     if (action == LocalActionId::None) return nullptr;
 
     for (const HandlerEntry &entry : handlers_) {
         if (entry.action == action && entry.handler) {
-            return entry.handler(entry.context, now_ms);
+            return entry.handler(entry.context, call);
         }
     }
     return "action_unavailable";

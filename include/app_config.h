@@ -65,7 +65,7 @@ struct AppConfigData {
     bool edf_capture_enabled = AC_DEFAULT_EDF_CAPTURE_ENABLED != 0;
 
     ButtonBindingConfig keybindings;
-    WeeklyActions schedule{};
+    ScheduledActions schedule{};
     DisplayOrientation display_orientation =
         DisplayOrientation::BoardDefault;
     bool display_auto_rotate = true;
@@ -142,7 +142,7 @@ private:
     bool set_alert_audible_enabled(bool enabled);
     bool set_alert_audible_volume(uint16_t percent);
     bool set_edf_capture_enabled(bool enabled);
-    bool set_schedule(size_t slot, const WeeklyAction &rule);
+    bool set_schedule(size_t slot, const ScheduledAction &rule);
     bool set_keybindings(const ButtonBindingConfig &keybindings);
     bool set_display_orientation(DisplayOrientation orientation);
     bool set_display_auto_rotate(bool enabled);

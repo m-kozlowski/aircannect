@@ -105,7 +105,7 @@ void LocalInputController::dispatch(ButtonInput input,
         bindings_.data(), bindings_.size(), input, gesture);
     const auto action = binding ? binding->action : LocalActionId::None;
     const LocalActionDefinition *definition = local_action_find(action);
-    const char *error = actions_.dispatch(action, now_ms);
+    const char *error = actions_.dispatch(action, {ActionSource::Button, now_ms});
 
     if (interaction_handler_) interaction_handler_(interaction_context_);
 

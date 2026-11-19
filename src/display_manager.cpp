@@ -352,15 +352,15 @@ void DisplayManager::note_interaction() {
     if (task_) xTaskNotifyGive(task_);
 }
 
-bool DisplayManager::previous_page() {
-    return navigate_page(-1);
+bool DisplayManager::previous_page(bool interactive) {
+    return navigate_page(-1, interactive);
 }
 
-bool DisplayManager::next_page() {
-    return navigate_page(1);
+bool DisplayManager::next_page(bool interactive) {
+    return navigate_page(1, interactive);
 }
 
-bool DisplayManager::navigate_page(int8_t direction) {
+bool DisplayManager::navigate_page(int8_t direction, bool interactive) {
     if (!device_ || direction == 0) return false;
 
     const bool therapy = therapy_active_.load();
@@ -371,8 +371,9 @@ bool DisplayManager::navigate_page(int8_t direction) {
         page.load(), count, direction, backlight_visible_.load());
     if (!navigation.handled) return false;
 
-    note_interaction();
+    if (interactive) note_interaction();
     if (navigation.wake_only) {
+        if (!interactive) return true;
         set_backlight(true);
         return true;
     }
