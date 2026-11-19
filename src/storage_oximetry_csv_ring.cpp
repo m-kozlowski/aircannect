@@ -60,8 +60,8 @@ bool step(uint32_t now) {
     }
     if (!current || index >= current->size() || !publisher.recovery_complete()) return false;
     const auto &r = (*current)[index];
-    if (r.start_s < r.noon_s) {
-        next(); // Another night slice of the same BIN.
+    if (r.csv_bytes || r.start_ms < r.noon_s * 1000) {
+        next(); // Only the first slice of a vendor BIN needs conversion.
         return true;
     }
 
@@ -108,7 +108,7 @@ bool step(uint32_t now) {
     for (size_t i = 0; i < count; ++i) {
         const auto *v = records + i * 5;
         char row[MaxRow];
-        const size_t n = format_row(row, (r.start_s + int64_t(sample + i) * r.interval_s) * 1000,
+        const size_t n = format_row(row, r.start_ms + int64_t(sample + i) * r.interval_s * 1000,
                                     v[0], v[1], v[3], -1);
         if (!n || used + n > chunk->size()) return retry(now, "invalid row");
         memcpy(chunk->data() + used, row, n);

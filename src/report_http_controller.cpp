@@ -1342,7 +1342,7 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         const String source = request->arg("source"), id = request->arg("id");
         uint64_t first, count, modified;
         if (!summary || !summary->oximetry || !parse_uint64_arg(request, "first", UINT32_MAX, first) ||
-            !parse_uint64_arg(request, "count", 16384, count) || !count ||
+            !parse_uint64_arg(request, "count", 65536, count) || !count ||
             !parse_uint64_arg(request, "mtime", UINT64_MAX, modified)) {
             send_json_error(request, 400, "bad_oximetry_range");
             return;
@@ -1351,18 +1351,20 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
         const auto file = std::find_if(files.begin(), files.end(), [&](const auto &r) {
             return source == r.source && id == r.id;
         });
-        if (file == files.end() || file->modified != modified || first + count > file->samples) {
+        if (file == files.end() || file->modified != modified ||
+            (file->csv_bytes ? first + count > file->csv_bytes :
+             (count > 16384 || first + count > file->samples))) {
             send_json_error(request, 409, "report_version_changed");
             return;
         }
         pending.kind = PendingKind::Oximetry;
         pending.archive = summary->oximetry;
-        pending.response_size = pending.raw_response_size = count * 5;
+        pending.response_size = pending.raw_response_size = file->csv_bytes ? count : count * 5;
         command.path = file->path();
         command.verification = StorageStreamVerification::SizeAndModified;
         command.expected_size = file->size();
         command.expected_modified = file->modified;
-        command.source_offset = 40 + first * 5;
+        command.source_offset = file->csv_bytes ? first : 40 + first * 5;
         command.source_length = pending.raw_response_size;
     } else if (part == "events") {
         const ReportEventFileQuery query =

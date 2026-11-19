@@ -1,11 +1,13 @@
 #include "report_oximetry.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <ctime>
 #include "calendar_utils.h"
 #include "large_json_allocator.h"
 #include "oximetry_archive.h"
+#include "utc_time.h"
 
 namespace aircannect {
 namespace {
@@ -23,6 +25,16 @@ bool archive_name(const char *path, bool clock, std::string_view &source, std::s
     const auto suffix = rest.substr(slash + 1);
     if (clock) return suffix.size() > 16 && suffix.substr(0, 6) == "clock/" &&
                       suffix.substr(suffix.size() - 5) == ".json";
+    if (suffix.size() == 49 && suffix.substr(8, 6) == "/live-" &&
+        suffix.substr(45) == ".csv") {
+        id = suffix.substr(9, 36);
+        return (source == "udp" || (source.size() == 16 && source.substr(0, 4) == "ble-" &&
+                source.substr(4).find_first_not_of("0123456789abcdef") == source.npos)) &&
+            id.substr(5, 8) == suffix.substr(0, 8) && id[13] == '-' && id[27] == '-' &&
+            id.substr(5, 8).find_first_not_of("0123456789") == id.npos &&
+            id.substr(14, 13).find_first_not_of("0123456789") == id.npos &&
+            id.substr(28).find_first_not_of("0123456789abcdef") == id.npos;
+    }
     if (suffix.size() != 27 || suffix[8] != '/' || suffix.substr(23) != ".bin") return false;
     id = suffix.substr(9, 14);
     return id.substr(0, 8) == suffix.substr(0, 8) && id.find_first_not_of("0123456789") == id.npos;
@@ -52,10 +64,36 @@ bool decode_header(const uint8_t *p, size_t length, uint64_t size, std::string_v
     struct tm local{};
     local.tm_year = year - 1900; local.tm_mon = p[4] - 1; local.tm_mday = p[5];
     local.tm_hour = p[6]; local.tm_min = p[7]; local.tm_sec = p[8]; local.tm_isdst = -1;
-    out.local_start_s = out.start_s = mktime(&local);
+    out.local_start_s = mktime(&local);
+    out.start_ms = out.local_start_s * 1000;
     out.samples = samples;
     out.interval_s = duration / samples;
-    return out.start_s >= 0;
+    return out.local_start_s >= 0;
+}
+
+// The writer puts the first UTC millisecond in the name. Only the last
+// complete row is needed to locate the other end, even for a full night.
+bool live_bounds(std::string_view id, const uint8_t *tail, size_t length,
+                 ReportOximetryRecording &out) {
+    std::string_view row(reinterpret_cast<const char *>(tail), length);
+    if (length < 2 || row.substr(length - 2) != "\r\n") return false;
+    row.remove_suffix(2);
+    const auto newline = row.rfind('\n');
+    if (newline != row.npos) row.remove_prefix(newline + 1);
+    const auto pi = row.rfind(',');
+    if (pi == row.npos) return false;
+    row = row.substr(0, pi);
+    const auto utc = row.rfind(',');
+    if (utc == row.npos || row.size() - utc - 1 != 24) return false;
+
+    char timestamp[25]{};
+    memcpy(timestamp, row.data() + utc + 1, 24);
+    int64_t last;
+    if (!parse_utc_iso8601_ms(timestamp, last) ||
+        std::from_chars(id.data() + 14, id.data() + 27, out.start_ms).ec != std::errc{} ||
+        last < out.start_ms || last - out.start_ms > 26LL * 3600000) return false;
+    out.csv_end_ms = last + 1; // Exclusive bound, not a fabricated sample duration.
+    return true;
 }
 
 bool night_window(time_t sample, ReportOximetryRecording &out) {
@@ -76,8 +114,8 @@ bool night_window(time_t sample, ReportOximetryRecording &out) {
 }  // namespace
 
 std::string ReportOximetryRecording::path() const {
-    return std::string(OximetryArchiveRoot) + "/" + source + "/" + std::string(id, 8) +
-           "/" + id + ".bin";
+    return std::string(OximetryArchiveRoot) + "/" + source + "/" +
+           std::string(csv_bytes ? id + 5 : id, 8) + "/" + id + (csv_bytes ? ".csv" : ".bin");
 }
 
 void ReportOximetryArchive::begin(StorageScanPort &scan, StorageReadPort &read) {
@@ -102,6 +140,7 @@ void ReportOximetryArchive::reset() {
     release();
     published_.reset();
     observed_ = retry_at_ = 0;
+    published_ring_revision_ = 0;
 }
 
 bool ReportOximetryArchive::poll(uint32_t now_ms) try {
@@ -115,7 +154,8 @@ bool ReportOximetryArchive::poll(uint32_t now_ms) try {
 bool ReportOximetryArchive::step(uint32_t now_ms) {
     if (!files_) {
         if (!scan_ticket_.valid()) {
-            generation_ = oximetry_archive_revision.load();
+            ring_revision_ = oximetry_archive_revision.load();
+            generation_ = ring_revision_ + oximetry_live_revision.load();
             if (generation_ == observed_ || (retry_at_ && int32_t(now_ms - retry_at_) < 0))
                 return false;
             const StorageScanRoot root{OximetryArchiveRoot, true};
@@ -131,26 +171,30 @@ bool ReportOximetryArchive::step(uint32_t now_ms) {
             return false;
         }
         files_ = std::move(result.snapshot);
+        ring_changed_ = ring_revision_ != published_ring_revision_;
         building_ = std::allocate_shared<ReportOximetryCatalog>(LargeAllocator<ReportOximetryCatalog>());
         return true;
     }
 
     StorageScanEntryView entry;
     if (!files_->entry(index_, entry)) {
-        if (!clocks_ && !building_->empty()) {
+        if (!clocks_ && ring_changed_ && !building_->empty()) {
             clocks_ = true;
             index_ = 0;
         } else {
             const size_t originals = building_->size();
             for (size_t i = 0; i < originals; ++i) {
                 auto slice = (*building_)[i];
-                if (!night_window(slice.start_s, slice)) continue;
+                if (!night_window(slice.start_ms / 1000, slice)) continue;
                 (*building_)[i] = slice;
-                const int64_t end = slice.start_s + int64_t(slice.samples) * slice.interval_s;
-                while (slice.next_noon_s < end && night_window(slice.next_noon_s, slice))
+                while (slice.next_noon_s * 1000 < slice.end_ms() && night_window(slice.next_noon_s, slice))
                     building_->push_back(slice);
             }
+            std::sort(building_->begin(), building_->end(), [](const auto &a, const auto &b) {
+                return a.key() == b.key() ? a.noon_s < b.noon_s : a.key() < b.key();
+            });
             published_ = std::move(building_);
+            published_ring_revision_ = ring_revision_;
             observed_ = generation_;
             release();
         }
@@ -158,15 +202,33 @@ bool ReportOximetryArchive::step(uint32_t now_ms) {
     }
 
     std::string_view source, id;
-    if (entry.directory || !archive_name(entry.path, clocks_, source, id) ||
-        (clocks_ && (!entry.size || entry.size > 128 * 1024))) {
+    if (entry.directory || !entry.size || !archive_name(entry.path, clocks_, source, id) ||
+        (clocks_ && entry.size > 128 * 1024)) {
         ++index_;
         return true;
     }
     if (!prepared_.valid() && !read_ticket_.valid()) {
+        // Publishing a live CSV must not reread historical files or rerun the
+        // BIN converter. Reuse only immutable files still present on this SD.
+        const bool live = id.substr(0, 5) == "live-";
+        if (!clocks_ && published_ && (live || !ring_changed_)) {
+            const auto key = std::make_pair(source, id);
+            const auto it = std::lower_bound(published_->begin(), published_->end(), key,
+                [](const auto &recording, const auto &wanted) { return recording.key() < wanted; });
+            if (it != published_->end() && it->key() == key && it->size() == entry.size &&
+                it->modified == entry.modified) {
+                building_->push_back(*it);
+                ++index_;
+                return true;
+            }
+        }
         StorageReadCommand cmd;
         cmd.path = entry.path;
         cmd.length = clocks_ ? entry.size : 40;
+        if (live) {
+            cmd.length = std::min<uint64_t>(entry.size, OximetryCsv::MaxRow);
+            cmd.offset = entry.size - cmd.length;
+        }
         cmd.generation = generation_;
         const auto submission = read_->request_read(cmd);
         if (submission.admission == OperationAdmission::Rejected) {
@@ -191,20 +253,24 @@ bool ReportOximetryArchive::step(uint32_t now_ms) {
     }
     const auto view = read_->view_prepared(prepared_);
     if (view.state == PreparedByteReadState::Retry) return false;
-    if (view.valid()) consume(entry, view.data, view.length);
+    if (view.valid()) consume(entry, source, id, view.data, view.length);
     read_->release_prepared(prepared_);
     prepared_ = {};
     ++index_;
     return true;
 }
 
-void ReportOximetryArchive::consume(const StorageScanEntryView &entry, const uint8_t *bytes,
-                                    size_t length) {
-    std::string_view source, id;
-    if (!archive_name(entry.path, clocks_, source, id)) return;
+void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::string_view source,
+                                    std::string_view id, const uint8_t *bytes, size_t length) {
     if (!clocks_) {
         ReportOximetryRecording recording;
-        if (!decode_header(bytes, length, entry.size, id, recording)) return;
+        if (id.substr(0, 5) == "live-") {
+            if (!live_bounds(id, bytes, length, recording)) return;
+            recording.csv_bytes = entry.size;
+        } else {
+            if (!decode_header(bytes, length, entry.size, id, recording)) return;
+            ring_changed_ = true;
+        }
         memcpy(recording.source, source.data(), source.size());
         memcpy(recording.id, id.data(), id.size());
         recording.modified = entry.modified;
@@ -227,7 +293,7 @@ void ReportOximetryArchive::consume(const StorageScanEntryView &entry, const uin
     // Membership is stronger evidence than comparing wall times across a
     // backward step. A later sync must never reinterpret an already listed file.
     for (auto &recording : *building_) {
-        if (source != recording.source ||
+        if (recording.csv_bytes || source != recording.source ||
             (recording.listed && recording.observation_ms <= utc)) continue;
         const auto pos = list.find(recording.id);
         const bool listed = pos != list.npos && (!pos || list[pos-1] == ',') &&
@@ -238,7 +304,7 @@ void ReportOximetryArchive::consume(const StorageScanEntryView &entry, const uin
             recording.observation_ms <= utc) continue;
         recording.listed = listed;
         recording.observation_ms = utc;
-        recording.start_s = recording.wall_s - delta;
+        recording.start_ms = (recording.wall_s - delta) * 1000;
     }
 }
 

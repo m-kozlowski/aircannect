@@ -97,8 +97,10 @@ bool vacant(const std::string &path) {
 }
 
 bool publish(const std::string &part, const std::string &final) {
-    return vacant(final) && Storage::ensure_parent_directories(final.c_str()) &&
-        Storage::rename(part.c_str(), final.c_str());
+    if (!vacant(final) || !Storage::ensure_parent_directories(final.c_str()) ||
+        !Storage::rename(part.c_str(), final.c_str())) return false;
+    ++oximetry_live_revision;
+    return true;
 }
 
 bool finish(Live &f) {

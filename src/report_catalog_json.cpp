@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "large_allocator.h"
+#include "board_oximetry.h"
 #include "report_night_summary.h"
 
 namespace aircannect {
@@ -47,7 +48,8 @@ uint64_t catalog_identity(const NightCatalog &catalog,
     }
     if (oximetry) for (const auto &r : *oximetry) {
         for (const char *c = r.source; *c; ++c) mix(*c);
-        mix(r.wall_s); mix(r.start_s); mix(r.samples); mix(r.interval_s); mix(r.modified);
+        for (const char *c = r.id; *c; ++c) mix(*c);
+        mix(r.start_ms); mix(r.end_ms()); mix(r.size()); mix(r.interval_s); mix(r.modified);
         mix(r.noon_s); mix(r.next_noon_s);
     }
     return hash;
@@ -170,10 +172,10 @@ bool ReportCatalogJsonReader::prepare_fragment() {
 
                 if (publication_->oximetry && !publication_->oximetry->empty()) {
                     phase_ = Phase::Recordings;
-                    return format_fragment("],\"oximetry_layout\":{\"stride\":5,\"channels\":{"
+                    return format_fragment("],\"oximetry_layout\":{\"stride\":5,\"live_stale_ms\":%u,\"channels\":{"
                         "\"spo2\":{\"byte\":0,\"invalid_flag\":2,\"min\":1,\"max\":100},"
                         "\"pulse\":{\"byte\":1,\"invalid_flag\":2,\"min\":1,\"max\":254},"
-                        "\"movement\":{\"byte\":3}}},\"oximetry\":[");
+                        "\"movement\":{\"byte\":3}}},\"oximetry\":[", unsigned(AC_OXIMETRY_SAMPLE_STALE_MS));
                 }
                 phase_ = Phase::Done;
                 return format_fragment("]}");
@@ -292,10 +294,11 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                 if (recording_index_ < publication_->oximetry->size()) {
                     const auto &r = (*publication_->oximetry)[recording_index_++];
                     return format_fragment("%s{\"source\":\"%s\",\"id\":\"%s\",\"start\":%lld,"
-                        "\"step\":%u,\"count\":%u,\"modified\":%llu,\"day\":\"%s\","
+                        "\"end\":%lld,\"csv_bytes\":%llu,\"step\":%u,\"count\":%u,\"modified\":%llu,\"day\":\"%s\","
                         "\"noon\":%lld,\"next_noon\":%lld}",
                         recording_index_ == 1 ? "" : ",", r.source, r.id,
-                        static_cast<long long>(r.start_s * 1000), r.interval_s * 1000, r.samples,
+                        static_cast<long long>(r.start_ms), static_cast<long long>(r.end_ms()),
+                        static_cast<unsigned long long>(r.csv_bytes), r.interval_s * 1000, r.samples,
                         static_cast<unsigned long long>(r.modified), r.day,
                         static_cast<long long>(r.noon_s * 1000),
                         static_cast<long long>(r.next_noon_s * 1000));
