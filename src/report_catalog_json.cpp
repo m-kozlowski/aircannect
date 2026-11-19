@@ -13,7 +13,8 @@ namespace aircannect {
 namespace {
 
 uint64_t catalog_identity(const NightCatalog &catalog,
-                          const ReportSignalStoreCatalog *store) {
+                          const ReportSignalStoreCatalog *store,
+                          const ReportOximetryCatalog *oximetry) {
     uint64_t hash = 1469598103934665603ULL;
     auto mix = [&hash](uint64_t value) {
         for (size_t byte = 0; byte < sizeof(value); ++byte) {
@@ -44,11 +45,17 @@ uint64_t catalog_identity(const NightCatalog &catalog,
             }
         }
     }
+    if (oximetry) for (const auto &r : *oximetry) {
+        for (const char *c = r.source; *c; ++c) mix(*c);
+        mix(r.wall_s); mix(r.start_s); mix(r.samples); mix(r.interval_s); mix(r.modified);
+        mix(r.noon_s); mix(r.next_noon_s);
+    }
     return hash;
 }
 
 bool format_catalog_etag(const NightCatalog &catalog,
                          const ReportSignalStoreCatalog *store,
+                         const ReportOximetryCatalog *oximetry,
                          uint32_t generation,
                          char *out,
                          size_t out_size) {
@@ -57,7 +64,7 @@ bool format_catalog_etag(const NightCatalog &catalog,
         out_size,
         "\"catalog-v2-%08lx-%016llx\"",
         static_cast<unsigned long>(generation),
-        static_cast<unsigned long long>(catalog_identity(catalog, store)));
+        static_cast<unsigned long long>(catalog_identity(catalog, store, oximetry)));
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
@@ -161,6 +168,13 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                 }
                 if (phase_ == Phase::NightPrefix) continue;
 
+                if (publication_->oximetry && !publication_->oximetry->empty()) {
+                    phase_ = Phase::Recordings;
+                    return format_fragment("],\"oximetry_layout\":{\"stride\":5,\"channels\":{"
+                        "\"spo2\":{\"byte\":0,\"invalid_flag\":2,\"min\":1,\"max\":100},"
+                        "\"pulse\":{\"byte\":1,\"invalid_flag\":2,\"min\":1,\"max\":254},"
+                        "\"movement\":{\"byte\":3}}},\"oximetry\":[");
+                }
                 phase_ = Phase::Done;
                 return format_fragment("]}");
 
@@ -274,6 +288,21 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                 current_stored_ = nullptr;
                 return format_fragment("]}");
 
+            case Phase::Recordings:
+                if (recording_index_ < publication_->oximetry->size()) {
+                    const auto &r = (*publication_->oximetry)[recording_index_++];
+                    return format_fragment("%s{\"source\":\"%s\",\"id\":\"%s\",\"start\":%lld,"
+                        "\"step\":%u,\"count\":%u,\"modified\":%llu,\"day\":\"%s\","
+                        "\"noon\":%lld,\"next_noon\":%lld}",
+                        recording_index_ == 1 ? "" : ",", r.source, r.id,
+                        static_cast<long long>(r.start_s * 1000), r.interval_s * 1000, r.samples,
+                        static_cast<unsigned long long>(r.modified), r.day,
+                        static_cast<long long>(r.noon_s * 1000),
+                        static_cast<long long>(r.next_noon_s * 1000));
+                }
+                phase_ = Phase::Done;
+                return format_fragment("]}");
+
             case Phase::Done:
                 return false;
         }
@@ -320,17 +349,18 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
     std::shared_ptr<const NightCatalog> catalog,
     std::shared_ptr<const ReportSignalStoreCatalog> store,
     uint32_t generation,
-    std::shared_ptr<const ReportCatalogJson> previous) try {
+    std::shared_ptr<const ReportCatalogJson> previous,
+    std::shared_ptr<const ReportOximetryCatalog> oximetry) try {
     if (!catalog) return {};
 
     char etag[64] = {};
-    if (!format_catalog_etag(*catalog, store.get(), generation, etag,
+    if (!format_catalog_etag(*catalog, store.get(), oximetry.get(), generation, etag,
                              sizeof(etag))) {
         return {};
     }
     const bool same_etag = previous && strcmp(previous->etag, etag) == 0;
     if (same_etag && previous->catalog.get() == catalog.get() &&
-        previous->store.get() == store.get()) {
+        previous->store.get() == store.get() && previous->oximetry == oximetry) {
         return previous;
     }
 
@@ -338,6 +368,7 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
         LargeAllocator<ReportCatalogJson>());
     next->catalog = std::move(catalog);
     next->store = std::move(store);
+    next->oximetry = std::move(oximetry);
     memcpy(next->etag, etag, sizeof(etag));
     next->generation = generation;
 

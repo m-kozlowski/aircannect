@@ -43,6 +43,14 @@
     function reportNightsNewestFirst() {
       const nights = reportSummary && Array.isArray(reportSummary.nights) ?
         reportSummary.nights.slice() : [];
+      if (reportViewMode === "night") {
+        const known = new Set(nights.map(n => n.id));
+        for (const r of reportSummary?.oximetry || []) {
+          if (known.has(r.day)) continue;
+          known.add(r.day);
+          nights.push({id:r.day, start:r.noon, end:r.next_noon, sessions:[], oximetryOnly:true});
+        }
+      }
       nights.sort((a, b) => Number(b.start || 0) - Number(a.start || 0));
       return nights;
     }
@@ -68,7 +76,7 @@
       const nights = reportNightsNewestFirst();
       if (!nights.length) return;
       const current = selectedReportNight();
-      let index = nights.findIndex((night) => night === current);
+      let index = nights.findIndex((night) => night.id === current?.id);
       if (index < 0) index = 0;
       const next = index + delta;
       if (next < 0 || next >= nights.length) return;
@@ -288,6 +296,8 @@
         if (reportChartIsHidden(key)) return false;
         const definition = definitions.get(key);
         if (!definition) return false;
+        if (ringChannel(key)) return !!oximetryView.series[key]?.length;
+        if (reportResult?.oximetryOnly) return false;
         if (definition.type === "events") {
           return !!((reportResult && reportResult.events_available) ||
             reportBaseEvents.length);
@@ -652,6 +662,7 @@
     }
 
     function resetReportData() {
+      clearOximetryView();
       reportSummaryScope = "night";
       reportSelectionResult = null;
       reportFinishDrag(true, false);
@@ -839,6 +850,12 @@
         start = Math.min(start, range.start);
         end = Math.max(end, range.end);
       });
+      if (oximetryView.source && !reportHiddenSessions.size && reportSummaryScope !== "sessions") {
+        for (const r of oximetryView.files) {
+          start = Math.min(start, Math.max(r.start, oximetryView.night.start));
+          end = Math.max(end, Math.min(r.start + r.step * r.count, oximetryView.night.end));
+        }
+      }
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
         start = Number(reportResult && reportResult.start || 0);
         end = Number(reportResult && reportResult.end || 0);
@@ -1855,13 +1872,15 @@
       return (definition.series || [definition]).map((series) => ({
         label: series.label || definition.title,
         color: series.color || definition.color,
-        points: (reportSeries[series.key] || []).slice()
+        points: (ringChannel(series.key) ? oximetryView.series[series.key] || [] : reportSeries[series.key] || []).slice()
           .sort((a, b) => a.t - b.t),
       })).filter((series) => series.points.length > 0);
     }
 
     function reportChartExtent(definition, ranges) {
       const series = (definition.series || [definition]).map((item) => {
+        if (ringChannel(item.key)) return (oximetryView.series[item.key] || []).filter(
+          point => reportPointOverlapsAnyRange(point, ranges));
         const base = reportBaseSeries[item.key] || [];
         const source = base.length ? base : reportSeries[item.key] || [];
         return source.filter((point) =>
@@ -1918,16 +1937,16 @@
         item.events = reportEvents.slice();
         item.start = range.start;
         item.end = range.end;
-        item.ranges = ranges;
+        item.ranges = ringChannel(item.key) ? oximetryRanges() : ranges;
 
-        const failure = reportChartFailure(item.key);
-        const pending = !failure &&
+        const failure = !ringChannel(item.key) && reportChartFailure(item.key);
+        const pending = !ringChannel(item.key) && !failure &&
           (!reportBaseLoadedCharts.has(item.key) ||
            (!!reportZoom && !signalStoreRangeChartReady(item.key)));
         if (item.type === "series") {
           const definition = reportChartDefinition(item.key);
           if (definition) {
-            const extent = reportChartExtent(definition, ranges);
+            const extent = reportChartExtent(definition, item.ranges);
             item.seriesList = reportChartSeriesList(definition);
             item.minY = extent.min;
             item.maxY = extent.max;
@@ -1943,6 +1962,7 @@
     }
 
     function updateRenderedReportChart(key) {
+      if (ringChannel(key)) return true;
       const range = reportZoom || reportRange();
       if (!validReportRange(range)) return false;
 
@@ -2102,6 +2122,7 @@
         if (reportChartIsHidden(key)) return;
         const def = chartByKey.get(key);
         if (!def) return;
+        if (reportResult.oximetryOnly && !ringChannel(key)) return;
         if (def.type === "events") {
           renderReportEventFlags(container, range, sessionRanges, def);
           return;
@@ -2111,7 +2132,7 @@
         const availableParts = signalStoreChartParts(def);
         const seriesList = reportChartSeriesList(def);
         const collapsed = reportChartPreferences.collapsed.has(def.key);
-        const failure = reportChartFailure(def.key);
+        const failure = !ringChannel(key) && reportChartFailure(def.key);
         const basePending = !collapsed && availableParts.length > 0 &&
           !reportBaseLoadedCharts.has(def.key) && !failure;
         if (!seriesList.length && !basePending) {
@@ -2154,7 +2175,8 @@
           container.appendChild(card);
           return;
         }
-        const extent = reportChartExtent(def, sessionRanges);
+        const chartRanges = ringChannel(key) ? oximetryRanges() : sessionRanges;
+        const extent = reportChartExtent(def, chartRanges);
 
         const card = document.createElement("div");
         card.className = "report-chart";
@@ -2162,7 +2184,7 @@
         title.className = "report-chart-title";
         const name = document.createElement("span");
         i18n.text(name, def.title);
-        const rangePending = !collapsed && !failure && !!reportZoom &&
+        const rangePending = !ringChannel(key) && !collapsed && !failure && !!reportZoom &&
           !signalStoreRangeChartReady(def.key);
         let loadingBadge = null;
         if (basePending || rangePending || (!collapsed && failure)) {
@@ -2171,7 +2193,7 @@
             failure ? i18n.error(failure) : "");
           name.appendChild(loadingBadge);
         }
-        if (seriesDefs.some((sd) => lowResByName[sd.key])) {
+        if (!ringChannel(key) && seriesDefs.some((sd) => lowResByName[sd.key])) {
           const badge = document.createElement("span");
           badge.className = "report-res-badge";
           i18n.text(badge, "1-min");
@@ -2191,7 +2213,9 @@
           dot.className = "report-legend-dot";
           dot.style.background = series.color;
           tag.appendChild(dot);
-          tag.appendChild(document.createTextNode(series.label));
+          const label = document.createElement("span");
+          i18n.text(label, series.label);
+          tag.appendChild(label);
           legend.appendChild(tag);
         });
         if (def.unit) {
@@ -2225,7 +2249,7 @@
           maxY: extent.max,
           start: range.start,
           end: range.end,
-          ranges: sessionRanges,
+          ranges: chartRanges,
           rangePending,
         };
         reportDrawItems.push(item);
@@ -2274,6 +2298,136 @@
         if (!(result.statistics && result.statistics[key])) stats[key] = {...stats[key], ...stat};
       });
       return stats;
+    }
+
+    function clearOximetryView() {
+      oximetryController?.abort();
+      oximetryView = {source:"", files:[], options:[], series:{}, night:null};
+    }
+
+    function ringChannel(key) {
+      return !!oximetryView.source && oximetryChannels.includes(key);
+    }
+
+    function oximetryRanges() {
+      return reportHiddenSessions.size || reportSummaryScope === "sessions"
+        ? reportVisibleSessionRanges() : [oximetryView.night];
+    }
+
+    function ringStatistics() {
+      const ranges = reportSummaryScope === "sessions" ? reportVisibleSessionRanges() : [oximetryView.night];
+      const cacheKey = ranges.map(r => r.start + ":" + r.end).join(",");
+      if (oximetryView.statsKey === cacheKey) return oximetryView.stats;
+      const stats = {};
+      for (const [key, points] of Object.entries(oximetryView.series)) {
+        const bins = new Map();
+        let sum = 0, total = 0;
+        for (const p of points) {
+          if (p.gap) continue;
+          const duration = ranges.reduce((n,r) =>
+            n + Math.max(0, Math.min(r.end, p.end) - Math.max(r.start, p.t)), 0);
+          if (!duration) continue;
+          bins.set(p.value, (bins.get(p.value) || 0) + duration);
+          sum += p.value * duration;
+          total += duration;
+        }
+        if (!total) continue;
+        const values = [...bins.keys()].sort((a,b) => a-b);
+        const percentile = fraction => {
+          let n = 0;
+          return values.find(v => (n += bins.get(v)) >= fraction * total);
+        };
+        stats[key] = {min:values[0], mean:sum/total, median:percentile(.5),
+          p95:percentile(.95), max:values[values.length-1]};
+      }
+      oximetryView.statsKey = cacheKey;
+      oximetryView.stats = stats;
+      return stats;
+    }
+
+    async function selectOximetrySource(night, token, signal, requested) {
+      const recordings = new Map();
+      for (const r of reportSummary?.oximetry || []) {
+        if (r.start < night.end && r.start + r.count * r.step > night.start)
+          recordings.set(r.source + "/" + r.id, r);
+      }
+      const files = [...recordings.values()].sort((a,b) => a.start-b.start || a.id.localeCompare(b.id));
+      const sources = [...new Set(files.map(r => r.source))];
+      if (sources.length && !night.oximetryOnly && !reportResult?.statistics?.spo2 &&
+          !reportResult?.statistics?.pulse) {
+        for (const key of ["spo2","pulse"]) {
+          if (reportSignalTracks(key).some(track => track.validSamples > 0n) &&
+              !reportBaseLoadedCharts.has(key))
+            await loadSignalStoreBaseChart(key, token, signal);
+        }
+      }
+      if (signal.aborted || token !== reportLoadToken) return;
+      const sa2 = !!(reportResult?.statistics?.spo2 || reportResult?.statistics?.pulse ||
+        ["spo2","pulse"].some(k => reportBaseSeries[k]?.some(p => {
+          const value = reportPointValue(p);
+          return value > 0 && value <= (k === "spo2" ? 100 : 254);
+        })));
+      const options = sa2 ? ["", ...sources] : sources;
+      const preferred = requested ?? oximetryPreference.get(night.id);
+      const source = options.includes(preferred) ? preferred : options[0] || "";
+      const view = {night, source, files:files.filter(r => r.source === source),
+        series:{}, options:sources.length ? options : []};
+      oximetryView = view;
+
+      const picker = document.getElementById("reportOximetrySource");
+      if (picker) {
+        picker.replaceChildren(...view.options.map(s => new Option(s ? "O2Ring · " + s : "SA2", s)));
+        picker.value = source;
+        picker.disabled = options.length < 2;
+      }
+      renderReportSummary();
+      renderReportCharts();
+      if (!source) return;
+
+      const layout = reportSummary.oximetry_layout;
+      const series = {};
+      let covered = night.start;
+      for (const file of view.files) {
+        const first = Math.max(0, Math.floor((Math.max(night.start, covered) - file.start) / file.step));
+        const end = Math.min(file.count, Math.ceil((night.end - file.start) / file.step));
+        if (first >= end) continue;
+        const from = Math.max(covered, file.start + first * file.step);
+        for (const points of Object.values(series)) {
+          if (from > covered && points.length) points.push({t:covered,gap:true});
+        }
+        for (let at = first; at < end; at += 16384) {
+          const count = Math.min(16384, end-at);
+          const args = new URLSearchParams({part:"oximetry",night:night.id,source,id:file.id,
+            first:at,count,mtime:file.modified});
+          const key = "oximetry-v1:" + args + ":" + file.count;
+          let bytes = (await readReportCache([key])).get(key)?.body;
+          if (signal.aborted || oximetryView !== view) return;
+          if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== count * layout.stride) {
+            const res = await AirCANnect.http.request("/api/report/plot?" + args, {signal});
+            if (!res.ok) throw new Error(AirCANnect.http.responseError(await res.text(), res.status));
+            bytes = await res.arrayBuffer();
+            if (bytes.byteLength !== count * layout.stride) throw new Error("incomplete_oximetry");
+            void writeReportCache([{key,value:{body:bytes},bytes:bytes.byteLength}]);
+          }
+          if (signal.aborted || oximetryView !== view) return;
+          const raw = new Uint8Array(bytes);
+          for (const [name,c] of Object.entries(layout.channels)) {
+            const points = series[name] ||= [];
+            for (let i=0; i<count; i++) {
+              const offset = i*layout.stride, value = raw[offset+c.byte];
+              const t = file.start + (at+i)*file.step;
+              const invalid = (c.invalid_flag !== undefined && raw[offset+c.invalid_flag] !== 0) ||
+                value < (c.min ?? 0) || value > (c.max ?? 255);
+              points.push(invalid ? {t,gap:true} :
+                {t:Math.max(t,from),end:Math.min(t+file.step,night.end),value:value*(c.scale ?? 1)});
+            }
+          }
+        }
+        covered = Math.max(covered,file.start + end*file.step);
+      }
+      if (signal.aborted || oximetryView !== view) return;
+      view.series = series;
+      delete view.statsKey;
     }
 
     function reportMetricValue(metric, result, selected) {
@@ -2507,6 +2661,10 @@
       if (!body) return;
       body.replaceChildren();
       const stats = reportStatistics(result);
+      if (!period && oximetryView.source) {
+        for (const key of oximetryChannels) delete stats[key];
+        Object.assign(stats, ringStatistics());
+      }
       const rows = [["pressure", "Pressure (IPAP)", "cmH2O", 1], ["epap", "EPAP", "cmH2O", 1],
         ["leak", "Leak", "L/min", 1], ["flow_limitation", "Flow limitation", "", 1],
         ["snore", "Snore", "", 1], ["respiratory_rate", "Resp. rate", "/min", 1],
@@ -2514,9 +2672,11 @@
         ["target_ventilation", "Target vent.", "L/min", 1],
         ["inspiration_time", "Insp. time", "s", 1], ["expiration_time", "Exp. time", "s", 1],
         ["ie_ratio", "I:E", "", 0.01],
-        ["spo2", "SpO2", "%", 1], ["pulse", "Pulse", "bpm", 1]];
+        ["spo2", "SpO2", "%", 1], ["pulse", "Pulse", "bpm", 1],
+        ["pi", "PI", "%", 1], ["movement", i18n.message("report.movement"), "", 1]];
       rows.forEach(([key, label, unit, scale]) => {
-        if ((key === "spo2" || key === "pulse") &&
+        if (!period && reportResult?.oximetryOnly && !oximetryChannels.includes(key)) return;
+        if (oximetryChannels.includes(key) &&
             (!stats[key] || (period && !stats[key].nights))) return;
         const row = body.insertRow();
         const cell = row.insertCell();
@@ -2612,10 +2772,19 @@
 
     function renderReportViewMode() {
       const period = reportViewMode === "period";
-      for (const id of ["reportNightActions", "reportTherapySettings", "reportSessions", "reportCharts"]) {
+      const ringOnly = !period && !!reportResult?.oximetryOnly;
+      const picker = document.getElementById("reportOximetryPicker");
+      if (picker) picker.hidden = period || !oximetryView.options.length;
+      for (const id of ["reportNightActions", "reportCharts"]) {
         const element = document.getElementById(id);
         if (element) element.hidden = period;
       }
+      for (const id of ["reportTherapySettings", "reportSessions"]) {
+        document.getElementById(id).hidden = period || ringOnly;
+      }
+      document.getElementById("reportMetricTiles").hidden = ringOnly;
+      document.querySelector(".report-event-strip").hidden = ringOnly;
+      document.querySelector(".report-stat-strip").hidden = ringOnly;
       for (const id of ["reportPeriodActions", "reportPeriodTrends", "reportPeriodNightsHeading"]) {
         const element = document.getElementById(id);
         if (element) element.hidden = !period;
@@ -2625,7 +2794,7 @@
       AirCANnect.ui.text("reportSummaryCaption", period ? i18n.message("report.period_summary") : i18n.message("ui.night.summary"));
       AirCANnect.ui.text("reportStatisticsScope", period ? i18n.message("report.full_period") : i18n.message("ui.full.night"));
       const scope = document.getElementById("reportSummaryScope");
-      if (scope) scope.hidden = period;
+      if (scope) scope.hidden = period || !!reportResult?.oximetryOnly;
       document.querySelectorAll('[data-action="report.scope"]').forEach((button) => {
         button.setAttribute("aria-pressed", String(button.dataset.value === reportSummaryScope));
         button.disabled = !reportResult || (button.dataset.value === "sessions" && !!reportResult.active);
@@ -2803,7 +2972,7 @@
         }
       }
       const selIndex = selected ?
-        nights.findIndex((night) => night === selected) : -1;
+        nights.findIndex((night) => night.id === selected.id) : -1;
       const prevBtn = document.getElementById("reportPrevNight");
       const nextBtn = document.getElementById("reportNextNight");
       const latestBtn = document.getElementById("reportLatestNight");
@@ -2831,7 +3000,7 @@
       const spo2Threshold = displayable &&
         reportNumber(reportResult.spo2_threshold_minutes) !== null ?
         Math.round(Number(reportResult.spo2_threshold_minutes)) + "m" : "--";
-      const spo2Visible = !selection && (spo2Median !== "--" || spo2Threshold !== "--");
+      const spo2Visible = !oximetryView.source && !selection && (spo2Median !== "--" || spo2Threshold !== "--");
       renderOptionalReportMetric(
         "reportSpo2Metric",
         "reportSpo2Summary",
@@ -3378,6 +3547,7 @@
 
     function signalStoreChartParts(definition) {
       if (!definition) return [];
+      if (ringChannel(definition.key)) return [];
       if (definition.type === "events") {
         return reportResult && reportResult.events_available ? ["events"] : [];
       }
@@ -4296,8 +4466,10 @@
 
       AirCANnect.ui.message("reportMsg", i18n.message("report.loading"), true, true);
       try {
-        const res = await pollSignalStoreNight(
-          token, nightId, controller.signal);
+        const res = night.oximetryOnly ? {status:200, result:{
+          state:"ready", oximetryOnly:true, start:night.start, end:night.end, sessions:[],
+          events_available:false, source_revision:"", generation:0, store:{tracks:[],tracksByName:{}},
+        }} : await pollSignalStoreNight(token, nightId, controller.signal);
         if (!res || token !== reportLoadToken) return;
         if (res.status === 404) {
           AirCANnect.ui.message("reportMsg", i18n.message("report.night_not_found"), false, true);
@@ -4347,7 +4519,10 @@
           }
         }
 
+        await selectOximetrySource(night, token, controller.signal);
+        if (token !== reportLoadToken) return;
         renderReportSummary();
+        renderReportCharts();
         const update = res.update === REPORT_RETAINED_REASON ? "" : res.update;
         AirCANnect.ui.message("reportMsg",
           res.cached ? i18n.message("report.browser_copy") : update
@@ -4480,6 +4655,11 @@
       ].join(":");
       if (completionKey === reportHandledCompletionKey) return;
       reportHandledCompletionKey = completionKey;
+      if (data.kind === "oximetry") {
+        if (AirCANnect.pages.isActive("report") && reportViewMode === "night")
+          void loadReportSummary(false).then(() => loadSelectedReportNight(true));
+        return;
+      }
       if (data.kind === "sessions") {
         const selected = reportResult?.sessions.map((s, i) =>
           reportHiddenSessions.has(Number(s.start)) ? null : i).filter((i) => i !== null);
@@ -4596,7 +4776,22 @@
       reportSummaryScope = scope;
       reportSelectionResult = null;
       renderReportSummary();
+      renderReportCharts();
       if (scope === "sessions") loadReportPeriod();
+    });
+    AirCANnect.actions.register("report.oximetry", async (_event, element) => {
+      const night = selectedReportNight();
+      if (!night || !reportResult) return;
+      oximetryController?.abort();
+      const controller = new AbortController();
+      oximetryController = controller;
+      oximetryPreference.set(night.id, element.value);
+      try {
+        await selectOximetrySource(night, reportLoadToken, controller.signal, element.value);
+        if (!controller.signal.aborted) { renderReportSummary(); renderReportCharts(); }
+      } catch (error) {
+        if (!controller.signal.aborted) AirCANnect.ui.message("reportMsg", i18n.error(error), false, true);
+      }
     });
     AirCANnect.actions.register("report.period-step", (_event, element) => {
       const step = Number(element.dataset.value);
@@ -4663,6 +4858,10 @@
     let reportSummary = null;
     let reportViewMode = "night";
     let reportSummaryScope = "night";
+    const oximetryChannels = ["spo2","pulse","movement","pi"];
+    const oximetryPreference = new Map();
+    let oximetryController = null;
+    let oximetryView = {source:"", files:[], options:[], series:{}, night:null};
     let reportSelectionResult = null;
     let reportPeriodDays = 30;
     let reportPeriodEnd = "";
@@ -4834,6 +5033,8 @@
         unit: "bpm",
         optional: true,
       },
+      {key:"movement", title:i18n.message("report.movement"), unit:"", color:"#38bdf8", optional:true},
+      {key:"pi", title:"PI", unit:"%", color:"#fbbf24", optional:true},
     ];
     let reportChartPreferences = {
       order: reportChartDefs.map((definition) => definition.key),

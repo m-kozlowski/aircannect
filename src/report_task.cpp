@@ -868,7 +868,8 @@ struct ReportTask::Runtime {
         const auto json = catalog
             ? build_report_catalog_json(catalog, store_catalog,
                                         catalog_generation,
-                                        previous ? previous->catalog_json : nullptr)
+                                        previous ? previous->catalog_json : nullptr,
+                                        oximetry_archive.catalog())
             : nullptr;
 
         std::shared_ptr<const ReportPublishedState> next =
@@ -2856,6 +2857,7 @@ struct ReportTask::Runtime {
 
             engine.clear();
             period_service.cancel();
+            oximetry_archive.reset();
             period_service.clear_cache();
             catalog_refresh.cancel();
             catalog_store.forget_media();
@@ -2973,6 +2975,8 @@ struct ReportTask::Runtime {
     std::weak_ptr<const NightCatalog> date_preview_catalog;
     std::weak_ptr<const ReportSignalStoreCatalog> date_preview_store;
     ReportPeriodService period_service;
+    ReportOximetryArchive oximetry_archive;
+    std::atomic<bool> oximetry_requested{false};
     ReportPeriodKey period_key;
     bool period_running = false;
     std::shared_ptr<const ReportPeriodResult> period_cache[5];
@@ -3192,6 +3196,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
     runtime_->period_service.begin(read_port, write_port);
+    runtime_->oximetry_archive.begin(scan_port, read_port);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port, &write_port);
         runtime_->date_repair.begin(read_port, write_port, range_write_port, scan_port, *delete_port);
@@ -3464,6 +3469,10 @@ ReportTask::catalog_json_snapshot() const {
     return state ? state->catalog_json : nullptr;
 }
 
+void ReportTask::request_oximetry_index() {
+    if (runtime_ && !runtime_->oximetry_requested.exchange(true)) runtime_->wake();
+}
+
 std::shared_ptr<const ReportSignalStoreCatalog>
 ReportTask::store_catalog_snapshot() const {
     if (!runtime_) return {};
@@ -3703,6 +3712,12 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     const bool summary_media_available = runtime.storage_status && runtime.storage_status->mounted();
+    if (runtime.oximetry_requested.load() && summary_media_available &&
+        !runtime.activity.ota_install_active && !runtime.activity.realtime_stream_active) {
+        const auto before = runtime.oximetry_archive.catalog();
+        worked = runtime.oximetry_archive.poll(now_ms) || worked;
+        if (before != runtime.oximetry_archive.catalog()) runtime.publish_state();
+    }
     if (runtime.summary_media_available && !summary_media_available) {
         if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
         runtime.summary_archive.forget_media();

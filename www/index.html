@@ -374,6 +374,9 @@
             </div>
             <div class="report-summary-heading">
               <div class="report-summary-caption" id="reportSummaryCaption" data-i18n="ui.night.summary"></div>
+              <label id="reportOximetryPicker" hidden><span data-i18n="ui.oximetry"></span>
+                <select id="reportOximetrySource" data-change-action="report.oximetry"></select>
+              </label>
               <div class="report-segment" id="reportSummaryScope" role="group" aria-label="Statistics scope" data-i18n-aria-label="ui.statistics.scope">
                 <button type="button" data-action="report.scope" data-value="night" aria-pressed="true" data-i18n="ui.full.night"></button>
                 <button type="button" data-action="report.scope" data-value="sessions" aria-pressed="false" data-i18n="ui.selected.sessions"></button>

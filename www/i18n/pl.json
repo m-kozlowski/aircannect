@@ -1126,6 +1126,7 @@
   "report.low_space": "Raport odroczony: mało miejsca na SD",
   "report.marker_save_failed": "Nie udało się zapisać ustawienia znaczników zdarzeń w tej przeglądarce",
   "report.markers": "Znaczniki",
+  "report.movement": "Ruch",
   "report.markers_for": "Znaczniki zdarzeń: {channel}",
   "report.markers_hint": "Pokaż znaczniki zdarzeń na tym wykresie",
   "report.max_pressure": "Maksymalne ciśnienie",

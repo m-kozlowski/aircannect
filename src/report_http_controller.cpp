@@ -59,6 +59,7 @@ constexpr const char *REPORT_ENVELOPE_HEADER = "X-Report-Envelope";
 enum class PendingKind : uint8_t {
     Events,
     Signal,
+    Oximetry,
 };
 
 void send_json_error(AsyncWebServerRequest *request,
@@ -603,6 +604,7 @@ struct HttpStreamRef {
 struct ReportHttpController::PendingResponses {
     struct Entry {
         std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
+        std::shared_ptr<const ReportOximetryCatalog> archive;
         PendingKind kind = PendingKind::Events;
         std::shared_ptr<AsyncDeferredResponse::State> response;
         StorageStreamCommand command;
@@ -871,10 +873,15 @@ void ReportHttpController::poll() {
 
         // Admission now protects the source range. Check its version after
         // admission so a concurrent append cannot enter under an old cache key.
-        const ReportNightQuery current = report_task_->query_night(entry.sleep_day);
-        const bool version_changed = current.state != ReportStoreQueryState::Ready ||
-            current.source_revision != entry.source_revision ||
-            current.generation != entry.generation;
+        bool version_changed;
+        if (entry.kind == PendingKind::Oximetry) {
+            const auto current = report_task_->catalog_json_snapshot();
+            version_changed = !current || current->oximetry != entry.archive;
+        } else {
+            const ReportNightQuery current = report_task_->query_night(entry.sleep_day);
+            version_changed = current.state != ReportStoreQueryState::Ready ||
+                current.source_revision != entry.source_revision || current.generation != entry.generation;
+        }
 
         const bool keep_pending = !expired && !timed_out &&
             !version_changed && waiting;
@@ -1194,6 +1201,7 @@ void ReportHttpController::send_summary(
         return;
     }
 
+    report_task_->request_oximetry_index();
     const auto summary = report_task_->catalog_json_snapshot();
     if (!summary) {
         if (report_task_->catalog_snapshot()) {
@@ -1329,7 +1337,34 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     command.verification = StorageStreamVerification::Size;
 
     const String part = request->arg("part");
-    if (part == "events") {
+    if (part == "oximetry") {
+        const auto summary = report_task_->catalog_json_snapshot();
+        const String source = request->arg("source"), id = request->arg("id");
+        uint64_t first, count, modified;
+        if (!summary || !summary->oximetry || !parse_uint64_arg(request, "first", UINT32_MAX, first) ||
+            !parse_uint64_arg(request, "count", 16384, count) || !count ||
+            !parse_uint64_arg(request, "mtime", UINT64_MAX, modified)) {
+            send_json_error(request, 400, "bad_oximetry_range");
+            return;
+        }
+        const auto &files = *summary->oximetry;
+        const auto file = std::find_if(files.begin(), files.end(), [&](const auto &r) {
+            return source == r.source && id == r.id;
+        });
+        if (file == files.end() || file->modified != modified || first + count > file->samples) {
+            send_json_error(request, 409, "report_version_changed");
+            return;
+        }
+        pending.kind = PendingKind::Oximetry;
+        pending.archive = summary->oximetry;
+        pending.response_size = pending.raw_response_size = count * 5;
+        command.path = file->path();
+        command.verification = StorageStreamVerification::SizeAndModified;
+        command.expected_size = file->size();
+        command.expected_modified = file->modified;
+        command.source_offset = 40 + first * 5;
+        command.source_length = pending.raw_response_size;
+    } else if (part == "events") {
         const ReportEventFileQuery query =
             report_task_->query_events(sleep_day);
         if (!handle_query_state(request,
@@ -1554,6 +1589,17 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 
 void ReportHttpController::publish_completion() {
     if (!report_task_) return;
+
+    const auto catalog = report_task_->catalog_json_snapshot();
+    const auto archive = catalog ? catalog->oximetry : nullptr;
+    if (archive && observed_archive_.lock() != archive) {
+        completion_json_ = "{";
+        json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
+        json_add_string(completion_json_, "kind", "oximetry");
+        completion_json_ += '}';
+        if (completion_snapshot_.replace(completion_json_)) observed_archive_ = archive;
+        return;
+    }
 
     uint32_t serial = observed_period_serial_;
     const auto period = report_task_->period_completion(serial);

@@ -1116,6 +1116,7 @@
   "report.low_space": "Report deferred: SD space low",
   "report.marker_save_failed": "Event marker preference could not be saved in this browser",
   "report.markers": "Markers",
+  "report.movement": "Movement",
   "report.markers_for": "Event markers: {channel}",
   "report.markers_hint": "Show event markers on this chart",
   "report.max_pressure": "Max pressure",

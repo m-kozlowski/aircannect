@@ -313,6 +313,7 @@ public:
     ReportEngineCompletion last_completion() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     std::shared_ptr<const ReportCatalogJson> catalog_json_snapshot() const;
+    void request_oximetry_index();
     std::shared_ptr<const ReportSignalStoreCatalog>
         store_catalog_snapshot() const;
     DisplayReportSummary display_summary_snapshot() const;

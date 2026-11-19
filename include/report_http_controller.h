@@ -10,6 +10,7 @@
 #include "main_loop_inbox.h"
 #include "operation_outcome.h"
 #include "published_json_snapshot.h"
+#include "report_oximetry.h"
 
 class AsyncWebServer;
 class AsyncWebServerRequest;
@@ -69,6 +70,7 @@ private:
     OperationTicket observed_completion_;
     uint32_t completion_serial_ = 0;
     uint32_t observed_period_serial_ = 0;
+    std::weak_ptr<const ReportOximetryCatalog> observed_archive_;
     mutable std::atomic<uint32_t> next_generation_{1};
     mutable std::atomic<uint32_t> next_preference_request_{1};
     MainLoopInbox<PreferenceCommand, 4, InboxStorage::Psram>
