@@ -8,6 +8,7 @@
 #include "large_json_allocator.h"
 #include "large_object.h"
 #include "little_endian.h"
+#include "memory_manager.h"
 #include "report_oximetry_samples.h"
 #include "report_signal_tile.h"
 #include "storage_space_policy.h"
@@ -17,7 +18,7 @@
 
 namespace aircannect {
 namespace {
-constexpr size_t ReadBytes = 10000, RawBytes = 16;
+constexpr size_t SampleStepBytes = 10000, RawBytes = 16;
 constexpr int64_t Block = REPORT_SIGNAL_STORE_BLOCK_MS;
 using Counts = std::map<float, uint32_t, std::less<float>,
                         LargeAllocator<std::pair<const float, uint32_t>>>;
@@ -29,7 +30,6 @@ struct BlockStatistics {
     uint32_t first = 0, rows = 0;
     int64_t start = 0, end = 0;
     uint32_t histogram_offset = 0, histogram_size = 0;
-    std::shared_ptr<const LargeByteBuffer> packed;
 };
 
 // This small fixed record is enough to reopen a published supplement without
@@ -94,13 +94,16 @@ struct ReportOximetrySignalBuilder::Work {
     ReportSignalTileEncoder encoder;
     ReportOximetryRecording *record = nullptr;
     int64_t first_block = 0;
-    size_t slots = 0, channel = 0, read_offset = 0, raw_offset = 0;
+    size_t slots = 0, channel = 0, read_offset = 0;
     std::array<std::shared_ptr<LargeByteBuffer>,4> planes;
     std::vector<BlockStatistics,LargeAllocator<BlockStatistics>> blocks;
     Counts block_counts[4], total_counts[4];
-    size_t current_block = SIZE_MAX, histogram_block = 0;
-    std::unique_ptr<LargeByteBuffer> raw;
-    size_t raw_used = 0;
+    size_t current_block = SIZE_MAX;
+    std::unique_ptr<LargeByteBuffer> raw, histograms;
+    size_t raw_used = 0, hist_used = 0;
+    const size_t raw_limit = Memory::buffer_budget(AC_STORAGE_RANGE_WRITE_MAX_BYTES, 32 * 1024);
+    const size_t read_limit = Memory::buffer_budget(128 * 1024, 32 * 1024);
+    const size_t hist_limit = Memory::buffer_budget(64 * 1024, 8 * 1024);
     std::shared_ptr<const LargeByteBuffer> output;
     StorageReadCommand read;
     OperationTicket read_ticket, write_ticket;
@@ -110,26 +113,42 @@ struct ReportOximetrySignalBuilder::Work {
     bool retry = false, verified = false;
 #ifdef ARDUINO
     uint32_t build_started_ms = 0;
+    uint32_t paused_at_ms = 0, paused_ms = 0;
 #endif
     uint64_t offset = 0;
     size_t sent = 0, chunk = 0;
 
-    // Only the current block needs a map. Its predecessor is written after
-    // the current RAW chunk, before we read more samples.
+    void flush(std::unique_ptr<LargeByteBuffer> &buffer, size_t &used,
+               const char *plane, size_t total_bytes) {
+        buffer->truncate(used);
+        output = LargeByteBuffer::freeze(std::move(buffer));
+        path = report_oximetry_signal_path(*record, plane);
+        offset = total_bytes - used;
+        used = 0;
+    }
+
+    // Keep maps only for the current block. Batch the packed blocks on SD.
     bool finish_block() {
         if (current_block == SIZE_MAX) return true;
         auto &b = blocks[current_block];
         size_t length = 16;
         for (const auto &counts : block_counts) length += 8 * counts.size();
-        auto bytes = LargeByteBuffer::allocate(length);
-        if (!bytes) return false;
 
+        const size_t needed = hist_used + length;
+        if (!histograms) histograms = LargeByteBuffer::allocate(std::max<size_t>(1024, needed));
+        if (!histograms) return false;
+        if (needed > histograms->size()) {
+            const size_t capacity = std::max(needed, std::min(hist_limit, histograms->size() * 2));
+            if (!histograms->grow(capacity)) return false;
+        }
+
+        auto *bytes = histograms->data() + hist_used;
         size_t pos = 16;
         for (size_t c = 0; c < 4; ++c) {
-            put_le32(bytes->data()+4*c, block_counts[c].size());
+            put_le32(bytes+4*c, block_counts[c].size());
             for (const auto &[value, weight] : block_counts[c]) {
-                memcpy(bytes->data()+pos, &value, sizeof(value));
-                put_le32(bytes->data()+pos+4, weight);
+                memcpy(bytes+pos, &value, sizeof(value));
+                put_le32(bytes+pos+4, weight);
                 pos += 8;
             }
             block_counts[c].clear();
@@ -137,7 +156,7 @@ struct ReportOximetrySignalBuilder::Work {
         b.histogram_offset = product.histogram_bytes;
         b.histogram_size = length;
         product.histogram_bytes += length;
-        b.packed = LargeByteBuffer::freeze(std::move(bytes));
+        hist_used += length;
         current_block = SIZE_MAX;
         return true;
     }
@@ -274,9 +293,12 @@ bool ReportOximetrySignalBuilder::complete_write(Work &w) {
     if (w.atomic) {
         w.phase = Work::Phase::Published;
 #ifdef ARDUINO
-        Log::logf(CAT_REPORT, LOG_DEBUG, "oximetry tracks id=%s rows=%lu elapsed_ms=%lu",
+        const uint32_t now = millis();
+        const uint32_t paused = w.paused_ms + (w.paused_at_ms ? now - w.paused_at_ms : 0);
+        Log::logf(CAT_REPORT, LOG_DEBUG, "oximetry tracks id=%s rows=%lu active_ms=%lu paused_ms=%lu",
                   w.record->id, static_cast<unsigned long>(w.product.rows),
-                  static_cast<unsigned long>(millis() - w.build_started_ms));
+                  static_cast<unsigned long>(now - w.build_started_ms - paused),
+                  static_cast<unsigned long>(paused));
 #endif
     }
     return true;
@@ -285,6 +307,9 @@ bool ReportOximetrySignalBuilder::complete_write(Work &w) {
 void ReportOximetrySignalBuilder::pause() {
     if (!work_) return;
     auto &w = *work_;
+#ifdef ARDUINO
+    if (w.build_started_ms && !w.paused_at_ms) w.paused_at_ms = millis();
+#endif
     // An unconsumed read can be requested again at read_offset. A write
     // already submitted must be acknowledged, not replayed after the pause.
     if (w.read_ticket.valid() && reads_->abandon(w.read_ticket)) w.read_ticket = {};
@@ -320,6 +345,12 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         if (mode == Mode::VerifyOriginal) work_->phase = Phase::Samples;
     }
     auto &w = *work_;
+#ifdef ARDUINO
+    if (w.paused_at_ms) {
+        w.paused_ms += millis() - w.paused_at_ms;
+        w.paused_at_ms = 0;
+    }
+#endif
     auto fail = [&](bool retry = true) {
         w.retry = retry;
         w.phase = Phase::Done;
@@ -354,14 +385,8 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         w.write_ticket = submitted.ticket;
         return submitted.accepted();
     }
-    const size_t finished_blocks = w.phase == Phase::Histograms ? w.slots :
-        (w.current_block == SIZE_MAX ? 0 : w.current_block);
-    while (w.histogram_block < finished_blocks) {
-        auto &block = w.blocks[w.histogram_block++];
-        if (!block.packed) continue;
-        w.output = std::move(block.packed);
-        w.offset = block.histogram_offset;
-        w.path = report_oximetry_signal_path(r, "histograms");
+    if (w.hist_used && (w.hist_used >= w.hist_limit || w.phase == Phase::Histograms)) {
+        w.flush(w.histograms, w.hist_used, "histograms", w.product.histogram_bytes);
         return true;
     }
 
@@ -374,6 +399,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
                 w.phase = Phase::Done;
             } else {
                 if (!w.finish_block()) return fail();
+                if (w.raw_used) w.flush(w.raw, w.raw_used, "raw", w.product.rows * RawBytes);
                 w.phase = Phase::Plane;
             }
             reads_->release_handle();
@@ -383,7 +409,8 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             w.read.path = probe ? report_oximetry_signal_path(r,"manifest") : r.path();
             w.read.generation = 1;
             w.read.offset = probe ? 0 : w.read_offset;
-            w.read.length = probe ? PublicationBytes : std::min<uint64_t>(ReadBytes, r.size() - w.read_offset);
+            const size_t limit = r.csv_bytes && mode == Mode::Build ? w.read_limit : SampleStepBytes;
+            w.read.length = probe ? PublicationBytes : std::min<uint64_t>(limit, r.size() - w.read_offset);
             w.read.retain_handle = !probe;
             const auto submit = reads_->request_read(w.read);
             if (submit.admission == OperationAdmission::Rejected) return fail();
@@ -422,24 +449,32 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             w.read_offset += view.length;
         } else {
             if (view.length != w.read.length) return fail();
-            const size_t max_rows = r.csv_bytes ? view.length / 24 + 2 : view.length / 5;
-            w.raw = LargeByteBuffer::allocate(max_rows * RawBytes);
-            if (!w.raw) return fail();
-            w.raw_used = 0;
-            if (!w.reader.consume(view.data, view.length, &w, [](void *ctx, const ReportOximetrySample &s) {
+            const size_t pos = w.read_offset - w.read.offset;
+            const size_t length = std::min(SampleStepBytes, view.length - pos);
+
+            // A CSV slice may complete a line carried over from the last slice.
+            const auto max_rows = [&](size_t bytes) {
+                return r.csv_bytes ? bytes / 24 + 2 : bytes / 5;
+            };
+            if (!w.raw) {
+                const size_t remaining = std::min<uint64_t>(2 * w.raw_limit, r.size() - w.read_offset);
+                w.raw = LargeByteBuffer::allocate(std::min(w.raw_limit, max_rows(remaining) * RawBytes));
+                if (!w.raw) return fail();
+            }
+
+            if (w.raw_used && max_rows(length) * RawBytes > w.raw->size() - w.raw_used) {
+                w.flush(w.raw, w.raw_used, "raw", w.product.rows * RawBytes);
+                return true;
+            }
+
+            if (!w.reader.consume(view.data + pos, length, &w, [](void *ctx, const ReportOximetrySample &s) {
                 auto &work = *static_cast<Work *>(ctx);
                 if (work.add(s)) return true;
                 work.retry = true;
                 return false;
             })) return fail(w.retry);
-            w.read_offset += view.length;
-            if (w.raw_used) {
-                w.raw->truncate(w.raw_used);
-                w.output = LargeByteBuffer::freeze(std::move(w.raw));
-                w.path = report_oximetry_signal_path(r,"raw");
-                w.offset = w.raw_offset;
-                w.raw_offset += w.raw_used;
-            }
+            w.read_offset += length;
+            if (pos + length < view.length) return true;
         }
         reads_->release_prepared(w.prepared);
         w.prepared = {};
