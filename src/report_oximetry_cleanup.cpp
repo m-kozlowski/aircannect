@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cstring>
 #include "report_signal_store.h"
+#include "storage_space_policy.h"
 
 namespace aircannect {
 namespace {
@@ -65,10 +66,12 @@ void ReportOximetryCleanup::begin(ReportOximetryArchive &archive, StorageScanPor
     deletes_ = &deletes;
     paths_ = &paths;
     verifier_.begin(reads, ranges, writes);
+    manifest_reader_.begin(reads);
 }
 
 void ReportOximetryCleanup::next() {
     verifier_.reset();
+    manifest_reader_.reset();
     directory_.clear();
     contents_.reset();
     original_ = {};
@@ -100,19 +103,22 @@ bool ReportOximetryCleanup::cancel() {
 
 void ReportOximetryCleanup::forget_media() {
     originals_.reset();
-    pressure_ = due_ = false;
+    copies_only_ = pressure_ = due_ = false;
 }
 
 bool ReportOximetryCleanup::poll(bool allowed, bool pressure) try {
     if (!archive_) return false;
     const auto originals = archive_->originals();
-    if (pressure && !pressure_) due_ = true;
-    pressure_ = pressure;
-    if (!allowed || !originals || originals != originals_ || (current_ && !pressure)) {
+    if (!allowed || !originals || originals != originals_ || pressure != pressure_) {
         if (active()) {
             due_ = true;
             if (!cancel()) return false;
         }
+        if (pressure != pressure_ || (pressure && originals != originals_)) {
+            copies_only_ = pressure;
+            due_ = true;
+        }
+        pressure_ = pressure;
         if (!allowed || !originals) return false;
         if (originals != originals_) {
             due_ |= !originals_ || retires_versions(*originals_, *originals);
@@ -127,7 +133,7 @@ bool ReportOximetryCleanup::poll(bool allowed, bool pressure) try {
             (status.id == delete_id_ && status.state == StorageDeleteState::Deleting)) return false;
         const bool done = status.id == delete_id_ && status.state == StorageDeleteState::Done;
         delete_id_ = 0;
-        if (done) phase_ = Phase::EmptyDirectory;
+        if (done && !copies_only_) phase_ = Phase::EmptyDirectory;
         else next();
         return true;
     }
@@ -166,13 +172,24 @@ bool ReportOximetryCleanup::poll(bool allowed, bool pressure) try {
                 manifest_ |= name == "manifest";
             }
             contents_ = std::move(done.snapshot);
-            phase_ = Phase::Verify;
+            if (copies_only_) {
+                if (!manifest_ || manifest_reader_.start((directory_ + "/manifest").c_str(),
+                    ReportOximetryPlanes::PublicationBytes, 1, StorageReadLane::Maintenance) !=
+                    OperationAdmission::Accepted) next();
+                else phase_ = Phase::Manifest;
+            } else phase_ = Phase::Verify;
         }
         return true;
     }
 
     if (phase_ == Phase::Select) {
-        if (cursor_ == entries_->size()) { entries_.reset(); return true; }
+        if (cursor_ == entries_->size()) {
+            if (copies_only_) {
+                copies_only_ = false;
+                cursor_ = 0;
+            } else entries_.reset();
+            return true;
+        }
         StorageScanEntryView e;
         if (!entries_->entry(cursor_, e) || !e.directory) { next(); return true; }
         const View path(e.path);
@@ -199,6 +216,14 @@ bool ReportOximetryCleanup::poll(bool allowed, bool pressure) try {
         }
         if (current_ && !pressure) next();
         else phase_ = Phase::Contents;
+        return true;
+    }
+
+    if (phase_ == Phase::Manifest) {
+        if (manifest_reader_.status().active()) return manifest_reader_.poll();
+        const auto bytes = manifest_reader_.take_completed();
+        if (!bytes || !planes_.decode(bytes->data(), bytes->size())) next();
+        else phase_ = Phase::Delete;
         return true;
     }
 
@@ -231,19 +256,37 @@ bool ReportOximetryCleanup::poll(bool allowed, bool pressure) try {
     // partially deleted version unavailable even if power fails.
     const char *names[12];
     size_t count = 0;
-    if (manifest_) names[count++] = "manifest";
+    if (manifest_ && !copies_only_) names[count++] = "manifest";
+    unsigned plain = 0;
+    const char *copies[4]{};
     for (size_t i = 0; i < contents_->size(); ++i) {
         StorageScanEntryView e;
         if (!contents_->entry(i, e)) { next(); return true; }
         if (e.directory) continue;
         const char *name = storage_basename_from_path(e.path);
+        if (copies_only_) {
+            const View filename(name);
+            for (size_t c = 0; c < 4; ++c) {
+                const View channel(ReportOximetryChannels[c]);
+                if (filename == channel && e.size && e.size == planes_.plane_bytes[c]) plain |= 1u << c;
+                if (filename.size() == channel.size() + 8 && filename.substr(0, channel.size()) == channel &&
+                    filename.substr(channel.size()) == ".deflate" && e.size) copies[c] = name;
+            }
+            continue;
+        }
         if (!strcmp(name, "manifest")) continue;
         if (count == sizeof(names)/sizeof(*names)) { next(); return true; }
         names[count++] = name;
     }
-    if (!count) { phase_ = Phase::EmptyDirectory; return true; }
+    if (copies_only_) {
+        for (size_t c = 0; c < 4; ++c) {
+            if ((plain & (1u << c)) && copies[c]) names[count++] = copies[c];
+        }
+        if (!count) { next(); return true; }
+    } else if (!count) { phase_ = Phase::EmptyDirectory; return true; }
     char error[AC_STORAGE_ERROR_MAX]{};
-    if (!deletes_->start_selected(directory_.c_str(), names, count, &delete_id_, error, sizeof(error))) {
+    if (!deletes_->start_selected(directory_.c_str(), names, count, &delete_id_, error, sizeof(error),
+                                  copies_only_ ? StorageSpacePolicy::ReclaimTarget : 0)) {
         if (!*error || strstr(error, "busy") || strstr(error, "unavailable")) return false;
         next();
     }

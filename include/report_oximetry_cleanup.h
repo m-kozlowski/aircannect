@@ -3,6 +3,7 @@
 #include "report_oximetry_signals.h"
 #include "storage_delete_port.h"
 #include "storage_path_port.h"
+#include "storage_bounded_file_loader.h"
 
 namespace aircannect {
 
@@ -19,7 +20,7 @@ public:
     void forget_media();
 
 private:
-    enum class Phase { Select, Contents, Verify, Delete, EmptyDirectory };
+    enum class Phase { Select, Contents, Manifest, Verify, Delete, EmptyDirectory };
     void next();
     bool cancel();
 
@@ -28,6 +29,7 @@ private:
     StorageDeletePort *deletes_ = nullptr;
     StoragePathPort *paths_ = nullptr;
     ReportOximetrySignalBuilder verifier_;
+    StorageBoundedFileLoader manifest_reader_;
 
     std::shared_ptr<const ReportOximetryCatalog> originals_;
     std::shared_ptr<const StorageScanSnapshot> entries_, contents_;
@@ -35,6 +37,8 @@ private:
     size_t cursor_ = 0;
     uint32_t delete_id_ = 0;
     bool due_ = false, pressure_ = false, current_ = false, manifest_ = false;
+    bool copies_only_ = false;
+    ReportOximetryPlanes planes_;
     Phase phase_ = Phase::Select;
     std::string directory_;
     ReportOximetryRecording original_;

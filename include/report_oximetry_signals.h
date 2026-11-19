@@ -9,6 +9,8 @@ namespace aircannect {
 // Source-scoped v9 supplement. Its publication record is written last.
 // RAW timestamps for live observations are not snapped to the EDF grid.
 struct ReportOximetryPlanes {
+    static constexpr size_t PublicationBytes = 52;
+    bool decode(const uint8_t *bytes, size_t length);
     uint32_t rows = 0, index_bytes = 0, histogram_bytes = 0;
     uint32_t plane_bytes[4]{}, compressed_bytes[4]{};
 };

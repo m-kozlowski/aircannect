@@ -31,7 +31,7 @@ struct BlockStatistics {
 
 // This small fixed record is enough to reopen a published supplement without
 // retaining its histograms or reading its RAW data on boot.
-constexpr size_t PublicationBytes = 52;
+constexpr size_t PublicationBytes = ReportOximetryPlanes::PublicationBytes;
 void encode_publication(uint8_t *out, const ReportOximetryPlanes &p) {
     memcpy(out, "ACOXSG02", 8);
     put_le32(out + 8, p.rows);
@@ -42,18 +42,19 @@ void encode_publication(uint8_t *out, const ReportOximetryPlanes &p) {
         put_le32(out + 32 + 4*c, p.compressed_bytes[c]);
     }
 }
-bool decode_publication(const uint8_t *in, size_t len, ReportOximetryPlanes &p) {
-    if (len != PublicationBytes || memcmp(in, "ACOXSG02", 8)) return false;
-    p.rows = get_le32(in + 8);
-    p.index_bytes = get_le32(in + 12);
-    p.histogram_bytes = get_le32(in + 48);
-    for (size_t c = 0; c < 4; ++c) {
-        p.plane_bytes[c] = get_le32(in + 16 + 4*c);
-        p.compressed_bytes[c] = get_le32(in + 32 + 4*c);
-    }
-    return p.index_bytes > 0 && p.rows <= UINT32_MAX / RawBytes;
-}
 }  // namespace
+
+bool ReportOximetryPlanes::decode(const uint8_t *in, size_t len) {
+    if (len != PublicationBytes || memcmp(in, "ACOXSG02", 8)) return false;
+    rows = get_le32(in + 8);
+    index_bytes = get_le32(in + 12);
+    histogram_bytes = get_le32(in + 48);
+    for (size_t c = 0; c < 4; ++c) {
+        plane_bytes[c] = get_le32(in + 16 + 4*c);
+        compressed_bytes[c] = get_le32(in + 32 + 4*c);
+    }
+    return index_bytes > 0 && rows <= UINT32_MAX / RawBytes;
+}
 
 std::string report_oximetry_signal_path(const ReportOximetryRecording &r, const char *plane) {
     SleepDayId day;
@@ -367,7 +368,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         if (view.state == PreparedByteReadState::Retry) return false;
         if (!view.valid()) return fail();
         if (probe) {
-            if (decode_publication(view.data, view.length, w.product)) {
+            if (w.product.decode(view.data, view.length)) {
                 r.planes = std::allocate_shared<ReportOximetryPlanes>(LargeAllocator<ReportOximetryPlanes>(), w.product);
                 w.phase = Phase::Done;
             } else { w.product = {}; w.phase = manifest_only ? Phase::Done : Phase::Samples; }

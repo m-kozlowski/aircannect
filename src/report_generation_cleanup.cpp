@@ -195,9 +195,12 @@ bool ReportGenerationCleanup::poll(bool allowed, uint32_t now_ms,
         reclaim_requested_ = true;
     }
 
-    if (oximetry_.active() || (!delete_id_ && reclaim_phase_ == ReclaimPhase::Idle &&
+    const bool http_first = reclaim_requested_ && catalog_ && can_publish_ &&
+        reclaim_cursor_ < catalog_->size();
+    if (oximetry_.active() || (!http_first && !delete_id_ && reclaim_phase_ == ReclaimPhase::Idle &&
         !scan_ticket_.valid() && !day_.valid() && night_cursor_ >= pending_.size())) {
-        const bool worked = oximetry_.poll(allowed && !tracking_failed_, reclaim_requested_);
+        const bool worked = oximetry_.poll(allowed && !tracking_failed_ && !http_first &&
+            (!reclaim_requested_ || space.known), reclaim_requested_);
         if (worked || oximetry_.active()) return worked;
     }
 
