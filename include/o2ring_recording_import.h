@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "storage_path_port.h"
 #include "storage_range_write_port.h"
 
@@ -13,11 +15,12 @@ public:
 
     void begin(const char *peer, StoragePathPort &paths, StorageRangeWritePort &writes);
     void observe_contact(bool on_finger, bool charging, uint32_t now_ms);
+    bool off_finger_timeout(uint32_t now_ms) const;
     bool needs_connection(uint32_t now_ms) const;
     void reset();
     bool active() const { return phase_ != Phase::Idle; }
     bool awaiting_list() const { return phase_ == Phase::Info; }
-    Command next();
+    Command next(uint32_t now_ms);
     const char *recording() const { return id_; }
     uint16_t block() const { return static_cast<uint16_t>(offset_ / BlockSize); }
     void reply(Command cmd, uint16_t index, const uint8_t *data, size_t size);
@@ -25,18 +28,21 @@ public:
     void skip_open();
 
 private:
-    enum class Window { Closed, OffFinger, Charging };
+    enum class Window { Unknown, Worn, OffFinger, Charging };
     static constexpr uint32_t RecordingSettleMs = 12000;
-    enum class Phase { Idle, WaitForSave, Info, Select, Open, FinalStat, PartialStat, Read,
-                       Write, Close, Publish };
+    static constexpr uint32_t WriteProgressGraceMs = 3000;
+    enum class Phase { Idle, WaitForSave, WaitForRecheck, Info, Select, Open, FinalStat,
+                       PartialStat, Read, Write, Close, Publish };
     bool take_list(const uint8_t *data, size_t size);
     void next_file();
     void step_path();
-    void step_write();
+    void step_write(uint32_t now_ms);
 
     Phase phase_ = Phase::Idle;
-    Window window_ = Window::Closed;
+    Window window_ = Window::Unknown;
     uint32_t idle_since_ms_ = 0, last_contact_ms_ = 0;
+    bool recheck_pending_ = false;
+    std::optional<uint32_t> last_write_ms_;
     StoragePathPort *paths_ = nullptr;
     StorageRangeWritePort *writes_ = nullptr;
     OperationTicket ticket_{};

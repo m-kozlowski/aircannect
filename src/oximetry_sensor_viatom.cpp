@@ -128,7 +128,7 @@ bool BleSensorProtocolEngine::viatom_poll_recordings(uint32_t now_ms) {
     if (viatom_.file_open && (!importing || recordings_->awaiting_list())) {
         cmd = FileCommand::Close;
     } else if (importing) {
-        cmd = recordings_->next();
+        cmd = recordings_->next(now_ms);
     }
     if (cmd == FileCommand::None) return false;
 

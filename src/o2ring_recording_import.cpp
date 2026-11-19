@@ -17,27 +17,39 @@ void O2RingRecordingImport::begin(const char *peer, StoragePathPort &paths,
     writes_ = &writes;
     source_ = peer;
     source_.erase(std::remove(source_.begin(), source_.end(), ':'), source_.end());
-    window_ = Window::Closed;
+    window_ = Window::Unknown;
+}
+
+bool O2RingRecordingImport::off_finger_timeout(uint32_t now_ms) const {
+    return window_ == Window::OffFinger &&
+           now_ms - idle_since_ms_ >= AC_OXIMETRY_SENSOR_INVALID_DISCONNECT_MS;
 }
 
 bool O2RingRecordingImport::needs_connection(uint32_t now_ms) const {
-    return active() && now_ms - last_contact_ms_ < AC_OXIMETRY_SENSOR_NOTIFY_TIMEOUT_MS;
+    if (!active() || now_ms - last_contact_ms_ >= AC_OXIMETRY_SENSOR_NOTIFY_TIMEOUT_MS)
+        return false;
+
+    // The hub's invalid-reading timer may have started before contact was lost.
+    return now_ms - idle_since_ms_ < AC_OXIMETRY_SENSOR_INVALID_DISCONNECT_MS ||
+           (last_write_ms_ && now_ms - *last_write_ms_ < WriteProgressGraceMs);
 }
 
 void O2RingRecordingImport::observe_contact(bool on_finger, bool charging, uint32_t now_ms) {
     last_contact_ms_ = now_ms;
     const Window next = charging ? Window::Charging :
-                        on_finger ? Window::Closed : Window::OffFinger;
+                        on_finger ? Window::Worn : Window::OffFinger;
 
     if (next != window_) {
-        if (next == Window::Closed) {
+        if (next == Window::Worn) {
             if (active()) Log::logf(CAT_OXI, LOG_DEBUG, "recording import paused: sensor worn\n");
             reset();
-        } else if (window_ == Window::Closed) {
+        } else if (window_ == Window::Unknown || window_ == Window::Worn) {
             // The newest file first appeared about ten seconds after removal on the O2Ring.
             idle_since_ms_ = now_ms;
             phase_ = Phase::WaitForSave;
+            recheck_pending_ = window_ == Window::Worn;
         } else if (!active()) {
+            idle_since_ms_ = now_ms;
             phase_ = Phase::Info;
         }
         window_ = next;
@@ -56,6 +68,8 @@ void O2RingRecordingImport::reset() {
     ticket_ = {};
     list_.reset();
     chunk_.reset();
+    recheck_pending_ = false;
+    last_write_ms_.reset();
     cursor_ = 0;
     saved_ = 0;
     id_[0] = '\0';
@@ -75,6 +89,23 @@ bool O2RingRecordingImport::take_list(const uint8_t *data, size_t size) {
     if (deserializeJson(doc, data, size)) return false;
     const JsonString list = doc["FileList"].as<JsonString>();
     if (list.isNull()) return false;
+
+    // On the second INFO, skip the already checked prefix of complete IDs.
+    const size_t checked = list_ ? std::min(cursor_, list_->size()) : 0;
+    cursor_ = 0;
+    if (list_ && list.size()) {
+        const std::string_view before(reinterpret_cast<const char *>(list_->data()), list_->size());
+        const std::string_view after(list.c_str(), list.size());
+        const auto end = std::mismatch(after.begin(), after.end(), before.begin(), before.end()).first;
+        if (end == after.end() && after.size() == before.size()) {
+            cursor_ = checked;
+            return true;
+        }
+        const auto comma = after.substr(0, end - after.begin()).rfind(',');
+        if (comma != after.npos) cursor_ = std::min(checked, comma + 1);
+    }
+
+    list_.reset();
     if (list.size()) {
         list_ = LargeByteBuffer::copy_and_freeze(list.c_str(), list.size());
         if (!list_) return false;
@@ -110,6 +141,12 @@ void O2RingRecordingImport::next_file() {
         return;
     }
     if (saved_) Log::logf(CAT_OXI, LOG_INFO, "recordings saved to SD files=%u\n", saved_);
+    if (recheck_pending_) {
+        saved_ = 0;
+        last_write_ms_.reset();
+        phase_ = Phase::WaitForRecheck;
+        return;
+    }
     reset();
 }
 
@@ -119,14 +156,24 @@ void O2RingRecordingImport::skip_open() {
     phase_ = Phase::Select;
 }
 
-O2RingRecordingImport::Command O2RingRecordingImport::next() {
+O2RingRecordingImport::Command O2RingRecordingImport::next(uint32_t now_ms) {
     switch (phase_) {
         case Phase::Info: return Command::Info;
-        case Phase::Select: next_file(); break;
+        case Phase::Select:
+        case Phase::WaitForRecheck:
+            // Recheck between files, leaving time for the first write before disconnect.
+            if (recheck_pending_ && now_ms - idle_since_ms_ >=
+                    AC_OXIMETRY_SENSOR_INVALID_DISCONNECT_MS - 5000) {
+                recheck_pending_ = false;
+                phase_ = Phase::Info;
+                return Command::Info;
+            }
+            if (phase_ == Phase::Select) next_file();
+            break;
         case Phase::Open: return Command::Open;
         case Phase::Read: return Command::Read;
         case Phase::Close: return Command::Close;
-        case Phase::Write: step_write(); break;
+        case Phase::Write: step_write(now_ms); break;
         case Phase::FinalStat:
         case Phase::PartialStat:
         case Phase::Publish: step_path(); break;
@@ -202,6 +249,8 @@ void O2RingRecordingImport::step_path() {
         }
         // Re-read an interrupted block in full. A complete partial file only needs publication.
         offset_ = result.size == size_ ? size_ : (result.size / BlockSize) * BlockSize;
+        // A partial file is older unfinished work, not a newly discovered recording.
+        if (!result.exists) recheck_pending_ = false;
         const auto space = writes_->space_snapshot();
         if (offset_ < size_ && space.known &&
             !space.fits(size_ - offset_, StorageSpacePolicy::WarnBelow))
@@ -216,7 +265,7 @@ void O2RingRecordingImport::step_path() {
     }
 }
 
-void O2RingRecordingImport::step_write() {
+void O2RingRecordingImport::step_write(uint32_t now_ms) {
     if (!ticket_.valid()) {
         StorageRangeWriteCommand c;
         c.generation = 1;
@@ -235,6 +284,7 @@ void O2RingRecordingImport::step_write() {
         result.bytes_written != chunk_->size()) return fail(result.error);
 
     offset_ += result.bytes_written;
+    last_write_ms_ = now_ms;
     chunk_.reset();
     phase_ = offset_ == size_ ? Phase::Close : Phase::Read;
 }

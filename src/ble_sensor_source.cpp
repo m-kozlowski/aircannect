@@ -1082,7 +1082,9 @@ void BleSensorSource::task_loop() {
         bool manual_connect = false;
         OximetrySensorDevice manual_target_device;
         char import_peer[sizeof(connected_addr_)]{};
-        const bool keep_for_import = recordings_.needs_connection(millis());
+        const uint32_t policy_ms = millis();
+        const bool keep_for_import = recordings_.needs_connection(policy_ms);
+        const bool off_finger_timeout = import_session && recordings_.off_finger_timeout(policy_ms);
 
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
@@ -1090,7 +1092,7 @@ void BleSensorSource::task_loop() {
         disconnect_now = disconnect_requested_;
         disconnect_hold_until_absent = disconnect_hold_until_absent_;
         disconnect_holdoff_kind = disconnect_holdoff_kind_;
-        if (!disconnect_now && live_disconnect_ != LiveDisconnect::None) {
+        if (!disconnect_now && (off_finger_timeout || live_disconnect_ != LiveDisconnect::None)) {
             if (keep_for_import) {
                 live_disconnect_ = LiveDisconnect::DeferredForImport;
             } else {
@@ -1577,7 +1579,7 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
 #endif
     if (charging) {
         live_disconnect_ = LiveDisconnect::None;
-        if (!recordings_.active()) {
+        if (!recordings_.needs_connection(millis())) {
             disconnect_requested_ = true;
             disconnect_hold_until_absent_ = true;
             disconnect_holdoff_kind_ = AutoconnectHoldoffKind::Charging;
