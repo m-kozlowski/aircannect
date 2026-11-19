@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string_view>
+#include "board_oximetry.h"
 #include "debug_log.h"
 #include "large_json_allocator.h"
 #include "storage_space_policy.h"
@@ -16,7 +17,35 @@ void O2RingRecordingImport::begin(const char *peer, StoragePathPort &paths,
     writes_ = &writes;
     source_ = peer;
     source_.erase(std::remove(source_.begin(), source_.end(), ':'), source_.end());
-    phase_ = Phase::Info;
+    window_ = Window::Closed;
+}
+
+bool O2RingRecordingImport::needs_connection(uint32_t now_ms) const {
+    return active() && now_ms - last_contact_ms_ < AC_OXIMETRY_SENSOR_NOTIFY_TIMEOUT_MS;
+}
+
+void O2RingRecordingImport::observe_contact(bool on_finger, bool charging, uint32_t now_ms) {
+    last_contact_ms_ = now_ms;
+    const Window next = charging ? Window::Charging :
+                        on_finger ? Window::Closed : Window::OffFinger;
+
+    if (next != window_) {
+        if (next == Window::Closed) {
+            if (active()) Log::logf(CAT_OXI, LOG_DEBUG, "recording import paused: sensor worn\n");
+            reset();
+        } else if (window_ == Window::Closed) {
+            // The newest file first appeared about ten seconds after removal on the O2Ring.
+            idle_since_ms_ = now_ms;
+            phase_ = Phase::WaitForSave;
+        } else if (!active()) {
+            phase_ = Phase::Info;
+        }
+        window_ = next;
+    }
+
+    if (phase_ == Phase::WaitForSave && now_ms - idle_since_ms_ >= RecordingSettleMs) {
+        phase_ = Phase::Info;
+    }
 }
 
 void O2RingRecordingImport::reset() {
@@ -24,7 +53,14 @@ void O2RingRecordingImport::reset() {
         if (phase_ == Phase::Write) writes_->abandon(ticket_);
         else paths_->abandon(ticket_);
     }
-    *this = {};
+    ticket_ = {};
+    list_.reset();
+    chunk_.reset();
+    cursor_ = 0;
+    saved_ = 0;
+    id_[0] = '\0';
+    offset_ = size_ = 0;
+    phase_ = Phase::Idle;
 }
 
 void O2RingRecordingImport::fail(const char *reason) {
@@ -94,6 +130,7 @@ O2RingRecordingImport::Command O2RingRecordingImport::next() {
         case Phase::FinalStat:
         case Phase::PartialStat:
         case Phase::Publish: step_path(); break;
+        case Phase::WaitForSave:
         case Phase::Idle: break;
     }
     return Command::None;

@@ -50,6 +50,7 @@ public:
     bool request_connect(const char *addr_or_index);
     bool request_connect(const OximetrySensorDevice &device);
     bool request_disconnect(bool hold_until_absent = true);
+    void request_live_disconnect();
     bool forget(const char *addr_or_all);
     bool set_autoconnect(const char *addr, bool enabled);
     bool set_recordings(const char *addr, bool enabled);
@@ -66,6 +67,8 @@ public:
 #endif
 
 private:
+    enum class LiveDisconnect : uint8_t { None, Requested, DeferredForImport };
+
     enum class AutoconnectHoldoffKind : uint8_t {
         Standard,
         Charging,
@@ -157,6 +160,7 @@ private:
     bool scan_requested_ = false;
     bool manual_connect_requested_ = false;
     bool disconnect_requested_ = false;
+    LiveDisconnect live_disconnect_ = LiveDisconnect::None;
     bool disconnect_hold_until_absent_ = false;
     AutoconnectHoldoffKind disconnect_holdoff_kind_ =
         AutoconnectHoldoffKind::Standard;

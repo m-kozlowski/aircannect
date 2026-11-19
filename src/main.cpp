@@ -961,7 +961,7 @@ static void poll_oximetry(bool network_available, uint32_t now_ms) {
         (!after.source_present || after.source == OximetrySource::Ble));
 
     if (oximetry_action_has(actions, OximetryHubAction::DisconnectBleSensor)) {
-        (void)oximetry_sensor_source.request_disconnect(true);
+        oximetry_sensor_source.request_live_disconnect();
     }
     if (oximetry_action_has(actions, OximetryHubAction::SourceBecameStale)) {
         Log::logf(CAT_OXI, LOG_INFO, "source stale\n");

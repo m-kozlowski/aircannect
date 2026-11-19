@@ -317,6 +317,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
 
     viatom_clear_pending();
     const bool charging = battery_state == 1 || battery_state == 2;
+    if (recordings_) recordings_->observe_contact(lead_state != 0, charging, millis());
     viatom_.initial_probe_complete = !charging || (recordings_ && recordings_->active());
     if (charging) viatom_.need_time_sync = false;
 

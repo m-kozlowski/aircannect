@@ -12,6 +12,8 @@ public:
     static constexpr size_t BlockSize = 512;
 
     void begin(const char *peer, StoragePathPort &paths, StorageRangeWritePort &writes);
+    void observe_contact(bool on_finger, bool charging, uint32_t now_ms);
+    bool needs_connection(uint32_t now_ms) const;
     void reset();
     bool active() const { return phase_ != Phase::Idle; }
     bool awaiting_list() const { return phase_ == Phase::Info; }
@@ -23,7 +25,9 @@ public:
     void skip_open();
 
 private:
-    enum class Phase { Idle, Info, Select, Open, FinalStat, PartialStat, Read,
+    enum class Window { Closed, OffFinger, Charging };
+    static constexpr uint32_t RecordingSettleMs = 12000;
+    enum class Phase { Idle, WaitForSave, Info, Select, Open, FinalStat, PartialStat, Read,
                        Write, Close, Publish };
     bool take_list(const uint8_t *data, size_t size);
     void next_file();
@@ -31,6 +35,8 @@ private:
     void step_write();
 
     Phase phase_ = Phase::Idle;
+    Window window_ = Window::Closed;
+    uint32_t idle_since_ms_ = 0, last_contact_ms_ = 0;
     StoragePathPort *paths_ = nullptr;
     StorageRangeWritePort *writes_ = nullptr;
     OperationTicket ticket_{};
