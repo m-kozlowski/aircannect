@@ -89,6 +89,16 @@ individual overrides can be changed with
 | --- | --- | --- | --- |
 | `keybindings` | Hardware-specific binding set | Hardware profile | Assign local button gestures to available actions. Missing overrides retain the hardware defaults. |
 
+## Scheduled Actions
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `schedule_1` ... `schedule_4` | `STATE HH:MM DAYS ACTION`, or empty | empty | One rule per slot. `on` enables the rule; `off` keeps it disabled. Any button action can be scheduled. |
+
+Times use the local timezone (`tz`). Use `*` for every day or a comma-separated
+list of days or ranges, e.g. `on 22:30 mon-fri warmup_start`. Missed times
+are skipped; a repeated hour does not run the same rule twice.
+
 ## Display
 
 These keys are available on builds with a local display.

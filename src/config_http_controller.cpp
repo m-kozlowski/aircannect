@@ -91,6 +91,7 @@ bool config_value_text(JsonVariantConst value,
             }
             return false;
 
+        case AppConfigFieldType::Schedule:
         case AppConfigFieldType::String:
         case AppConfigFieldType::Secret:
         case AppConfigFieldType::Enum:
@@ -364,6 +365,7 @@ void build_config_json(LargeTextBuffer &json,
                 comma = true;
                 break;
 
+            case AppConfigFieldType::Schedule:
             case AppConfigFieldType::String:
             case AppConfigFieldType::Enum:
             case AppConfigFieldType::LogLevel:

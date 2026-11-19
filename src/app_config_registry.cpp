@@ -170,6 +170,11 @@ static constexpr AppConfigFieldFlags SECRET_INTERNAL =
      label " log level", label " log category level.", nullptr, 0, index,   \
      AC_CFG_OFFSET(log_levels)}
 
+#define AC_SCHEDULE_FIELD(n)                                                 \
+    {"schedule_" #n, AppConfigFieldId::Schedule, AppConfigGroup::Schedule, n, \
+     AppConfigFieldType::Schedule, PROVISIONABLE, AC_CONFIG_DIRTY_SCHEDULE,   \
+     "Rule " #n, nullptr, nullptr, 0, n - 1, 0}
+
 static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
     {AC_CONFIG_ONBOARDING_KEY, AppConfigFieldId::OnboardingComplete,
      AppConfigGroup::Device, 0, AppConfigFieldType::Bool,
@@ -399,6 +404,11 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      "SleepHQ mask ID for new post-therapy imports; empty disables it.",
      nullptr, 0, -1, AC_CFG_OFFSET(sleephq_mask_id)},
 
+    AC_SCHEDULE_FIELD(1),
+    AC_SCHEDULE_FIELD(2),
+    AC_SCHEDULE_FIELD(3),
+    AC_SCHEDULE_FIELD(4),
+
     {"keybindings", AppConfigFieldId::Keybindings,
      AppConfigGroup::Keybindings, 10, AppConfigFieldType::Keybindings,
      AC_CONFIG_FIELD_NONE, AC_CONFIG_DIRTY_KEYBINDINGS,
@@ -525,6 +535,9 @@ bool raw_value(const AppConfigData &cfg,
                String &out) {
     out = "";
     switch (field.type) {
+        case AppConfigFieldType::Schedule:
+            out = format_weekly_action(cfg.schedule[field.index]).c_str();
+            return true;
         case AppConfigFieldType::Bool:
             out = config_field_ref<bool>(cfg, field) ? "1" : "0";
             return true;
@@ -759,6 +772,11 @@ bool AppConfigFieldWriter::set_value(
             return config.set_log_level(static_cast<log_cat_t>(field.index),
                                         level);
         }
+        case AppConfigFieldId::Schedule: {
+            WeeklyAction parsed;
+            return parse_weekly_action(value.c_str(), parsed) &&
+                   config.set_schedule(field.index, parsed);
+        }
         case AppConfigFieldId::Keybindings:
             return false;
         case AppConfigFieldId::DisplayOrientation: {
@@ -878,6 +896,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::SleepHq: return "sleephq";
         case AppConfigGroup::Keybindings: return "keybindings";
         case AppConfigGroup::Display: return "display";
+        case AppConfigGroup::Schedule: return "schedule";
         case AppConfigGroup::Vpn: return "vpn";
         case AppConfigGroup::Count: break;
     }
@@ -899,6 +918,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::SleepHq: return "SleepHQ";
         case AppConfigGroup::Keybindings: return "Buttons";
         case AppConfigGroup::Display: return "Display";
+        case AppConfigGroup::Schedule: return "Scheduled actions";
         case AppConfigGroup::Vpn: return "VPN (WireGuard)";
         case AppConfigGroup::Count: break;
     }
@@ -914,6 +934,7 @@ const char *app_config_field_type_name(AppConfigFieldType type) {
         case AppConfigFieldType::Enum:
         case AppConfigFieldType::LogLevel:
             return "enum";
+        case AppConfigFieldType::Schedule: return "schedule";
         case AppConfigFieldType::Keybindings:
             return "keybindings";
     }

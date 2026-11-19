@@ -339,6 +339,14 @@ void load_config_field(Preferences &prefs,
     const PreferenceType stored_type = prefs.getType(load_key);
 
     switch (field.type) {
+        case AppConfigFieldType::Schedule:
+            if (stored_type == PT_STR) {
+                const String text = prefs.getString(load_key);
+                if (!parse_weekly_action(text.c_str(), data.schedule[field.index])) {
+                    Log::logf(CAT_CONFIG, LOG_WARN, "invalid rule key=%s\n", field.key);
+                }
+            }
+            return;
         case AppConfigFieldType::Bool:
             if (stored_type != PT_U8) return;
             config_field_ref<bool>(data, field) =
@@ -438,6 +446,7 @@ bool save_config_field(Preferences &prefs,
         case AppConfigFieldType::Secret:
         case AppConfigFieldType::Enum:
         case AppConfigFieldType::LogLevel:
+        case AppConfigFieldType::Schedule:
             return put_string(prefs, field.key, raw);
         case AppConfigFieldType::Keybindings: {
             std::vector<uint8_t> bytes;
@@ -955,6 +964,14 @@ bool AppConfig::set_edf_capture_enabled(bool enabled) {
     if (data_.edf_capture_enabled == enabled) return true;
     data_.edf_capture_enabled = enabled;
     return mark_dirty(AC_CONFIG_DIRTY_EDF_CAPTURE);
+}
+
+bool AppConfig::set_schedule(size_t slot, const WeeklyAction &rule) {
+    if (slot >= data_.schedule.size()) return false;
+    if (data_.schedule[slot] == rule) return true;
+
+    data_.schedule[slot] = rule;
+    return mark_dirty(AC_CONFIG_DIRTY_SCHEDULE);
 }
 
 bool AppConfig::set_keybindings(

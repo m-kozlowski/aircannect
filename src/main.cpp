@@ -173,6 +173,7 @@ static ResmedOtaManager resmed_ota_manager;
 static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static DisplayManager display_manager;
+static ActionSchedule action_schedule;
 static LocalActionRouter local_actions;
 static LocalInputController local_inputs(local_actions);
 static LiveChartService live_chart_service;
@@ -347,6 +348,27 @@ static const char *set_warmup(void *, uint32_t) {
         rpc_transport, device, enable, RpcSource::Internal);
     if (submission.accepted()) return nullptr;
     return submission.admission == OperationAdmission::Busy ? "busy" : "warmup_rejected";
+}
+
+static void poll_scheduled_actions(uint32_t now_ms) {
+    static uint32_t last_check = 0;
+    if (now_ms - last_check < 1000) return;
+    last_check = now_ms;
+
+    const time_t now = time_sync_service.esp_clock_valid() ? time(nullptr) : 0;
+    const uint8_t due = action_schedule.take_due(now);
+    if (!due) return;
+
+    const auto &rules = config_service.data().schedule;
+    for (size_t i = 0; i < rules.size(); ++i) {
+        if (!(due & (1u << i))) continue;
+        const auto action = rules[i].action;
+        const char *error = local_actions.dispatch(action, now_ms);
+        Log::logf(CAT_GENERAL, error ? LOG_WARN : LOG_INFO,
+                  "[SCHEDULE] slot=%u action=%s result=%s\n",
+                  unsigned(i + 1), local_action_find(action)->name,
+                  error ? error : "accepted");
+    }
 }
 
 static const char *power_off_aircannect(void *, uint32_t) {
@@ -1014,6 +1036,9 @@ static void apply_config_runtime_effects(void *,
     if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
         edf_recorder_manager.set_enabled(config.edf_capture_enabled);
     }
+    if (dirty & AC_CONFIG_DIRTY_SCHEDULE) {
+        action_schedule.configure(config.schedule, time(nullptr));
+    }
     if (dirty & AC_CONFIG_DIRTY_KEYBINDINGS) {
         if (!local_inputs.apply_config(config.keybindings, millis())) {
             Log::logf(CAT_CONFIG, LOG_ERROR,
@@ -1313,6 +1338,7 @@ void setup() {
                   "[INIT] display manager failed to start\n");
     }
 
+    action_schedule.configure(config_service.data().schedule, time(nullptr));
     local_inputs.set_interaction_handler([](void *) {
         display_manager.note_interaction();
     }, nullptr);
@@ -1907,6 +1933,7 @@ void loop() {
     session_manager.poll(as11_device_service.state(), now_ms);
 
     local_inputs.poll(now_ms);
+    poll_scheduled_actions(now_ms);
     drain_can_rx();
 
     edf_recorder_manager.poll(now_ms);
