@@ -22,6 +22,9 @@ constexpr LocalActionDefinition ACTIONS[] = {
     {LocalActionId::TriggerSync, "trigger_sync", "Sync exports"},
     {LocalActionId::DisconnectCpap,
      "disconnect_cpap", "Disconnect from CPAP"},
+    {LocalActionId::WarmupStart, "warmup_start", "Start warm-up"},
+    {LocalActionId::WarmupStop, "warmup_stop", "Stop warm-up"},
+    {LocalActionId::WarmupToggle, "warmup_toggle", "Start or stop warm-up"},
 };
 
 }  // namespace

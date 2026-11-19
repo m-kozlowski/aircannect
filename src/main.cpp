@@ -332,6 +332,23 @@ static const char *toggle_therapy(void *, uint32_t now_ms) {
     return submission.admission == OperationAdmission::Busy ? "busy" : "therapy_rejected";
 }
 
+template <LocalActionId Action>
+static const char *set_warmup(void *, uint32_t) {
+    const auto &device = as11_device_service.state();
+    const auto state = device.warmup_state();
+    if (state == As11WarmupState::Unknown) return "warmup_state_unknown";
+
+    const bool active = state == As11WarmupState::Active;
+    const bool enable = Action == LocalActionId::WarmupToggle
+        ? !active : Action == LocalActionId::WarmupStart;
+    if (enable == active) return nullptr;
+
+    const auto submission = as11_settings_manager.request_warmup(
+        rpc_transport, device, enable, RpcSource::Internal);
+    if (submission.accepted()) return nullptr;
+    return submission.admission == OperationAdmission::Busy ? "busy" : "warmup_rejected";
+}
+
 static const char *power_off_aircannect(void *, uint32_t) {
     if (!board_power_off_supported() || local_poweroff_requested ||
         StorageUsb::suspended() ||
@@ -1321,6 +1338,13 @@ void setup() {
         LocalActionId::DisconnectCpap, [](void *ctx, uint32_t ms) -> const char * {
             return disconnect_cpap(ctx, ms) ? nullptr : "disconnect_unavailable";
         }, nullptr);
+    (void)local_actions.register_handler(LocalActionId::WarmupStart,
+        set_warmup<LocalActionId::WarmupStart>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::WarmupStop,
+        set_warmup<LocalActionId::WarmupStop>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::WarmupToggle,
+        set_warmup<LocalActionId::WarmupToggle>, nullptr);
+
     if (!local_inputs.begin() ||
         !local_inputs.apply_config(config_service.data().keybindings,
                                    millis())) {

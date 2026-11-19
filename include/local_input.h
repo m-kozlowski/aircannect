@@ -32,6 +32,9 @@ enum class LocalActionId : uint16_t {
     RestartAirCANnect = 6,
     TriggerSync = 7,
     DisconnectCpap = 8,
+    WarmupStart = 9,
+    WarmupStop = 10,
+    WarmupToggle = 11,
 };
 
 struct LocalActionDefinition {
