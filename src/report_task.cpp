@@ -940,6 +940,8 @@ struct ReportTask::Runtime {
         catalog_generation = monotonic_generation(
             generation, catalog_generation);
         catalog = std::move(next);
+        oximetry_archive.night_offsets_changed();
+        oximetry_clock_catalog_ready = true;
         display_summary = build_display_report_summary(*catalog);
         engine.publish_catalog(catalog);
 
@@ -1599,6 +1601,7 @@ struct ReportTask::Runtime {
             }
         }
         if (timezone_changed) {
+            oximetry_archive.invalidate(ReportOximetryChange::published(true));
             schedule_reconcile(now_ms,
                                false);
         }
@@ -2869,6 +2872,7 @@ struct ReportTask::Runtime {
             engine.clear();
             period_service.cancel();
             oximetry_archive.reset();
+            oximetry_clock_catalog_ready = false;
             period_service.clear_cache();
             catalog_refresh.cancel();
             catalog_store.forget_media();
@@ -2988,6 +2992,8 @@ struct ReportTask::Runtime {
     ReportPeriodService period_service;
     ReportOximetrySignalBuilder oximetry_signals;
     ReportOximetryArchive oximetry_archive;
+    bool oximetry_clock_catalog_ready = false;
+    std::weak_ptr<const ReportOximetryCatalog> delivered_ring_sources;
     std::atomic<bool> oximetry_requested{false};
     ReportPeriodKey period_key;
     bool period_running = false;
@@ -3732,12 +3738,16 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         const auto before = runtime.oximetry_archive.catalog();
         worked = runtime.oximetry_archive.poll(now_ms, runtime.catalog.get()) || worked;
         const auto catalog = runtime.oximetry_archive.catalog();
-        if (before != catalog) {
-            if (oximetry_consumer_ && runtime.oximetry_archive.ring_changed()) oximetry_consumer_(catalog);
-            runtime.publish_state();
+        if (before != catalog) runtime.publish_state();
+        const auto ring = runtime.oximetry_archive.ring_sources();
+        if (oximetry_consumer_ && runtime.oximetry_clock_catalog_ready && !runtime.catalog_load_pending &&
+            ring && ring != runtime.delivered_ring_sources.lock()) {
+            oximetry_consumer_(ring);
+            runtime.delivered_ring_sources = ring;
         }
     }
     if (runtime.summary_media_available && !summary_media_available) {
+        runtime.oximetry_clock_catalog_ready = false;
         runtime.oximetry_archive.reset();
         if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
         runtime.summary_archive.forget_media();
@@ -4001,6 +4011,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         break;
                     }
                 } else {
+                    runtime.oximetry_clock_catalog_ready = strcmp(status.error, "read_not_found") == 0;
                     if (strcmp(status.error, "read_not_found") != 0) {
                         runtime.record_failure("load_catalog", status.error);
                     }
@@ -4614,6 +4625,18 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.engine.catalog_update_required();
 
     worked = runtime.resume_compression() || worked;
+
+    if (summary_media_available && !runtime.activity.ota_install_active &&
+        !runtime.activity.realtime_stream_active) {
+        const auto before = runtime.oximetry_archive.catalog();
+        const auto engine = runtime.engine.status();
+        const bool idle = startup_allowed && !local_blocked && !runtime.activity.storage_low_space &&
+            !runtime.rebuild_started && !runtime.capture_build.valid() && !runtime.post_therapy_build.valid() &&
+            !runtime.signal_tile_backfill_started && !runtime.generation_cleanup.deleting() &&
+            engine.state == ReportEngineState::Idle && !engine.queued;
+        worked = runtime.oximetry_archive.poll_signals(now_ms, idle) || worked;
+        if (before != runtime.oximetry_archive.catalog()) runtime.publish_state();
+    }
 
     if (runtime.activity.storage_low_space) {
         worked = runtime.poll_generation_cleanup(

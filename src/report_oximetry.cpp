@@ -114,6 +114,20 @@ bool night_window(time_t sample, ReportOximetryRecording &out) {
     return out.noon_s <= sample && sample < out.next_noon_s;
 }
 
+int32_t ring_offset(int64_t start_ms, const NightCatalog *nights) {
+    const int64_t utc_day = start_ms / 86400000;
+    for (int delta = -2; nights && delta <= 1; ++delta) {
+        SleepDayId day;
+        if (!SleepDayId::from_epoch_days(utc_day + delta, day)) continue;
+        const auto *record = nights->find(day);
+        if (record && record->timezone_offset_valid && record->day_start_ms <= start_ms &&
+            start_ms < record->day_end_ms) return record->timezone_offset_minutes;
+    }
+    int32_t offset = 0;
+    edf_configured_timezone_offset_minutes(start_ms, offset);
+    return offset;
+}
+
 }  // namespace
 
 std::string ReportOximetryRecording::path() const {
@@ -127,8 +141,6 @@ void ReportOximetryArchive::begin(StorageScanPort &scan, StorageReadPort &read) 
 }
 
 void ReportOximetryArchive::release() {
-    if (signals_) signals_->reset();
-    preparing_signals_ = false;
     if (scan_ticket_.valid()) scan_->abandon(scan_ticket_);
     if (read_ticket_.valid()) read_->abandon(read_ticket_);
     if (prepared_.valid()) read_->release_prepared(prepared_);
@@ -143,6 +155,11 @@ void ReportOximetryArchive::release() {
 
 void ReportOximetryArchive::reset() {
     release();
+    if (signals_) signals_->reset();
+    preparing_.reset();
+    ring_sources_.reset();
+    prepare_pending_ = offsets_dirty_ = false;
+    signal_retry_at_ = 0;
     published_.reset();
     retry_at_ = 0;
     scanning_ = {};
@@ -158,28 +175,20 @@ bool ReportOximetryArchive::poll(uint32_t now_ms, const NightCatalog *nights) tr
 }
 
 bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
-    if (preparing_signals_) {
-        if (signals_ && index_ < building_->size()) {
-            auto &recording = (*building_)[index_];
-            if (recording.planes) { ++index_; return true; }
-            const bool worked = signals_->step(recording);
-            if (signals_->finished()) {
-                if (signals_->retryable()) {
-                    pending_.merge(ReportOximetryChange::published(!recording.csv_bytes,
-                        recording.source, recording.csv_bytes ? std::string_view(recording.id+5, 8) :
-                        std::string_view{}));
-                    retry_at_ = now_ms + 60000;
-                }
-                signals_->reset();
-                ++index_;
-            }
-            return worked;
+    if (offsets_dirty_ && ring_sources_) {
+        std::shared_ptr<ReportOximetryCatalog> revised;
+        for (size_t i = 0; i < ring_sources_->size(); ++i) {
+            const auto &r = (*ring_sources_)[i];
+            if (r.csv_bytes) continue;
+            const auto offset = ring_offset(r.start_ms, nights);
+            if (r.offset_minutes == offset) continue;
+            if (!revised) revised = std::allocate_shared<ReportOximetryCatalog>(
+                LargeAllocator<ReportOximetryCatalog>(), *ring_sources_);
+            (*revised)[i].offset_minutes = offset;
         }
-        published_ = std::move(building_);
-        scanning_ = {};
-        release();
-        return true;
+        if (revised) ring_sources_ = std::move(revised);
     }
+    offsets_dirty_ = false;
     if (!files_) {
         if (!scan_ticket_.valid()) {
             if (!scanning_.pending && pending_.pending) {
@@ -231,21 +240,7 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
                 if (!night_window(slice.start_ms / 1000, slice)) continue;
                 if (slice.noon_s != (*building_)[i].noon_s ||
                     slice.next_noon_s != (*building_)[i].next_noon_s) slice.planes.reset();
-                if (!slice.csv_bytes) {
-                    edf_configured_timezone_offset_minutes(slice.start_ms, slice.offset_minutes);
-                    // The EDF day may differ from the ESP sleep day near noon.
-                    const int64_t utc_day = slice.start_ms / 86400000;
-                    for (int delta = -2; nights && delta <= 1; ++delta) {
-                        SleepDayId day;
-                        if (!SleepDayId::from_epoch_days(utc_day + delta, day)) continue;
-                        const auto *record = nights->find(day);
-                        if (record && record->timezone_offset_valid &&
-                            record->day_start_ms <= slice.start_ms && slice.start_ms < record->day_end_ms) {
-                            slice.offset_minutes = record->timezone_offset_minutes;
-                            break;
-                        }
-                    }
-                }
+                if (!slice.csv_bytes) slice.offset_minutes = ring_offset(slice.start_ms, nights);
                 (*building_)[i] = slice;
                 while (slice.next_noon_s * 1000 < slice.end_ms() && night_window(slice.next_noon_s, slice)) {
                     slice.planes.reset();
@@ -255,8 +250,15 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             std::sort(building_->begin(), building_->end(), [](const auto &a, const auto &b) {
                 return a.key() == b.key() ? a.noon_s < b.noon_s : a.key() < b.key();
             });
-            preparing_signals_ = true;
-            index_ = 0;
+            if (signals_) signals_->reset();
+            preparing_.reset();
+            prepare_pending_ = true;
+            manifest_only_ = true;
+            signal_retry_at_ = 0;
+            if (ring_changed_) ring_sources_ = building_;
+            published_ = std::move(building_);
+            scanning_ = {};
+            release();
         }
         return true;
     }
@@ -318,6 +320,44 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     prepared_ = {};
     ++index_;
     return true;
+}
+
+bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowed) try {
+    if (!signals_ || !prepare_pending_ || !published_ ||
+        (!preparing_ && signal_retry_at_ && int32_t(now_ms - signal_retry_at_) < 0)) return false;
+    if (!manifest_only_ && !background_allowed) {
+        signals_->reset();
+        return false;
+    }
+    if (!preparing_) {
+        preparing_ = std::allocate_shared<ReportOximetryCatalog>(
+            LargeAllocator<ReportOximetryCatalog>(), *published_);
+        signal_index_ = 0;
+        signal_retry_at_ = 0;
+    }
+
+    while (signal_index_ < preparing_->size() && (*preparing_)[signal_index_].planes) ++signal_index_;
+    if (signal_index_ == preparing_->size()) {
+        published_ = std::move(preparing_);
+        prepare_pending_ = signal_retry_at_ != 0 || (manifest_only_ &&
+            std::any_of(published_->begin(), published_->end(), [](const auto &r){return !r.planes;}));
+        manifest_only_ = false;
+        return true;
+    }
+
+    using Mode = ReportOximetrySignalBuilder::Mode;
+    const bool worked = signals_->step((*preparing_)[signal_index_], manifest_only_ ? Mode::Manifest : Mode::Build);
+    if (signals_->finished()) {
+        if (signals_->retryable()) signal_retry_at_ = now_ms + 60000;
+        signals_->reset();
+        ++signal_index_;
+    }
+    return worked;
+} catch (const std::bad_alloc &) {
+    signals_->reset();
+    preparing_.reset();
+    signal_retry_at_ = now_ms + 60000;
+    return false;
 }
 
 void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::string_view source,

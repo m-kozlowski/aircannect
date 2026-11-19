@@ -240,7 +240,8 @@ bool ReportOximetrySignalBuilder::finished() const {
 
 bool ReportOximetrySignalBuilder::retryable() const { return work_ && work_->retry; }
 
-bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r) {
+bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
+    const bool manifest_only = mode == Mode::Manifest;
     using Phase = Work::Phase;
     if (!work_) {
         work_ = LargeObject::create<Work>();
@@ -256,7 +257,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r) {
             work_->phase = Phase::Done;
             return true;
         }
-        work_->blocks.resize(work_->slots);
+        if (mode == Mode::Build) work_->blocks.resize(work_->slots);
     }
     auto &w = *work_;
     auto fail = [&](bool retry = true) {
@@ -348,7 +349,8 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r) {
             w.prepared = done.prepared;
             if (done.outcome.disposition != OperationDisposition::Succeeded ||
                 !w.prepared.valid()) {
-                if (probe && !strcmp(done.error, "read_not_found")) w.phase = Phase::Samples;
+                if (probe && !strcmp(done.error, "read_not_found"))
+                    w.phase = manifest_only ? Phase::Done : Phase::Samples;
                 else return fail();
                 return true;
             }
@@ -361,7 +363,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r) {
             if (decode_publication(view.data, view.length, w.product)) {
                 r.planes = std::allocate_shared<ReportOximetryPlanes>(LargeAllocator<ReportOximetryPlanes>(), w.product);
                 w.phase = Phase::Done;
-            } else { w.product = {}; w.phase = Phase::Samples; }
+            } else { w.product = {}; w.phase = manifest_only ? Phase::Done : Phase::Samples; }
         } else {
             if (view.length != w.read.length) return fail();
             const size_t max_rows = r.csv_bytes ? view.length / 24 + 2 : view.length / 5;

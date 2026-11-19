@@ -49,7 +49,9 @@ public:
     void reset();
     void invalidate(const ReportOximetryChange &change) { pending_.merge(change); }
     bool poll(uint32_t now_ms, const NightCatalog *nights = nullptr);
-    bool ring_changed() const { return ring_changed_; }
+    void night_offsets_changed() { offsets_dirty_ = true; }
+    bool poll_signals(uint32_t now_ms, bool background_allowed);
+    auto ring_sources() const { return ring_sources_; }
     std::shared_ptr<const ReportOximetryCatalog> catalog() const { return published_; }
 
 private:
@@ -67,7 +69,11 @@ private:
     bool clocks_ = false;
     bool ring_changed_ = false;
     ReportOximetrySignalBuilder *signals_ = nullptr;
-    bool preparing_signals_ = false;
+    bool prepare_pending_ = false, manifest_only_ = true, offsets_dirty_ = false;
+    size_t signal_index_ = 0;
+    uint32_t signal_retry_at_ = 0;
+    std::shared_ptr<ReportOximetryCatalog> preparing_;
+    std::shared_ptr<const ReportOximetryCatalog> ring_sources_;
     ReportOximetryChange pending_{true, true}, scanning_;
     uint32_t generation_ = 0, retry_at_ = 0;
     std::shared_ptr<ReportOximetryCatalog> building_;
