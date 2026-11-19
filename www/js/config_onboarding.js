@@ -214,16 +214,17 @@
       raw.type = "hidden";
       raw.dataset.key = field.key;
       raw.dataset.section = section.id;
-      const [mode, clock, days, name] = (data[field.key] || "").split(" ");
+      const [mode, when, detail, name] = (data[field.key] || "").split(" ");
+      const interval = when === "every";
 
       const action = document.createElement("select");
-      const option = (value, key, fallback) => {
+      const option = (select, value, key, fallback) => {
         const item = new Option("", value);
         AirCANnect.i18n.text(item, AirCANnect.i18n.message(key, {}, fallback));
-        action.add(item);
+        select.add(item);
       };
-      option("", "config.schedule.unused");
-      section.actions.forEach((a) => option(a.value, "config.action." + a.value, a.label));
+      option(action, "", "config.schedule.unused");
+      section.actions.forEach((a) => option(action, a.value, "config.action." + a.value, a.label));
       action.value = name || "";
       AirCANnect.i18n.text(action, AirCANnect.i18n.message("config.schedule.action"), "aria-label");
 
@@ -235,10 +236,29 @@
       AirCANnect.i18n.text(caption, AirCANnect.i18n.message("config.schedule.enabled"));
       enabledLabel.append(enabled, caption);
 
+      const kind = document.createElement("select");
+      option(kind, "at", "config.schedule.at");
+      option(kind, "every", "config.schedule.every");
+      kind.value = interval ? "every" : "at";
+      AirCANnect.i18n.text(kind, AirCANnect.i18n.message("config.schedule.kind"), "aria-label");
+
+      const count = document.createElement("input");
+      count.type = "number";
+      count.min = "1";
+      count.required = true;
+      count.value = interval ? detail.slice(0, -1) : "15";
+      AirCANnect.i18n.text(count, AirCANnect.i18n.message("config.schedule.interval"), "aria-label");
+      const unit = document.createElement("select");
+      for (const [value, label] of [["s","seconds"], ["m","minutes"], ["h","hours"]]) {
+        option(unit, value, "config.schedule." + label);
+      }
+      unit.value = interval ? detail.slice(-1) : "s";
+      AirCANnect.i18n.text(unit, AirCANnect.i18n.message("config.schedule.unit"), "aria-label");
+
       const time = document.createElement("input");
       time.type = "time";
       time.required = true;
-      time.value = clock || "22:30";
+      time.value = interval || !when ? "22:30" : when;
       AirCANnect.i18n.text(time, AirCANnect.i18n.message("ui.time"), "aria-label");
 
       const weekdays = document.createElement("div");
@@ -251,7 +271,7 @@
         const box = document.createElement("input");
         box.type = "checkbox";
         box.value = token;
-        box.checked = !days || days === "*" || days.split(",").includes(token);
+        box.checked = interval || !detail || detail === "*" || detail.split(",").includes(token);
         const label = document.createElement("label");
         label.append(box, fmt.format(new Date(Date.UTC(2024, 0, 1 + i))));
         weekdays.appendChild(label);
@@ -260,13 +280,20 @@
 
       function update() {
         const used = !!action.value;
-        enabled.disabled = time.disabled = !used;
-        boxes.forEach(b => { b.disabled = !used; });
+        const every = kind.value === "every";
+        enabled.disabled = kind.disabled = !used;
+        time.hidden = weekdays.hidden = every;
+        count.hidden = unit.hidden = !every;
+        count.disabled = unit.disabled = !used || !every;
+        count.max = String(Math.floor(0xffffffff / ({s: 1, m: 60, h: 3600})[unit.value]));
+        time.disabled = !used || every;
+        boxes.forEach(b => { b.disabled = time.disabled; });
         const selected = boxes.filter(b => b.checked).map(b => b.value);
-        boxes[0].setCustomValidity(used && !selected.length
+        boxes[0].setCustomValidity(!time.disabled && !selected.length
           ? AirCANnect.i18n.t("config.schedule.choose_day") : "");
-        raw.value = used ? [enabled.checked ? "on" : "off", time.value,
-          selected.length === 7 ? "*" : selected.join(","), action.value].join(" ") : "";
+        const timing = every ? ["every", String(count.valueAsNumber) + unit.value]
+          : [time.value, selected.length === 7 ? "*" : selected.join(",")];
+        raw.value = used ? [enabled.checked ? "on" : "off", ...timing, action.value].join(" ") : "";
       }
 
       panel.addEventListener("input", (event) => {
@@ -275,7 +302,7 @@
       });
       update();
       raw.dataset.orig = raw.value;
-      panel.append(action, enabledLabel, time, weekdays, raw);
+      panel.append(action, enabledLabel, kind, time, weekdays, count, unit, raw);
       const label = AirCANnect.i18n.message("config.field." + field.key + ".label", {}, field.label);
       root.appendChild(AirCANnect.ui.row(label, panel));
     }

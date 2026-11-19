@@ -647,6 +647,8 @@
 
     .schedule-rule { min-width: 0; }
     .schedule-rule select, .schedule-rule input { width: auto; max-width: 100%; }
+    .schedule-rule input[type="number"] { width: 7em; }
+    .schedule-rule [hidden] { display: none; }
     .schedule-rule label { gap: 3px; white-space: nowrap; }
 
     .keybindings-field {
