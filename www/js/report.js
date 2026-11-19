@@ -2449,12 +2449,18 @@
         if (!values.length) return;
         let sum=0,total=0;
         for (const [v,n] of bins) { sum+=v*n; total+=n; }
-        const percentile = f => {
-          let n=0;
-          return values.find(v => (n+=bins.get(v)) >= total*f);
+        const valueAtRank = rank => {
+          let n = 0;
+          return values.find(v => (n += bins.get(v)) > rank);
+        };
+        const percentile = percent => {
+          const rank = (total - 1) * percent;
+          const lo = valueAtRank(Math.floor(rank / 100));
+          const fraction = (rank % 100) / 100;
+          return fraction ? lo + fraction * (valueAtRank(Math.ceil(rank / 100)) - lo) : lo;
         };
         stats[oximetryChannels[c]] = {min:values[0],max:values.at(-1),mean:sum/total,
-          median:percentile(.5),p95:percentile(.95)};
+          median:percentile(50),p95:percentile(95)};
       });
       return stats;
     }
