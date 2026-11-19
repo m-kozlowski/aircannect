@@ -226,6 +226,8 @@ ReportSourceChange pending_report_source_changes[
 size_t pending_report_source_change_count = 0;
 ReportSourceChangeCallback report_source_change_callback = nullptr;
 void *report_source_change_context = nullptr;
+portMUX_TYPE oximetry_change_lock = portMUX_INITIALIZER_UNLOCKED;
+ReportOximetryChange pending_oximetry_change;
 std::atomic<void (*)()> completion_callback{nullptr};
 
 void notify_completion() {
@@ -463,15 +465,30 @@ void queue_report_source_change(const JobSlot &job) {
 }
 
 bool deliver_report_source_change() {
-    if (pending_report_source_change_count == 0) return false;
+    portENTER_CRITICAL(&oximetry_change_lock);
+    const auto oximetry = pending_oximetry_change;
+    pending_oximetry_change = {};
+    portEXIT_CRITICAL(&oximetry_change_lock);
+    if (!oximetry.pending && !pending_report_source_change_count) return false;
 
     ReportSourceChangeCallback callback = nullptr;
     void *context = nullptr;
-    if (!lock_queue(0)) return false;
+    if (lock_queue(0)) {
+        callback = report_source_change_callback;
+        context = report_source_change_context;
+        unlock_queue();
+    }
 
-    callback = report_source_change_callback;
-    context = report_source_change_context;
-    unlock_queue();
+    if (oximetry.pending) {
+        ReportSourceChange notice{};
+        notice.oximetry = oximetry;
+        if (callback && callback(context, notice) == OperationAdmission::Accepted) return true;
+
+        portENTER_CRITICAL(&oximetry_change_lock);
+        pending_oximetry_change.merge(oximetry);
+        portEXIT_CRITICAL(&oximetry_change_lock);
+        return false;
+    }
 
     if (!callback || callback(context, pending_report_source_changes[0]) !=
                          OperationAdmission::Accepted) {
@@ -3103,6 +3120,13 @@ void begin() {
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
               Memory::psram_available() ? "yes" : "no",
               storage_resources_ready ? "ready" : "recovering");
+}
+
+void notify_oximetry_publication(const ReportOximetryChange &change) {
+    portENTER_CRITICAL(&oximetry_change_lock);
+    pending_oximetry_change.merge(change);
+    portEXIT_CRITICAL(&oximetry_change_lock);
+    wake_service_task();
 }
 
 bool set_report_source_change_callback(ReportSourceChangeCallback callback,

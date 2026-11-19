@@ -1,4 +1,5 @@
 #include "report_http_controller.h"
+#include "report_oximetry_signals.h"
 #include "storage_usb.h"
 
 #include "http_route_registry.h"
@@ -605,6 +606,7 @@ struct ReportHttpController::PendingResponses {
     struct Entry {
         std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
         std::shared_ptr<const ReportOximetryCatalog> archive;
+        const ReportOximetryRecording *recording = nullptr;
         PendingKind kind = PendingKind::Events;
         std::shared_ptr<AsyncDeferredResponse::State> response;
         StorageStreamCommand command;
@@ -876,7 +878,15 @@ void ReportHttpController::poll() {
         bool version_changed;
         if (entry.kind == PendingKind::Oximetry) {
             const auto current = report_task_->catalog_json_snapshot();
-            version_changed = !current || current->oximetry != entry.archive;
+            version_changed = !current || !current->oximetry;
+            if (!version_changed && current->oximetry != entry.archive) {
+                const auto &previous = *entry.recording;
+                version_changed = std::none_of(current->oximetry->begin(), current->oximetry->end(),
+                    [&](const auto &r) { return r.key() == previous.key() &&
+                        r.noon_s == previous.noon_s && r.next_noon_s == previous.next_noon_s &&
+                        r.start_ms == previous.start_ms &&
+                        r.modified == previous.modified && r.size() == previous.size(); });
+            }
         } else {
             const ReportNightQuery current = report_task_->query_night(entry.sleep_day);
             version_changed = current.state != ReportStoreQueryState::Ready ||
@@ -990,7 +1000,8 @@ void ReportHttpController::poll() {
                            ready.source_revision,
                            ready.generation,
                            ready.versioned,
-                           ready.kind == PendingKind::Signal);
+                           ready.kind == PendingKind::Signal || ready.kind == PendingKind::Oximetry);
+        if (use_deflate) response->addHeader("Content-Encoding", "deflate");
         if (ready.kind == PendingKind::Signal) {
             add_signal_headers(response,
                                ready.track_index,
@@ -1003,9 +1014,6 @@ void ReportHttpController::poll() {
                                ready.value_offset,
                                ready.grid_phase_ms,
                                ready.envelope);
-            if (use_deflate) {
-                response->addHeader("Content-Encoding", "deflate");
-            }
         }
         ready.response->publish(
             std::unique_ptr<AsyncWebServerResponse>(response));
@@ -1337,35 +1345,81 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     command.verification = StorageStreamVerification::Size;
 
     const String part = request->arg("part");
-    if (part == "oximetry") {
+    if (part == "signal" && request->hasArg("source")) {
         const auto summary = report_task_->catalog_json_snapshot();
         const String source = request->arg("source"), id = request->arg("id");
-        uint64_t first, count, modified;
-        if (!summary || !summary->oximetry || !parse_uint64_arg(request, "first", UINT32_MAX, first) ||
-            !parse_uint64_arg(request, "count", 65536, count) || !count ||
-            !parse_uint64_arg(request, "mtime", UINT64_MAX, modified)) {
-            send_json_error(request, 400, "bad_oximetry_range");
+        const String slice = request->arg("slice"), level = request->arg("level");
+        uint64_t modified, start, size, noon, end;
+        if (!summary || !summary->oximetry || !parse_uint64_arg(request, "mtime", UINT64_MAX, modified) ||
+            !parse_uint64_arg(request, "start", INT64_MAX, start) ||
+            !parse_uint64_arg(request, "size", UINT32_MAX, size) ||
+            !parse_uint64_arg(request, "noon", INT64_MAX, noon) ||
+            !parse_uint64_arg(request, "end", INT64_MAX, end)) {
+            send_json_error(request, 400, "bad_signal_request");
             return;
         }
         const auto &files = *summary->oximetry;
         const auto file = std::find_if(files.begin(), files.end(), [&](const auto &r) {
-            return source == r.source && id == r.id;
+            return source == r.source && id == r.id && slice == r.day;
         });
-        if (file == files.end() || file->modified != modified ||
-            (file->csv_bytes ? first + count > file->csv_bytes :
-             (count > 16384 || first + count > file->samples))) {
+        if (file == files.end() || file->modified != modified || file->start_ms != int64_t(start) ||
+            file->size() != size || file->noon_s * 1000 != int64_t(noon) ||
+            file->next_noon_s * 1000 != int64_t(end) || !file->planes) {
             send_json_error(request, 409, "report_version_changed");
             return;
         }
         pending.kind = PendingKind::Oximetry;
         pending.archive = summary->oximetry;
-        pending.response_size = pending.raw_response_size = file->csv_bytes ? count : count * 5;
-        command.path = file->path();
-        command.verification = StorageStreamVerification::SizeAndModified;
-        command.expected_size = file->size();
-        command.expected_modified = file->modified;
-        command.source_offset = file->csv_bytes ? first : 40 + first * 5;
-        command.source_length = pending.raw_response_size;
+        pending.recording = &*file;
+        const auto &p = *file->planes;
+        if (level == "index") {
+            command.path = report_oximetry_signal_path(*file, "index");
+            command.source_length = command.expected_size = p.index_bytes;
+        } else if (level == "histogram") {
+            uint64_t offset, bytes;
+            if (!parse_uint64_arg(request, "offset", UINT32_MAX, offset) ||
+                !parse_uint64_arg(request, "bytes", 65536, bytes) || !bytes ||
+                offset + bytes > p.histogram_bytes) {
+                send_json_error(request, 400, "bad_signal_range");
+                return;
+            }
+            command.path = report_oximetry_signal_path(*file, "histograms");
+            command.expected_size = p.histogram_bytes;
+            command.source_offset = offset;
+            command.source_length = bytes;
+        } else if (level == "raw") {
+            uint64_t first, count;
+            if (!parse_uint64_arg(request, "first", UINT32_MAX, first) ||
+                !parse_uint64_arg(request, "count", 4096, count) || !count || first + count > p.rows) {
+                send_json_error(request, 400, "bad_signal_range");
+                return;
+            }
+            command.path = report_oximetry_signal_path(*file, "raw");
+            command.expected_size = uint64_t(p.rows) * 16;
+            command.source_offset = first * 16;
+            command.source_length = count * 16;
+        } else if (level == "10s") {
+            uint64_t channel;
+            if (!parse_uint64_arg(request, "channel", 3, channel) || !p.plane_bytes[channel]) {
+                send_json_error(request, 400, "bad_signal_request");
+                return;
+            }
+            command.path = report_oximetry_signal_path(*file, ReportOximetryChannels[channel]);
+            command.source_length = command.expected_size = p.plane_bytes[channel];
+            ReportSignalTile tile;
+            if (p.compressed_bytes[channel] && accepts_deflate(request) &&
+                report_oximetry_overview_tile(*file, tile)) {
+                memcpy(pending.tile_header, tile.header, sizeof(tile.header));
+                pending.sidecar_command.path = command.path + ".deflate";
+                pending.sidecar_command.lane = StorageStreamLane::Foreground;
+                pending.sidecar_command.missing_ok = true;
+                pending.sidecar_command.verification = StorageStreamVerification::None;
+            }
+        } else {
+            send_json_error(request, 400, "bad_signal_level");
+            return;
+        }
+        pending.response_size = pending.raw_response_size = command.source_length;
     } else if (part == "events") {
         const ReportEventFileQuery query =
             report_task_->query_events(sleep_day);

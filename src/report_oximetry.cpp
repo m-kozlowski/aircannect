@@ -1,4 +1,5 @@
 #include "report_oximetry.h"
+#include "report_oximetry_signals.h"
 
 #include <algorithm>
 #include <charconv>
@@ -126,6 +127,8 @@ void ReportOximetryArchive::begin(StorageScanPort &scan, StorageReadPort &read) 
 }
 
 void ReportOximetryArchive::release() {
+    if (signals_) signals_->reset();
+    preparing_signals_ = false;
     if (scan_ticket_.valid()) scan_->abandon(scan_ticket_);
     if (read_ticket_.valid()) read_->abandon(read_ticket_);
     if (prepared_.valid()) read_->release_prepared(prepared_);
@@ -141,8 +144,9 @@ void ReportOximetryArchive::release() {
 void ReportOximetryArchive::reset() {
     release();
     published_.reset();
-    observed_ = retry_at_ = 0;
-    published_ring_revision_ = 0;
+    retry_at_ = 0;
+    scanning_ = {};
+    pending_ = {true, true};
 }
 
 bool ReportOximetryArchive::poll(uint32_t now_ms, const NightCatalog *nights) try {
@@ -154,13 +158,41 @@ bool ReportOximetryArchive::poll(uint32_t now_ms, const NightCatalog *nights) tr
 }
 
 bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
+    if (preparing_signals_) {
+        if (signals_ && index_ < building_->size()) {
+            auto &recording = (*building_)[index_];
+            if (recording.planes) { ++index_; return true; }
+            const bool worked = signals_->step(recording);
+            if (signals_->finished()) {
+                if (signals_->retryable()) {
+                    pending_.merge(ReportOximetryChange::published(!recording.csv_bytes,
+                        recording.source, recording.csv_bytes ? std::string_view(recording.id+5, 8) :
+                        std::string_view{}));
+                    retry_at_ = now_ms + 60000;
+                }
+                signals_->reset();
+                ++index_;
+            }
+            return worked;
+        }
+        published_ = std::move(building_);
+        scanning_ = {};
+        release();
+        return true;
+    }
     if (!files_) {
         if (!scan_ticket_.valid()) {
-            ring_revision_ = oximetry_archive_revision.load();
-            generation_ = ring_revision_ + oximetry_live_revision.load();
-            if (generation_ == observed_ || (retry_at_ && int32_t(now_ms - retry_at_) < 0))
+            if (!scanning_.pending && pending_.pending) {
+                scanning_ = pending_;
+                pending_ = {};
+                if (++generation_ == 0) ++generation_;
+            }
+            if (!scanning_.pending || (retry_at_ && int32_t(now_ms - retry_at_) < 0))
                 return false;
-            const StorageScanRoot root{OximetryArchiveRoot, true};
+            std::string dir = OximetryArchiveRoot;
+            if (scanning_.source[0]) dir += std::string("/") + scanning_.source;
+            if (scanning_.directory_day[0]) dir += std::string("/") + scanning_.directory_day;
+            const StorageScanRoot root{dir.c_str(), true};
             const auto submitted = scan_->request_scan({&root, 1, false, generation_});
             scan_ticket_ = submitted.ticket;
             return submitted.accepted();
@@ -173,8 +205,17 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             return false;
         }
         files_ = std::move(result.snapshot);
-        ring_changed_ = ring_revision_ != published_ring_revision_;
+        ring_changed_ = scanning_.ring;
         building_ = std::allocate_shared<ReportOximetryCatalog>(LargeAllocator<ReportOximetryCatalog>());
+        if (scanning_.source[0] && published_) {
+            for (const auto &r : *published_) {
+                const char *directory_day = r.csv_bytes ? r.id + 5 : r.id;
+                const bool in_scope = !strcmp(scanning_.source, r.source) &&
+                    (!scanning_.directory_day[0] || !strncmp(scanning_.directory_day, directory_day, 8));
+                if (in_scope || r.start_ms < r.noon_s * 1000) continue;
+                building_->push_back(r);
+            }
+        }
         return true;
     }
 
@@ -188,6 +229,8 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             for (size_t i = 0; i < originals; ++i) {
                 auto slice = (*building_)[i];
                 if (!night_window(slice.start_ms / 1000, slice)) continue;
+                if (slice.noon_s != (*building_)[i].noon_s ||
+                    slice.next_noon_s != (*building_)[i].next_noon_s) slice.planes.reset();
                 if (!slice.csv_bytes) {
                     edf_configured_timezone_offset_minutes(slice.start_ms, slice.offset_minutes);
                     // The EDF day may differ from the ESP sleep day near noon.
@@ -204,16 +247,16 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
                     }
                 }
                 (*building_)[i] = slice;
-                while (slice.next_noon_s * 1000 < slice.end_ms() && night_window(slice.next_noon_s, slice))
+                while (slice.next_noon_s * 1000 < slice.end_ms() && night_window(slice.next_noon_s, slice)) {
+                    slice.planes.reset();
                     building_->push_back(slice);
+                }
             }
             std::sort(building_->begin(), building_->end(), [](const auto &a, const auto &b) {
                 return a.key() == b.key() ? a.noon_s < b.noon_s : a.key() < b.key();
             });
-            published_ = std::move(building_);
-            published_ring_revision_ = ring_revision_;
-            observed_ = generation_;
-            release();
+            preparing_signals_ = true;
+            index_ = 0;
         }
         return true;
     }

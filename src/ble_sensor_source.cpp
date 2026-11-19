@@ -1145,7 +1145,8 @@ void BleSensorSource::task_loop() {
         if (import != import_session) {
             if (import) recordings_.begin(import_peer, StorageService::path_port(),
                                           StorageService::range_write_port(),
-                                          &StorageService::atomic_write_port());
+                                          &StorageService::atomic_write_port(),
+                                          StorageService::notify_oximetry_publication);
             else recordings_.end();
             import_session = import;
         }

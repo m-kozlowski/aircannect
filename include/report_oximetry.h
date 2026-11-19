@@ -7,10 +7,13 @@
 #include "large_allocator.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
+#include "report_source_change.h"
 
 namespace aircannect {
 
 class NightCatalog;
+class ReportOximetrySignalBuilder;
+struct ReportOximetryPlanes;
 
 struct ReportOximetryRecording {
     char source[33]{};
@@ -25,6 +28,7 @@ struct ReportOximetryRecording {
     int32_t offset_minutes = 0;
     char day[9]{};
     int64_t noon_s = 0, next_noon_s = 0;
+    std::shared_ptr<const ReportOximetryPlanes> planes;
 
     std::string path() const;
     auto key() const { return std::make_pair(std::string_view(source), std::string_view(id)); }
@@ -37,12 +41,13 @@ struct ReportOximetryRecording {
 using ReportOximetryCatalog = std::vector<ReportOximetryRecording,
                                           LargeAllocator<ReportOximetryRecording>>;
 
-// Indexes ring headers and clock observations, and the bounds of published
-// live CSVs. Sample bytes stay on SD until a source is selected.
+// Resolves originals and publishes their prepared, sleep-day-scoped tracks.
 class ReportOximetryArchive {
 public:
     void begin(StorageScanPort &scan, StorageReadPort &read);
+    void set_signal_builder(ReportOximetrySignalBuilder &builder) { signals_ = &builder; }
     void reset();
+    void invalidate(const ReportOximetryChange &change) { pending_.merge(change); }
     bool poll(uint32_t now_ms, const NightCatalog *nights = nullptr);
     bool ring_changed() const { return ring_changed_; }
     std::shared_ptr<const ReportOximetryCatalog> catalog() const { return published_; }
@@ -61,8 +66,10 @@ private:
     size_t index_ = 0;
     bool clocks_ = false;
     bool ring_changed_ = false;
-    uint32_t ring_revision_ = 0, published_ring_revision_ = 0;
-    uint32_t generation_ = 0, observed_ = 0, retry_at_ = 0;
+    ReportOximetrySignalBuilder *signals_ = nullptr;
+    bool preparing_signals_ = false;
+    ReportOximetryChange pending_{true, true}, scanning_;
+    uint32_t generation_ = 0, retry_at_ = 0;
     std::shared_ptr<ReportOximetryCatalog> building_;
     std::shared_ptr<const ReportOximetryCatalog> published_;
 };

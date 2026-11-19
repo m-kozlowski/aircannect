@@ -2,11 +2,37 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <cstring>
+#include <string_view>
 
 #include "operation_outcome.h"
 #include "sleep_day_id.h"
 
 namespace aircannect {
+
+// An empty source denotes the archive; an empty directory day denotes all
+// recordings of the source (a clock observation can affect old ring files).
+struct ReportOximetryChange {
+    bool pending = false, ring = false;
+    char source[33]{}, directory_day[9]{};
+
+    static ReportOximetryChange published(bool ring, std::string_view source = {},
+                                          std::string_view day = {}) {
+        ReportOximetryChange out{true, ring};
+        source.copy(out.source, sizeof(out.source)-1);
+        day.copy(out.directory_day, sizeof(out.directory_day)-1);
+        return out;
+    }
+
+    void merge(const ReportOximetryChange &other) {
+        if (!other.pending) return;
+        if (!pending) { *this = other; return; }
+
+        ring |= other.ring;
+        if (strcmp(source, other.source)) source[0] = 0;
+        if (!source[0] || strcmp(directory_day, other.directory_day)) directory_day[0] = 0;
+    }
+};
 
 // A durable source publication invalidates the report materialized for this
 // canonical sleep-day range. ReportTask stamps revision when it accepts the
@@ -15,6 +41,7 @@ struct ReportSourceChange {
     SleepDayId first_day;
     SleepDayId last_day;
     uint32_t revision = 0;
+    ReportOximetryChange oximetry{};
 
     bool valid() const {
         return first_day.valid() && last_day.valid() &&

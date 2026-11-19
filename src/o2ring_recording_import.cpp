@@ -15,11 +15,13 @@ namespace aircannect {
 
 void O2RingRecordingImport::begin(const char *peer, StoragePathPort &paths,
                                   StorageRangeWritePort &writes,
-                                  StorageAtomicWritePort *clock_storage) {
+                                  StorageAtomicWritePort *clock_storage,
+                                  void (*published)(const ReportOximetryChange &)) {
     end();
     paths_ = &paths;
     writes_ = &writes;
     clock_storage_ = clock_storage;
+    published_ = published;
     downloads_ = true;
     source_ = peer;
     snprintf(peer_, sizeof(peer_), "%s", peer);
@@ -116,7 +118,7 @@ OperationDisposition O2RingRecordingImport::poll_clock() {
                     completion.bytes_written == clock_write_.bytes->size();
     clock_write_ = {};
     clock_ticket_ = {};
-    if (ok) oximetry_archive_published();
+    if (ok && published_) published_(ReportOximetryChange::published(true, source_));
     return ok ? OperationDisposition::Succeeded : OperationDisposition::Failed;
 }
 
@@ -364,7 +366,7 @@ void O2RingRecordingImport::step_path() {
                   id_, unsigned(size_), unsigned(offset_));
     } else {
         ++saved_;
-        oximetry_archive_published();
+        if (published_) published_(ReportOximetryChange::published(true, source_));
         phase_ = Phase::Select;
     }
 }

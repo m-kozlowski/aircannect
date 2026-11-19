@@ -1,4 +1,5 @@
 #include "report_task.h"
+#include "report_oximetry_signals.h"
 
 #include <algorithm>
 #include <atomic>
@@ -818,8 +819,15 @@ struct ReportTask::Runtime {
 
     OperationAdmission publish_source_change(
         const ReportSourceChange &change) {
-        if (!change.valid()) return OperationAdmission::Rejected;
+        if (!change.oximetry.pending && !change.valid()) return OperationAdmission::Rejected;
         if (!lock()) return OperationAdmission::Busy;
+
+        if (change.oximetry.pending) {
+            pending_oximetry_change.merge(change.oximetry);
+            unlock();
+            wake();
+            return OperationAdmission::Accepted;
+        }
 
         ReportSourceChange stamped = change;
         source_change_revision = increment_generation(
@@ -845,14 +853,17 @@ struct ReportTask::Runtime {
             pending[i] = pending_source_changes[i];
         }
         pending_source_change_count = 0;
+        const auto oximetry = pending_oximetry_change;
+        pending_oximetry_change = {};
         unlock();
 
+        oximetry_archive.invalidate(oximetry);
         for (size_t i = 0; i < pending_count; ++i) {
             merge_report_source_change(source_changes,
                                        source_change_count,
                                        pending[i]);
         }
-        return pending_count != 0;
+        return pending_count != 0 || oximetry.pending;
     }
 
     std::shared_ptr<const ReportPublishedState> published_state() const {
@@ -2975,6 +2986,7 @@ struct ReportTask::Runtime {
     std::weak_ptr<const NightCatalog> date_preview_catalog;
     std::weak_ptr<const ReportSignalStoreCatalog> date_preview_store;
     ReportPeriodService period_service;
+    ReportOximetrySignalBuilder oximetry_signals;
     ReportOximetryArchive oximetry_archive;
     std::atomic<bool> oximetry_requested{false};
     ReportPeriodKey period_key;
@@ -3034,6 +3046,7 @@ struct ReportTask::Runtime {
     ReportSourceChange pending_source_changes[
         AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t pending_source_change_count = 0;
+    ReportOximetryChange pending_oximetry_change;
     ReportSourceChange source_changes[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t source_change_count = 0;
     bool pending_catalog_save_source_change = false;
@@ -3197,6 +3210,8 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->store_catalog_loader.begin(read_port);
     runtime_->period_service.begin(read_port, write_port);
     runtime_->oximetry_archive.begin(scan_port, read_port);
+    runtime_->oximetry_signals.begin(read_port, range_write_port, write_port);
+    runtime_->oximetry_archive.set_signal_builder(runtime_->oximetry_signals);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port, &write_port);
         runtime_->date_repair.begin(read_port, write_port, range_write_port, scan_port, *delete_port);

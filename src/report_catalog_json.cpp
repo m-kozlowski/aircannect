@@ -1,4 +1,5 @@
 #include "report_catalog_json.h"
+#include "report_oximetry_signals.h"
 
 #include <algorithm>
 #include <new>
@@ -51,6 +52,7 @@ uint64_t catalog_identity(const NightCatalog &catalog,
         for (const char *c = r.id; *c; ++c) mix(*c);
         mix(r.start_ms); mix(r.end_ms()); mix(r.size()); mix(r.interval_s); mix(r.modified);
         mix(r.noon_s); mix(r.next_noon_s);
+        mix(r.planes ? r.planes->index_bytes : 0);
     }
     return hash;
 }
@@ -172,10 +174,8 @@ bool ReportCatalogJsonReader::prepare_fragment() {
 
                 if (publication_->oximetry && !publication_->oximetry->empty()) {
                     phase_ = Phase::Recordings;
-                    return format_fragment("],\"oximetry_layout\":{\"stride\":5,\"live_stale_ms\":%u,\"channels\":{"
-                        "\"spo2\":{\"byte\":0,\"invalid_flag\":2,\"min\":1,\"max\":100},"
-                        "\"pulse\":{\"byte\":1,\"invalid_flag\":2,\"min\":1,\"max\":254},"
-                        "\"movement\":{\"byte\":3}}},\"oximetry\":[", unsigned(AC_OXIMETRY_SAMPLE_STALE_MS));
+                    return format_fragment("],\"oximetry_live_stale_ms\":%u,\"oximetry\":[",
+                        unsigned(AC_OXIMETRY_SAMPLE_STALE_MS));
                 }
                 phase_ = Phase::Done;
                 return format_fragment("]}");
@@ -295,13 +295,17 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                     const auto &r = (*publication_->oximetry)[recording_index_++];
                     return format_fragment("%s{\"source\":\"%s\",\"id\":\"%s\",\"start\":%lld,"
                         "\"end\":%lld,\"csv_bytes\":%llu,\"step\":%u,\"count\":%u,\"modified\":%llu,\"day\":\"%s\","
-                        "\"noon\":%lld,\"next_noon\":%lld}",
+                        "\"noon\":%lld,\"next_noon\":%lld,\"channels\":%u}",
                         recording_index_ == 1 ? "" : ",", r.source, r.id,
                         static_cast<long long>(r.start_ms), static_cast<long long>(r.end_ms()),
                         static_cast<unsigned long long>(r.csv_bytes), r.interval_s * 1000, r.samples,
                         static_cast<unsigned long long>(r.modified), r.day,
                         static_cast<long long>(r.noon_s * 1000),
-                        static_cast<long long>(r.next_noon_s * 1000));
+                        static_cast<long long>(r.next_noon_s * 1000),
+                        r.planes ? unsigned(bool(r.planes->plane_bytes[0])) |
+                            (unsigned(bool(r.planes->plane_bytes[1])) << 1) |
+                            (unsigned(bool(r.planes->plane_bytes[2])) << 2) |
+                            (unsigned(bool(r.planes->plane_bytes[3])) << 3) : 0);
                 }
                 phase_ = Phase::Done;
                 return format_fragment("]}");

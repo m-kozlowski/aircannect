@@ -5,6 +5,7 @@
 
 #include "storage_path_port.h"
 #include "storage_range_write_port.h"
+#include "report_source_change.h"
 
 namespace aircannect {
 
@@ -15,7 +16,8 @@ public:
     static constexpr size_t BlockSize = 512;
 
     void begin(const char *peer, StoragePathPort &paths, StorageRangeWritePort &writes,
-               StorageAtomicWritePort *clock_storage = nullptr);
+               StorageAtomicWritePort *clock_storage = nullptr,
+               void (*published)(const ReportOximetryChange &) = nullptr);
     void end();
     void enable_downloads(bool enabled);
     void observe_contact(bool on_finger, bool charging, uint32_t now_ms);
@@ -57,6 +59,7 @@ private:
     StorageRangeWritePort *writes_ = nullptr;
     bool downloads_ = true;
     StorageAtomicWritePort *clock_storage_ = nullptr;
+    void (*published_)(const ReportOximetryChange &) = nullptr;
     std::atomic<const char *> clock_source_{"unknown"};
     StorageAtomicWriteCommand clock_write_;
     OperationTicket clock_ticket_;

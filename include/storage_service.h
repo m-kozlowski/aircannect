@@ -176,6 +176,7 @@ void set_completion_callback(void (*callback)());
 
 // Called from the storage task after a replacement STR record has been
 // durably published. Busy admission keeps the bounded notification pending.
+void notify_oximetry_publication(const ReportOximetryChange &change);
 bool set_report_source_change_callback(ReportSourceChangeCallback callback,
                                        void *context);
 

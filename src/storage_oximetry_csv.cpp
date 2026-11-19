@@ -17,6 +17,7 @@
 #include "memory_manager.h"
 #include "oximetry_archive.h"
 #include "storage_internal.h"
+#include "storage_service.h"
 #include "storage_path.h"
 #include "storage_usb.h"
 #include "utc_time.h"
@@ -86,7 +87,10 @@ bool vacant(const std::string &path) {
 bool publish(const std::string &part, const std::string &final) {
     if (!vacant(final) || !Storage::ensure_parent_directories(final.c_str()) ||
         !Storage::rename(part.c_str(), final.c_str())) return false;
-    ++oximetry_live_revision;
+    const auto dir = std::string_view(final).substr(sizeof(OximetryArchiveRoot));
+    const auto slash = dir.find('/');
+    StorageService::notify_oximetry_publication(
+        ReportOximetryChange::published(false, dir.substr(0, slash), dir.substr(slash + 1, 8)));
     return true;
 }
 

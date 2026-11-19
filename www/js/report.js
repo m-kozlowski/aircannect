@@ -296,8 +296,8 @@
         if (reportChartIsHidden(key)) return false;
         const definition = definitions.get(key);
         if (!definition) return false;
-        if (archiveOximetryChannel(key)) return !!oximetryView.series[key]?.length;
-        if (reportResult?.oximetryOnly) return false;
+        if (reportResult?.oximetryOnly || (oximetryView.source && oximetryChannels.includes(key)))
+          return reportSignalTracks(key).length > 0;
         if (definition.type === "events") {
           return !!((reportResult && reportResult.events_available) ||
             reportBaseEvents.length);
@@ -1874,16 +1874,14 @@
       return (definition.series || [definition]).map((series) => ({
         label: series.label || definition.title,
         color: series.color || definition.color,
-        liveCsv: archiveOximetryChannel(series.key) && !!oximetryView.files[0]?.csv_bytes,
-        points: (archiveOximetryChannel(series.key) ? oximetryView.series[series.key] || [] : reportSeries[series.key] || []).slice()
+        liveCsv: !!oximetryView.tracks?.[series.key]?.[0]?.file.csv_bytes,
+        points: (reportSeries[series.key] || []).slice()
           .sort((a, b) => a.t - b.t),
       })).filter((series) => series.points.length > 0);
     }
 
     function reportChartExtent(definition, ranges) {
       const series = (definition.series || [definition]).map((item) => {
-        if (archiveOximetryChannel(item.key)) return (oximetryView.series[item.key] || []).filter(
-          point => reportPointOverlapsAnyRange(point, ranges));
         const base = reportBaseSeries[item.key] || [];
         const source = base.length ? base : reportSeries[item.key] || [];
         return source.filter((point) =>
@@ -1940,10 +1938,10 @@
         item.events = reportEvents.slice();
         item.start = range.start;
         item.end = range.end;
-        item.ranges = archiveOximetryChannel(item.key) ? oximetryRanges() : ranges;
+        item.ranges = sourceRanges(item.key);
 
-        const failure = !archiveOximetryChannel(item.key) && reportChartFailure(item.key);
-        const pending = !archiveOximetryChannel(item.key) && !failure &&
+        const failure = reportChartFailure(item.key);
+        const pending = !failure &&
           (!reportBaseLoadedCharts.has(item.key) ||
            (!!reportZoom && !signalStoreRangeChartReady(item.key)));
         if (item.type === "series") {
@@ -1965,7 +1963,6 @@
     }
 
     function updateRenderedReportChart(key) {
-      if (archiveOximetryChannel(key)) return true;
       const range = reportZoom || reportRange();
       if (!validReportRange(range)) return false;
 
@@ -1996,7 +1993,7 @@
         return reportChartSeriesList(definition).length === 0;
       }
 
-      const extent = reportChartExtent(definition, ranges);
+      const extent = reportChartExtent(definition, sourceRanges(key));
       const seriesList = reportChartSeriesList(definition);
       item.seriesList = seriesList;
       item.events = reportEvents.slice();
@@ -2004,7 +2001,7 @@
       item.maxY = extent.max;
       item.start = range.start;
       item.end = range.end;
-      item.ranges = ranges;
+      item.ranges = sourceRanges(key);
       item.rangePending = pending;
       setReportItemLoading(item, pending, failure);
       scheduleReportDraw();
@@ -2125,7 +2122,7 @@
         if (reportChartIsHidden(key)) return;
         const def = chartByKey.get(key);
         if (!def) return;
-        if (reportResult.oximetryOnly && !archiveOximetryChannel(key)) return;
+        if (reportResult.oximetryOnly && !reportSignalTracks(key).length) return;
         if (def.type === "events") {
           renderReportEventFlags(container, range, sessionRanges, def);
           return;
@@ -2135,7 +2132,7 @@
         const availableParts = signalStoreChartParts(def);
         const seriesList = reportChartSeriesList(def);
         const collapsed = reportChartPreferences.collapsed.has(def.key);
-        const failure = !archiveOximetryChannel(key) && reportChartFailure(def.key);
+        const failure = reportChartFailure(def.key);
         const basePending = !collapsed && availableParts.length > 0 &&
           !reportBaseLoadedCharts.has(def.key) && !failure;
         if (!seriesList.length && !basePending) {
@@ -2178,7 +2175,7 @@
           container.appendChild(card);
           return;
         }
-        const chartRanges = archiveOximetryChannel(key) ? oximetryRanges() : sessionRanges;
+        const chartRanges = sourceRanges(key);
         const extent = reportChartExtent(def, chartRanges);
 
         const card = document.createElement("div");
@@ -2187,7 +2184,7 @@
         title.className = "report-chart-title";
         const name = document.createElement("span");
         i18n.text(name, def.title);
-        const rangePending = !archiveOximetryChannel(key) && !collapsed && !failure && !!reportZoom &&
+        const rangePending = !collapsed && !failure && !!reportZoom &&
           !signalStoreRangeChartReady(def.key);
         let loadingBadge = null;
         if (basePending || rangePending || (!collapsed && failure)) {
@@ -2196,7 +2193,7 @@
             failure ? i18n.error(failure) : "");
           name.appendChild(loadingBadge);
         }
-        if (!archiveOximetryChannel(key) && seriesDefs.some((sd) => lowResByName[sd.key])) {
+        if (!oximetryView.tracks?.[key] && seriesDefs.some((sd) => lowResByName[sd.key])) {
           const badge = document.createElement("span");
           badge.className = "report-res-badge";
           i18n.text(badge, "1-min");
@@ -2308,199 +2305,248 @@
       oximetryView = {source:"", files:[], options:[], series:{}, night:null};
     }
 
-    function archiveOximetryChannel(key) {
-      return !!oximetryView.source && oximetryChannels.includes(key);
-    }
-
-    function oximetryRanges() {
-      return reportHiddenSessions.size || reportSummaryScope === "sessions"
-        ? reportVisibleSessionRanges() : [oximetryView.night];
-    }
-
-    function archiveOximetryStatistics() {
-      const ranges = reportSummaryScope === "sessions" ? reportVisibleSessionRanges() : [oximetryView.night];
-      const cacheKey = ranges.map(r => r.start + ":" + r.end).join(",");
-      if (oximetryView.statsKey === cacheKey) return oximetryView.stats;
-      const stats = {};
-      for (const [key, points] of Object.entries(oximetryView.series)) {
-        const bins = new Map();
-        let sum = 0, total = 0;
-        for (const p of points) {
-          if (p.gap) continue;
-          // Live rows are observations, not a value held until the next packet.
-          const duration = p.end === undefined
-            ? Number(ranges.some(r => p.t >= r.start && p.t < r.end))
-            : ranges.reduce((n,r) => n + Math.max(0, Math.min(r.end, p.end) - Math.max(r.start, p.t)), 0);
-          if (!duration) continue;
-          bins.set(p.value, (bins.get(p.value) || 0) + duration);
-          sum += p.value * duration;
-          total += duration;
-        }
-        if (!total) continue;
-        const values = [...bins.keys()].sort((a,b) => a-b);
-        const percentile = fraction => {
-          let n = 0;
-          return values.find(v => (n += bins.get(v)) >= fraction * total);
-        };
-        stats[key] = {min:values[0], mean:sum/total, median:percentile(.5),
-          p95:percentile(.95), max:values[values.length-1]};
-      }
-      oximetryView.statsKey = cacheKey;
-      oximetryView.stats = stats;
-      return stats;
+    function sourceRanges(key) {
+      return oximetryView.source && oximetryChannels.includes(key) &&
+        !reportHiddenSessions.size && reportSummaryScope !== "sessions"
+        ? [oximetryView.night] : reportVisibleSessionRanges();
     }
 
     function oximetryFileEnd(file) {
       return file.end ?? file.start + file.count * file.step;
     }
 
-    async function oximetryChunk(file, first, count, length, view, signal) {
-      const args = new URLSearchParams({part:"oximetry",night:view.night.id,source:file.source,
-        id:file.id,first,count,mtime:file.modified});
-      const key = "oximetry-v1:" + args + ":" + (file.csv_bytes || file.count);
-      let bytes = (await readReportCache([key])).get(key)?.body;
-      if (signal.aborted || oximetryView !== view) return null;
-      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== length) {
-        const res = await AirCANnect.http.request("/api/report/plot?" + args, {signal});
-        if (!res.ok) throw new Error(AirCANnect.http.responseError(await res.text(), res.status));
-        bytes = await res.arrayBuffer();
-        if (bytes.byteLength !== length) throw new Error("incomplete_oximetry");
-        void writeReportCache([{key,value:{body:bytes},bytes:length}]);
-      }
-      return !signal.aborted && oximetryView === view ? bytes : null;
+    async function sourcePlane(track, args, signal) {
+      const f = track.file;
+      const params = new URLSearchParams({part:"signal", night:track.view.night.id,
+        slice:f.day, noon:f.noon, end:f.next_noon, source:f.source, id:f.id, start:f.start, mtime:f.modified,
+        size:f.csv_bytes || 40 + f.count * 5, ...args});
+      const key = "source-plane-2:" + params;
+      const pending = track.view.pending;
+      if (pending.has(key)) return pending.get(key);
+      const fetch = (async () => {
+        const saved = (await readReportCache([key])).get(key)?.body;
+        if (signal.aborted || track.view !== oximetryView)
+          throw new DOMException("Source changed", "AbortError");
+        if (saved instanceof ArrayBuffer) return saved;
+        const res = await AirCANnect.http.request("/api/report/plot?" + params, {signal});
+        if (!res.ok) throw new Error(AirCANnect.http.responseError(await res.text(),res.status));
+        const body = await res.arrayBuffer();
+        void writeReportCache([{key,value:{body},bytes:body.byteLength}]);
+        return body;
+      })();
+      pending.set(key,fetch);
+      try { return await fetch; }
+      finally { pending.delete(key); }
     }
 
-    async function loadLiveOximetry(file, series, from, view, signal) {
-      const decoder = new TextDecoder();
-      let carry = "", columns, previous = null;
-      for (let offset = 0; offset < file.csv_bytes; offset += 65536) {
-        const length = Math.min(65536, file.csv_bytes - offset);
-        const bytes = await oximetryChunk(file, offset, length, length, view, signal);
-        if (!bytes) return;
+    async function visitSourceRows(track, block, signal, visit) {
+      const [first, count] = block;
+      for (let offset = 0; offset < count; offset += 4096) {
+        const n = Math.min(4096, count-offset);
+        const data = new DataView(await sourcePlane(track, {level:"raw",first:first+offset,count:n}, signal));
+        if (data.byteLength !== n*16) throw new Error("incomplete_signal_block");
+        for (let i = 0; i < data.byteLength; i += 16) {
+          const t = track.file.start + data.getUint32(i,true);
+          visit(t,[data.getInt16(i+4,true),data.getInt16(i+6,true),data.getInt16(i+8,true),data.getFloat32(i+12,true)]);
+        }
+      }
+    }
 
-        const lines = (carry + decoder.decode(bytes)).split("\n");
-        carry = lines.pop();
-        if (carry.length > 256) throw new Error("invalid_oximetry_csv");
-        for (const line of lines) {
-          if (!columns && line.startsWith("# Source=")) continue;
-          const fields = line.trimEnd().split(",");
-          if (!columns) {
-            const names = ["UTC", "Oxygen Level", "Pulse Rate", "Motion", "PI"];
-            columns = names.map(name => fields.indexOf(name));
-            if (columns.some(i => i < 0)) throw new Error("invalid_oximetry_csv");
-            continue;
-          }
-          const t = Date.parse(fields[columns[0]]);
-          if (!Number.isFinite(t) || t < file.start || t >= file.end ||
-              (previous !== null && t < previous)) throw new Error("invalid_oximetry_csv");
-          if (t < from || t >= view.night.end) continue;
-
-          if (previous !== null && t - previous > reportSummary.oximetry_layout.live_stale_ms) {
-            for (const points of Object.values(series))
-              if (points.length && !points.at(-1).gap) points.push({t,gap:true});
-          }
+    async function loadSourceTrack(track, lo, hi, context) {
+      const points = [], index = track.index;
+      const from = Math.max(track.from,lo), to = Math.min(track.to,hi);
+      if (from >= to) return points;
+      if (!context.detail || hi-lo > SIGNAL_STORE_RAW_CURVE_MAX_SPAN_MS) {
+        const bytes = await sourcePlane(track,{level:"10s",channel:track.channel},context.signal);
+        const blockBytes = SIGNAL_STORE_BLOCK_MS / 10000 * 4;
+        if (bytes.byteLength !== index.slots * blockBytes) throw new Error("incomplete_signal_plane");
+        for (let i=0; i<index.slots; ++i) {
+          const block = index.first + i * SIGNAL_STORE_BLOCK_MS;
+          if (block >= to || block + SIGNAL_STORE_BLOCK_MS <= from) continue;
+          const part = decodeSignalStoreBlock(bytes,i*blockBytes,track,{name:"10s",interval:10000},
+            block,blockBytes,from,to);
+          appendSignalStorePoints(points,part,Math.max(block,from));
+        }
+        return points;
+      }
+      let previous = 0;
+      for (const b of index.blocks) {
+        if (b[3]<=from || b[2]>=to) continue;
+        await visitSourceRows(track,b,context.signal,(t,values) => {
+          const dur = track.file.step;
+          if (t + (dur || 1) <= from || t >= to) return;
+          if (!dur && previous && t-previous > track.view.stale) points.push({t,gap:true});
           previous = t;
-          for (let i = 0; i < oximetryChannels.length; ++i) {
-            const key = oximetryChannels[i], raw = fields[columns[i + 1]];
-            const value = raw ? Number(raw) : NaN;
-            if (!Number.isFinite(value) || value < 0 ||
-                (key === "spo2" && (!value || value > 100)) ||
-                (key === "pulse" && (!value || value === 255))) {
-              const points = series[key];
-              if (points?.length && !points.at(-1).gap) points.push({t,gap:true});
-            } else {
-              (series[key] ||= []).push({t,value});
-            }
+          const value = values[track.channel];
+          if (value < 0) points.push({t,gap:true});
+          else if (dur) points.push({t:Math.max(from,t),end:Math.min(to,t+dur),value});
+          else points.push({t,value});
+        });
+      }
+      return points;
+    }
+
+    async function addSourceBlockHistograms(record, blocks, add) {
+      for (let i = 0; i < blocks.length;) {
+        const offset = blocks[i][4];
+        let length = blocks[i++][5];
+        while (i < blocks.length && blocks[i][4] === offset+length &&
+               length+blocks[i][5] <= 65536) length += blocks[i++][5];
+
+        const bytes = new Uint8Array(length);
+        for (let at=0; at<length; at+=65536) {
+          const n = Math.min(length-at,65536);
+          const data = await sourcePlane(record,
+            {level:"histogram",offset:offset+at,bytes:n},record.view.signal);
+          if (data.byteLength !== n) throw new Error("incomplete_signal_histogram");
+          bytes.set(new Uint8Array(data),at);
+        }
+        const data = new DataView(bytes.buffer);
+        for (let pos=0; pos<length;) {
+          const header = pos;
+          pos += 16;
+          for (let c=0; c<4; ++c) {
+            const entries = data.getUint32(header+4*c,true);
+            for (let j=0; j<entries; ++j, pos+=8)
+              add(c,data.getFloat32(pos,true),data.getUint32(pos+4,true));
           }
         }
       }
-      if (carry || !columns) throw new Error("incomplete_oximetry");
     }
 
-    async function selectOximetrySource(night, token, signal, requested) {
-      const recordings = new Map();
-      for (const r of reportSummary?.oximetry || []) {
-        if (r.start < night.end && oximetryFileEnd(r) > night.start)
-          recordings.set(r.source + "/" + r.id, r);
+    async function sourceStatistics(view,ranges) {
+      const counts = oximetryChannels.map(() => new Map());
+      const add = (c,value,n) => { if (value >= 0 && n) counts[c].set(value,(counts[c].get(value)||0)+n); };
+      for (const record of view.records) {
+        const clips = ranges.map(r => ({start:Math.max(r.start,record.from),end:Math.min(r.end,record.to)}))
+          .filter(r => r.start < r.end);
+        const covered = b => clips.some(r => b[2]>=r.start && b[3]<=r.end);
+        if (record.index.blocks.every(covered)) {
+          record.index.histogram.forEach((bins,c) => {
+            for (let i=0; i<bins.length; i+=2) add(c,Math.fround(bins[i]),bins[i+1]);
+          });
+          continue;
+        }
+
+        const full = [];
+        for (const b of record.index.blocks) {
+          if (!clips.some(r => b[2]<r.end && b[3]>r.start)) continue;
+          if (covered(b)) full.push(b);
+          else {
+            await visitSourceRows(record,b,view.signal,(t,values) => {
+              const n = record.file.step ? clips.reduce((n,r) => n+Math.max(0,
+                Math.min(r.end,t+record.file.step)-Math.max(r.start,t)),0)
+                : Number(clips.some(r => t>=r.start && t<r.end));
+              values.forEach((v,c) => add(c,v,n));
+            });
+          }
+        }
+        await addSourceBlockHistograms(record,full,add);
       }
-      const files = [...recordings.values()].sort((a,b) => a.start-b.start || a.id.localeCompare(b.id));
-      const sources = [...new Set(files.map(r => r.source))];
-      if (sources.length && !night.oximetryOnly && !reportResult?.statistics?.spo2 &&
-          !reportResult?.statistics?.pulse) {
+      const stats = {};
+      counts.forEach((bins,c) => {
+        const values = [...bins.keys()].sort((a,b) => a-b);
+        if (!values.length) return;
+        let sum=0,total=0;
+        for (const [v,n] of bins) { sum+=v*n; total+=n; }
+        const percentile = f => {
+          let n=0;
+          return values.find(v => (n+=bins.get(v)) >= total*f);
+        };
+        stats[oximetryChannels[c]] = {min:values[0],max:values.at(-1),mean:sum/total,
+          median:percentile(.5),p95:percentile(.95)};
+      });
+      return stats;
+    }
+
+    function refreshSourceStatistics(view) {
+      if (!view.ready) return;
+      const ranges = reportSummaryScope === "sessions" ? reportVisibleSessionRanges() : [view.night];
+      const key = ranges.map(r => r.start+":"+r.end).join(",");
+      if (view.statsKey === key) return;
+      view.statsKey = key;
+      view.stats = {};
+      sourceStatistics(view,ranges).then(stats => {
+        if (oximetryView !== view || view.statsKey !== key) return;
+        view.stats = stats;
+        renderReportSummary();
+      }).catch(error => {
+        if (!view.signal.aborted && oximetryView === view)
+          AirCANnect.ui.message("reportMsg",i18n.error(error),false,true);
+      });
+    }
+
+    function nightOximetryFiles(night) {
+      return (reportSummary?.oximetry || []).filter(r => r.channels &&
+        Math.max(r.start,r.noon,night.start)<Math.min(oximetryFileEnd(r),r.next_noon,night.end))
+        .sort((a,b) => a.start-b.start || a.noon-b.noon || a.id.localeCompare(b.id));
+    }
+
+    async function selectOximetrySource(night, token, signal, requested, files = nightOximetryFiles(night),
+                                        concurrency = 3) {
+      const sources = [...new Set(files.map(r=>r.source))];
+      const sameNight = oximetryView.night?.id === night.id;
+      let sa2 = !!(reportResult?.statistics?.spo2 || reportResult?.statistics?.pulse);
+      if (sameNight && oximetryView.source) sa2 ||= oximetryView.sa2;
+      else if (!sa2 && sources.length && !night.oximetryOnly) {
         for (const key of ["spo2","pulse"]) {
-          if (reportSignalTracks(key).some(track => track.validSamples > 0n) &&
-              !reportBaseLoadedCharts.has(key))
-            await loadSignalStoreBaseChart(key, token, signal);
+          if (!reportSignalTracks(key).some(t => t.validSamples > 0n)) continue;
+          await loadSignalStoreBaseChart(key, token, signal);
+          if (reportBaseSeries[key]?.some(p => reportPointValue(p)>0 &&
+              reportPointValue(p)<=(key==="spo2"?100:254))) { sa2 = true; break; }
         }
       }
       if (signal.aborted || token !== reportLoadToken) return;
-      const sa2 = !!(reportResult?.statistics?.spo2 || reportResult?.statistics?.pulse ||
-        ["spo2","pulse"].some(k => reportBaseSeries[k]?.some(p => {
-          const value = reportPointValue(p);
-          return value > 0 && value <= (k === "spo2" ? 100 : 254);
-        })));
-      const options = sa2 ? ["", ...sources] : sources;
+      const options = sa2 && sources.length ? ["",...sources] : sources;
       const preferred = requested ?? oximetryPreference.get(night.id);
       const source = options.includes(preferred) ? preferred : options[0] || "";
-      const view = {night, source, files:files.filter(r => r.source === source),
-        series:{}, options:sources.length ? options : []};
+      const previous = oximetryView.source;
+      const view = {night,source,sa2,files:files.filter(r=>r.source===source),options,records:[],
+        tracks:{},pending:new Map(),stale:reportSummary?.oximetry_live_stale_ms || 5000,signal};
       oximetryView = view;
-
       const picker = document.getElementById("reportOximetrySource");
       if (picker) {
-        picker.replaceChildren(...view.options.map(s => {
-          if (!s) return new Option("SA2", s);
-          if (!files.find(f => f.source === s).csv_bytes) return new Option("O2Ring · " + s, s);
-          return new Option(s === "udp" ? "UDP" : "BLE · " + s.slice(4).match(/../g).join(":"), s);
-        }));
-        picker.value = source;
-        picker.disabled = options.length < 2;
+        picker.replaceChildren(...options.map(s => new Option(!s ? "SA2" : s==="udp" ? "UDP" :
+          s.startsWith("ble-") ? "BLE · "+s.slice(4).match(/../g).join(":") : "O2Ring · "+s,s)));
+        picker.value=source; picker.disabled=options.length<2;
       }
-      renderReportSummary();
-      renderReportCharts();
-      if (!source) return;
+      if (!previous && !source) return;
+      cancelReportRangeRequest();
+      reportRangeView = null;
+      for (const key of oximetryChannels) {
+        delete reportSeries[key]; delete reportBaseSeries[key];
+        reportBaseLoadedCharts.delete(key);
+        reportBaseChartPromises.delete(key);
+      }
 
-      const layout = reportSummary.oximetry_layout;
-      const series = {};
       let covered = night.start;
-      for (const file of view.files) {
-        if (file.csv_bytes) {
-          if (file.end <= covered) continue;
-          for (const points of Object.values(series)) points.push({t:covered,gap:true});
-          await loadLiveOximetry(file, series, Math.max(covered, file.start), view, signal);
-          if (signal.aborted || oximetryView !== view) return;
-          covered = Math.min(night.end, file.end);
-          continue;
-        }
-        const first = Math.max(0, Math.floor((Math.max(night.start, covered) - file.start) / file.step));
-        const end = Math.min(file.count, Math.ceil((night.end - file.start) / file.step));
-        if (first >= end) continue;
-        const from = Math.max(covered, file.start + first * file.step);
-        for (const points of Object.values(series)) {
-          if (from > covered && points.length) points.push({t:covered,gap:true});
-        }
-        for (let at = first; at < end; at += 16384) {
-          const count = Math.min(16384, end-at);
-          const bytes = await oximetryChunk(file, at, count, count * layout.stride, view, signal);
-          if (!bytes) return;
-          const raw = new Uint8Array(bytes);
-          for (const [name,c] of Object.entries(layout.channels)) {
-            const points = series[name] ||= [];
-            for (let i=0; i<count; i++) {
-              const offset = i*layout.stride, value = raw[offset+c.byte];
-              const t = file.start + (at+i)*file.step;
-              const invalid = (c.invalid_flag !== undefined && raw[offset+c.invalid_flag] !== 0) ||
-                value < (c.min ?? 0) || value > (c.max ?? 255);
-              points.push(invalid ? {t,gap:true} :
-                {t:Math.max(t,from),end:Math.min(t+file.step,night.end),value:value*(c.scale ?? 1)});
-            }
-          }
-        }
-        covered = Math.max(covered,file.start + end*file.step);
+      for (const f of view.files) {
+        const from = Math.max(covered,f.start,f.noon), to = Math.min(night.end,oximetryFileEnd(f),f.next_noon);
+        if (to<=from) continue;
+        covered = to;
+        const record = {file:f,view,from,to};
+        view.records.push(record);
       }
-      if (signal.aborted || oximetryView !== view) return;
-      view.series = series;
-      delete view.statsKey;
+      try { await runReportFetchJobs(view.records.map(record => async () => {
+        const bytes = await sourcePlane(record,{level:"index"},signal);
+        record.index = JSON.parse(new TextDecoder().decode(bytes));
+      }),concurrency); } catch (error) {
+        if (signal.aborted || oximetryView !== view) return;
+        throw error;
+      }
+      if (signal.aborted || oximetryView!==view || token!==reportLoadToken) return;
+      for (const record of view.records) {
+        oximetryChannels.forEach((key,channel) => {
+          if (!(record.file.channels & (1<<channel))) return;
+          (view.tracks[key] ||= []).push({...record,channel,missingValue:-32768,
+            scale:channel===3?.01:1,offset:channel===3?327.67:0});
+        });
+      }
+      view.ready = true;
+      refreshSourceStatistics(view);
+      await runReportFetchJobs(oximetryChannels.filter(k => reportSignalTracks(k).length &&
+        !reportChartIsHidden(k) && !reportChartPreferences.collapsed.has(k))
+        .map(k => () => loadSignalStoreBaseChart(k,token,signal)),concurrency);
     }
 
     function reportMetricValue(metric, result, selected) {
@@ -2736,7 +2782,8 @@
       const stats = reportStatistics(result);
       if (!period && oximetryView.source) {
         for (const key of oximetryChannels) delete stats[key];
-        Object.assign(stats, archiveOximetryStatistics());
+        refreshSourceStatistics(oximetryView);
+        Object.assign(stats, oximetryView.stats);
       }
       const rows = [["pressure", "Pressure (IPAP)", "cmH2O", 1], ["epap", "EPAP", "cmH2O", 1],
         ["leak", "Leak", "L/min", 1], ["flow_limitation", "Flow limitation", "", 1],
@@ -3615,12 +3662,12 @@
     }
 
     function reportSignalTracks(name, store = reportSignalStore) {
+      if (oximetryView.source && oximetryChannels.includes(name)) return oximetryView.tracks?.[name] || [];
       return store && store.tracksByName && store.tracksByName[name] || [];
     }
 
     function signalStoreChartParts(definition) {
       if (!definition) return [];
-      if (archiveOximetryChannel(definition.key)) return [];
       if (definition.type === "events") {
         return reportResult && reportResult.events_available ? ["events"] : [];
       }
@@ -4076,6 +4123,7 @@
     }
 
     async function loadSignalStoreTrack(track, lo, hi, context) {
+      if (track.file) return loadSourceTrack(track,lo,hi,context);
       const trackEnd = track.firstBlock +
         track.blockSlots * SIGNAL_STORE_BLOCK_MS;
       const from = Math.max(track.firstBlock,
@@ -4284,6 +4332,7 @@
       const definition = reportChartDefinition(key);
       const range = reportRange();
       if (!definition || !validReportRange(range)) return Promise.resolve(false);
+      const sourceView = oximetryChannels.includes(key) ? oximetryView : null;
       const context = {
         nightId: reportCurrentNightId,
         revision: reportCurrentRevision,
@@ -4291,7 +4340,8 @@
         store: reportSignalStore,
         offline: reportOffline,
         signal,
-        active: () => !signal.aborted && token === reportLoadToken &&
+        active: () => (!sourceView || sourceView === oximetryView) &&
+          !signal.aborted && token === reportLoadToken &&
           context.nightId === reportCurrentNightId &&
           context.generation === reportCurrentGeneration &&
           context.revision === reportCurrentRevision,
@@ -4308,10 +4358,9 @@
           return true;
         })
         .catch((error) => {
-          if (context.active()) {
-            reportBaseChartFailures.set(key, error);
-            if (!updateRenderedReportChart(key)) renderReportCharts();
-          }
+          if (!context.active()) return false;
+          reportBaseChartFailures.set(key, error);
+          if (!updateRenderedReportChart(key)) renderReportCharts();
           throw error;
         })
         .finally(() => {
@@ -4323,7 +4372,7 @@
       return promise;
     }
 
-    async function loadSignalStoreBase(token, nightId, signal) {
+    async function loadSignalStoreBase(token, nightId, night, signal) {
       activateSignalStoreNight(
         nightId,
         reportResult.source_revision,
@@ -4333,8 +4382,22 @@
       renderReportCharts();
 
       const keys = signalStoreBaseLoadKeys(signalStoreExpandedChartKeys());
-      await runReportFetchJobs(keys.map((key) => () =>
-        loadSignalStoreBaseChart(key, token, signal)), 4);
+      const files = nightOximetryFiles(night);
+      const jobs = keys.filter(key => !files.length || !oximetryChannels.includes(key))
+        .map(key => () => loadSignalStoreBaseChart(key, token, signal));
+      if (files.length) {
+        // One of the four existing fetch slots resolves and loads oximetry.
+        // CPAP plots need neither that index nor its source choice.
+        jobs.unshift(async () => {
+          await selectOximetrySource(night, token, signal, undefined, files, night.oximetryOnly ? 3 : 1);
+          if (signal.aborted || token !== reportLoadToken || oximetryView.source) return;
+          for (const key of keys.filter(k => oximetryChannels.includes(k)))
+            await loadSignalStoreBaseChart(key, token, signal);
+        });
+      } else {
+        await selectOximetrySource(night, token, signal, undefined, files);
+      }
+      await runReportFetchJobs(jobs, 4);
       return token === reportLoadToken;
     }
 
@@ -4369,11 +4432,11 @@
     }
 
     function signalStoreRangeKey(from, to) {
-      return [reportCurrentNightId, reportCurrentGeneration, from, to].join(":");
+      return [reportCurrentNightId, reportCurrentGeneration, oximetryView.source, from, to].join(":");
     }
 
     function currentSignalStoreRangeKey() {
-      if (!reportZoom || !reportCurrentNightId || !reportCurrentGeneration) {
+      if (!reportZoom || !reportCurrentNightId || (!reportCurrentGeneration && !oximetryView.source)) {
         return "";
       }
       const range = reportRangeWindow(reportZoom.start, reportZoom.end);
@@ -4413,6 +4476,7 @@
         store: reportSignalStore,
         offline: reportOffline,
         prefetchJobs: [],
+        detail: true,
         signal: controller.signal,
         active: () => !controller.signal.aborted &&
           token === reportRangeToken &&
@@ -4473,7 +4537,7 @@
     }
 
     function ensureSignalStoreRangeLoaded(lo, hi, requestedKeys) {
-      if (!reportCurrentNightId || !reportCurrentGeneration) return;
+      if (!reportCurrentNightId || (!reportCurrentGeneration && !oximetryView.source)) return;
       const range = reportRangeWindow(lo, hi);
       if (!range) return;
       const key = signalStoreRangeKey(range.from, range.to);
@@ -4576,7 +4640,7 @@
           savedHiddenSessions.forEach((key) => reportHiddenSessions.add(key));
 
           const loaded = await loadSignalStoreBase(
-            token, nightId, controller.signal);
+            token, nightId, night, controller.signal);
           if (!loaded || token !== reportLoadToken) return;
         } else {
           reportBaseChartPromises.clear();
@@ -4590,9 +4654,9 @@
           if (reportZoom) {
             ensureSignalStoreRangeLoaded(reportZoom.start, reportZoom.end);
           }
+          await selectOximetrySource(night, token, controller.signal);
         }
 
-        await selectOximetrySource(night, token, controller.signal);
         if (token !== reportLoadToken) return;
         renderReportSummary();
         renderReportCharts();
