@@ -85,11 +85,9 @@ private:
     StoragePreparedRead prepared_;
     std::shared_ptr<const StorageScanSnapshot> files_;
     size_t index_ = 0;
-    enum class FilePart { Prefix, LiveTail, SFooter, SChecksum };
+    enum class FilePart { Prefix, LiveTail, SFooter };
     FilePart part_ = FilePart::Prefix;
     ReportOximetryRecording metadata_;
-    uint64_t checked_bytes_ = 0;
-    uint32_t byte_sum_ = 0, expected_sum_ = 0;
     bool clocks_ = false;
     bool ring_changed_ = false;
     ReportOximetrySignalBuilder *signals_ = nullptr;

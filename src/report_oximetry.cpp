@@ -6,7 +6,6 @@
 #include <cstring>
 #include <ctime>
 #include <functional>
-#include <numeric>
 #include "calendar_utils.h"
 #include "little_endian.h"
 #include "large_json_allocator.h"
@@ -326,9 +325,6 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
         } else if (part_ == FilePart::SFooter) {
             cmd.length = RingBinLayout::SFooter;
             cmd.offset = entry.size - cmd.length;
-        } else if (part_ == FilePart::SChecksum) {
-            cmd.offset = checked_bytes_;
-            cmd.length = std::min<uint64_t>(32 * 1024, metadata_.data_end() - checked_bytes_);
         }
         cmd.generation = generation_;
         const auto submission = read_->request_read(cmd);
@@ -449,8 +445,6 @@ bool ReportOximetryArchive::consume_file(const StorageScanEntryView &entry, std:
             r.bin.format = RingBinLayout::O2RingS;
             if (entry.size < r.bin.offset(1) + r.bin.footer()) return true;
 
-            checked_bytes_ = std::min<uint64_t>(length, entry.size - r.bin.footer());
-            byte_sum_ = std::accumulate(bytes, bytes + checked_bytes_, uint32_t{0});
             part_ = FilePart::SFooter;
             return false;
         }
@@ -459,21 +453,11 @@ bool ReportOximetryArchive::consume_file(const StorageScanEntryView &entry, std:
         if (!live_bounds(id, bytes, length, r)) return true;
         r.csv_bytes = entry.size;
     } else {
-        if (part_ == FilePart::SFooter) {
-            if (!RingBinLayout::s_footer_matches(bytes, length, entry.size)) return true;
+        if (!RingBinLayout::s_footer_matches(bytes, length, entry.size) ||
+            !ring_start(get_le32(bytes + 8), id, r)) return true;
 
-            r.samples = get_le32(bytes + 12);
-            r.interval_s = 1;
-            if (!ring_start(get_le32(bytes + 8), id, r)) return true;
-            expected_sum_ = get_le32(bytes);
-            part_ = FilePart::SChecksum;
-        } else {
-            if (!length || length > r.data_end() - checked_bytes_) return true;
-            byte_sum_ = std::accumulate(bytes, bytes + length, byte_sum_);
-            checked_bytes_ += length;
-        }
-        if (checked_bytes_ < r.data_end()) return false;
-        if (byte_sum_ != expected_sum_) return true;
+        r.samples = get_le32(bytes + 12);
+        r.interval_s = 1;
     }
 
     add_file(entry, source, id);
