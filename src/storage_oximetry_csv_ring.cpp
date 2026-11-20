@@ -84,16 +84,16 @@ bool step(uint32_t now) {
 
     const auto bin = r.path();
     constexpr size_t Count = 32;
-    uint8_t records[Count * 5];
+    uint8_t records[Count * RingBinLayout::MaxStride];
     const size_t count = std::min<size_t>(Count, r.samples - sample);
-    const size_t length = count * 5;
+    const size_t length = count * r.bin.stride();
     if (!sample) {
         final = bin.substr(0, bin.size()-3) + "csv";
         part = final + ".part";
     }
     const int fd = Storage::open_descriptor(bin.c_str(), O_RDONLY);
     if (fd < 0) return retry(now, "BIN open failed");
-    const off_t pos = 40 + 5 * sample;
+    const off_t pos = r.bin.offset(sample);
     const bool read_ok = lseek(fd, pos, SEEK_SET) == pos &&
                          read(fd, records, length) == ssize_t(length);
     if (Storage::close_descriptor(bin.c_str(), fd) != 0 || !read_ok)
@@ -109,10 +109,10 @@ bool step(uint32_t now) {
         memcpy(chunk->data(), header, used);
     }
     for (size_t i = 0; i < count; ++i) {
-        const auto *v = records + i * 5;
+        const auto value = r.bin.decode(records + i * r.bin.stride());
         char row[MaxRow];
         const size_t n = format_row(row, r.start_ms + int64_t(sample + i) * r.interval_s * 1000,
-                                    r.offset_minutes, v[0], v[1], v[3], -1);
+                                    r.offset_minutes, value.oxygen, value.pulse, value.motion, -1);
         if (!n || used + n > chunk->size()) return retry(now, "invalid row");
         memcpy(chunk->data() + used, row, n);
         used += n;

@@ -332,7 +332,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         if (!work_) return false;
         work_->record = &r;
         work_->reader.begin(r);
-        work_->read_offset = r.csv_bytes ? 0 : 40;
+        work_->read_offset = r.csv_bytes ? 0 : r.bin.offset(0);
         const int64_t lo = std::max(r.start_ms, r.noon_s * 1000);
         const int64_t hi = std::min(r.end_ms(), r.next_noon_s * 1000);
         work_->first_block = lo - lo % Block;
@@ -392,7 +392,12 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
 
     if (w.phase == Phase::Probe || w.phase == Phase::Samples) {
         const bool probe = w.phase == Phase::Probe;
-        if (!probe && w.read_offset == r.size()) {
+        // A BIN slice contains whole samples and must fit the board's RAW budget.
+        const size_t stride = r.bin.stride();
+        const size_t step_bytes = r.csv_bytes ? SampleStepBytes :
+            std::min(SampleStepBytes / stride, w.raw_limit / RawBytes) * stride;
+        const uint64_t end = r.data_end();
+        if (!probe && w.read_offset == end) {
             if (!w.reader.complete()) return fail(false);
             if (mode == Mode::VerifyOriginal) {
                 w.verified = true;
@@ -409,8 +414,8 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             w.read.path = probe ? report_oximetry_signal_path(r,"manifest") : r.path();
             w.read.generation = 1;
             w.read.offset = probe ? 0 : w.read_offset;
-            const size_t limit = r.csv_bytes && mode == Mode::Build ? w.read_limit : SampleStepBytes;
-            w.read.length = probe ? PublicationBytes : std::min<uint64_t>(limit, r.size() - w.read_offset);
+            const size_t limit = r.csv_bytes && mode == Mode::Build ? w.read_limit : step_bytes;
+            w.read.length = probe ? PublicationBytes : std::min<uint64_t>(limit, end - w.read_offset);
             w.read.retain_handle = !probe;
             const auto submit = reads_->request_read(w.read);
             if (submit.admission == OperationAdmission::Rejected) return fail();
@@ -450,14 +455,14 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         } else {
             if (view.length != w.read.length) return fail();
             const size_t pos = w.read_offset - w.read.offset;
-            const size_t length = std::min(SampleStepBytes, view.length - pos);
+            const size_t length = std::min(step_bytes, view.length - pos);
 
             // A CSV slice may complete a line carried over from the last slice.
             const auto max_rows = [&](size_t bytes) {
-                return r.csv_bytes ? bytes / 24 + 2 : bytes / 5;
+                return r.csv_bytes ? bytes / 24 + 2 : bytes / stride;
             };
             if (!w.raw) {
-                const size_t remaining = std::min<uint64_t>(2 * w.raw_limit, r.size() - w.read_offset);
+                const size_t remaining = std::min<uint64_t>(2 * w.raw_limit, end - w.read_offset);
                 w.raw = LargeByteBuffer::allocate(std::min(w.raw_limit, max_rows(remaining) * RawBytes));
                 if (!w.raw) return fail();
             }

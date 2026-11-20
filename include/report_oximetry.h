@@ -16,11 +16,29 @@ class NightCatalog;
 class ReportOximetrySignalBuilder;
 struct ReportOximetryPlanes;
 
+struct RingBinLayout {
+    enum Format { Original, O2RingS } format = Original;
+    static constexpr size_t MaxStride = 5, SHeader = 10, SFooter = 48;
+
+    size_t stride() const { return format == Original ? MaxStride : 3; }
+    uint64_t offset(uint32_t sample) const {
+        return (format == Original ? 40 : SHeader) + uint64_t(sample) * stride();
+    }
+    size_t footer() const { return format == Original ? 0 : SFooter; }
+
+    struct Sample { int oxygen, pulse, motion; bool invalid_vitals; };
+    Sample decode(const uint8_t *p) const {
+        if (format == O2RingS) return {p[0], p[1], 2 * p[2], false};
+        return {p[0], p[1], p[3], p[2] != 0};
+    }
+};
+
 struct ReportOximetryRecording : OximetryCsv::Header {
     char source[33]{};
     char id[37]{};
     int64_t start_ms = 0, wall_s = 0, local_start_s = 0, observation_ms = 0;
     uint32_t samples = 0, interval_s = 0;
+    RingBinLayout bin;
     uint64_t csv_bytes = 0;
     int64_t csv_end_ms = 0;
     uint64_t modified = 0;
@@ -32,7 +50,8 @@ struct ReportOximetryRecording : OximetryCsv::Header {
 
     std::string path() const;
     auto key() const { return std::make_pair(std::string_view(source), std::string_view(id)); }
-    uint64_t size() const { return csv_bytes ? csv_bytes : 40ULL + 5ULL * samples; }
+    uint64_t data_end() const { return csv_bytes ? csv_bytes : bin.offset(samples); }
+    uint64_t size() const { return csv_bytes ? csv_bytes : data_end() + bin.footer(); }
     int64_t end_ms() const {
         return csv_bytes ? csv_end_ms : start_ms + int64_t(samples) * interval_s * 1000;
     }
@@ -62,8 +81,10 @@ public:
 private:
     void release();
     bool step(uint32_t now_ms, const NightCatalog *nights);
-    void consume(const StorageScanEntryView &entry, std::string_view source, std::string_view id,
-                 const uint8_t *bytes, size_t length);
+    bool consume_file(const StorageScanEntryView &entry, std::string_view source,
+                      std::string_view id, const uint8_t *bytes, size_t length);
+    void add_file(const StorageScanEntryView &entry, std::string_view source, std::string_view id);
+    void consume_clock(std::string_view source, const uint8_t *bytes, size_t length);
 
     StorageScanPort *scan_ = nullptr;
     StorageReadPort *read_ = nullptr;
@@ -71,8 +92,11 @@ private:
     StoragePreparedRead prepared_;
     std::shared_ptr<const StorageScanSnapshot> files_;
     size_t index_ = 0;
-    ReportOximetryRecording live_header_;
-    bool read_live_tail_ = false;
+    enum class FilePart { Prefix, LiveTail, SFooter, SChecksum };
+    FilePart part_ = FilePart::Prefix;
+    ReportOximetryRecording metadata_;
+    uint64_t checked_bytes_ = 0;
+    uint32_t byte_sum_ = 0, expected_sum_ = 0;
     bool clocks_ = false;
     bool ring_changed_ = false;
     ReportOximetrySignalBuilder *signals_ = nullptr;

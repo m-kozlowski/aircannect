@@ -5,7 +5,9 @@
 #include <charconv>
 #include <cstring>
 #include <ctime>
+#include <numeric>
 #include "calendar_utils.h"
+#include "little_endian.h"
 #include "large_json_allocator.h"
 #include "edf_time.h"
 #include "night_catalog.h"
@@ -26,35 +28,44 @@ bool archive_name(const char *path, bool clock, std::string_view &source, std::s
     return kind == OximetryArchiveFile::LiveCsv || kind == OximetryArchiveFile::RingBin;
 }
 
-uint32_t little32(const uint8_t *p) {
-    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+using LittleEndian::get_le32;
+constexpr uint8_t SHeader[] = {1, 3, 0, 0, 0, 0, 0, 0, 4, 0};
+static_assert(sizeof(SHeader) == RingBinLayout::SHeader);
+
+bool ring_start(time_t wall, std::string_view id, ReportOximetryRecording &out) {
+    struct tm local{};
+    char stamp[16];
+    if (!gmtime_r(&wall, &local) || local.tm_year < 100 || local.tm_year > 199 ||
+        strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &local) != 14 || id != stamp)
+        return false;
+
+    local.tm_isdst = -1;
+    out.wall_s = wall;
+    out.local_start_s = mktime(&local);
+    out.start_ms = out.local_start_s * 1000;
+    return out.local_start_s >= 0;
 }
 
-bool decode_header(const uint8_t *p, size_t length, uint64_t size, std::string_view id,
-                   ReportOximetryRecording &out) {
-    if (length != 40 || p[0] != 3 || p[1] != 0 || size <= 40 ||
-        size != little32(p + 9) || (size - 40) % 5) return false;
-    const auto samples = static_cast<uint32_t>((size - 40) / 5);
-    const auto duration = little32(p + 13);
+bool decode_original_header(const uint8_t *p, size_t length, uint64_t size, std::string_view id,
+                            ReportOximetryRecording &out) {
+    const auto header = out.bin.offset(0);
+    if (length != header || p[0] != 3 || p[1] != 0 || size <= header ||
+        size != get_le32(p + 9) || (size - header) % out.bin.stride()) return false;
+
+    const uint32_t samples = (size - header) / out.bin.stride();
+    const auto duration = get_le32(p + 13);
     if (duration != samples * 2ULL && duration != samples * 4ULL) return false;
 
     const int year = p[2] + 256 * p[3];
-    char stamp[16];
     if (year < 2000 || year > 2099 || p[4] < 1 || p[4] > 12 || p[5] < 1 ||
-        p[5] > calendar_days_in_month(year, p[4]) || p[6] > 23 || p[7] > 59 || p[8] > 59 ||
-        snprintf(stamp, sizeof(stamp), "%04d%02u%02u%02u%02u%02u",
-                 year,p[4],p[5],p[6],p[7],p[8]) != 14 || id != stamp) return false;
+        p[5] > calendar_days_in_month(year, p[4]) || p[6] > 23 || p[7] > 59 || p[8] > 59)
+        return false;
 
-    out.wall_s = calendar_days_from_civil(year, p[4], p[5]) * 86400 +
-                 p[6] * 3600 + p[7] * 60 + p[8];
-    struct tm local{};
-    local.tm_year = year - 1900; local.tm_mon = p[4] - 1; local.tm_mday = p[5];
-    local.tm_hour = p[6]; local.tm_min = p[7]; local.tm_sec = p[8]; local.tm_isdst = -1;
-    out.local_start_s = mktime(&local);
-    out.start_ms = out.local_start_s * 1000;
     out.samples = samples;
     out.interval_s = duration / samples;
-    return out.local_start_s >= 0;
+    const auto wall = calendar_days_from_civil(year, p[4], p[5]) * 86400 +
+                      p[6] * 3600 + p[7] * 60 + p[8];
+    return ring_start(wall, id, out);
 }
 
 // The writer puts the first UTC millisecond in the name. Only the last
@@ -133,7 +144,7 @@ void ReportOximetryArchive::release() {
     files_.reset();
     building_.reset();
     index_ = 0;
-    read_live_tail_ = false;
+    part_ = FilePart::Prefix;
     clocks_ = false;
 }
 
@@ -259,24 +270,44 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
         // Publishing a live CSV must not reread historical files or rerun the
         // BIN converter. Reuse only immutable files still present on this SD.
         const bool live = id.substr(0, 5) == "live-";
-        if (!clocks_ && published_ && (live || !ring_changed_)) {
+        if (!clocks_ && part_ == FilePart::Prefix && published_) {
             const auto key = std::make_pair(source, id);
             const auto it = std::lower_bound(published_->begin(), published_->end(), key,
                 [](const auto &recording, const auto &wanted) { return recording.key() < wanted; });
             if (it != published_->end() && it->key() == key && it->size() == entry.size &&
                 it->modified == entry.modified) {
-                building_->push_back(*it);
-                ++index_;
-                return true;
+                if (live || !ring_changed_) {
+                    building_->push_back(*it);
+                    ++index_;
+                    return true;
+                }
+
+                // A scoped publication may revise the clock, not the bytes
+                // of an existing immutable BIN. A full remount scan rechecks it.
+                if (scanning_.source[0]) {
+                    metadata_ = {};
+                    metadata_.bin = it->bin;
+                    metadata_.samples = it->samples;
+                    metadata_.interval_s = it->interval_s;
+                    if (ring_start(it->wall_s, id, metadata_)) add_file(entry, source, id);
+                    ++index_;
+                    return true;
+                }
             }
         }
         StorageReadCommand cmd;
         cmd.path = entry.path;
-        cmd.length = clocks_ ? entry.size : 40;
+        cmd.length = clocks_ ? entry.size : std::min<uint64_t>(entry.size, 40);
         if (live) {
-            cmd.length = std::min<uint64_t>(entry.size, read_live_tail_
+            cmd.length = std::min<uint64_t>(entry.size, part_ == FilePart::LiveTail
                 ? OximetryCsv::MaxRow : OximetryCsv::MaxHeader);
-            cmd.offset = read_live_tail_ ? entry.size - cmd.length : 0;
+            cmd.offset = part_ == FilePart::LiveTail ? entry.size - cmd.length : 0;
+        } else if (part_ == FilePart::SFooter) {
+            cmd.length = RingBinLayout::SFooter;
+            cmd.offset = entry.size - cmd.length;
+        } else if (part_ == FilePart::SChecksum) {
+            cmd.offset = checked_bytes_;
+            cmd.length = std::min<uint64_t>(32 * 1024, metadata_.data_end() - checked_bytes_);
         }
         cmd.generation = generation_;
         const auto submission = read_->request_read(cmd);
@@ -294,7 +325,7 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
         read_ticket_ = {};
         prepared_ = result.prepared;
         if (result.outcome.disposition != OperationDisposition::Succeeded ||
-            result.file_size != entry.size || !prepared_.valid()) {
+            result.file_size != entry.size || result.modified != entry.modified || !prepared_.valid()) {
             release();
             retry_at_ = now_ms + 10000;
             return false;
@@ -302,20 +333,17 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     }
     const auto view = read_->view_prepared(prepared_);
     if (view.state == PreparedByteReadState::Retry) return false;
-    if (!clocks_ && !read_live_tail_ && id.substr(0, 5) == "live-" && view.valid()) {
-        live_header_ = {};
-        live_header_.export_clock_known = OximetryCsv::parse_header(
-            {reinterpret_cast<const char *>(view.data), view.length}, source, id, live_header_);
-        read_->release_prepared(prepared_);
-        prepared_ = {};
-        read_live_tail_ = true;
-        return true;
+    bool finished = true;
+    if (view.valid()) {
+        if (clocks_) consume_clock(source, view.data, view.length);
+        else finished = consume_file(entry, source, id, view.data, view.length);
     }
-    if (view.valid()) consume(entry, source, id, view.data, view.length);
     read_->release_prepared(prepared_);
     prepared_ = {};
-    read_live_tail_ = false;
-    ++index_;
+    if (finished) {
+        part_ = FilePart::Prefix;
+        ++index_;
+    }
     return true;
 }
 
@@ -375,28 +403,70 @@ void ReportOximetryArchive::withdraw(const ReportOximetryRecording &recording) {
     prepare_pending_ = true;
 }
 
-void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::string_view source,
-                                    std::string_view id, const uint8_t *bytes, size_t length) {
-    if (!clocks_) {
-        ReportOximetryRecording recording;
+bool ReportOximetryArchive::consume_file(const StorageScanEntryView &entry, std::string_view source,
+                                         std::string_view id, const uint8_t *bytes, size_t length) {
+    auto &r = metadata_;
+    if (part_ == FilePart::Prefix) {
+        r = {};
         if (id.substr(0, 5) == "live-") {
-            recording = live_header_;
-            if (!live_bounds(id, bytes, length, recording)) return;
-            recording.csv_bytes = entry.size;
-        } else {
-            if (!decode_header(bytes, length, entry.size, id, recording)) return;
-            // Legacy imports used SN, or twelve MAC digits when INFO had no SN.
-            if (source.size() != 12 || source.find_first_not_of("0123456789abcdefABCDEF") != source.npos)
-                memcpy(recording.serial, source.data(), source.size());
-            ring_changed_ = true;
+            r.export_clock_known = OximetryCsv::parse_header(
+                {reinterpret_cast<const char *>(bytes), length}, source, id, r);
+            part_ = FilePart::LiveTail;
+            return false;
         }
-        memcpy(recording.source, source.data(), source.size());
-        memcpy(recording.id, id.data(), id.size());
-        recording.modified = entry.modified;
-        building_->push_back(recording);
-        return;
+
+        if (length >= sizeof(SHeader) && !memcmp(bytes, SHeader, sizeof(SHeader))) {
+            r.bin.format = RingBinLayout::O2RingS;
+            if (entry.size < r.bin.offset(1) + r.bin.footer()) return true;
+
+            checked_bytes_ = std::min<uint64_t>(length, entry.size - r.bin.footer());
+            byte_sum_ = std::accumulate(bytes, bytes + checked_bytes_, uint32_t{0});
+            part_ = FilePart::SFooter;
+            return false;
+        }
+        if (!decode_original_header(bytes, length, entry.size, id, r)) return true;
+    } else if (part_ == FilePart::LiveTail) {
+        if (!live_bounds(id, bytes, length, r)) return true;
+        r.csv_bytes = entry.size;
+    } else {
+        if (part_ == FilePart::SFooter) {
+            if (length != r.bin.footer() || get_le32(bytes + 4) != 0xda5a1248 ||
+                memcmp(bytes + 16, "\x01\x01\x03", 3)) return true;
+
+            r.samples = get_le32(bytes + 12);
+            r.interval_s = 1;
+            if (r.size() != entry.size || !ring_start(get_le32(bytes + 8), id, r)) return true;
+            expected_sum_ = get_le32(bytes);
+            part_ = FilePart::SChecksum;
+        } else {
+            if (!length || length > r.data_end() - checked_bytes_) return true;
+            byte_sum_ = std::accumulate(bytes, bytes + length, byte_sum_);
+            checked_bytes_ += length;
+        }
+        if (checked_bytes_ < r.data_end()) return false;
+        if (byte_sum_ != expected_sum_) return true;
     }
 
+    add_file(entry, source, id);
+    return true;
+}
+
+void ReportOximetryArchive::add_file(const StorageScanEntryView &entry, std::string_view source,
+                                     std::string_view id) {
+    auto &r = metadata_;
+    if (!r.csv_bytes) {
+        // Legacy imports used SN, or twelve MAC digits when INFO had no SN.
+        if (source.size() != 12 || source.find_first_not_of("0123456789abcdefABCDEF") != source.npos)
+            memcpy(r.serial, source.data(), source.size());
+        ring_changed_ = true;
+    }
+    memcpy(r.source, source.data(), source.size());
+    memcpy(r.id, id.data(), id.size());
+    r.modified = entry.modified;
+    building_->push_back(r);
+}
+
+void ReportOximetryArchive::consume_clock(std::string_view source, const uint8_t *bytes, size_t length) {
     LargeJsonAllocator allocator;
     JsonDocument doc(&allocator);
     if (deserializeJson(doc, bytes, length)) return;

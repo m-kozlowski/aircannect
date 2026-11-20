@@ -75,16 +75,19 @@ bool ReportOximetrySampleReader::consume(const uint8_t *bytes, size_t size,
             row_[line.size()-2] = 0;
             if (!csv_row(sample)) return false;
         } else {
-            if (size < 5 || samples_ >= recording_->samples) return false;
+            const auto &bin = recording_->bin;
+            if (size < bin.stride() || samples_ >= recording_->samples) return false;
+            const auto value = bin.decode(bytes);
             sample.duration_ms = recording_->interval_s * 1000;
             sample.time_ms = recording_->start_ms + int64_t(samples_) * sample.duration_ms;
-            if (!bytes[2]) {
-                if (bytes[0] && bytes[0] <= 100) sample.values[0] = bytes[0];
-                if (bytes[1] && bytes[1] < 255) sample.values[1] = bytes[1];
+
+            if (!value.invalid_vitals) {
+                if (value.oxygen && value.oxygen <= 100) sample.values[0] = value.oxygen;
+                if (value.pulse && value.pulse < 255) sample.values[1] = value.pulse;
             }
-            sample.values[2] = bytes[3];
-            bytes += 5;
-            size -= 5;
+            sample.values[2] = value.motion;
+            bytes += bin.stride();
+            size -= bin.stride();
         }
 
         if (!sink(context, sample)) return false;
