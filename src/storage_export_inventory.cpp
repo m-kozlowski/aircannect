@@ -509,12 +509,12 @@ OperationAdmission StorageExportInventoryLoader::request(
     if (!scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
+    reset();
     if (!state_dir || !state_dir[0] ||
         strlen(state_dir) >= sizeof(state_dir_) || generation == 0) {
         return OperationAdmission::Rejected;
     }
 
-    reset_operation();
     copy_cstr(state_dir_, sizeof(state_dir_), state_dir);
     generation_ = generation;
     now_epoch_ = now_epoch != 0
@@ -569,15 +569,10 @@ OperationAdmission StorageExportInventoryLoader::request_datalog_day(
     if (!scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
-    if (!state_dir_[0] || !storage_export_is_datalog_day_name(day) ||
+    if (phase_ != Phase::Ready || !storage_export_is_datalog_day_name(day) ||
         generation == 0) {
         return OperationAdmission::Rejected;
     }
-
-    reset_operation();
-    generation_ = generation;
-    request_kind_ = RequestKind::DatalogDay;
-    copy_cstr(requested_day_, sizeof(requested_day_), day);
 
     char datalog_path[AC_STORAGE_PATH_MAX] = {};
     char state_path[AC_STORAGE_PATH_MAX] = {};
@@ -605,20 +600,19 @@ OperationAdmission StorageExportInventoryLoader::request_datalog_day(
         {state_path, false},
         {done_path, false},
     };
-    state_root_index_ = 1;
-
     StorageScanCommand command;
     command.roots = roots;
     command.root_count = sizeof(roots) / sizeof(roots[0]);
     command.include_directories = false;
-    command.generation = generation_;
+    command.generation = generation;
     const OperationSubmission submission = scan_port_->request_scan(command);
-    if (!submission.accepted()) {
-        phase_ = Phase::Idle;
-        request_kind_ = RequestKind::None;
-        return submission.admission;
-    }
+    if (!submission.accepted()) return submission.admission;
 
+    reset_operation();
+    generation_ = generation;
+    request_kind_ = RequestKind::DatalogDay;
+    copy_cstr(requested_day_, sizeof(requested_day_), day);
+    state_root_index_ = 1;
     scan_ticket_ = submission.ticket;
     phase_ = Phase::Scan;
     return OperationAdmission::Accepted;
@@ -895,6 +889,8 @@ void StorageExportInventoryLoader::reset_operation() {
 void StorageExportInventoryLoader::reset() {
     reset_operation();
     state_dir_[0] = '\0';
+    daily_root_[0] = '\0';
+    oximetry_ = false;
 }
 
 }  // namespace aircannect
