@@ -12,8 +12,6 @@ public:
     using CatalogProvider = Catalog (*)();
     using MemoryEnabled = bool (*)(const char *ble_address);
 
-    static const char *source_id(const ReportOximetryRecording &record,
-                                 const ReportOximetryCatalog &catalog, char (&ble)[17]);
     void begin(Catalog catalog, std::string_view preference = "auto", std::string_view day = {});
     const char *next_source();
     const char *inventory_day() const { return inventory_day_[0] ? inventory_day_ : nullptr; }

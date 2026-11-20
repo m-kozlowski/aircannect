@@ -238,7 +238,7 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
                     slice.next_noon_s != (*building_)[i].next_noon_s) slice.planes.reset();
                 if (!slice.csv_bytes) slice.offset_minutes = ring_offset(slice.start_ms, nights);
                 (*building_)[i] = slice;
-                while (slice.next_noon_s * 1000 < slice.end_ms() && night_window(slice.next_noon_s, slice)) {
+                while (slice.next_noon_s * 1000 < slice.report_end_ms() && night_window(slice.next_noon_s, slice)) {
                     slice.planes.reset();
                     building_->push_back(slice);
                 }
@@ -251,6 +251,7 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             prepare_pending_ = true;
             manifest_only_ = true;
             signal_retry_at_ = 0;
+            resolve_oximetry_devices(*building_);
             if (ring_changed_) ring_sources_ = building_;
             originals_ = building_;
             published_ = std::move(building_);
@@ -453,12 +454,7 @@ bool ReportOximetryArchive::consume_file(const StorageScanEntryView &entry, std:
 void ReportOximetryArchive::add_file(const StorageScanEntryView &entry, std::string_view source,
                                      std::string_view id) {
     auto &r = metadata_;
-    if (!r.csv_bytes) {
-        // Legacy imports used SN, or twelve MAC digits when INFO had no SN.
-        if (source.size() != 12 || source.find_first_not_of("0123456789abcdefABCDEF") != source.npos)
-            memcpy(r.serial, source.data(), source.size());
-        ring_changed_ = true;
-    }
+    if (!r.csv_bytes) ring_changed_ = true;
     memcpy(r.source, source.data(), source.size());
     memcpy(r.id, id.data(), id.size());
     r.modified = entry.modified;

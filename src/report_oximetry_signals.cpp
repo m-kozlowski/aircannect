@@ -30,6 +30,22 @@ struct BlockStatistics {
     uint32_t first = 0, rows = 0;
     int64_t start = 0, end = 0;
     uint32_t histogram_offset = 0, histogram_size = 0;
+    struct Span { uint32_t start, end, mask; };
+    std::vector<Span,LargeAllocator<Span>> spans;
+    bool fragmented = false;
+
+    void cover(uint32_t lo, uint32_t hi, unsigned mask) {
+        if (!mask || fragmented) return;
+        if (!spans.empty() && spans.back().end == lo && spans.back().mask == mask) {
+            spans.back().end = hi;
+        } else if (spans.size() < 32) {
+            spans.push_back({lo, hi, mask});
+        } else {
+            // For noisy blocks RAW already carries every exact interval.
+            decltype(spans)().swap(spans);
+            fragmented = true;
+        }
+    }
 };
 
 // This small fixed record is enough to reopen a published supplement without
@@ -67,7 +83,7 @@ std::string report_oximetry_signal_path(const ReportOximetryRecording &r, const 
     return std::string(night) + "/ox/" + r.source + "/" + r.id + "/" +
         std::to_string(r.start_ms) + "-" + std::to_string(r.size()) + "-" +
         std::to_string(r.modified) + "-" + std::to_string(r.noon_s) + "-" +
-        std::to_string(r.next_noon_s) + "/" + plane;
+        std::to_string(r.next_noon_s) + (r.csv_bytes ? "-ms/" : "/") + plane;
 }
 
 bool report_oximetry_overview_tile(const ReportOximetryRecording &r, ReportSignalTile &tile) {
@@ -75,7 +91,7 @@ bool report_oximetry_overview_tile(const ReportOximetryRecording &r, ReportSigna
     track.sample_interval_ms = 1000;
     track.lod_mask = REPORT_SIGNAL_STORE_LOD_10S;
     const int64_t start = std::max(r.start_ms, r.noon_s * 1000);
-    const int64_t end = std::min(r.end_ms(), r.next_noon_s * 1000);
+    const int64_t end = std::min(r.report_end_ms(), r.next_noon_s * 1000);
     track.first_block_start_ms = start - start % Block;
     track.last_valid_sample_ms = end - 1;
     const auto slots = (end - track.first_block_start_ms + Block - 1) / Block;
@@ -97,8 +113,8 @@ struct ReportOximetrySignalBuilder::Work {
     size_t slots = 0, channel = 0, read_offset = 0;
     std::array<std::shared_ptr<LargeByteBuffer>,4> planes;
     std::vector<BlockStatistics,LargeAllocator<BlockStatistics>> blocks;
-    // BLE measurements present in each UTC second, independent per channel.
-    std::vector<uint8_t,LargeAllocator<uint8_t>> coverage;
+    ReportOximetrySample pending_live;
+    bool have_live = false;
     Counts block_counts[4], total_counts[4];
     size_t current_block = SIZE_MAX;
     std::unique_ptr<LargeByteBuffer> raw, histograms;
@@ -163,10 +179,25 @@ struct ReportOximetrySignalBuilder::Work {
         return true;
     }
 
+    bool finish_live(int64_t next) {
+        if (!have_live) return true;
+        have_live = false;
+        pending_live.duration_ms = std::min<int64_t>(next - pending_live.time_ms,
+                                                     AC_OXIMETRY_SAMPLE_STALE_MS);
+        return !pending_live.duration_ms || add(pending_live);
+    }
+
+    bool observe(const ReportOximetrySample &s) {
+        if (!record->csv_bytes) return add(s);
+        if (!finish_live(s.time_ms)) return false;
+        pending_live = s;
+        have_live = true;
+        return true;
+    }
+
     bool add(const ReportOximetrySample &s) {
         const int64_t start = std::max(s.time_ms, record->noon_s * 1000);
-        const int64_t end = std::min(s.time_ms + (s.duration_ms ? s.duration_ms : 1),
-                                     record->next_noon_s * 1000);
+        const int64_t end = std::min(s.time_ms + s.duration_ms, record->next_noon_s * 1000);
         if (end <= start) return true;
         const size_t slot = (start - first_block) / Block;
         if (slot >= slots || raw_used + RawBytes > raw->size()) return false;
@@ -184,17 +215,14 @@ struct ReportOximetrySignalBuilder::Work {
         auto *p = raw->data() + raw_used;
         raw_used += RawBytes;
         put_le32(p, static_cast<uint32_t>(s.time_ms - record->start_ms));
+        unsigned mask = 0;
         for (size_t c = 0; c < 4; ++c) {
             const float v = s.values[c];
             if (c == 3) memcpy(p + 12, &v, sizeof(v));
             else put_le16(p + 4 + 2*c, static_cast<int16_t>(v));
             if (v < 0) continue;
-            if (record->csv_bytes && !strncmp(record->source, "ble-", 4)) {
-                const size_t second = (start - first_block) / 1000;
-                if (second >= coverage.size()) coverage.resize(second + 1);
-                coverage[second] |= uint8_t(1u << c);
-            }
-            const auto weight = s.duration_ms ? uint32_t(end - start) : 1;
+            mask |= 1u << c;
+            const auto weight = uint32_t(end - start);
             block_counts[c][v] += weight;
             total_counts[c][v] += weight;
             if (!planes[c]) {
@@ -213,7 +241,10 @@ struct ReportOximetrySignalBuilder::Work {
                 cells[1] = cells[1] == INT16_MIN ? value : std::max(cells[1], value);
             }
         }
-        p[10] = p[11] = 0;
+        static_assert(AC_OXIMETRY_SAMPLE_STALE_MS <= UINT16_MAX);
+        put_le16(p + 10, record->csv_bytes ? s.duration_ms : 0);
+        if (record->csv_bytes && strcmp(record->source, "udp"))
+            b.cover(start - first_block, end - first_block, mask);
         return true;
     }
 
@@ -237,28 +268,11 @@ struct ReportOximetrySignalBuilder::Work {
             entry.add(b.first); entry.add(b.rows); entry.add(b.start); entry.add(b.end);
             entry.add(b.histogram_offset);
             entry.add(b.histogram_size);
-        }
-        if (!coverage.empty()) {
-            // Usually the same few channels cover an entire recording. Store
-            // runs as [end second (exclusive), mask]; bound noisy input by
-            // using one hex digit per second if runs would cost more.
-            size_t runs = 1;
-            for (size_t i = 1; i < coverage.size(); ++i)
-                if (coverage[i] != coverage[i - 1]) ++runs;
-            if (runs * 10 < coverage.size()) {
-                auto ranges = doc["coverage"].to<JsonArray>();
-                for (size_t i = 1; i <= coverage.size(); ++i) {
-                    if (i < coverage.size() && coverage[i] == coverage[i - 1]) continue;
-                    ranges.add(i);
-                    ranges.add(coverage[i - 1]);
+            if (record->csv_bytes && strcmp(record->source, "udp") && !b.fragmented) {
+                auto spans = entry.add<JsonArray>();
+                for (const auto &s : b.spans) {
+                    spans.add(s.start); spans.add(s.end); spans.add(s.mask);
                 }
-            } else {
-                auto masks = LargeByteBuffer::allocate(coverage.size() + 1);
-                if (!masks) return {};
-                for (size_t i = 0; i < coverage.size(); ++i)
-                    masks->data()[i] = "0123456789abcdef"[coverage[i]];
-                masks->data()[coverage.size()] = 0;
-                doc["coverage"] = reinterpret_cast<char *>(masks->data());
             }
         }
         if (doc.overflowed()) return {};
@@ -364,7 +378,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         work_->reader.begin(r);
         work_->read_offset = r.csv_bytes ? 0 : r.bin.offset(0);
         const int64_t lo = std::max(r.start_ms, r.noon_s * 1000);
-        const int64_t hi = std::min(r.end_ms(), r.next_noon_s * 1000);
+        const int64_t hi = std::min(r.report_end_ms(), r.next_noon_s * 1000);
         work_->first_block = lo - lo % Block;
         work_->slots = (hi - work_->first_block + Block - 1) / Block;
         if (!work_->slots || work_->slots > REPORT_SIGNAL_STORE_MAX_BLOCKS) {
@@ -433,6 +447,14 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
                 w.verified = true;
                 w.phase = Phase::Done;
             } else {
+                if (w.have_live) {
+                    if (w.raw && w.raw_used + RawBytes > w.raw->size()) {
+                        w.flush(w.raw, w.raw_used, "raw", w.product.rows * RawBytes);
+                        return true;
+                    }
+                    if (!w.raw) w.raw = LargeByteBuffer::allocate(RawBytes);
+                    if (!w.raw || !w.finish_live(r.report_end_ms())) return fail();
+                }
                 if (!w.finish_block()) return fail();
                 if (w.raw_used) w.flush(w.raw, w.raw_used, "raw", w.product.rows * RawBytes);
                 w.phase = Phase::Plane;
@@ -504,7 +526,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
 
             if (!w.reader.consume(view.data + pos, length, &w, [](void *ctx, const ReportOximetrySample &s) {
                 auto &work = *static_cast<Work *>(ctx);
-                if (work.add(s)) return true;
+                if (work.observe(s)) return true;
                 work.retry = true;
                 return false;
             })) return fail(w.retry);

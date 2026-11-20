@@ -2319,7 +2319,7 @@
       const params = new URLSearchParams({part:"signal", night:track.view.night.id,
         slice:f.day, noon:f.noon, end:f.next_noon, source:f.source, id:f.id, start:f.start, mtime:f.modified,
         size:f.size || f.csv_bytes || 40 + f.count * 5, ...args});
-      const key = "source-plane-2:" + params;
+      const key = (f.csv_bytes ? "source-plane-live-ms:" : "source-plane-2:") + params;
       const pending = track.view.pending;
       if (pending.has(key)) return pending.get(key);
       const fetch = (async () => {
@@ -2346,7 +2346,8 @@
         if (data.byteLength !== n*16) throw new Error("incomplete_signal_block");
         for (let i = 0; i < data.byteLength; i += 16) {
           const t = track.file.start + data.getUint32(i,true);
-          visit(t,[data.getInt16(i+4,true),data.getInt16(i+6,true),data.getInt16(i+8,true),data.getFloat32(i+12,true)]);
+          visit(t,[data.getInt16(i+4,true),data.getInt16(i+6,true),data.getInt16(i+8,true),data.getFloat32(i+12,true)],
+            track.file.step || data.getUint16(i+10,true));
         }
       }
     }
@@ -2375,7 +2376,6 @@
           if (p && p.t < to && p.end > from) points.push(p);
         return points;
       }
-      let previous = 0;
       for (const b of index.blocks) {
         if (b[3]<=from || b[2]>=to) continue;
         const remaining=track.fallback?.get(b)?.[track.channel];
@@ -2386,15 +2386,10 @@
           }
           continue;
         }
-        await visitSourceRows(track,b,context.signal,(t,values) => {
-          const dur = track.file.step;
-          if (t + (dur || 1) <= from || t >= to) return;
-          if (!dur && previous && t-previous > track.view.stale) points.push({t,gap:true});
-          previous = t;
+        await visitSourceRows(track,b,context.signal,(t,values,dur) => {
+          if (t + dur <= from || t >= to) return;
           const value = values[track.channel];
-          if (value < 0) points.push({t,gap:true});
-          else if (dur) points.push({t:Math.max(from,t),end:Math.min(to,t+dur),value});
-          else points.push({t,value});
+          if (value >= 0) points.push({t:Math.max(from,t),end:Math.min(to,t+dur),value});
         });
       }
       return points;
@@ -2430,10 +2425,8 @@
 
     async function sourceStatistics(view,ranges) {
       const counts = oximetryChannels.map(() => new Map());
-      const liveCounts = view.mixed ? oximetryChannels.map(() => new Map()) : counts;
       for (const record of view.records) {
-        const dest = record.file.step ? counts : liveCounts;
-        const add = (c,v,n) => { if (v >= 0 && n) dest[c].set(v,(dest[c].get(v)||0)+n); };
+        const add = (c,v,n) => { if (v >= 0 && n) counts[c].set(v,(counts[c].get(v)||0)+n); };
         const clips = ranges.map(r => ({start:Math.max(r.start,record.from),end:Math.min(r.end,record.to)}))
           .filter(r => r.start < r.end);
         const covered = b => clips.some(r => b[2]>=r.start && b[3]<=r.end);
@@ -2462,10 +2455,9 @@
           }
           if (covered(b)) full.push(b);
           else {
-            await visitSourceRows(record,b,view.signal,(t,values) => {
-              const n = record.file.step ? clips.reduce((n,r) => n+Math.max(0,
-                Math.min(r.end,t+record.file.step)-Math.max(r.start,t)),0)
-                : Number(clips.some(r => t>=r.start && t<r.end));
+            await visitSourceRows(record,b,view.signal,(t,values,dur) => {
+              const n = clips.reduce((n,r) => n+Math.max(0,
+                Math.min(r.end,t+dur)-Math.max(r.start,t)),0);
               values.forEach((v,c) => { if (!(direct & (1<<c)) && !fallback?.[c]) add(c,v,n); });
             });
           }
@@ -2476,12 +2468,6 @@
       }
       const stats = {};
       counts.forEach((bins,c) => {
-        if (view.mixed) {
-          // A live ring observation represents one measured second. BIN
-          // histograms use milliseconds. Keep live-only ranks unchanged.
-          const unit = bins.size ? 1000 : 1;
-          for (const [v,n] of liveCounts[c]) bins.set(v,(bins.get(v)||0)+n*unit);
-        }
         const values = [...bins.keys()].sort((a,b) => a-b);
         if (!values.length) return;
         let sum=0,total=0;
@@ -2525,46 +2511,22 @@
         .sort((a,b) => a.start-b.start || a.noon-b.noon || a.id.localeCompare(b.id));
     }
 
-    // Use archived identity, never the sensor currently paired to the ESP.
-    function oximetryDevices(files) {
-      const serials = new Map();
-      const peerOf = f => f.csv_bytes && f.source.startsWith("ble-") ? f.source : f.peer ||
-        (!f.csv_bytes && !f.serial && /^[0-9a-f]{12}$/i.test(f.source) ? "ble-"+f.source.toLowerCase() : "");
-      for (const f of reportSummary?.oximetry || []) {
-        const peer = peerOf(f);
-        if (!peer || !f.serial || (f.csv_bytes && f.source === "udp")) continue;
-        if (!serials.has(peer)) serials.set(peer,f.serial);
-        else if (serials.get(peer) !== f.serial) serials.set(peer,null);
+    // Yield both measured spans and uncovered gaps, clipped to the request.
+    function visitLiveCoverage(spans, start, end, visit) {
+      let lo = 0, hi = spans.length;
+      while (lo < hi) {
+        const mid = (lo+hi) >>> 1;
+        if (spans[mid].end <= start) lo = mid+1;
+        else hi = mid;
       }
-
-      const devices = new Map();
-      for (const f of files) {
-        const peer = peerOf(f);
-        const serial = f.serial || serials.get(peer);
-        const id = f.csv_bytes && f.source === "udp" ? "udp" : serial ? "ring:"+serial :
-          peer || "ring:"+f.source;
-        if (!devices.has(id)) devices.set(id,[]);
-        devices.get(id).push(f);
+      let at = start;
+      for (let i=lo; i<spans.length && spans[i].start<end; ++i) {
+        const s = spans[i];
+        if (at < s.start) visit(at,s.start,0);
+        at = Math.min(s.end,end);
+        visit(Math.max(start,s.start),at,s.mask);
       }
-      return devices;
-    }
-
-    function decodeLiveCoverage(record, mark) {
-      const {coverage,first} = record.index;
-      const limit = Math.ceil((Math.min(oximetryFileEnd(record.file),record.file.next_noon)-first)/1000);
-      if (typeof coverage === "string") {
-        if (coverage.length > limit || /[^0-9a-f]/.test(coverage)) return false;
-        for (let i=0; i<coverage.length; ++i) mark(first+i*1000,parseInt(coverage[i],16));
-      } else {
-        if (!Array.isArray(coverage) || coverage.length%2 ||
-            !coverage.every((n,i) => Number.isInteger(n) && (i%2 ? n>=0 && n<=15 :
-              n>(coverage[i-2] || 0) && n<=limit))) return false;
-        let i=0;
-        for (let j=0; j<coverage.length; j+=2) {
-          for (; i<coverage[j]; ++i) mark(first+i*1000,coverage[j+1]);
-        }
-      }
-      return true;
+      if (at < end) visit(at,end,0);
     }
 
     function includeOximetryExtrema(point, min, max) {
@@ -2581,48 +2543,50 @@
         rings.some(b => b.from < r.to && r.from < b.to));
       if (!live.length) return;
 
-      const first = Math.floor(view.night.start/1000);
-      const seconds = new Uint8Array(Math.ceil(view.night.end/1000)-first);
+      const spans = [];
       for (const r of live) {
-        const mark = (t,mask) => {
-          if (t+1000 > r.from && t < r.to) seconds[Math.floor(t/1000)-first] |= mask;
+        const mark = (lo,hi,mask) => {
+          const start = Math.max(lo,r.from), end = Math.min(hi,r.to);
+          if (!mask || start>=end) return;
+          const last = spans.at(-1);
+          if (last?.end===start && last.mask===mask) last.end=end;
+          else spans.push({start,end,mask});
         };
-        if (decodeLiveCoverage(r,mark)) continue;
-
-        // Pre-coverage indexes remain readable even if the original is gone.
         for (const b of r.index.blocks) {
           if (!rings.some(k => k.from < b[3] && b[2] < k.to)) continue;
-          await visitSourceRows(r,b,view.signal,(t,vs) => {
-            if (t >= r.from && t < r.to)
-              mark(t,vs.reduce((m,v,c) => v>=0 ? m | (1<<c) : m,0));
-          });
+          if (b[6]) {
+            const base = r.index.first, runs = b[6];
+            for (let i=0; i<runs.length; i+=3)
+              mark(base+runs[i],base+runs[i+1],runs[i+2]);
+          } else {
+            await visitSourceRows(r,b,view.signal,(t,vs,dur) =>
+              mark(t,t+dur,vs.reduce((m,v,c) => v>=0 ? m | (1<<c) : m,0)));
+          }
         }
       }
 
       for (const r of rings) {
         const bins = oximetryChannels.map(() => new Map());
-        for (let s=Math.floor(r.from/1000); s<Math.ceil(r.to/1000); ++s) {
-          const mask=seconds[s-first] & r.file.channels;
-          if (!mask) continue;
-          const cell=Math.floor(s/10)*10000;
-          bins.forEach((map,c) => { if (mask & (1<<c)) map.set(cell,null); });
-        }
+        visitLiveCoverage(spans,r.from,r.to,(lo,hi,mask) => {
+          if (!(mask & r.file.channels)) return;
+          for (let cell=Math.floor(lo/10000)*10000; cell<hi; cell+=10000)
+            bins.forEach((map,c) => { if (mask & (1<<c)) map.set(cell,null); });
+        });
         r.overview = bins;
         for (const block of r.index.blocks)
-          await prepareFallbackBlock(r,block,s => seconds[s-first]);
+          await prepareFallbackBlock(r,block,spans);
       }
     }
 
-    async function prepareFallbackBlock(record, block, maskAt) {
+    async function prepareFallbackBlock(record, block, spans) {
       const start = Math.max(block[2],record.from), end = Math.min(block[3],record.to);
       if (start >= end) return;
 
       let any = 0, all = record.file.channels;
-      for (let s=Math.floor(start/1000); s<Math.ceil(end/1000); ++s) {
-        const mask = maskAt(s);
+      visitLiveCoverage(spans,start,end,(_lo,_hi,mask) => {
         any |= mask;
         all &= mask;
-      }
+      });
 
       // A 4-second memory sample can cross a tile boundary. Rebuild the
       // entire affected 10-second cell, including the adjacent block.
@@ -2639,42 +2603,38 @@
       // Ring samples have a fixed cadence. Skip a block's raw prefix or
       // suffix if only a small gap needs filling.
       let lo = end, hi = start;
-      for (let s=Math.floor(start/1000); s<Math.ceil(end/1000); ++s) {
-        if (partial & ~maskAt(s)) {
-          lo = Math.min(lo,Math.max(start,s*1000));
-          hi = Math.min(end,(s+1)*1000);
-        }
-      }
+      visitLiveCoverage(spans,start,end,(from,to,mask) => {
+        if (partial & ~mask) { lo = Math.min(lo,from); hi = to; }
+      });
       const {step} = record.file;
       const blockTime = record.file.start + Math.floor((block[2]-record.file.start)/step)*step;
       const offset = Math.floor((lo-blockTime)/step);
       const count = Math.min(block[1],Math.ceil((hi-blockTime)/step))-offset;
 
       await visitSourceRows(record,[block[0]+offset,count],record.view.signal,(t,values) => {
-        for (let at=Math.max(t,start); at<Math.min(t+step,end);) {
-          const second = Math.floor(at/1000);
-          const until = Math.min(t+step,end,(second+1)*1000);
-          const keep = partial & ~maskAt(second);
+        visitLiveCoverage(spans,Math.max(t,start),Math.min(t+step,end),(at,until,mask) => {
+          const keep = partial & ~mask;
           values.forEach((value,c) => {
             if (!(keep & (1<<c)) || value<0) return;
             const points = fallback[c], last = points.at(-1);
             if (last?.end===at && last.t>=t) last.end=until;
             else points.push({t:at,end:until,value});
 
-            const cell = Math.floor(at/10000)*10000, map = record.overview[c];
-            if (!map.has(cell)) return;
-            const p = map.get(cell);
-            if (p) includeOximetryExtrema(p,value,value);
-            else map.set(cell,{t:cell,end:cell+10000,min:value,max:value,value,envelope:true});
+            const map = record.overview[c];
+            for (let cell=Math.floor(at/10000)*10000; cell<until; cell+=10000) {
+              if (!map.has(cell)) continue;
+              const p = map.get(cell);
+              if (p) includeOximetryExtrema(p,value,value);
+              else map.set(cell,{t:cell,end:cell+10000,min:value,max:value,value,envelope:true});
+            }
           });
-          at = until;
-        }
+        });
       });
     }
 
     async function selectOximetrySource(night, token, signal, requested, files = nightOximetryFiles(night),
                                         concurrency = 3) {
-      const devices = oximetryDevices(files), sources = [...devices.keys()];
+      const sources = [...new Set(files.map(f => f.device))];
       const sameNight = oximetryView.night?.id === night.id;
       let sa2 = !!(reportResult?.statistics?.spo2 || reportResult?.statistics?.pulse);
       if (sameNight && oximetryView.source) sa2 ||= oximetryView.sa2;
@@ -2691,13 +2651,17 @@
       const preferred = requested ?? oximetryPreference.get(night.id);
       const source = options.includes(preferred) ? preferred : options[0] || "";
       const previous = oximetryView.source;
-      const view = {night,source,sa2,files:devices.get(source) || [],options,records:[],
-        tracks:{},pending:new Map(),stale:reportSummary?.oximetry_live_stale_ms || 5000,signal};
+      const view = {night,source,sa2,files:files.filter(f=>f.device===source),options,records:[],
+        tracks:{},pending:new Map(),signal};
       oximetryView = view;
       const picker = document.getElementById("reportOximetrySource");
       if (picker) {
-        picker.replaceChildren(...options.map(s => new Option(!s ? "SA2" : s==="udp" ? "UDP" :
-          s.startsWith("ring:") ? "O2Ring · "+s.slice(5) : "BLE · "+s.slice(4).match(/../g).join(":"),s)));
+        picker.replaceChildren(...options.map(s => {
+          const ring = files.find(f => f.device===s && !f.csv_bytes);
+          const label = !s ? "SA2" : s==="udp" ? "UDP" : ring ? "O2Ring · "+(ring.serial || ring.source) :
+            s.startsWith("ble-") ? "BLE · "+s.slice(4).match(/../g).join(":") : s;
+          return new Option(label,s);
+        }));
         picker.value=source; picker.disabled=options.length<2;
       }
       if (!previous && !source) return;
@@ -2727,7 +2691,6 @@
       if (signal.aborted || oximetryView!==view || token!==reportLoadToken) return;
       const rows=view.records.reduce((n,r) => n+r.index.blocks.reduce((s,b)=>s+b[1],0),0);
       view.smallOverview=rows <= Math.min(signalStoreChartWidth()*2,SIGNAL_STORE_RAW_CURVE_MAX_BYTES/16);
-      view.mixed=covered.size>1;
       await prepareRingFallback(view);
       if (signal.aborted || oximetryView!==view || token!==reportLoadToken) return;
       for (const record of view.records) {
@@ -4389,19 +4352,17 @@
       return merged;
     }
 
-    function mergeOximetryTracks(series, stale) {
+    function mergeOximetryTracks(series) {
       // An empty cell in one file must not break valid data from the other.
       const points=series.flat().sort((a,b)=>a.t-b.t), out=[];
-      let gapAt=-Infinity, last=null;
+      let last=null;
       for (const p of points) {
-        if (p.gap) { gapAt=p.t; continue; }
+        if (p.gap) continue;
         if (last && last.t===p.t && last.envelope && p.envelope) {
           includeOximetryExtrema(last,p.min,p.max);
           continue;
         }
-        if (last && (p.t > (last.end ?? last.t+stale) ||
-            (gapAt>last.t && gapAt<p.t && gapAt>=(last.end ?? last.t))))
-          out.push({t:last.end ?? last.t+1,gap:true});
+        if (last && p.t > last.end) out.push({t:last.end,gap:true});
         out.push(p);
         last=p;
       }
@@ -4513,7 +4474,7 @@
         }
         if (tracks.length) {
           decoded.series[series.key] = tracks[0].file
-            ? mergeOximetryTracks(values,oximetryView.stale) : mergeSignalStoreTracks(values);
+            ? mergeOximetryTracks(values) : mergeSignalStoreTracks(values);
         }
       }
       return decoded;

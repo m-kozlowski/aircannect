@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "large_allocator.h"
+#include "board_oximetry.h"
 #include "oximetry_archive.h"
 #include "ring_bin_layout.h"
 #include "storage_read_port.h"
@@ -19,6 +20,7 @@ struct ReportOximetryPlanes;
 
 struct ReportOximetryRecording : OximetryCsv::Header {
     char source[33]{};
+    char device[33]{}; // Resolved when the catalog is published.
     char id[37]{};
     int64_t start_ms = 0, wall_s = 0, local_start_s = 0, observation_ms = 0;
     uint32_t samples = 0, interval_s = 0;
@@ -39,10 +41,14 @@ struct ReportOximetryRecording : OximetryCsv::Header {
     int64_t end_ms() const {
         return csv_bytes ? csv_end_ms : start_ms + int64_t(samples) * interval_s * 1000;
     }
+    int64_t report_end_ms() const {
+        return csv_bytes ? csv_end_ms - 1 + AC_OXIMETRY_SAMPLE_STALE_MS : end_ms();
+    }
 };
 
 using ReportOximetryCatalog = std::vector<ReportOximetryRecording,
                                           LargeAllocator<ReportOximetryRecording>>;
+void resolve_oximetry_devices(ReportOximetryCatalog &catalog);
 
 // Resolves originals and publishes their prepared, sleep-day-scoped tracks.
 class ReportOximetryArchive {

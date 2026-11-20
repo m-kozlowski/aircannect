@@ -2,18 +2,11 @@
 
 #include <algorithm>
 #include <cstring>
-#include <strings.h>
 
 #include "oximetry_archive.h"
 
 namespace aircannect {
 namespace {
-
-bool same_device(const ReportOximetryRecording &a, const ReportOximetryRecording &b) {
-    return !strcmp(a.source, b.source) ||
-        (a.serial[0] && !strcmp(a.serial, b.serial)) ||
-        (a.peer[0] && !strcasecmp(a.peer, b.peer));
-}
 
 std::string_view directory_day(const ReportOximetryRecording &r) {
     return {r.csv_bytes ? r.id + 5 : r.id, 8};
@@ -25,17 +18,6 @@ bool overlaps(const ReportOximetryRecording &a, const ReportOximetryRecording &b
 
 }  // namespace
 
-const char *SleepHqOximetryPlan::source_id(const ReportOximetryRecording &r,
-                                           const ReportOximetryCatalog &catalog, char (&ble)[17]) {
-    if (oximetry_ble_source(r.peer, ble)) return ble;
-    if (r.serial[0]) {
-        for (const auto &other : catalog) {
-            if (!strcmp(r.serial, other.serial) && oximetry_ble_source(other.peer, ble)) return ble;
-        }
-    }
-    return r.source;
-}
-
 void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference, std::string_view day) {
     catalog_ = std::move(catalog);
     decltype(files_)().swap(files_);
@@ -46,11 +28,28 @@ void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference, st
     deadline_ = 0;
     if (!catalog_ || preference.empty()) return;
 
+    // Older configurations may name an archive directory or a serial.
+    // Resolve that preference once, so it includes both kinds of recording.
+    if (preference != "auto") {
+        std::string_view selected;
+        bool ambiguous = false;
+        for (const auto &r : *catalog_) {
+            if (preference == r.device) {
+                selected = r.device;
+                ambiguous = false;
+                break;
+            }
+            if (preference != r.source && preference != r.serial) continue;
+            ambiguous |= !selected.empty() && selected != r.device;
+            selected = r.device;
+        }
+        if (ambiguous || selected.empty()) return;
+        preference = selected;
+    }
+
     for (const auto &r : *catalog_) {
         if (r.start_ms < r.noon_s * 1000 || (r.csv_bytes && !r.export_clock_known)) continue;
-        char ble[17];
-        if (preference != "auto" && preference != r.source && preference != r.serial &&
-            preference != source_id(r, *catalog_, ble)) continue;
+        if (preference != "auto" && preference != r.device) continue;
         files_.push_back({&r});
     }
 
@@ -64,7 +63,7 @@ void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference, st
         files_.erase(std::remove_if(files_.begin(), files_.end(), [&](const File &f) {
             if (directory_day(*f.record) == day) return false;
             return std::none_of(changed.begin(), changed.end(), [&](const File &c) {
-                return same_device(*c.record, *f.record) && overlaps(*c.record, *f.record);
+                return !strcmp(c.record->device, f.record->device) && overlaps(*c.record, *f.record);
             });
         }), files_.end());
     }
@@ -125,7 +124,7 @@ bool SleepHqOximetryPlan::eligible(const char *path, int64_t now, MemoryEnabled 
         const auto &s = *other.record;
         if (&other == file || !other.published || !overlaps(r, s)) continue;
 
-        if (same_device(r, s) && (other.confirmed || (r.csv_bytes && !s.csv_bytes))) return false;
+        if (!strcmp(r.device, s.device) && (other.confirmed || (r.csv_bytes && !s.csv_bytes))) return false;
     }
 
     if (r.csv_bytes && now < r.next_noon_s && r.peer[0] &&

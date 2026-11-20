@@ -24,6 +24,7 @@ Visit cache_directory(size_t depth, const char *name, bool directory) {
 
 // Match the five decimal components emitted by report_oximetry_signal_path.
 bool version_size(View name, uint64_t &size) {
+    if (name.size() > 3 && name.substr(name.size()-3) == "-ms") name.remove_suffix(3);
     const char *p = name.data(), *end = p + name.size();
     for (int i = 0; i < 5; ++i) {
         uint64_t n = 0;

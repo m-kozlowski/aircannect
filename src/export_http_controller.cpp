@@ -338,11 +338,8 @@ void ExportHttpController::send_sleephq_sync_status(
             for (size_t i = 0; i < count; ++i)
                 if (oximetry_ble_source(known[i].addr, id)) add(id, known[i].name);
             const auto originals = reports_->oximetry_originals();
-            const char *previous = "";
             if (originals) for (const auto &r : *originals) {
-                if (!strcmp(previous, r.source)) continue;
-                previous = r.source;
-                add(SleepHqOximetryPlan::source_id(r, *originals, id), r.serial);
+                add(r.device, r.serial);
             }
         } catch (const std::bad_alloc &) {
             request->send(503);
