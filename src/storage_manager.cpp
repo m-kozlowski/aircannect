@@ -1,6 +1,5 @@
 #include "storage_internal.h"
 
-#include <atomic>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -36,7 +35,6 @@ namespace {
 StorageStatus owner_status;
 StorageStatus published_status;
 bool initialized = false;
-std::atomic<uint8_t> oximetry_published{0};
 PathChangeCallback path_change_callback = nullptr;
 ReadReleaseCallback read_release_callback = nullptr;
 
@@ -541,13 +539,6 @@ bool rmdir(const char *path) {
     return !fs->exists(path);
 }
 
-bool take_oximetry_publication(bool *csv) {
-    const uint8_t flags = oximetry_published.load(std::memory_order_relaxed)
-        ? oximetry_published.exchange(0, std::memory_order_relaxed) : 0;
-    if (csv) *csv = (flags & 2) != 0;
-    return flags != 0;
-}
-
 bool rename(const char *from, const char *to) {
     if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
@@ -578,8 +569,6 @@ bool rename(const char *from, const char *to) {
         return false;
     }
 
-    if (recording) oximetry_published.fetch_or(
-        kind == OximetryArchiveFile::RingBin ? 1 : 2, std::memory_order_relaxed);
     if (path_change_callback) {
         path_change_callback(from);
         path_change_callback(to);

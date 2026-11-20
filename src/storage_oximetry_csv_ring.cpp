@@ -43,6 +43,9 @@ bool step(uint32_t now) {
         ticket = {};
         if (done.outcome.disposition != OperationDisposition::Succeeded)
             return retry(now, done.error);
+        const auto &r = (*current)[index];
+        StorageService::notify_oximetry_publication(ReportOximetryChange::file(
+            OximetryArchiveFile::RingCsv, r.source, std::string_view(r.id, 8)));
         next();
         return true;
     }

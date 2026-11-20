@@ -14,8 +14,9 @@ public:
 
     static const char *source_id(const ReportOximetryRecording &record,
                                  const ReportOximetryCatalog &catalog, char (&ble)[17]);
-    void begin(Catalog catalog, std::string_view preference = "auto");
+    void begin(Catalog catalog, std::string_view preference = "auto", std::string_view day = {});
     const char *next_source();
+    const char *inventory_day() const { return inventory_day_[0] ? inventory_day_ : nullptr; }
     void start_uploads();
     bool inspect(const char *path, bool confirmed);
     const ReportOximetryRecording *ring_csv(const char *path);
@@ -34,6 +35,8 @@ private:
     std::vector<File, LargeAllocator<File>> files_;
     size_t cursor_ = 0;
     bool collecting_ = true;
+    bool scoped_ = false;
+    char inventory_day_[9]{};
     int64_t deadline_ = 0;
 };
 

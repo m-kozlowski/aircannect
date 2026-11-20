@@ -594,6 +594,8 @@ static OperationAdmission route_report_source_change(
     ReportTask *task = static_cast<ReportTask *>(context);
     if (!task) return OperationAdmission::Busy;
     const OperationAdmission admission = task->publish_source_change(change);
+    if (admission == OperationAdmission::Accepted && change.oximetry.file_published)
+        export_coordinator.oximetry_published(change.oximetry);
     return admission == OperationAdmission::Rejected
         ? OperationAdmission::Busy : admission;
 }
@@ -1632,8 +1634,7 @@ void setup() {
         Log::logf(CAT_BLE, LOG_ERROR,
                   "AS11 reconnect recovery failed to start\n");
     }
-    report_task.set_oximetry_catalog_consumer(OximetryCsv::publish_catalog,
-        [] { export_coordinator.rearm_oximetry(); });
+    report_task.set_oximetry_catalog_consumer(OximetryCsv::publish_catalog);
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
@@ -2086,11 +2087,6 @@ void loop() {
 
     publish_export_config();
 
-    bool csv_published = false;
-    if (Storage::take_oximetry_publication(&csv_published)) {
-        export_coordinator.rearm_idle_backfill(ExportEndpoint::Smb);
-        if (csv_published) export_coordinator.rearm_oximetry();
-    }
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx();
 

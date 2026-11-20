@@ -115,7 +115,7 @@ public:
     bool request_sync(const char *reason = "manual");
     bool request_sync_day(const char *day, const char *reason = "manual_day");
     bool request_post_therapy_sync();
-    bool request_oximetry();
+    bool request_oximetry(const char *day = nullptr);
     void set_oximetry_sources(SleepHqOximetryPlan::CatalogProvider catalog,
                               SleepHqOximetryPlan::MemoryEnabled memory_enabled) {
         oximetry_catalog_ = catalog;

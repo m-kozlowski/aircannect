@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "operation_outcome.h"
+#include "oximetry_archive.h"
 #include "sleep_day_id.h"
 
 namespace aircannect {
@@ -15,6 +16,7 @@ namespace aircannect {
 struct ReportOximetryChange {
     bool pending = false, ring = false;
     char source[33]{}, directory_day[9]{};
+    bool file_published = false, csv_published = false, refresh_originals = true;
 
     static ReportOximetryChange published(bool ring, std::string_view source = {},
                                           std::string_view day = {}) {
@@ -24,11 +26,23 @@ struct ReportOximetryChange {
         return out;
     }
 
+    static ReportOximetryChange file(OximetryArchiveFile kind, std::string_view source,
+                                     std::string_view day) {
+        auto out = published(kind == OximetryArchiveFile::RingBin, source, day);
+        out.file_published = true;
+        out.csv_published = !out.ring;
+        out.refresh_originals = kind != OximetryArchiveFile::RingCsv;
+        return out;
+    }
+
     void merge(const ReportOximetryChange &other) {
         if (!other.pending) return;
         if (!pending) { *this = other; return; }
 
         ring |= other.ring;
+        file_published |= other.file_published;
+        csv_published |= other.csv_published;
+        refresh_originals |= other.refresh_originals;
         if (strcmp(source, other.source)) source[0] = 0;
         if (!source[0] || strcmp(directory_day, other.directory_day)) directory_day[0] = 0;
     }

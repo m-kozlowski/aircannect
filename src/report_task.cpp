@@ -821,10 +821,15 @@ struct ReportTask::Runtime {
     OperationAdmission publish_source_change(
         const ReportSourceChange &change) {
         if (!change.oximetry.pending && !change.valid()) return OperationAdmission::Rejected;
+        if (change.oximetry.pending && !change.oximetry.refresh_originals)
+            return OperationAdmission::Accepted;
         if (!lock()) return OperationAdmission::Busy;
 
         if (change.oximetry.pending) {
+            originals_dirty.store(true);
             pending_oximetry_change.merge(change.oximetry);
+            // Clock observations live outside a ring's day directory.
+            if (pending_oximetry_change.ring) pending_oximetry_change.directory_day[0] = 0;
             unlock();
             wake();
             return OperationAdmission::Accepted;
@@ -3056,6 +3061,7 @@ struct ReportTask::Runtime {
         AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t pending_source_change_count = 0;
     ReportOximetryChange pending_oximetry_change;
+    std::atomic<bool> originals_dirty{true};
     ReportSourceChange source_changes[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t source_change_count = 0;
     bool pending_catalog_save_source_change = false;
@@ -3500,7 +3506,7 @@ void ReportTask::request_oximetry_index() {
 }
 
 std::shared_ptr<const ReportOximetryCatalog> ReportTask::oximetry_originals() const {
-    const auto state = runtime_ ? runtime_->published_state() : nullptr;
+    const auto state = runtime_ && !runtime_->originals_dirty.load() ? runtime_->published_state() : nullptr;
     return state ? state->originals : nullptr;
 }
 
@@ -3749,9 +3755,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         const auto before = runtime.oximetry_archive.catalog();
         worked = runtime.oximetry_archive.poll(now_ms, runtime.catalog.get()) || worked;
         const auto catalog = runtime.oximetry_archive.catalog();
-        if (before != catalog) {
-            runtime.publish_state();
-            if (originals_ready_) originals_ready_();
+        if (before != catalog) runtime.publish_state();
+        if (runtime.originals_dirty.load()) {
+            const auto originals = runtime.oximetry_archive.originals();
+            const auto state = runtime.published_state();
+            if (originals && state && state->originals == originals && runtime.lock()) {
+                if (!runtime.pending_oximetry_change.pending) runtime.originals_dirty.store(false);
+                runtime.unlock();
+            }
         }
         const auto ring = runtime.oximetry_archive.ring_sources();
         if (oximetry_consumer_ && runtime.oximetry_clock_catalog_ready && !runtime.catalog_load_pending &&
@@ -3763,6 +3774,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (runtime.summary_media_available && !summary_media_available) {
         runtime.oximetry_clock_catalog_ready = false;
         runtime.oximetry_archive.reset();
+        runtime.originals_dirty.store(true);
         if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
         runtime.summary_archive.forget_media();
     }

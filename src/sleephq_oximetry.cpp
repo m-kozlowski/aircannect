@@ -15,6 +15,14 @@ bool same_device(const ReportOximetryRecording &a, const ReportOximetryRecording
         (a.peer[0] && !strcasecmp(a.peer, b.peer));
 }
 
+std::string_view directory_day(const ReportOximetryRecording &r) {
+    return {r.csv_bytes ? r.id + 5 : r.id, 8};
+}
+
+bool overlaps(const ReportOximetryRecording &a, const ReportOximetryRecording &b) {
+    return a.start_ms < b.end_ms() && b.start_ms < a.end_ms();
+}
+
 }  // namespace
 
 const char *SleepHqOximetryPlan::source_id(const ReportOximetryRecording &r,
@@ -28,11 +36,13 @@ const char *SleepHqOximetryPlan::source_id(const ReportOximetryRecording &r,
     return r.source;
 }
 
-void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference) {
+void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference, std::string_view day) {
     catalog_ = std::move(catalog);
     decltype(files_)().swap(files_);
     cursor_ = 0;
     collecting_ = true;
+    scoped_ = !day.empty();
+    inventory_day_[0] = 0;
     deadline_ = 0;
     if (!catalog_ || preference.empty()) return;
 
@@ -43,16 +53,34 @@ void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference) {
             preference != source_id(r, *catalog_, ble)) continue;
         files_.push_back({&r});
     }
+
+    if (scoped_) {
+        // The ring's directory date can differ from live's, even for the
+        // same interval. Read its receipts too before choosing a recording.
+        decltype(files_) changed;
+        for (const auto &f : files_) {
+            if (directory_day(*f.record) == day) changed.push_back(f);
+        }
+        files_.erase(std::remove_if(files_.begin(), files_.end(), [&](const File &f) {
+            if (directory_day(*f.record) == day) return false;
+            return std::none_of(changed.begin(), changed.end(), [&](const File &c) {
+                return same_device(*c.record, *f.record) && overlaps(*c.record, *f.record);
+            });
+        }), files_.end());
+    }
 }
 
 const char *SleepHqOximetryPlan::next_source() {
     while (cursor_ < files_.size()) {
         const char *source = files_[cursor_].record->source;
+        const auto day = directory_day(*files_[cursor_].record);
+        if (scoped_) day.copy(inventory_day_, 8);
         bool needed = collecting_;
         do {
             const auto &f = files_[cursor_++];
             needed |= f.published && !f.confirmed;
-        } while (cursor_ < files_.size() && !strcmp(source, files_[cursor_].record->source));
+        } while (cursor_ < files_.size() && !strcmp(source, files_[cursor_].record->source) &&
+                 (!scoped_ || day == directory_day(*files_[cursor_].record)));
         if (needed) return source;
     }
     return nullptr;
@@ -95,8 +123,7 @@ bool SleepHqOximetryPlan::eligible(const char *path, int64_t now, MemoryEnabled 
 
     for (const auto &other : files_) {
         const auto &s = *other.record;
-        if (&other == file || !other.published ||
-            r.start_ms >= s.end_ms() || s.start_ms >= r.end_ms()) continue;
+        if (&other == file || !other.published || !overlaps(r, s)) continue;
 
         if (same_device(r, s) && (other.confirmed || (r.csv_bytes && !s.csv_bytes))) return false;
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <mutex>
 
 #include "export_task.h"
 #include "runtime_snapshots.h"
@@ -40,7 +41,7 @@ public:
     bool request(const ExportRequest &request);
     bool request_sync();
     void rearm_idle_backfill(ExportEndpoint endpoint);
-    void rearm_oximetry() { oximetry_changed_.store(true); }
+    void oximetry_published(const ReportOximetryChange &change);
 
 private:
     struct PostTherapyState {
@@ -118,6 +119,8 @@ private:
     bool startup_idle_grace_complete_ = false;
     uint32_t idle_backfill_due_ms_ = 0;
     uint32_t oximetry_generation_ = 0;
+    ReportOximetryChange oximetry_inbox_, pending_csv_;
+    std::mutex oximetry_mutex_;
     std::atomic<bool> oximetry_changed_{false};
     ExportTaskControlSnapshot status_snapshot_;
 };

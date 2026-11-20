@@ -90,7 +90,8 @@ bool publish(const std::string &part, const std::string &final) {
     const auto dir = std::string_view(final).substr(sizeof(OximetryArchiveRoot));
     const auto slash = dir.find('/');
     StorageService::notify_oximetry_publication(
-        ReportOximetryChange::published(false, dir.substr(0, slash), dir.substr(slash + 1, 8)));
+        ReportOximetryChange::file(OximetryArchiveFile::LiveCsv, dir.substr(0, slash),
+                                   dir.substr(slash + 1, 8)));
     return true;
 }
 

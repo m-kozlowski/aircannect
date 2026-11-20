@@ -3,6 +3,7 @@
 #include "board_report.h"
 #include "debug_log.h"
 #include "storage_export_plan.h"
+#include "string_util.h"
 
 namespace aircannect {
 
@@ -347,12 +348,23 @@ void ExportCoordinator::rearm_idle_backfill(ExportEndpoint id) {
     if (status_snapshot_.endpoint(id).configured) idle_backfill_due_ms_ = 0;
 }
 
+void ExportCoordinator::oximetry_published(const ReportOximetryChange &change) {
+    std::lock_guard<std::mutex> lock(oximetry_mutex_);
+    oximetry_inbox_.merge(change);
+    oximetry_changed_.store(true);
+}
+
 void ExportCoordinator::poll_idle_backfill(
     const ExportReportActivity &report, const ActivitySnapshot &activity,
     const ExportTaskControlSnapshot &status, uint32_t now_ms) {
     if (oximetry_changed_.exchange(false)) {
-        oximetry_generation_ = 0;
-        if (status.endpoint(ExportEndpoint::SleepHq).oximetry_generation) idle_backfill_due_ms_ = 0;
+        std::lock_guard<std::mutex> lock(oximetry_mutex_);
+        if (oximetry_inbox_.file_published) rearm_idle_backfill(ExportEndpoint::Smb);
+        if (oximetry_inbox_.csv_published && status.endpoint(ExportEndpoint::SleepHq).oximetry_generation) {
+            pending_csv_.merge(oximetry_inbox_);
+            idle_backfill_due_ms_ = 0;
+        }
+        oximetry_inbox_ = {};
     }
     for (const auto id : status.order) {
         if (!status.endpoint(id).configured) schedule(id).backfill_queued_generation = 0;
@@ -372,10 +384,11 @@ void ExportCoordinator::poll_idle_backfill(
         const bool ready = current.configured && current.ready() && current.backfill_ready() &&
             current.definition->rule(ExportOperation::Sync, ExportReason::IdleBackfill) &&
             schedule(id).backfill_queued_generation != current.config_generation;
-        const bool supplement = !ready && current.oximetry_generation &&
-            current.ready() && current.backfill_ready() &&
+        const bool reconcile = current.oximetry_generation &&
             (oximetry_generation_ != current.oximetry_generation ||
              (current.oximetry_deadline && storage_export_current_epoch_seconds_or_zero() >= current.oximetry_deadline));
+        const bool supplement = !ready && current.oximetry_generation &&
+            current.ready() && current.backfill_ready() && (reconcile || pending_csv_.pending);
         if ((!ready && !supplement) || busy) continue;
 
         if (idle_backfill_due_ms_ == 0) {
@@ -384,10 +397,15 @@ void ExportCoordinator::poll_idle_backfill(
         }
         if (static_cast<int32_t>(now_ms - idle_backfill_due_ms_) < 0) return;
 
-        const ExportRequest work{id, ExportOperation::Sync,
+        ExportRequest work{id, ExportOperation::Sync,
             supplement ? ExportReason::Oximetry : ExportReason::IdleBackfill};
+        if (supplement && !reconcile)
+            copy_cstr(work.day, sizeof(work.day), pending_csv_.directory_day);
         if (task_->request(work)) {
-            if (supplement) oximetry_generation_ = current.oximetry_generation;
+            if (supplement) {
+                oximetry_generation_ = current.oximetry_generation;
+                pending_csv_ = {};
+            }
             record_request(work, current);
             idle_backfill_due_ms_ = 0;
         }

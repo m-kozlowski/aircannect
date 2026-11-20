@@ -366,7 +366,8 @@ void O2RingRecordingImport::step_path() {
                   id_, unsigned(size_), unsigned(offset_));
     } else {
         ++saved_;
-        if (published_) published_(ReportOximetryChange::published(true, source_));
+        if (published_) published_(ReportOximetryChange::file(
+            OximetryArchiveFile::RingBin, source_, std::string_view(id_, 8)));
         phase_ = Phase::Select;
     }
 }

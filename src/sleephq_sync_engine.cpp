@@ -419,10 +419,10 @@ bool SleepHqSyncEngine::request_check(const char *reason) {
     return queued;
 }
 
-bool SleepHqSyncEngine::request_oximetry() {
+bool SleepHqSyncEngine::request_oximetry(const char *day) {
     if (!lock(0)) return false;
     const bool accepted = config_.oximetry_source[0] &&
-        request_locked(RunKind::Oximetry, "oximetry");
+        request_locked(RunKind::Oximetry, "oximetry", day);
     publish_runtime_locked();
     unlock();
     return accepted;
@@ -506,6 +506,9 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     if (runtime_blocked_.load()) return false;
 
     const RunKind kind = pending_run_kind_;
+    const auto originals = kind == RunKind::Oximetry && oximetry_catalog_ ? oximetry_catalog_() : nullptr;
+    if (kind == RunKind::Oximetry && !originals) return false;
+    const auto checked_team = status_.team_id;
     char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
     char datalog_day[9] = {};
     copy_cstr(reason, sizeof(reason),
@@ -535,16 +538,24 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     abort_requested_.store(false);
     phase_ = WorkPhase::Connect;
     if (kind == RunKind::Oximetry) {
-        oximetry_deadline_.store(0);
+        if (!datalog_day[0]) oximetry_deadline_.store(0);
         try {
-            oximetry_plan_.begin(oximetry_catalog_ ? oximetry_catalog_() : nullptr, config_.oximetry_source);
+            oximetry_plan_.begin(originals, config_.oximetry_source, datalog_day);
         } catch (const std::bad_alloc &) {
             fail_locked("oximetry_plan_alloc_failed");
             return false;
         }
+        status_.team_id = checked_team;
+        if (!checked_team || !client_.configure(client_config_from_snapshot(config_))) {
+            fail_locked("account_not_ready");
+            return false;
+        }
+        // Reconcile SD receipts before any HTTP request. Recovery retains
+        // its own network phases for an unfinished import.
+        next_oximetry_source_locked();
     }
     publish_runtime_locked();
-    Log::logf(CAT_EXPORT, LOG_INFO, "[SLEEPHQ] started reason=%s mode=%s\n",
+    Log::logf(CAT_EXPORT, kind == RunKind::Oximetry ? LOG_DEBUG : LOG_INFO, "[SLEEPHQ] started reason=%s mode=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
               current_run_kind_ == RunKind::Check
                   ? "check"
@@ -996,7 +1007,8 @@ void SleepHqSyncEngine::finish_sync_locked() {
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
     status_.updated_ms = nonzero_millis(millis());
-    Log::logf(CAT_EXPORT, LOG_INFO,
+    const bool no_supplement = current_run_kind_ == RunKind::Oximetry && !status_.files_seen;
+    Log::logf(CAT_EXPORT, no_supplement ? LOG_DEBUG : LOG_INFO,
               "[SLEEPHQ] done seen=%u uploaded=%u skipped=%u failed=%u bytes=%llu\n",
               static_cast<unsigned>(status_.files_seen),
               static_cast<unsigned>(status_.files_uploaded),
@@ -1189,7 +1201,9 @@ bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
     if (current_run_kind_ == RunKind::PostTherapySync) {
         config.max_datalog_days = SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT;
     }
-    if (current_datalog_day_filter_[0]) {
+    if (oximetry_source_) {
+        config.only_datalog_day = oximetry_plan_.inventory_day();
+    } else if (current_datalog_day_filter_[0]) {
         config.only_datalog_day = current_datalog_day_filter_;
     }
     return export_planner_.begin(config,
@@ -1354,7 +1368,9 @@ void SleepHqSyncEngine::next_oximetry_source_locked() {
         oximetry_source_ = oximetry_plan_.next_source();
     }
     if (!oximetry_source_) {
-        oximetry_deadline_.store(oximetry_plan_.next_deadline());
+        const auto due = oximetry_plan_.next_deadline();
+        const auto previous = oximetry_deadline_.load();
+        if (due && (!previous || due < previous)) oximetry_deadline_.store(due);
         phase_ = WorkPhase::Finish;
         return;
     }
@@ -3134,8 +3150,7 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
                 return ExportStep::Idle;
             }
 
-            if (current_run_kind_ == RunKind::Oximetry) next_oximetry_source_locked();
-            else phase_ = WorkPhase::LoadInventory;
+            phase_ = WorkPhase::LoadInventory;
             return ExportStep::Working;
         }
 

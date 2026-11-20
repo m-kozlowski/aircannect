@@ -66,8 +66,6 @@ StorageStatus status();
 StorageSpaceSnapshot space_snapshot();
 bool try_status(StorageStatus &out);
 bool mounted();
-// Single consumer: the main loop routes completed recordings to exports.
-bool take_oximetry_publication(bool *csv = nullptr);
 
 const char *type_name(StorageType type);
 const char *state_name(StorageState state);
