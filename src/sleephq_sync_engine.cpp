@@ -2698,10 +2698,7 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::Connect: {
-            auto config = client_config_from_snapshot(config_);
-            if (current_run_kind_ == RunKind::Oximetry)
-                copy_cstr(config.device_id, sizeof(config.device_id), "69184"); // SleepHQ /devices: O2 Ring.
-            if (!client_.configure(config)) {
+            if (!client_.configure(client_config_from_snapshot(config_))) {
                 copy_cstr(result.error,
                           sizeof(result.error),
                           "not_configured");
@@ -2820,7 +2817,8 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
             result.ok = client_.create_import(status_.team_id,
                                                mask_id,
                                                result.import,
-                                               &operation);
+                                               &operation,
+                                               current_run_kind_ == RunKind::Oximetry);
             if (!result.ok) {
                 copy_cstr(result.error,
                           sizeof(result.error),

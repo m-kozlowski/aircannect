@@ -99,6 +99,8 @@ void SleepHqClient::set_error(const char *error) {
 
 bool SleepHqClient::configure(const SleepHqConfig &config) {
     disconnect();
+    if (strcmp(config_.client_id, config.client_id) || strcmp(config_.team_id, config.team_id))
+        oximetry_device_id_ = 0;
     config_ = config;
     access_token_.clear();
     set_error("");
@@ -676,7 +678,21 @@ bool SleepHqClient::create_import(
     uint32_t team_id,
     const char *mask_id,
     SleepHqImportInfo &out,
-    const BackgroundOperationControl *operation) {
+    const BackgroundOperationControl *operation, bool oximetry) {
+    char ring_id[16];
+    const char *device = config_.device_id;
+    if (oximetry) {
+        if (!oximetry_device_id_) {
+            SleepHqHttpResponse catalog;
+            if (!request("GET", "/api/v1/devices", nullptr, nullptr, true, catalog,
+                         nullptr, nullptr, operation) ||
+                !sleephq_oximetry_device_id(catalog.body.c_str(), oximetry_device_id_,
+                                           last_error_, sizeof(last_error_))) return false;
+        }
+        snprintf(ring_id, sizeof(ring_id), "%lu", static_cast<unsigned long>(oximetry_device_id_));
+        device = ring_id;
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "/api/v1/teams/%lu/imports",
              static_cast<unsigned long>(team_id));
@@ -687,9 +703,9 @@ bool SleepHqClient::create_import(
         return false;
     }
     body += "programatic=true";
-    if (config_.device_id[0]) {
+    if (device[0]) {
         body += "&device_id=";
-        if (!form_encode_append(body, config_.device_id)) return false;
+        if (!form_encode_append(body, device)) return false;
     }
     if (mask_id && mask_id[0]) {
         body += "&mask_id=";
