@@ -385,8 +385,9 @@
         checkbox.checked = !reportChartIsHidden(key);
         checkbox.onchange = () => setReportChartVisible(
           key, checkbox.checked);
-        label.appendChild(checkbox);
-        label.appendChild(document.createTextNode(definition.title));
+        const caption = document.createElement("span");
+        i18n.text(caption, definition.title);
+        label.append(checkbox, caption);
         row.appendChild(label);
 
         [-1, 1].forEach((delta) => {
