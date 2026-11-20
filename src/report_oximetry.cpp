@@ -454,8 +454,15 @@ bool ReportOximetryArchive::consume_file(const StorageScanEntryView &entry, std:
 void ReportOximetryArchive::add_file(const StorageScanEntryView &entry, std::string_view source,
                                      std::string_view id) {
     auto &r = metadata_;
-    if (!r.csv_bytes) ring_changed_ = true;
     memcpy(r.source, source.data(), source.size());
+    if (!r.csv_bytes) {
+        // The importer uses SN, or the peer's twelve hex digits without an SN.
+        // Only an explicit clock record can disambiguate a twelve-hex SN.
+        if (source.size() != 12 || source.find_first_not_of("0123456789abcdefABCDEF") != source.npos)
+            strcpy(r.serial, r.source);
+        ring_changed_ = true;
+    }
+
     memcpy(r.id, id.data(), id.size());
     r.modified = entry.modified;
     building_->push_back(r);
