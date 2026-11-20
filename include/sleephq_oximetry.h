@@ -34,7 +34,6 @@ private:
     std::vector<File, LargeAllocator<File>> files_;
     size_t cursor_ = 0;
     bool collecting_ = true;
-    bool automatic_ = false;
     int64_t deadline_ = 0;
 };
 

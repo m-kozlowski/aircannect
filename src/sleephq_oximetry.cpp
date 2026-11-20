@@ -33,14 +33,13 @@ void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference) {
     decltype(files_)().swap(files_);
     cursor_ = 0;
     collecting_ = true;
-    automatic_ = preference == "auto";
     deadline_ = 0;
     if (!catalog_ || preference.empty()) return;
 
     for (const auto &r : *catalog_) {
         if (r.start_ms < r.noon_s * 1000 || (r.csv_bytes && !r.export_clock_known)) continue;
         char ble[17];
-        if (!automatic_ && preference != r.source && preference != r.serial &&
+        if (preference != "auto" && preference != r.source && preference != r.serial &&
             preference != source_id(r, *catalog_, ble)) continue;
         files_.push_back({&r});
     }
@@ -99,9 +98,7 @@ bool SleepHqOximetryPlan::eligible(const char *path, int64_t now, MemoryEnabled 
         if (&other == file || !other.published ||
             r.start_ms >= s.end_ms() || s.start_ms >= r.end_ms()) continue;
 
-        const bool same = same_device(r, s);
-        if (!same && automatic_) return false;
-        if (same && (other.confirmed || (r.csv_bytes && !s.csv_bytes))) return false;
+        if (same_device(r, s) && (other.confirmed || (r.csv_bytes && !s.csv_bytes))) return false;
     }
 
     if (r.csv_bytes && now < r.next_noon_s && r.peer[0] &&
