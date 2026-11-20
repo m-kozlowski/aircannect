@@ -175,6 +175,7 @@ private:
     bool append_body(SleepHqHttpResponse &out, const char *data, size_t len);
 
     bool parse_token(const SleepHqHttpResponse &response);
+    bool resolve_oximetry_device(const BackgroundOperationControl *operation);
     bool parse_team_id(const SleepHqHttpResponse &response,
                        uint32_t &team_id);
     bool parse_import(const SleepHqHttpResponse &response,

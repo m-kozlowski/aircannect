@@ -106,8 +106,8 @@ private:
 
 SleepHqImportStatusKind sleephq_classify_import_status(const char *status);
 
-bool sleephq_oximetry_device_id(const char *json, uint32_t &id,
-                               char *error, size_t error_size);
+bool sleephq_parse_devices_page(const char *json, uint32_t &ring_id,
+                                size_t &count, char *error, size_t error_size);
 bool sleephq_parse_mask_list_json(const char *json, SleepHqMaskList &masks,
                                  char *error, size_t error_size);
 

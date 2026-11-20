@@ -674,6 +674,34 @@ bool SleepHqClient::parse_team_id(const SleepHqHttpResponse &response,
     return false;
 }
 
+bool SleepHqClient::resolve_oximetry_device(const BackgroundOperationControl *operation) {
+    if (oximetry_device_id_) return true;
+
+    constexpr unsigned page_size = 20;
+    uint32_t ring_id = 0;
+    for (unsigned page = 1; ; ++page) {
+        char path[72];
+        snprintf(path, sizeof(path), "/api/v1/devices?page=%u&per_page=%u", page, page_size);
+
+        SleepHqHttpResponse response;
+        if (!request("GET", path, nullptr, nullptr, true, response,
+                     nullptr, nullptr, operation)) return false;
+
+        size_t count = 0;
+        if (!sleephq_parse_devices_page(response.body.c_str(), ring_id, count,
+                                        last_error_, sizeof(last_error_))) return false;
+
+        if (count < page_size) break;
+    }
+
+    if (!ring_id) {
+        set_error("oximetry_device_missing");
+        return false;
+    }
+    oximetry_device_id_ = ring_id;
+    return true;
+}
+
 bool SleepHqClient::create_import(
     uint32_t team_id,
     const char *mask_id,
@@ -682,13 +710,7 @@ bool SleepHqClient::create_import(
     char ring_id[16];
     const char *device = config_.device_id;
     if (oximetry) {
-        if (!oximetry_device_id_) {
-            SleepHqHttpResponse catalog;
-            if (!request("GET", "/api/v1/devices", nullptr, nullptr, true, catalog,
-                         nullptr, nullptr, operation) ||
-                !sleephq_oximetry_device_id(catalog.body.c_str(), oximetry_device_id_,
-                                           last_error_, sizeof(last_error_))) return false;
-        }
+        if (!resolve_oximetry_device(operation)) return false;
         snprintf(ring_id, sizeof(ring_id), "%lu", static_cast<unsigned long>(oximetry_device_id_));
         device = ring_id;
     }

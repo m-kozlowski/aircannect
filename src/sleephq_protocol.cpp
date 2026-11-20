@@ -317,29 +317,25 @@ SleepHqImportStatusKind sleephq_classify_import_status(const char *status) {
     return SleepHqImportStatusKind::Unknown;
 }
 
-bool sleephq_oximetry_device_id(const char *json, uint32_t &id,
-                               char *error, size_t error_size) {
+bool sleephq_parse_devices_page(const char *json, uint32_t &ring_id,
+                                size_t &count, char *error, size_t error_size) {
     JsonDocument doc;
     if (deserializeJson(doc, json) || !doc["data"].is<JsonArrayConst>()) {
         set_error(error, error_size, "device_list_invalid");
         return false;
     }
 
-    uint32_t found = 0;
-    for (JsonObjectConst device : doc["data"].as<JsonArrayConst>()) {
+    const auto devices = doc["data"].as<JsonArrayConst>();
+    count = devices.size();
+    for (JsonObjectConst device : devices) {
         const auto attr = device["attributes"];
         if (attr["name"] != "O2 Ring" || attr["brand"] != "Viatom" ||
             attr["device_type"] != "Pulse Oximetry Ring") continue;
-        if (found || !json_variant_to_uint32(device["id"], found) || !found) {
+        if (ring_id || !json_variant_to_uint32(device["id"], ring_id) || !ring_id) {
             set_error(error, error_size, "oximetry_device_invalid");
             return false;
         }
     }
-    if (!found) {
-        set_error(error, error_size, "oximetry_device_missing");
-        return false;
-    }
-    id = found;
     return true;
 }
 

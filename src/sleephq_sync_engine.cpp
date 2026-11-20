@@ -394,6 +394,13 @@ bool SleepHqSyncEngine::request_locked(RunKind kind,
         return false;
     }
     if (status_.state == SleepHqSyncState::Working) return false;
+
+    if (retry_due_ms_ && pending_run_kind_ == RunKind::Oximetry &&
+        kind != RunKind::Oximetry) {
+        // The incoming run replaces the retry. Recheck unsent CSVs after it.
+        ++oximetry_generation_;
+    }
+
     pending_run_kind_ = kind;
     pending_datalog_day_[0] = '\0';
     if (datalog_day) {
