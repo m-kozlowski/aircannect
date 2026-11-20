@@ -755,6 +755,11 @@ ExportStep StorageSyncEngine::step_load_datalog_day_locked() {
         return ExportStep::Idle;
     }
 
+    if (oximetry_source_) {
+        Log::logf(CAT_EXPORT, LOG_DEBUG, "[SMB] day loaded source=%s day=%s\n",
+                  oximetry_source_, inventory_session_.datalog_day()->loaded_datalog_day());
+    }
+
     phase_ = day_load_resume_phase_;
     day_load_resume_phase_ = WorkPhase::NextFile;
     return ExportStep::Working;
