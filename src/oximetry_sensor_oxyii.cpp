@@ -41,25 +41,6 @@ const char *oxyii_command_name(uint8_t command) {
     }
 }
 
-bool decode_oxyii_reading(const uint8_t *payload,
-                          size_t len,
-                          uint8_t &spo2,
-                          uint8_t &pulse,
-                          uint16_t &spo2_raw,
-                          uint16_t &pulse_raw,
-                          bool &invalid) {
-    if (!payload || len < 9) return false;
-
-    spo2 = payload[6];
-    pulse = payload[8];
-    const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 &&
-                       pulse != 0xff && pulse < 250;
-    spo2_raw = valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN;
-    pulse_raw = valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN;
-    invalid = !valid;
-    return true;
-}
-
 }  // namespace
 
 #if AC_OXIMETRY_BLE_ENABLED
@@ -232,13 +213,7 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
         return;
     }
 
-    uint16_t spo2_raw = PLX_SFLOAT_NAN;
-    uint16_t pulse_raw = PLX_SFLOAT_NAN;
-    uint8_t spo2 = 0;
-    uint8_t pulse = 0;
-    bool invalid = true;
-    if (!decode_oxyii_reading(frame.payload, frame.payload_len, spo2, pulse,
-                              spo2_raw, pulse_raw, invalid)) {
+    if (frame.payload_len < 10) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor OxyII live decode failed len=%u\n",
                   static_cast<unsigned>(frame.payload_len));
@@ -246,12 +221,26 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
     }
 
     oxyii_clear_pending();
+    const uint8_t *p = frame.payload;
+    const uint8_t spo2 = p[6];
+    const uint16_t pulse = uint16_t(p[8]) | (uint16_t(p[9]) << 8);
+    const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse < 250;
+
+    // Off-finger placeholders are not measurements. Keep motion during
+    // poor signal if the sensor still reports contact (RtParam.sensorState).
+    const bool measured = valid || p[5] == 1;
+    const float pi = measured ? p[7] / 10.0f : -1.0f;
+    const int16_t motion = measured && frame.payload_len >= 12 ? p[11] : -1;
+
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor OxyII reading %s spo2=%u pulse=%u\n",
-              invalid ? "invalid" : "valid",
+              valid ? "valid" : "invalid",
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse));
-    emit_sample(spo2_raw, pulse_raw, invalid);
+
+    emit_sample(valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
+                valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
+                !valid, false, false, false, pi, motion);
 }
 
 void BleSensorProtocolEngine::oxyii_reset_rx() {

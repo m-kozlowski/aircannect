@@ -24,7 +24,7 @@ public:
                                     bool invalid,
                                     bool contact_known,
                                     bool contact_present,
-                                    bool charging, float pi_percent);
+                                    bool charging, float pi_percent, int16_t motion);
 
     bool begin();
     void set_sample_callback(SampleCallback callback, void *context);
@@ -54,7 +54,7 @@ private:
                      bool invalid,
                      bool contact_known = false,
                      bool contact_present = false,
-                     bool charging = false, float pi_percent = -1);
+                     bool charging = false, float pi_percent = -1, int16_t motion = -1);
 
 #if AC_OXIMETRY_BLE_ENABLED
     // NimBLE host callback -> sensor worker SPSC mailbox.

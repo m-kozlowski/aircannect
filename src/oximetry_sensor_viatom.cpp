@@ -45,6 +45,7 @@ bool decode_viatom_reading(const BleSensorFrameView &frame,
                            uint8_t &lead_state,
                            uint8_t &battery,
                            uint8_t &battery_state,
+                           uint8_t &motion,
                            uint8_t &pi,
                            uint16_t &spo2_raw,
                            uint16_t &pulse_raw,
@@ -57,6 +58,7 @@ bool decode_viatom_reading(const BleSensorFrameView &frame,
             (static_cast<uint16_t>(payload[2]) << 8);
     battery = payload[7];
     battery_state = payload[8];
+    motion = payload[9];
     pi = payload[10];
     lead_state = payload[11] & 0x01;
 
@@ -329,12 +331,13 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
     uint8_t lead_state = 0xff;
     uint8_t battery = 0xff;
     uint8_t battery_state = 0xff;
+    uint8_t motion = 0;
     uint8_t pi = 0;
     bool invalid = true;
 
     const bool decoded = decode_viatom_reading(
         frame, spo2, pulse, lead_state, battery,
-        battery_state, pi, spo2_raw, pulse_raw, invalid);
+        battery_state, motion, pi, spo2_raw, pulse_raw, invalid);
 
     if (!decoded) {
         Log::logf(CAT_OXI, LOG_DEBUG,
@@ -359,7 +362,7 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
               static_cast<unsigned>(battery_state),
               static_cast<double>(pi) / 10.0);
     emit_sample(spo2_raw, pulse_raw, invalid, true, lead_state != 0,
-                charging, pi == 0xff ? -1.0f : pi / 10.0f);
+                charging, pi == 0xff ? -1.0f : pi / 10.0f, motion);
 }
 
 void BleSensorProtocolEngine::viatom_reset_rx() {

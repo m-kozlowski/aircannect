@@ -33,6 +33,7 @@ struct OximetrySample {
     char peer[18] = {};
     char serial[33] = {};
     float pi_percent = -1;
+    int16_t motion = -1;
 };
 
 using OximetrySampleObserver = void (*)(void *context,

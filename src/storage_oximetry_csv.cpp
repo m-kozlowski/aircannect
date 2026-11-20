@@ -42,7 +42,7 @@ constexpr uint32_t FlushMs = 15000, GapMs = 120000, DayMs = 86400000;
 struct Input {
     int64_t utc_ms;
     uint32_t observed;
-    int16_t oxygen, pulse;
+    int16_t oxygen, pulse, motion;
     float pi;
     bool measured, removed;
     char source[18];
@@ -232,7 +232,8 @@ bool append(const Input &in, uint32_t now) {
     }
 
     char row[MaxRow];
-    const size_t len = format_row(row, in.utc_ms, it->offset_minutes, in.oxygen, in.pulse, -1, in.pi);
+    const size_t len = format_row(row, in.utc_ms, it->offset_minutes,
+                                  in.oxygen, in.pulse, in.motion, in.pi);
     if (!len || (it->used + len > Batch && !flush(*it))) return false;
     if (!it->used) it->dirty = now;
     memcpy(it->buffer->data() + it->used, row, len);
@@ -275,10 +276,11 @@ void observe(const OximetrySample &s, int64_t utc_ms, int32_t device_offset_minu
     in.utc_ms = utc_ms;
     in.observed = s.observed_ms ? s.observed_ms : millis();
     in.removed = s.contact_known && !s.contact_present;
-    in.measured = !in.removed && (s.valid || s.pi_percent >= 0);
+    in.measured = !in.removed && (s.valid || s.pi_percent >= 0 || s.motion >= 0);
     in.oxygen = s.valid ? s.spo2 : 255;
     in.pulse = s.valid ? s.pulse_bpm : 255;
     in.pi = s.pi_percent;
+    in.motion = s.motion;
     if (!xQueueSend(queue, &in, 0)) ++lost;
     quiet.store(false);
     notify();
