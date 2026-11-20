@@ -7,7 +7,7 @@
 namespace aircannect {
 
 inline constexpr char OximetryArchiveRoot[] = "/aircannect/oximetry";
-inline constexpr char OximetryDayRevisionSuffix[] = ".smb-rev";
+inline constexpr char OximetryDayRevisionSuffix[] = ".rev";
 
 inline bool oximetry_source_valid(std::string_view source) {
     return !source.empty() && source.size() <= 32 && source.find_first_not_of(
