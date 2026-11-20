@@ -6,6 +6,7 @@
 
 #include "large_allocator.h"
 #include "oximetry_archive.h"
+#include "ring_bin_layout.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
 #include "report_source_change.h"
@@ -15,23 +16,6 @@ namespace aircannect {
 class NightCatalog;
 class ReportOximetrySignalBuilder;
 struct ReportOximetryPlanes;
-
-struct RingBinLayout {
-    enum Format { Original, O2RingS } format = Original;
-    static constexpr size_t MaxStride = 5, SHeader = 10, SFooter = 48;
-
-    size_t stride() const { return format == Original ? MaxStride : 3; }
-    uint64_t offset(uint32_t sample) const {
-        return (format == Original ? 40 : SHeader) + uint64_t(sample) * stride();
-    }
-    size_t footer() const { return format == Original ? 0 : SFooter; }
-
-    struct Sample { int oxygen, pulse, motion; bool invalid_vitals; };
-    Sample decode(const uint8_t *p) const {
-        if (format == O2RingS) return {p[0], p[1], 2 * p[2], false};
-        return {p[0], p[1], p[3], p[2] != 0};
-    }
-};
 
 struct ReportOximetryRecording : OximetryCsv::Header {
     char source[33]{};

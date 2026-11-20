@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <cstring>
+#include <string_view>
 
 #include "board_oximetry.h"
 #include "board_storage.h"
@@ -28,9 +29,19 @@ struct OximetrySensorDevice {
     bool autoconnect = true;
     bool recordings = false;
 
+    bool oxyii_ring() const {
+        const std::string_view n(name);
+        for (const auto model : {std::string_view("O2Ring S"), std::string_view("O2Ring-S"),
+                                 std::string_view("SHQO2Pro"), std::string_view("S8-AW")}) {
+            if (n == model || (n.size() > model.size() && n.substr(0, model.size()) == model &&
+                               (n[model.size()] == ' ' || n[model.size()] == '_'))) return true;
+        }
+        return n.substr(0, 6) == "T8520_";
+    }
+
     bool supports_recordings() const {
         return AC_STORAGE_HAS_SDCARD &&
-               (std::strcmp(name, "O2Ring") == 0 ||
+               (oxyii_ring() || std::strcmp(name, "O2Ring") == 0 ||
                 (std::strncmp(name, "O2Ring ", 7) == 0 && name[7] >= '0' && name[7] <= '9'));
     }
 };

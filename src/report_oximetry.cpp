@@ -430,12 +430,11 @@ bool ReportOximetryArchive::consume_file(const StorageScanEntryView &entry, std:
         r.csv_bytes = entry.size;
     } else {
         if (part_ == FilePart::SFooter) {
-            if (length != r.bin.footer() || get_le32(bytes + 4) != 0xda5a1248 ||
-                memcmp(bytes + 16, "\x01\x01\x03", 3)) return true;
+            if (!RingBinLayout::s_footer_matches(bytes, length, entry.size)) return true;
 
             r.samples = get_le32(bytes + 12);
             r.interval_s = 1;
-            if (r.size() != entry.size || !ring_start(get_le32(bytes + 8), id, r)) return true;
+            if (!ring_start(get_le32(bytes + 8), id, r)) return true;
             expected_sum_ = get_le32(bytes);
             part_ = FilePart::SChecksum;
         } else {

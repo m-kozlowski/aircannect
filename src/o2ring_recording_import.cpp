@@ -7,6 +7,7 @@
 #include "board_oximetry.h"
 #include "debug_log.h"
 #include "large_json_allocator.h"
+#include "little_endian.h"
 #include "storage_space_policy.h"
 #include "utc_time.h"
 #include "oximetry_archive.h"
@@ -61,12 +62,21 @@ bool O2RingRecordingImport::save_clock(const uint8_t *info, size_t size,
     int64_t wall_ms = 0;
     if (!parse_utc_iso8601_ms(iso, wall_ms)) return false;
 
-    const char *sn = doc["SN"] | "";
+    identify(doc["SN"] | "");
+    return save_clock({list.c_str(), list.size()}, wall_ms, utc_ms, rtt_ms);
+}
+
+void O2RingRecordingImport::identify(std::string_view sn) {
     if (oximetry_source_valid(sn)) {
-        source_ = sn;
-        strcpy(serial_, sn);
+        source_.assign(sn);
+        strcpy(serial_, source_.c_str());
     }
-    if (!oximetry_source_valid(source_)) return false;
+}
+
+bool O2RingRecordingImport::save_clock(std::string_view list, int64_t wall_ms,
+                                       int64_t utc_ms, uint32_t rtt_ms) {
+    if (!clock_storage_ || utc_ms < 1704067200000LL || clock_write_.bytes ||
+        !oximetry_source_valid(source_)) return false;
 
     // Use the midpoint of INFO, keeping the observation's round-trip uncertainty.
     const int64_t observed = utc_ms - rtt_ms / 2;
@@ -77,6 +87,7 @@ bool O2RingRecordingImport::save_clock(const uint8_t *info, size_t size,
     if (!localtime_r(&seconds, &local) || !strftime(month, sizeof(month), "%Y/%m", &local) ||
         !strftime(zone, sizeof(zone), "%z", &local)) return false;
 
+    LargeJsonAllocator allocator;
     JsonDocument observation(&allocator);
     observation["utc_ms"] = observed;
     observation["ring_minus_utc_s"] = wall_ms / 1000 - seconds;
@@ -174,6 +185,7 @@ void O2RingRecordingImport::reset() {
     recheck_pending_ = false;
     last_write_ms_.reset();
     cursor_ = 0;
+    recheck_from_.reset();
     saved_ = 0;
     id_[0] = '\0';
     offset_ = size_ = 0;
@@ -186,19 +198,14 @@ void O2RingRecordingImport::fail(const char *reason) {
     reset();
 }
 
-bool O2RingRecordingImport::take_list(const uint8_t *data, size_t size) {
-    LargeJsonAllocator allocator;
-    JsonDocument doc(&allocator);
-    if (deserializeJson(doc, data, size)) return false;
-    const JsonString list = doc["FileList"].as<JsonString>();
-    if (list.isNull()) return false;
-
+bool O2RingRecordingImport::take_list(std::string_view list) {
     // On the second INFO, skip the already checked prefix of complete IDs.
-    const size_t checked = list_ ? std::min(cursor_, list_->size()) : 0;
+    const size_t checked = list_ ? std::min(recheck_from_.value_or(cursor_), list_->size()) : 0;
+    recheck_from_.reset();
     cursor_ = 0;
     if (list_ && list.size()) {
         const std::string_view before(reinterpret_cast<const char *>(list_->data()), list_->size());
-        const std::string_view after(list.c_str(), list.size());
+        const auto after = list;
         const auto end = std::mismatch(after.begin(), after.end(), before.begin(), before.end()).first;
         if (end == after.end() && after.size() == before.size()) {
             cursor_ = checked;
@@ -210,18 +217,10 @@ bool O2RingRecordingImport::take_list(const uint8_t *data, size_t size) {
 
     list_.reset();
     if (list.size()) {
-        list_ = LargeByteBuffer::copy_and_freeze(list.c_str(), list.size());
+        list_ = LargeByteBuffer::copy_and_freeze(list.data(), list.size());
         if (!list_) return false;
     }
 
-    const JsonString serial = doc["SN"].as<JsonString>();
-    if (!serial.isNull() && serial.size() && serial.size() <= 32) {
-        const std::string_view sn(serial.c_str(), serial.size());
-        if (oximetry_source_valid(sn)) {
-            source_ = std::string(sn);
-            strcpy(serial_, source_.c_str());
-        }
-    }
     return true;
 }
 
@@ -255,9 +254,10 @@ void O2RingRecordingImport::next_file() {
     reset();
 }
 
-void O2RingRecordingImport::skip_open() {
+void O2RingRecordingImport::skip_open(bool not_finalized) {
     if (phase_ != Phase::Open) return;
-    Log::logf(CAT_OXI, LOG_WARN, "recording not available file=%s\n", id_);
+    if (not_finalized && !recheck_from_) recheck_from_ = cursor_ - strlen(id_) - 1;
+    Log::logf(CAT_OXI, not_finalized ? LOG_DEBUG : LOG_WARN, "recording not ready file=%s\n", id_);
     phase_ = Phase::Select;
 }
 
@@ -291,27 +291,27 @@ O2RingRecordingImport::Command O2RingRecordingImport::next(uint32_t now_ms) {
 void O2RingRecordingImport::reply(Command cmd, uint16_t index,
                                   const uint8_t *data, size_t len) {
     switch (cmd) {
-        case Command::Info:
+        case Command::Info: {
             if (phase_ != Phase::Info) return;
-            if (!take_list(data, len)) return fail("invalid_recording_list");
-            phase_ = Phase::Select;
+            LargeJsonAllocator allocator;
+            JsonDocument doc(&allocator);
+            if (deserializeJson(doc, data, len)) return fail("invalid_recording_list");
+            const auto ids = doc["FileList"].as<JsonString>();
+            if (ids.isNull()) return fail("invalid_recording_list");
+            identify(doc["SN"] | "");
+            listed({ids.c_str(), ids.size()});
             break;
+        }
         case Command::Open:
             if (phase_ != Phase::Open) return;
             if (len != 4) return fail("invalid_file_size");
-            size_ = uint32_t(data[0]) | uint32_t(data[1]) << 8 |
-                    uint32_t(data[2]) << 16 | uint32_t(data[3]) << 24;
-            if (!size_ || size_ > BlockSize * 65536u) return fail("unsupported_file_size");
-            part_ = final_ + "." + std::to_string(size_) + ".part";
-            phase_ = Phase::FinalStat;
+            opened(LittleEndian::get_le32(data), Addressing::Blocks);
             break;
         case Command::Read:
             if (phase_ != Phase::Read) return;
             if (index != block() || len != std::min<size_t>(BlockSize, size_ - offset_))
                 return fail("invalid_file_block");
-            chunk_ = LargeByteBuffer::copy_and_freeze(data, len);
-            if (!chunk_) return fail("out_of_memory");
-            phase_ = Phase::Write;
+            received(uint32_t(index) * BlockSize, data, len);
             break;
         case Command::Close:
             if (phase_ != Phase::Close) return;
@@ -319,6 +319,32 @@ void O2RingRecordingImport::reply(Command cmd, uint16_t index,
             break;
         case Command::None: break;
     }
+}
+
+void O2RingRecordingImport::listed(std::string_view ids) {
+    if (phase_ != Phase::Info) return;
+    if (!take_list(ids)) return fail("invalid_recording_list");
+    phase_ = Phase::Select;
+}
+
+void O2RingRecordingImport::opened(uint32_t size, Addressing addressing) {
+    if (phase_ != Phase::Open) return;
+    if (!size || (addressing == Addressing::Blocks && size > BlockSize * 65536u))
+        return fail("unsupported_file_size");
+    size_ = size;
+    addressing_ = addressing;
+    part_ = final_ + "." + std::to_string(size_) + ".part";
+    phase_ = Phase::FinalStat;
+}
+
+void O2RingRecordingImport::received(uint32_t offset, const uint8_t *data, size_t size) {
+    if (phase_ != Phase::Read) return;
+    if (offset != offset_ || !size || size > std::min<size_t>(BlockSize, size_ - offset_))
+        return fail("invalid_file_block");
+
+    chunk_ = LargeByteBuffer::copy_and_freeze(data, size);
+    if (!chunk_) return fail("out_of_memory");
+    phase_ = Phase::Write;
 }
 
 void O2RingRecordingImport::step_path() {
@@ -352,8 +378,9 @@ void O2RingRecordingImport::step_path() {
             phase_ = Phase::Close;
             return;
         }
-        // Re-read an interrupted block in full. A complete partial file only needs publication.
-        offset_ = result.size == size_ ? size_ : (result.size / BlockSize) * BlockSize;
+        // Legacy READ addresses blocks; OxyII can continue at the exact SD length.
+        offset_ = result.size;
+        if (offset_ != size_ && addressing_ == Addressing::Blocks) offset_ -= offset_ % BlockSize;
         // A partial file is older unfinished work, not a newly discovered recording.
         if (!result.exists) recheck_pending_ = false;
         const auto space = writes_->space_snapshot();

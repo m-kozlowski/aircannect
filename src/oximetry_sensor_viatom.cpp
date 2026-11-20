@@ -185,7 +185,7 @@ void BleSensorProtocolEngine::viatom_poll(uint32_t now_ms) {
     }
 
     if (viatom_.clock_step == ClockStep::Probe) {
-        if (!original_ring_) viatom_.clock_step = ClockStep::Set;
+        if (!history_ring_) viatom_.clock_step = ClockStep::Set;
         else if (recordings_ && time(nullptr) >= 1704067200 &&
                  viatom_send_command(uint8_t(FileCommand::Info), nullptr, 0, now_ms)) {
             viatom_.clock_step = ClockStep::AwaitInfo;

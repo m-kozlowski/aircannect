@@ -37,8 +37,10 @@ public:
     void invalidate_connection();
     void reset();
     void poll(uint32_t now_ms, O2RingRecordingImport *recordings = nullptr,
-              bool original_ring = false);
-    bool uses_viatom() const { return active_protocol_ == ActiveProtocol::Viatom; }
+              bool history_ring = false);
+    bool uses_recording_protocol(bool oxyii) const {
+        return active_protocol_ == (oxyii ? ActiveProtocol::Oxyii : ActiveProtocol::Viatom);
+    }
 
 private:
     enum class ActiveProtocol : uint8_t {
@@ -132,6 +134,7 @@ private:
 
     // OxyII
     static constexpr size_t OxyiiRxMax = 640;
+    enum class OxyiiFileStep { Idle, CloseForList, List, Footer, Release, SaveClock };
 
     struct OxyiiState {
         NimBLERemoteCharacteristic *write = nullptr;
@@ -145,12 +148,19 @@ private:
         bool need_auth = false;
         bool need_setup = false;
         bool need_time_sync = false;
+        bool need_identity = false, off_finger = false, file_open = false;
+        OxyiiFileStep file_step = OxyiiFileStep::Idle;
+        uint32_t file_size = 0, read_offset = 0, info_rtt_ms = 0;
+        int64_t wall_ms = 0, info_utc_ms = 0;
+        std::unique_ptr<LargeByteBuffer> list_rx;
     };
 
     bool subscribe_oxyii();
     void oxyii_on_connected();
     void oxyii_reset();
     void oxyii_poll(uint32_t now_ms);
+    void oxyii_poll_history(uint32_t now_ms);
+    void oxyii_history_reply(uint8_t command, uint8_t *payload, size_t length, uint32_t rtt);
     void oxyii_notify(const uint8_t *data, size_t len);
     void oxyii_reset_rx();
     void oxyii_clear_pending();
@@ -184,7 +194,7 @@ private:
     NimBLEClient *client_ = nullptr;
     ViatomState viatom_;
     O2RingRecordingImport *recordings_ = nullptr;
-    bool original_ring_ = false;
+    bool history_ring_ = false;
     OxyiiState oxyii_;
 #endif
 

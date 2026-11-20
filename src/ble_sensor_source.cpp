@@ -1082,7 +1082,7 @@ void BleSensorSource::task_loop() {
         bool manual_connect = false;
         OximetrySensorDevice manual_target_device;
         char import_peer[sizeof(connected_addr_)]{};
-        bool downloads = false;
+        bool downloads = false, oxyii_ring = false;
         const uint32_t policy_ms = millis();
         const bool keep_for_import = recordings_.needs_connection(policy_ms);
         const bool off_finger_timeout = import_session && recordings_.off_finger_timeout(policy_ms);
@@ -1110,6 +1110,7 @@ void BleSensorSource::task_loop() {
             known_[known_index].supports_recordings()) {
             memcpy(import_peer, connected_addr_, sizeof(import_peer));
             downloads = known_[known_index].recordings;
+            oxyii_ring = known_[known_index].oxyii_ring();
         }
         disconnect_requested_ = false;
         disconnect_hold_until_absent_ = false;
@@ -1140,7 +1141,8 @@ void BleSensorSource::task_loop() {
         }
 
         const uint32_t now_ms = millis();
-        const bool import = import_peer[0] && !disconnect_now && protocols_.uses_viatom() &&
+        const bool history_ring = import_peer[0] && protocols_.uses_recording_protocol(oxyii_ring);
+        const bool import = history_ring && !disconnect_now &&
                             Storage::mounted() && !StorageUsb::suspended();
         if (import != import_session) {
             if (import) recordings_.begin(import_peer, StorageService::path_port(),
@@ -1151,7 +1153,7 @@ void BleSensorSource::task_loop() {
             import_session = import;
         }
         if (import_session) recordings_.enable_downloads(downloads);
-        protocols_.poll(now_ms, import_session ? &recordings_ : nullptr, import_peer[0] != 0);
+        protocols_.poll(now_ms, import_session ? &recordings_ : nullptr, history_ring);
         update_autoconnect_holdoffs(
             now_ms, runtime_.passive_observation_active());
 
