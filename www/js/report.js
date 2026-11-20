@@ -685,7 +685,6 @@
       reportCurrentRevision = "";
       reportCurrentGeneration = 0;
       reportRangeView = null;
-      reportRangeActiveKey = "";
       reportRangeToken++;
       reportDrawItems = [];
       reportDrawPending = false;
@@ -838,7 +837,6 @@
       reportCurrentRevision = String(revision || "");
       reportCurrentGeneration = Number(generation) || 0;
       reportRangeView = null;
-      reportRangeActiveKey = "";
       reportRangeToken++;
     }
 
@@ -1688,7 +1686,7 @@
       if (!reportZoom) return;
       cancelReportRangeRequest();
       reportZoom = null;
-      reportRangeActiveKey = "";
+      reportRangeView = null;
       reportRangeToken++;
       reportSeries = reportBaseSeries;
       reportEvents = reportBaseEvents;
@@ -1791,7 +1789,7 @@
           reportDrag.awaitDirection = false;
           reportDrag.pointers.forEach((_point, id) => capture(id));
           cancelReportRangeRequest();
-          reportRangeActiveKey = "";
+          reportRangeView = null;
         }
         reportHoverTime = null;
         updateReportHover();
@@ -3330,7 +3328,7 @@
       cancelReportRangeRequest();
       reportLoadToken++;
       reportRangeToken++;
-      if (!preserveRange) reportRangeActiveKey = "";
+      if (!preserveRange) reportRangeView = null;
     }
 
     function reportCompletionMatches(data, url) {
@@ -4656,7 +4654,7 @@
         signal: controller.signal,
         active: () => !controller.signal.aborted &&
           token === reportRangeToken &&
-          entry.key === reportRangeActiveKey &&
+          entry === reportRangeView &&
           context.nightId === reportCurrentNightId &&
           context.generation === reportCurrentGeneration &&
           context.revision === reportCurrentRevision,
@@ -4717,9 +4715,8 @@
       const range = reportRangeWindow(lo, hi);
       if (!range) return;
       const key = signalStoreRangeKey(range.from, range.to);
-      if (reportRangeActiveKey !== key) {
+      if (reportRangeView?.key !== key) {
         cancelReportRangeRequest();
-        reportRangeActiveKey = key;
         reportRangeView = {
           key,
           from: range.from,
@@ -4969,8 +4966,17 @@
       if (completionKey === reportHandledCompletionKey) return;
       reportHandledCompletionKey = completionKey;
       if (data.kind === "oximetry") {
-        if (AirCANnect.pages.isActive("report") && reportViewMode === "night")
-          void loadReportSummary(false).then(() => loadSelectedReportNight(true));
+        if (AirCANnect.pages.isActive("report") && reportViewMode === "night") {
+          const night = selectedReportNight();
+          const token = reportLoadToken;
+          const files = night && JSON.stringify(nightOximetryFiles(night));
+          void loadReportSummary(false).then(() => {
+            if (token !== reportLoadToken || reportViewMode !== "night" || !AirCANnect.pages.isActive("report")) return;
+            const next = selectedReportNight();
+            if (night?.id !== next?.id || (next && files !== JSON.stringify(nightOximetryFiles(next))))
+              return loadSelectedReportNight(true);
+          });
+        }
         return;
       }
       if (data.kind === "sessions") {
@@ -5211,7 +5217,6 @@
     const reportSignalBlockCache = new Map();
     const reportEventClientCache = new Map();
     let reportRangeView = null;
-    let reportRangeActiveKey = "";
     let reportRangeToken = 0;
     let reportRangeAbortController = null;
     let reportHoverTime = null;

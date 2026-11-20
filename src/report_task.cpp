@@ -820,36 +820,34 @@ struct ReportTask::Runtime {
 
     OperationAdmission publish_source_change(
         const ReportSourceChange &change) {
-        if (!change.oximetry.pending && !change.valid()) return OperationAdmission::Rejected;
-        if (change.oximetry.pending && !change.oximetry.refresh_originals)
+        if (!change.removals.owners && !change.valid() && !change.oximetry.pending)
+            return OperationAdmission::Rejected;
+        if (!change.removals.owners && !change.valid() && !change.oximetry.refresh_originals)
             return OperationAdmission::Accepted;
         if (!lock()) return OperationAdmission::Busy;
 
-        if (change.oximetry.pending) {
+        pending_removals.merge(change.removals);
+        if (change.oximetry.pending && change.oximetry.refresh_originals) {
             originals_dirty.store(true);
             pending_oximetry_change.merge(change.oximetry);
             // Clock observations live outside a ring's day directory.
             if (pending_oximetry_change.ring) pending_oximetry_change.directory_day[0] = 0;
-            unlock();
-            wake();
-            return OperationAdmission::Accepted;
         }
 
-        ReportSourceChange stamped = change;
-        source_change_revision = increment_generation(
-            source_change_revision);
-        stamped.revision = source_change_revision;
-        merge_report_source_change(pending_source_changes,
-                                   pending_source_change_count,
-                                   stamped);
+        if (change.valid()) {
+            ReportSourceChange stamped = change;
+            source_change_revision = increment_generation(source_change_revision);
+            stamped.revision = source_change_revision;
+            merge_report_source_change(pending_source_changes, pending_source_change_count, stamped);
+        }
 
-        control.background_active = true;
+        if (change.valid() || change.removals.owners) control.background_active = true;
         unlock();
         wake();
         return OperationAdmission::Accepted;
     }
 
-    bool apply_pending_source_changes() {
+    bool apply_pending_source_changes(uint32_t now_ms) {
         ReportSourceChange pending[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
         size_t pending_count = 0;
         if (!lock()) return false;
@@ -861,7 +859,19 @@ struct ReportTask::Runtime {
         pending_source_change_count = 0;
         const auto oximetry = pending_oximetry_change;
         pending_oximetry_change = {};
+        auto removals = pending_removals;
+        if (catalog_store.active() || catalog_store.staging()) removals.owners &= ~RemovedStorageFiles::NightStore;
+        if (summary_archive.status().active) removals.owners &= ~RemovedStorageFiles::SummaryJournal;
+        pending_removals.owners &= ~removals.owners;
+        if (!(pending_removals.owners & RemovedStorageFiles::NightStore))
+            pending_removals.first_source = pending_removals.last_source = {};
         unlock();
+
+        if (removals.owners & RemovedStorageFiles::SummaryJournal) summary_archive.forget_media();
+        if (removals.owners & RemovedStorageFiles::NightStore)
+            catalog_store.invalidate_sources(removals.first_source, removals.last_source);
+        if (removals.owners & (RemovedStorageFiles::NightSources | RemovedStorageFiles::NightStore))
+            schedule_reconcile(now_ms, false);
 
         oximetry_archive.invalidate(oximetry);
         for (size_t i = 0; i < pending_count; ++i) {
@@ -869,7 +879,7 @@ struct ReportTask::Runtime {
                                        source_change_count,
                                        pending[i]);
         }
-        return pending_count != 0 || oximetry.pending;
+        return pending_count != 0 || oximetry.pending || removals.owners;
     }
 
     std::shared_ptr<const ReportPublishedState> published_state() const {
@@ -3061,6 +3071,7 @@ struct ReportTask::Runtime {
         AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t pending_source_change_count = 0;
     ReportOximetryChange pending_oximetry_change;
+    RemovedStorageFiles pending_removals;
     std::atomic<bool> originals_dirty{true};
     ReportSourceChange source_changes[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t source_change_count = 0;
@@ -3731,7 +3742,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     bool worked = runtime.apply_pending_refresh_inputs(now_ms);
-    worked = runtime.apply_pending_source_changes() || worked;
+    worked = runtime.apply_pending_source_changes(now_ms) || worked;
     if (!runtime.reconcile_deadline_initialized) {
         runtime.reconcile_pending = true;
         runtime.reconcile_due_ms = now_ms + CATALOG_RECONCILE_IDLE_MS;

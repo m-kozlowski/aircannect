@@ -128,13 +128,30 @@ struct ReportOximetrySignalBuilder::Work {
     StoragePreparedRead prepared;
     std::string path;
     bool atomic = false;
-    bool retry = false, verified = false;
+    bool retry = false, verified = false, source_changed = false, verifying = false;
 #ifdef ARDUINO
     uint32_t build_started_ms = 0;
     uint32_t paused_at_ms = 0, paused_ms = 0;
 #endif
     uint64_t offset = 0;
     size_t sent = 0, chunk = 0;
+
+    bool fail(const char *reason, bool can_retry = true) {
+        if (!verifying && !can_retry && !source_changed) record->invalid_tracks = true;
+#ifdef ARDUINO
+        static constexpr const char *steps[] = {"manifest", "samples", "plane", "tile", "histograms",
+                                                 "index", "publish", "published", "done"};
+        const auto key = uint32_t(std::hash<std::string_view>{}(reason)) ^ (uint32_t(phase) << 24);
+        if (!verifying && record->last_track_warning != key) {
+            record->last_track_warning = key;
+            Log::logf(CAT_REPORT, LOG_WARN, "oximetry tracks source=%s id=%s step=%s reason=%s",
+                      record->source, record->id, steps[size_t(phase)], reason);
+        }
+#endif
+        retry = can_retry;
+        phase = Phase::Done;
+        return true;
+    }
 
     void flush(std::unique_ptr<LargeByteBuffer> &buffer, size_t &used,
                const char *plane, size_t total_bytes) {
@@ -309,25 +326,22 @@ bool ReportOximetrySignalBuilder::finished() const {
 }
 
 bool ReportOximetrySignalBuilder::retryable() const { return work_ && work_->retry; }
+bool ReportOximetrySignalBuilder::source_changed() const { return work_ && work_->source_changed; }
 bool ReportOximetrySignalBuilder::verified() const { return work_ && work_->verified; }
 
 bool ReportOximetrySignalBuilder::complete_write(Work &w) {
-    bool ok;
     if (w.atomic) {
         StorageAtomicWriteCompletion done;
         if (!writes_->take_completion(w.write_ticket, done)) return false;
-        ok = done.outcome.disposition == OperationDisposition::Succeeded;
+        w.write_ticket = {};
+        if (done.outcome.disposition != OperationDisposition::Succeeded)
+            return w.fail(done.error[0] ? done.error : "manifest_write");
     } else {
         StorageRangeWriteCompletion done;
         if (!ranges_->take_completion(w.write_ticket, done)) return false;
-        ok = done.outcome.disposition == OperationDisposition::Succeeded &&
-             done.bytes_written == w.chunk;
-    }
-    w.write_ticket = {};
-    if (!ok) {
-        w.retry = true;
-        w.phase = Work::Phase::Done;
-        return true;
+        w.write_ticket = {};
+        if (done.outcome.disposition != OperationDisposition::Succeeded || done.bytes_written != w.chunk)
+            return w.fail(done.error[0] ? done.error : "short_write");
     }
 
     w.sent += w.chunk;
@@ -375,6 +389,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         work_ = LargeObject::create<Work>();
         if (!work_) return false;
         work_->record = &r;
+        work_->verifying = mode == Mode::VerifyOriginal;
         work_->reader.begin(r);
         work_->read_offset = r.csv_bytes ? 0 : r.bin.offset(0);
         const int64_t lo = std::max(r.start_ms, r.noon_s * 1000);
@@ -382,8 +397,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         work_->first_block = lo - lo % Block;
         work_->slots = (hi - work_->first_block + Block - 1) / Block;
         if (!work_->slots || work_->slots > REPORT_SIGNAL_STORE_MAX_BLOCKS) {
-            work_->phase = Phase::Done;
-            return true;
+            return work_->fail("invalid_window", false);
         }
         if (mode == Mode::Build) work_->blocks.resize(work_->slots);
         if (mode == Mode::VerifyOriginal) work_->phase = Phase::Samples;
@@ -395,11 +409,6 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         w.paused_at_ms = 0;
     }
 #endif
-    auto fail = [&](bool retry = true) {
-        w.retry = retry;
-        w.phase = Phase::Done;
-        return true;
-    };
     if (w.write_ticket.valid()) return complete_write(w);
     if (w.phase == Phase::Done) return false;
     if (w.phase == Phase::Published) {
@@ -425,7 +434,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             cmd.free_reserve_bytes = StorageSpacePolicy::ReclaimBelow;
             submitted = ranges_->request_write(cmd);
         }
-        if (submitted.admission == OperationAdmission::Rejected) return fail();
+        if (submitted.admission == OperationAdmission::Rejected) return w.fail("write_rejected");
         w.write_ticket = submitted.ticket;
         return submitted.accepted();
     }
@@ -442,7 +451,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             std::min(SampleStepBytes / stride, w.raw_limit / RawBytes) * stride;
         const uint64_t end = r.data_end();
         if (!probe && w.read_offset == end) {
-            if (!w.reader.complete()) return fail(false);
+            if (!w.reader.complete()) return w.fail("incomplete_recording", false);
             if (mode == Mode::VerifyOriginal) {
                 w.verified = true;
                 w.phase = Phase::Done;
@@ -453,9 +462,9 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
                         return true;
                     }
                     if (!w.raw) w.raw = LargeByteBuffer::allocate(RawBytes);
-                    if (!w.raw || !w.finish_live(r.report_end_ms())) return fail();
+                    if (!w.raw || !w.finish_live(r.report_end_ms())) return w.fail("finish_live");
                 }
-                if (!w.finish_block()) return fail();
+                if (!w.finish_block()) return w.fail("finish_block");
                 if (w.raw_used) w.flush(w.raw, w.raw_used, "raw", w.product.rows * RawBytes);
                 w.phase = Phase::Plane;
             }
@@ -470,7 +479,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             w.read.length = probe ? PublicationBytes : std::min<uint64_t>(limit, end - w.read_offset);
             w.read.retain_handle = !probe;
             const auto submit = reads_->request_read(w.read);
-            if (submit.admission == OperationAdmission::Rejected) return fail();
+            if (submit.admission == OperationAdmission::Rejected) return w.fail("read_rejected");
             w.read_ticket = submit.ticket;
 #ifdef ARDUINO
             if (!w.build_started_ms && !probe && mode == Mode::Build && submit.accepted())
@@ -487,14 +496,20 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
                 !w.prepared.valid()) {
                 if (probe && !strcmp(done.error, "read_not_found"))
                     w.phase = manifest_only ? Phase::Done : Phase::Samples;
-                else return fail();
+                else {
+                    w.source_changed = !probe && !strcmp(done.error, "read_not_found");
+                    return w.fail(done.error[0] ? done.error : "read_failed", !w.source_changed);
+                }
                 return true;
             }
-            if (!probe && (done.file_size != r.size() || done.modified != r.modified)) return fail();
+            if (!probe && (done.file_size != r.size() || done.modified != r.modified)) {
+                w.source_changed = true;
+                return w.fail("source_changed", false);
+            }
         }
         const auto view = reads_->view_prepared(w.prepared);
         if (view.state == PreparedByteReadState::Retry) return false;
-        if (!view.valid()) return fail();
+        if (!view.valid()) return w.fail("read_unavailable");
         if (probe) {
             if (w.product.decode(view.data, view.length)) {
                 r.planes = std::allocate_shared<ReportOximetryPlanes>(LargeAllocator<ReportOximetryPlanes>(), w.product);
@@ -502,10 +517,10 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             } else { w.product = {}; w.phase = manifest_only ? Phase::Done : Phase::Samples; }
         } else if (mode == Mode::VerifyOriginal) {
             if (view.length != w.read.length || !w.reader.consume(view.data, view.length, nullptr,
-                [](void *, const ReportOximetrySample &) { return true; })) return fail(false);
+                [](void *, const ReportOximetrySample &) { return true; })) return w.fail("invalid_samples", false);
             w.read_offset += view.length;
         } else {
-            if (view.length != w.read.length) return fail();
+            if (view.length != w.read.length) return w.fail("short_read");
             const size_t pos = w.read_offset - w.read.offset;
             const size_t length = std::min(step_bytes, view.length - pos);
 
@@ -516,7 +531,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
             if (!w.raw) {
                 const size_t remaining = std::min<uint64_t>(2 * w.raw_limit, end - w.read_offset);
                 w.raw = LargeByteBuffer::allocate(std::min(w.raw_limit, max_rows(remaining) * RawBytes));
-                if (!w.raw) return fail();
+                if (!w.raw) return w.fail("raw_alloc");
             }
 
             if (w.raw_used && max_rows(length) * RawBytes > w.raw->size() - w.raw_used) {
@@ -529,7 +544,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
                 if (work.observe(s)) return true;
                 work.retry = true;
                 return false;
-            })) return fail(w.retry);
+            })) return w.fail(w.retry ? "record_block" : "invalid_samples", w.retry);
             w.read_offset += length;
             if (pos + length < view.length) return true;
         }
@@ -569,7 +584,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
     }
     if (w.phase == Phase::Index) {
         w.output = w.index();
-        if (!w.output) return fail();
+        if (!w.output) return w.fail("index_alloc");
         w.product.index_bytes = w.output->size();
         w.path = report_oximetry_signal_path(r,"index");
         w.phase = Phase::Publish;
@@ -579,7 +594,7 @@ bool ReportOximetrySignalBuilder::step(ReportOximetryRecording &r, Mode mode) {
         uint8_t bytes[PublicationBytes];
         encode_publication(bytes,w.product);
         w.output = LargeByteBuffer::copy_and_freeze(bytes,sizeof(bytes));
-        if (!w.output) return fail();
+        if (!w.output) return w.fail("manifest_alloc");
         w.path = report_oximetry_signal_path(r,"manifest");
         w.atomic = true;
         return true;

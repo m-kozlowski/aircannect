@@ -515,7 +515,7 @@ bool remove(const char *path) {
     release_read_handle(path);
     release_write_handle(path);
     if (fs->remove(path)) {
-        if (path_change_callback) path_change_callback(path);
+        if (path_change_callback) path_change_callback(path, true);
         return true;
     }
     const int error = errno;
@@ -531,7 +531,7 @@ bool rmdir(const char *path) {
     release_read_handle(path);
     release_write_handles();
     if (fs->rmdir(path)) {
-        if (path_change_callback) path_change_callback(path);
+        if (path_change_callback) path_change_callback(path, true);
         return true;
     }
     const int error = errno;
@@ -570,8 +570,8 @@ bool rename(const char *from, const char *to) {
     }
 
     if (path_change_callback) {
-        path_change_callback(from);
-        path_change_callback(to);
+        path_change_callback(from, false);
+        path_change_callback(to, false);
     }
     return true;
 }

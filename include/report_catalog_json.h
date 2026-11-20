@@ -15,6 +15,7 @@ struct ReportCatalogJson {
     std::shared_ptr<const ReportSignalStoreCatalog> store;
     std::shared_ptr<const ReportOximetryCatalog> oximetry;
     char etag[64] = {};
+    uint64_t oximetry_identity = 0;
     uint32_t generation = 0;
     size_t content_length = 0;
 

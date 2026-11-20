@@ -594,6 +594,8 @@ static OperationAdmission route_report_source_change(
     ReportTask *task = static_cast<ReportTask *>(context);
     if (!task) return OperationAdmission::Busy;
     const OperationAdmission admission = task->publish_source_change(change);
+    if (admission == OperationAdmission::Accepted && (change.removals.owners & RemovedStorageFiles::Firmware))
+        resmed_firmware_repository.notify_removal();
     if (admission == OperationAdmission::Accepted && change.oximetry.file_published)
         export_coordinator.oximetry_published(change.oximetry);
     return admission == OperationAdmission::Rejected

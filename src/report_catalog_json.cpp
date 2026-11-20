@@ -16,7 +16,7 @@ namespace {
 
 uint64_t catalog_identity(const NightCatalog &catalog,
                           const ReportSignalStoreCatalog *store,
-                          const ReportOximetryCatalog *oximetry) {
+                          const ReportOximetryCatalog *oximetry, uint64_t &oximetry_identity) {
     uint64_t hash = 1469598103934665603ULL;
     auto mix = [&hash](uint64_t value) {
         for (size_t byte = 0; byte < sizeof(value); ++byte) {
@@ -47,6 +47,9 @@ uint64_t catalog_identity(const NightCatalog &catalog,
             }
         }
     }
+    const auto night_hash = hash;
+    hash = 1469598103934665603ULL;
+    mix(oximetry ? oximetry->size() : 0);
     if (oximetry) for (const auto &r : *oximetry) {
         for (const char *c = r.source; *c; ++c) mix(*c);
         for (const char *c = r.id; *c; ++c) mix(*c);
@@ -55,8 +58,14 @@ uint64_t catalog_identity(const NightCatalog &catalog,
         for (const char *c = r.serial; *c; ++c) mix(*c);
         mix(r.start_ms); mix(r.report_end_ms()); mix(r.size()); mix(r.interval_s); mix(r.modified);
         mix(r.noon_s); mix(r.next_noon_s);
-        mix(r.planes ? r.planes->index_bytes : 0);
+        mix(r.samples); mix(r.csv_bytes);
+        if (r.planes) {
+            mix(r.planes->index_bytes); mix(r.planes->histogram_bytes); mix(r.planes->rows);
+            for (const auto size : r.planes->plane_bytes) mix(size);
+        }
     }
+    oximetry_identity = hash;
+    mix(night_hash);
     return hash;
 }
 
@@ -65,13 +74,13 @@ bool format_catalog_etag(const NightCatalog &catalog,
                          const ReportOximetryCatalog *oximetry,
                          uint32_t generation,
                          char *out,
-                         size_t out_size) {
+                         size_t out_size, uint64_t &oximetry_identity) {
     const int written = snprintf(
         out,
         out_size,
         "\"catalog-v4-%08lx-%016llx\"",
         static_cast<unsigned long>(generation),
-        static_cast<unsigned long long>(catalog_identity(catalog, store, oximetry)));
+        static_cast<unsigned long long>(catalog_identity(catalog, store, oximetry, oximetry_identity)));
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
@@ -367,8 +376,9 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
     if (!catalog) return {};
 
     char etag[64] = {};
+    uint64_t oximetry_identity;
     if (!format_catalog_etag(*catalog, store.get(), oximetry.get(), generation, etag,
-                             sizeof(etag))) {
+                             sizeof(etag), oximetry_identity)) {
         return {};
     }
     const bool same_etag = previous && strcmp(previous->etag, etag) == 0;
@@ -382,6 +392,7 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
     next->catalog = std::move(catalog);
     next->store = std::move(store);
     next->oximetry = std::move(oximetry);
+    next->oximetry_identity = oximetry_identity;
     memcpy(next->etag, etag, sizeof(etag));
     next->generation = generation;
 

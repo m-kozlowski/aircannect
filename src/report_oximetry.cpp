@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cstring>
 #include <ctime>
+#include <functional>
 #include <numeric>
 #include "calendar_utils.h"
 #include "little_endian.h"
@@ -246,9 +247,28 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             std::sort(building_->begin(), building_->end(), [](const auto &a, const auto &b) {
                 return a.key() == b.key() ? a.noon_s < b.noon_s : a.key() < b.key();
             });
+            // A scoped scan may reread ring clocks. Keep ready tracks when the
+            // immutable source and its night window still identify the same files.
+            if (published_) {
+                auto old = published_->begin();
+                for (auto &r : *building_) {
+                    r.invalid_tracks = false;
+                    r.last_track_warning = 0;
+                    while (old != published_->end() && (old->key() < r.key() ||
+                           (old->key() == r.key() && old->noon_s < r.noon_s))) ++old;
+                    if (old != published_->end() && old->key() == r.key() && old->noon_s == r.noon_s &&
+                        old->next_noon_s == r.next_noon_s && old->start_ms == r.start_ms &&
+                        old->size() == r.size() && old->modified == r.modified) {
+                        r.planes = old->planes;
+                        r.invalid_tracks = old->invalid_tracks;
+                        r.last_track_warning = old->last_track_warning;
+                    }
+                }
+            }
             if (signals_) signals_->reset();
             preparing_.reset();
-            prepare_pending_ = true;
+            prepare_pending_ = std::any_of(building_->begin(), building_->end(),
+                std::mem_fn(&ReportOximetryRecording::needs_tracks));
             manifest_only_ = true;
             signal_retry_at_ = 0;
             resolve_oximetry_devices(*building_);
@@ -366,11 +386,16 @@ bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowe
         signal_retry_at_ = 0;
     }
 
-    while (signal_index_ < preparing_->size() && (*preparing_)[signal_index_].planes) ++signal_index_;
+    while (signal_index_ < preparing_->size()) {
+        const auto &r = (*preparing_)[signal_index_];
+        if (r.needs_tracks()) break;
+        ++signal_index_;
+    }
     if (signal_index_ == preparing_->size()) {
         published_ = std::move(preparing_);
         prepare_pending_ = signal_retry_at_ != 0 || (manifest_only_ &&
-            std::any_of(published_->begin(), published_->end(), [](const auto &r){return !r.planes;}));
+            std::any_of(published_->begin(), published_->end(),
+                std::mem_fn(&ReportOximetryRecording::needs_tracks)));
         manifest_only_ = false;
         return true;
     }
@@ -378,6 +403,10 @@ bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowe
     using Mode = ReportOximetrySignalBuilder::Mode;
     const bool worked = signals_->step((*preparing_)[signal_index_], manifest_only_ ? Mode::Manifest : Mode::Build);
     if (signals_->finished()) {
+        if (signals_->source_changed()) {
+            const auto &r = (*preparing_)[signal_index_];
+            invalidate(ReportOximetryChange::published(!r.csv_bytes, r.source));
+        }
         if (signals_->retryable()) signal_retry_at_ = now_ms + 60000;
         signals_->reset();
         ++signal_index_;

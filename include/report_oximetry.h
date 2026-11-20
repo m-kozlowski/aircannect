@@ -33,8 +33,11 @@ struct ReportOximetryRecording : OximetryCsv::Header {
     char day[9]{};
     int64_t noon_s = 0, next_noon_s = 0;
     std::shared_ptr<const ReportOximetryPlanes> planes;
+    uint32_t last_track_warning = 0;
+    bool invalid_tracks = false;
 
     std::string path() const;
+    bool needs_tracks() const { return !planes && !invalid_tracks; }
     auto key() const { return std::make_pair(std::string_view(source), std::string_view(id)); }
     uint64_t data_end() const { return csv_bytes ? csv_bytes : bin.offset(samples); }
     uint64_t size() const { return csv_bytes ? csv_bytes : data_end() + bin.footer(); }

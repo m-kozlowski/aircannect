@@ -25,6 +25,12 @@
 #include "edf_str_storage_writer.h"
 #include "large_allocator.h"
 #include "memory_manager.h"
+#include "edf_session_metadata.h"
+#include "night_catalog_store_service.h"
+#include "report_fallback_artifact.h"
+#include "report_signal_store.h"
+#include "resmed_firmware_catalog.h"
+#include "summary_archive.h"
 #include "storage_archive_service.h"
 #include "storage_atomic_write_service.h"
 #include "storage_browser_service.h"
@@ -228,6 +234,7 @@ ReportSourceChangeCallback report_source_change_callback = nullptr;
 void *report_source_change_context = nullptr;
 portMUX_TYPE oximetry_change_lock = portMUX_INITIALIZER_UNLOCKED;
 ReportOximetryChange pending_oximetry_change;
+ReportSourceChange pending_removed_files;
 std::atomic<void (*)()> completion_callback{nullptr};
 
 void notify_completion() {
@@ -464,12 +471,74 @@ void queue_report_source_change(const JobSlot &job) {
                            0});
 }
 
-bool deliver_report_source_change() {
+// remove/rmdir report successful mutations, not requests. Fold all children of
+// a recursive delete into one notice, including partial failure or cancellation.
+void storage_path_changed(const char *path, bool removed) {
+    edf_overview.path_changed(path);
+    if (!removed) return;
+
+    const std::string_view name(path);
+    const auto below = [&](std::string_view root) {
+        return name.size() > root.size() && name[root.size()] == '/' &&
+               name.substr(0, root.size()) == root;
+    };
+    const auto ends = [&](std::string_view suffix) {
+        return name.size() >= suffix.size() && name.substr(name.size() - suffix.size()) == suffix;
+    };
+
+    RemovedStorageFiles removed_files;
+    auto &owners = removed_files.owners;
+    ReportOximetryChange ox;
+    if (below("/DATALOG") || name == "/STR.edf" || below(EDF_SESSION_METADATA_ROOT) ||
+        below(REPORT_FALLBACK_ARTIFACT_ROOT)) owners |= RemovedStorageFiles::NightSources;
+    if (name == NIGHT_CATALOG_STORE_PATH) owners |= RemovedStorageFiles::NightStore;
+    if (below(REPORT_SIGNAL_STORE_ROOT) && ends("/sources.bin")) {
+        const auto suffix = name.substr(strlen(REPORT_SIGNAL_STORE_ROOT) + 1);
+        if (suffix.size() == sizeof("YYYY/MM/DD/sources.bin") - 1 && suffix[4] == '/' && suffix[7] == '/') {
+            char date[9]{};
+            suffix.copy(date, 4);
+            suffix.copy(date + 4, 2, 5);
+            suffix.copy(date + 6, 2, 8);
+            if (SleepDayId::from_yyyymmdd(date, removed_files.first_source)) {
+                removed_files.last_source = removed_files.first_source;
+                owners |= RemovedStorageFiles::NightStore;
+            }
+        }
+    }
+    if (below(SUMMARY_ARCHIVE_ROOT) && (ends(".head") || ends(".journal")))
+        owners |= RemovedStorageFiles::SummaryJournal;
+    if (below(AC_RESMED_FIRMWARE_REPOSITORY_PATH) &&
+        name.find('/', strlen(AC_RESMED_FIRMWARE_REPOSITORY_PATH) + 1) == name.npos)
+        owners |= RemovedStorageFiles::Firmware;
+
+    std::string_view source, suffix, id;
+    if (oximetry_archive_path(name, source, suffix)) {
+        const auto kind = oximetry_recording_file(source, suffix, id);
+        if (kind == OximetryArchiveFile::LiveCsv || kind == OximetryArchiveFile::RingBin)
+            ox = ReportOximetryChange::published(kind == OximetryArchiveFile::RingBin, source, suffix.substr(0, 8));
+        else if (suffix.substr(0, 6) == "clock/" && ends(".json"))
+            ox = ReportOximetryChange::published(true, source);
+    }
+    if (!owners && !ox.pending) return;
+
     portENTER_CRITICAL(&oximetry_change_lock);
-    const auto oximetry = pending_oximetry_change;
-    pending_oximetry_change = {};
+    pending_removed_files.removals.merge(removed_files);
+    pending_removed_files.oximetry.merge(ox);
     portEXIT_CRITICAL(&oximetry_change_lock);
-    if (!oximetry.pending && !pending_report_source_change_count) return false;
+}
+
+bool deliver_report_source_change() {
+    const bool deleting = delete_service.active();
+    portENTER_CRITICAL(&oximetry_change_lock);
+    const auto publication = pending_oximetry_change;
+    pending_oximetry_change = {};
+    const auto removed = deleting ? ReportSourceChange{} : pending_removed_files;
+    if (!deleting) pending_removed_files = {};
+    portEXIT_CRITICAL(&oximetry_change_lock);
+
+    auto notice = removed;
+    notice.oximetry.merge(publication);
+    if (!notice.removals.owners && !notice.oximetry.pending && !pending_report_source_change_count) return false;
 
     ReportSourceChangeCallback callback = nullptr;
     void *context = nullptr;
@@ -479,13 +548,13 @@ bool deliver_report_source_change() {
         unlock_queue();
     }
 
-    if (oximetry.pending) {
-        ReportSourceChange notice{};
-        notice.oximetry = oximetry;
+    if (notice.removals.owners || notice.oximetry.pending) {
         if (callback && callback(context, notice) == OperationAdmission::Accepted) return true;
 
         portENTER_CRITICAL(&oximetry_change_lock);
-        pending_oximetry_change.merge(oximetry);
+        pending_oximetry_change.merge(publication);
+        pending_removed_files.removals.merge(removed.removals);
+        pending_removed_files.oximetry.merge(removed.oximetry);
         portEXIT_CRITICAL(&oximetry_change_lock);
         return false;
     }
@@ -3092,9 +3161,7 @@ void begin() {
 
     if (!task) {
         Storage::set_read_release_callback(close_active_read_file);
-        Storage::set_path_change_callback([](const char *path) {
-            edf_overview.path_changed(path);
-        });
+        Storage::set_path_change_callback(storage_path_changed);
 
         const BaseType_t created =
             xTaskCreatePinnedToCore(task_entry, "ac_storage",

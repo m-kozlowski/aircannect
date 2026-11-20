@@ -1647,13 +1647,12 @@ void ReportHttpController::publish_completion() {
     if (!report_task_) return;
 
     const auto catalog = report_task_->catalog_json_snapshot();
-    const auto archive = catalog ? catalog->oximetry : nullptr;
-    if (archive && observed_archive_.lock() != archive) {
+    if (catalog && catalog->oximetry && catalog->oximetry_identity != observed_oximetry_identity_) {
         completion_json_ = "{";
         json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
         json_add_string(completion_json_, "kind", "oximetry");
         completion_json_ += '}';
-        if (completion_snapshot_.replace(completion_json_)) observed_archive_ = archive;
+        if (completion_snapshot_.replace(completion_json_)) observed_oximetry_identity_ = catalog->oximetry_identity;
         return;
     }
 

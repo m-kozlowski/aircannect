@@ -33,7 +33,7 @@ int open_descriptor(const char *path, int flags);
 int close_descriptor(const char *path, int descriptor);
 
 // Registered before the worker starts; callbacks run on the storage task.
-using PathChangeCallback = void (*)(const char *path);
+using PathChangeCallback = void (*)(const char *path, bool removed);
 void set_path_change_callback(PathChangeCallback callback);
 
 // Before mutations; nullptr releases the reader for remount/resource pressure.

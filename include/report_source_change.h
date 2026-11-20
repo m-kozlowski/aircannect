@@ -48,14 +48,29 @@ struct ReportOximetryChange {
     }
 };
 
-// A durable source publication invalidates the report materialized for this
-// canonical sleep-day range. ReportTask stamps revision when it accepts the
-// notice; producer generations are not comparable across producers.
+struct RemovedStorageFiles {
+    enum Owner : uint8_t {
+        NightSources = 1, NightStore = 2, SummaryJournal = 4, Firmware = 8
+    };
+    uint8_t owners = 0;
+    SleepDayId first_source, last_source;
+
+    void merge(const RemovedStorageFiles &other) {
+        owners |= other.owners;
+        if (!other.first_source.valid()) return;
+        if (!first_source.valid() || other.first_source < first_source) first_source = other.first_source;
+        if (!last_source.valid() || last_source < other.last_source) last_source = other.last_source;
+    }
+};
+
+// ReportTask stamps the revision of a durable source publication on admission;
+// producer generations are not comparable across producers.
 struct ReportSourceChange {
     SleepDayId first_day;
     SleepDayId last_day;
     uint32_t revision = 0;
     ReportOximetryChange oximetry{};
+    RemovedStorageFiles removals{};
 
     bool valid() const {
         return first_day.valid() && last_day.valid() &&

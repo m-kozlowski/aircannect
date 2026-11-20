@@ -45,7 +45,6 @@ constexpr size_t MAX_FRAME = AC_REPORT_MAX_PAYLOAD_BYTES * 2;
 constexpr char FRAME_MAGIC[] = "ACSUM001";
 constexpr char HEAD_MAGIC[] = "ACSUMHD1";
 constexpr char SEGMENT_HEAD_MAGIC[] = "ACSUMHD2";
-constexpr char ARCHIVE_ROOT[] = "/aircannect/as11/summary";
 
 Digest digest(const void *data, size_t length) {
     Digest out{};
@@ -219,7 +218,7 @@ struct SummaryArchive::Impl {
 
     bool discover() {
         if (!ticket.valid()) {
-            const StorageScanRoot root{ARCHIVE_ROOT, false};
+            const StorageScanRoot root{SUMMARY_ARCHIVE_ROOT, false};
             const StorageScanCommand command{&root, 1, false, generation};
             const auto submitted = scan->request_scan(command);
             if (submitted.admission == OperationAdmission::Busy) return false;
@@ -264,7 +263,7 @@ struct SummaryArchive::Impl {
         if (!loaded || serial != value.device_serial) {
             forget();
             serial = value.device_serial;
-            base_path = std::string(ARCHIVE_ROOT) + "/" + hex(digest(serial.data(), serial.size()));
+            base_path = std::string(SUMMARY_ARCHIVE_ROOT) + "/" + hex(digest(serial.data(), serial.size()));
             segment = 0;
             recovery_reason[0] = '\0';
             sequence = end = cursor = replay_sequence = 0;

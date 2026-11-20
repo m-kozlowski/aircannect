@@ -32,6 +32,7 @@ public:
     bool step(ReportOximetryRecording &recording, Mode mode = Mode::Build);
     bool finished() const;
     bool retryable() const;
+    bool source_changed() const;
     bool verified() const;
 
 private:
