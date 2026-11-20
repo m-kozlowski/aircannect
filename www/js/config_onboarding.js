@@ -345,7 +345,26 @@
       }
 
       let control;
-      if (field.key === "shq_mask") {
+      if (field.key === "shq_oxi") {
+        control = document.createElement("select");
+        const selected = String(data[field.key] || "");
+        for (const [value, key] of [["", "ui.off"], ["auto", "config.oxi.auto"], ["udp", null]]) {
+          const option = new Option("UDP", value);
+          if (key) AirCANnect.i18n.text(option, AirCANnect.i18n.message(key));
+          control.add(option);
+        }
+        if (selected && !Array.from(control.options).some(o => o.value === selected))
+          control.add(new Option(selected, selected));
+        control.value = selected;
+        AirCANnect.http.requestOk("/api/sleephq/sync/status?sources=1")
+          .then(r => r.json()).then(status => {
+            for (const {id, name} of status.oximetry_sources || []) {
+              const existing = Array.from(control.options).find(o => o.value === id);
+              if (existing) existing.text = name;
+              else control.add(new Option(name, id));
+            }
+          }).catch(() => {});
+      } else if (field.key === "shq_mask") {
         control = document.createElement("select");
         renderSleepHqMasks(control, String(data[field.key] || ""));
       } else if (field.type === "bool") {

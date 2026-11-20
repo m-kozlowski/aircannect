@@ -15,6 +15,7 @@
 #include "large_allocator.h"
 #include "sleephq_client.h"
 #include "sleephq_remote_file_cache.h"
+#include "sleephq_oximetry.h"
 #include "sleephq_sync_file.h"
 #include "storage_atomic_write_port.h"
 #include "storage_export_inventory_session.h"
@@ -68,6 +69,8 @@ struct SleepHqSyncStatus {
 };
 
 struct SleepHqSyncRuntimeStatus {
+    uint32_t oximetry_generation = 0;
+    uint32_t oximetry_deadline = 0;
     SleepHqSyncState state = SleepHqSyncState::Disabled;
     bool pending = false;
     bool configured = false;
@@ -112,6 +115,12 @@ public:
     bool request_sync(const char *reason = "manual");
     bool request_sync_day(const char *day, const char *reason = "manual_day");
     bool request_post_therapy_sync();
+    bool request_oximetry();
+    void set_oximetry_sources(SleepHqOximetryPlan::CatalogProvider catalog,
+                              SleepHqOximetryPlan::MemoryEnabled memory_enabled) {
+        oximetry_catalog_ = catalog;
+        memory_enabled_ = memory_enabled;
+    }
     void cancel_post_therapy_sync();
 
     // status
@@ -153,6 +162,7 @@ private:
         Check,
         Sync,
         PostTherapySync,
+        Oximetry,
     };
 
     enum class InflightPhase : uint8_t {
@@ -198,6 +208,7 @@ private:
         bool has_more = false;
         bool retryable = false;
         bool remote_date_exists = false;
+        bool csv_ready = false;
         size_t count = 0;
         uint32_t team_id = 0;
         uint32_t machine_id = 0;
@@ -230,6 +241,7 @@ private:
     // run lifecycle
     bool begin_run_locked(uint32_t now_ms);
     ExportStep step_load_inventory_locked();
+    void next_oximetry_source_locked();
     ExportStep step_load_datalog_day_locked();
     void queue_retry_locked(uint32_t now_ms);
     bool cancel_post_therapy_locked();
@@ -374,6 +386,14 @@ private:
 
     // active export/import
     StorageExportInventorySession inventory_session_;
+    SleepHqOximetryPlan oximetry_plan_;
+    SleepHqOximetryPlan::CatalogProvider oximetry_catalog_ = nullptr;
+    SleepHqOximetryPlan::MemoryEnabled memory_enabled_ = nullptr;
+    const char *oximetry_source_ = nullptr;
+    const ReportOximetryRecording *ring_header_check_ = nullptr;
+    uint32_t oximetry_generation_ = 0;
+    std::atomic<uint32_t> runtime_oximetry_generation_{0};
+    std::atomic<uint32_t> oximetry_deadline_{0};
     StorageStreamPort *stream_port_ = nullptr;
     StorageExportPlanner export_planner_;
     StorageExportStateBatch state_batch_;

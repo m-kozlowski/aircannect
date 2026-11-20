@@ -40,6 +40,7 @@ public:
     bool request(const ExportRequest &request);
     bool request_sync();
     void rearm_idle_backfill(ExportEndpoint endpoint);
+    void rearm_oximetry() { oximetry_changed_.store(true); }
 
 private:
     struct PostTherapyState {
@@ -116,6 +117,8 @@ private:
     std::array<EndpointSchedule, AC_EXPORT_ENDPOINT_CAPACITY> endpoints_;
     bool startup_idle_grace_complete_ = false;
     uint32_t idle_backfill_due_ms_ = 0;
+    uint32_t oximetry_generation_ = 0;
+    std::atomic<bool> oximetry_changed_{false};
     ExportTaskControlSnapshot status_snapshot_;
 };
 

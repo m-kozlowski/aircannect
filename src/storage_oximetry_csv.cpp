@@ -266,16 +266,7 @@ void observe(const OximetrySample &s, int64_t utc_ms, int32_t device_offset_minu
     if (!mounted.load() || !queue || paused.load() || StorageUsb::suspended()) return;
     Input in{};
     if (s.source == OximetrySource::Udp) strcpy(in.source, "udp");
-    else if (s.source == OximetrySource::Ble && strlen(s.peer) == 17) {
-        strcpy(in.source, "ble-");
-        size_t n = 4;
-        for (const char *p = s.peer; *p; ++p) {
-            if (*p == ':') continue;
-            if (!isxdigit((unsigned char)*p) || n >= sizeof(in.source)-1) return;
-            in.source[n++] = tolower((unsigned char)*p);
-        }
-        if (n != 16) return;
-    } else return;
+    else if (s.source != OximetrySource::Ble || !oximetry_ble_source(s.peer, in.source)) return;
 
     memcpy(in.peer, s.peer, sizeof(in.peer));
     memcpy(in.serial, s.serial, sizeof(in.serial));

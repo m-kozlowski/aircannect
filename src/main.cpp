@@ -1468,14 +1468,22 @@ void setup() {
         StorageService::read_port(),
         StorageService::stream_port(),
         StorageService::atomic_write_port(),
-        StorageService::path_port());
+        StorageService::path_port(),
+        [] { return report_task.oximetry_originals(); },
+        [](const char *peer) {
+            OximetrySensorDevice known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+            const auto count = oximetry_sensor_source.known_sensors(known, AC_OXIMETRY_SENSOR_MAX_KNOWN);
+            for (size_t i = 0; i < count; ++i)
+                if (!strcasecmp(known[i].addr, peer)) return known[i].recordings;
+            return false;
+        });
     if (!export_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] export task failed to start\n");
     }
 
     export_coordinator.begin(export_task);
-    export_http_controller.begin(export_coordinator);
+    export_http_controller.begin(export_coordinator, report_task, oximetry_sensor_source);
 
     const bool storage_http_started = storage_http_controller.begin(
         StorageService::read_port(),
@@ -1624,7 +1632,8 @@ void setup() {
         Log::logf(CAT_BLE, LOG_ERROR,
                   "AS11 reconnect recovery failed to start\n");
     }
-    report_task.set_oximetry_catalog_consumer(OximetryCsv::publish_catalog);
+    report_task.set_oximetry_catalog_consumer(OximetryCsv::publish_catalog,
+        [] { export_coordinator.rearm_oximetry(); });
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
@@ -2077,8 +2086,10 @@ void loop() {
 
     publish_export_config();
 
-    if (Storage::take_oximetry_publication()) {
+    bool csv_published = false;
+    if (Storage::take_oximetry_publication(&csv_published)) {
         export_coordinator.rearm_idle_backfill(ExportEndpoint::Smb);
+        if (csv_published) export_coordinator.rearm_oximetry();
     }
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx();

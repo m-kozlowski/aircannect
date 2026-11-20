@@ -403,6 +403,11 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "Default mask",
      "SleepHQ mask ID for new post-therapy imports; empty disables it.",
      nullptr, 0, -1, AC_CFG_OFFSET(sleephq_mask_id)},
+    {"shq_oxi", AppConfigFieldId::SleepHqOximetrySource,
+     AppConfigGroup::SleepHq, 60, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "Oximetry source",
+     "Source for supplemental SleepHQ imports.", nullptr, 0, -1,
+     AC_CFG_OFFSET(sleephq_oximetry_source)},
 
     AC_SCHEDULE_FIELD(1),
     AC_SCHEDULE_FIELD(2),
@@ -735,6 +740,8 @@ bool AppConfigFieldWriter::set_value(
                 cfg.sleephq_team_id, value);
         case AppConfigFieldId::SleepHqMaskId:
             return config.set_sleephq_mask_id(value);
+        case AppConfigFieldId::SleepHqOximetrySource:
+            return config.set_sleephq_oximetry_source(value);
         case AppConfigFieldId::HttpUser:
             return config.set_http_auth(value, cfg.http_password);
         case AppConfigFieldId::HttpPassword:

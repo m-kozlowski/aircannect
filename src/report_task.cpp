@@ -132,6 +132,7 @@ struct ReportPublishedState {
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportCatalogJson> catalog_json;
     std::shared_ptr<const NightCatalogLayoutIssues> layout_issues;
+    std::shared_ptr<const ReportOximetryCatalog> originals;
 };
 
 enum class CatalogStorePurpose : uint8_t {
@@ -886,7 +887,7 @@ struct ReportTask::Runtime {
         std::shared_ptr<const ReportPublishedState> next =
             std::make_shared<ReportPublishedState>(ReportPublishedState{
                 catalog, store_catalog, display_summary, json,
-                catalog_store.layout_issues()});
+                catalog_store.layout_issues(), oximetry_archive.originals()});
         if (!next) return false;
 
 #pragma GCC diagnostic push
@@ -3498,6 +3499,11 @@ void ReportTask::request_oximetry_index() {
     if (runtime_ && !runtime_->oximetry_requested.exchange(true)) runtime_->wake();
 }
 
+std::shared_ptr<const ReportOximetryCatalog> ReportTask::oximetry_originals() const {
+    const auto state = runtime_ ? runtime_->published_state() : nullptr;
+    return state ? state->originals : nullptr;
+}
+
 std::shared_ptr<const ReportSignalStoreCatalog>
 ReportTask::store_catalog_snapshot() const {
     if (!runtime_) return {};
@@ -3743,7 +3749,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         const auto before = runtime.oximetry_archive.catalog();
         worked = runtime.oximetry_archive.poll(now_ms, runtime.catalog.get()) || worked;
         const auto catalog = runtime.oximetry_archive.catalog();
-        if (before != catalog) runtime.publish_state();
+        if (before != catalog) {
+            runtime.publish_state();
+            if (originals_ready_) originals_ready_();
+        }
         const auto ring = runtime.oximetry_archive.ring_sources();
         if (oximetry_consumer_ && runtime.oximetry_clock_catalog_ready && !runtime.catalog_load_pending &&
             ring && ring != runtime.delivered_ring_sources.lock()) {

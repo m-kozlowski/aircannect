@@ -36,7 +36,7 @@ namespace {
 StorageStatus owner_status;
 StorageStatus published_status;
 bool initialized = false;
-std::atomic<bool> oximetry_published{false};
+std::atomic<uint8_t> oximetry_published{0};
 PathChangeCallback path_change_callback = nullptr;
 ReadReleaseCallback read_release_callback = nullptr;
 
@@ -541,9 +541,11 @@ bool rmdir(const char *path) {
     return !fs->exists(path);
 }
 
-bool take_oximetry_publication() {
-    return oximetry_published.load(std::memory_order_relaxed) &&
-           oximetry_published.exchange(false, std::memory_order_relaxed);
+bool take_oximetry_publication(bool *csv) {
+    const uint8_t flags = oximetry_published.load(std::memory_order_relaxed)
+        ? oximetry_published.exchange(0, std::memory_order_relaxed) : 0;
+    if (csv) *csv = (flags & 2) != 0;
+    return flags != 0;
 }
 
 bool rename(const char *from, const char *to) {
@@ -558,8 +560,9 @@ bool rename(const char *from, const char *to) {
     // Advance the source/day revision durably before exposing a final recording.
     // Its length is visible in a shallow listing, even on FAT with coarse mtimes.
     std::string_view source, suffix, id;
-    const bool recording = oximetry_archive_path(to, source, suffix) &&
-        oximetry_recording_file(source, suffix, id) != OximetryArchiveFile::Other;
+    const auto kind = oximetry_archive_path(to, source, suffix)
+        ? oximetry_recording_file(source, suffix, id) : OximetryArchiveFile::Other;
+    const bool recording = kind != OximetryArchiveFile::Other;
     if (recording) {
         char revision[AC_STORAGE_PATH_MAX];
         snprintf(revision, sizeof(revision), "%.*s%s", int(suffix.data() - to + 8),
@@ -575,7 +578,8 @@ bool rename(const char *from, const char *to) {
         return false;
     }
 
-    if (recording) oximetry_published.store(true, std::memory_order_relaxed);
+    if (recording) oximetry_published.fetch_or(
+        kind == OximetryArchiveFile::RingBin ? 1 : 2, std::memory_order_relaxed);
     if (path_change_callback) {
         path_change_callback(from);
         path_change_callback(to);

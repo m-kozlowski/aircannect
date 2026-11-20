@@ -2,12 +2,30 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cctype>
+#include <cstring>
 #include <string_view>
 
 namespace aircannect {
 
 inline constexpr char OximetryArchiveRoot[] = "/aircannect/oximetry";
 inline constexpr char OximetryDayRevisionSuffix[] = ".rev";
+
+inline bool oximetry_ble_source(std::string_view address, char *out) {
+    if (address.size() != 17) return false;
+    size_t n = 4;
+    for (size_t i = 0; i < address.size(); ++i) {
+        const unsigned char c = address[i];
+        if (i % 3 == 2) {
+            if (c != ':') return false;
+        } else if (std::isxdigit(c)) {
+            out[n++] = std::tolower(c);
+        } else return false;
+    }
+    memcpy(out, "ble-", 4);
+    out[n] = 0;
+    return true;
+}
 
 inline bool oximetry_source_valid(std::string_view source) {
     return !source.empty() && source.size() <= 32 && source.find_first_not_of(
@@ -53,6 +71,11 @@ inline OximetryArchiveFile oximetry_recording_file(std::string_view source,
 }
 
 namespace OximetryCsv {
+struct Header {
+    char peer[18]{}, serial[33]{};
+    int32_t offset_minutes = 0;
+};
+bool parse_header(std::string_view prefix, std::string_view source, std::string_view id, Header &out);
 inline constexpr char Columns[] =
     "Time,Oxygen Level,Pulse Rate,Motion,O2 Reminder,PR Reminder,UTC,PI\r\n";
 inline constexpr size_t MaxRow = 112;

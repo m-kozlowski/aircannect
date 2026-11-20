@@ -179,6 +179,7 @@ and `vpn_error`.
 | `shq_team` | Numeric SleepHQ team ID | empty | Optional team ID. |
 | `shq_device` | Numeric SleepHQ device ID, or empty | empty | Optional SleepHQ device type override. |
 | `shq_mask` | Numeric SleepHQ mask ID, or empty | empty | Default mask for new post-therapy imports only. |
+| `shq_oxi` | Empty, `auto`, `udp`, or an oximeter source ID | empty | Oximetry to upload separately from CPAP. Empty disables it. |
 
 ## Logging
 

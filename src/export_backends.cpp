@@ -19,6 +19,7 @@ constexpr ExportOperationRule SMB_RULES[] = {
 };
 
 constexpr ExportOperationRule SLEEPHQ_RULES[] = {
+    {ExportOperation::Sync, ExportReason::Oximetry},
     {ExportOperation::Check, ExportReason::Startup},
     {ExportOperation::Check, ExportReason::Manual},
     {ExportOperation::Sync, ExportReason::Manual, true},
@@ -47,6 +48,7 @@ bool request_engine(StorageSyncEngine &engine, const ExportRequest &request) {
 }
 
 bool request_engine(SleepHqSyncEngine &engine, const ExportRequest &request) {
+    if (request.reason == ExportReason::Oximetry) return engine.request_oximetry();
     if (request.operation == ExportOperation::Check) {
         return engine.request_check(request.reason == ExportReason::Startup
                                         ? "startup_check" : "manual");
@@ -99,6 +101,8 @@ ExportEndpointStatus engine_status(SleepHqSyncEngine &engine) {
     const auto source = engine.runtime_status();
     auto out = common_status(source);
     out.ready_generation = source.completed_check_generation;
+    out.oximetry_generation = source.oximetry_generation;
+    out.oximetry_deadline = source.oximetry_deadline;
     return out;
 }
 

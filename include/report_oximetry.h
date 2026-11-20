@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "large_allocator.h"
+#include "oximetry_archive.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
 #include "report_source_change.h"
@@ -15,7 +16,7 @@ class NightCatalog;
 class ReportOximetrySignalBuilder;
 struct ReportOximetryPlanes;
 
-struct ReportOximetryRecording {
+struct ReportOximetryRecording : OximetryCsv::Header {
     char source[33]{};
     char id[37]{};
     int64_t start_ms = 0, wall_s = 0, local_start_s = 0, observation_ms = 0;
@@ -24,8 +25,7 @@ struct ReportOximetryRecording {
     int64_t csv_end_ms = 0;
     uint64_t modified = 0;
     bool listed = false;
-    char peer[18]{}, serial[33]{};
-    int32_t offset_minutes = 0;
+    bool export_clock_known = false;
     char day[9]{};
     int64_t noon_s = 0, next_noon_s = 0;
     std::shared_ptr<const ReportOximetryPlanes> planes;
@@ -71,6 +71,8 @@ private:
     StoragePreparedRead prepared_;
     std::shared_ptr<const StorageScanSnapshot> files_;
     size_t index_ = 0;
+    ReportOximetryRecording live_header_;
+    bool read_live_tail_ = false;
     bool clocks_ = false;
     bool ring_changed_ = false;
     ReportOximetrySignalBuilder *signals_ = nullptr;

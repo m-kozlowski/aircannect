@@ -20,7 +20,7 @@ struct ExportEndpointOrder {
 
 enum class ExportOperation : uint8_t { Check, Sync, Reconcile };
 enum class ExportReason : uint8_t {
-    Manual, Startup, IdleBackfill, PostTherapy, Maintenance,
+    Manual, Startup, IdleBackfill, PostTherapy, Maintenance, Oximetry,
 };
 enum class ExportState : uint8_t { Disabled, Idle, Pending, Working, Error };
 
@@ -81,6 +81,8 @@ struct ExportEndpointStatus {
     bool network_available = false;
     bool pending = false;
     bool durable_state_pending = false;
+    uint32_t oximetry_generation = 0; // Zero while supplemental imports are off.
+    uint32_t oximetry_deadline = 0;
     uint32_t config_generation = 0;
     uint32_t ready_generation = 0;
 

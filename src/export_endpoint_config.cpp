@@ -37,6 +37,8 @@ ExportEndpointConfig make_export_endpoint_config(
     copy_cstr(out.sleephq.mask_id,
               sizeof(out.sleephq.mask_id),
               config.sleephq_mask_id.c_str());
+    copy_cstr(out.sleephq.oximetry_source, sizeof(out.sleephq.oximetry_source),
+              config.sleephq_oximetry_source.c_str());
     return out;
 }
 
@@ -51,7 +53,8 @@ bool export_endpoint_config_equal(const ExportEndpointConfig &left,
                   right.sleephq.client_secret) == 0 &&
            strcmp(left.sleephq.team_id, right.sleephq.team_id) == 0 &&
            strcmp(left.sleephq.device_id, right.sleephq.device_id) == 0 &&
-           strcmp(left.sleephq.mask_id, right.sleephq.mask_id) == 0;
+           strcmp(left.sleephq.mask_id, right.sleephq.mask_id) == 0 &&
+           strcmp(left.sleephq.oximetry_source, right.sleephq.oximetry_source) == 0;
 }
 
 }  // namespace aircannect

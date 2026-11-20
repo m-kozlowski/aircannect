@@ -11,6 +11,7 @@
 #include "app_config_registry.h"
 #include "board_motion.h"
 #include "debug_log.h"
+#include "oximetry_archive.h"
 
 namespace aircannect {
 
@@ -1076,6 +1077,14 @@ bool AppConfig::set_sleephq_mask_id(const String &mask_id) {
     if (data_.sleephq_mask_id == parsed) return true;
 
     data_.sleephq_mask_id = parsed;
+    return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
+}
+
+bool AppConfig::set_sleephq_oximetry_source(const String &source) {
+    if (source.length() && !oximetry_source_valid(source.c_str())) return false;
+    if (source == data_.sleephq_oximetry_source) return true;
+
+    data_.sleephq_oximetry_source = source;
     return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
 }
 

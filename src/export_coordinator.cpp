@@ -79,7 +79,7 @@ void ExportCoordinator::record_request(
     const ExportRequest &work, const ExportEndpointStatus &status) {
     auto &state = schedule(work.endpoint);
     const bool full_sync = work.operation != ExportOperation::Check &&
-                           work.reason != ExportReason::Maintenance &&
+                           work.reason != ExportReason::Maintenance && work.reason != ExportReason::Oximetry &&
                            !work.day[0];
 
     if (work.operation == ExportOperation::Check ||
@@ -350,6 +350,10 @@ void ExportCoordinator::rearm_idle_backfill(ExportEndpoint id) {
 void ExportCoordinator::poll_idle_backfill(
     const ExportReportActivity &report, const ActivitySnapshot &activity,
     const ExportTaskControlSnapshot &status, uint32_t now_ms) {
+    if (oximetry_changed_.exchange(false)) {
+        oximetry_generation_ = 0;
+        if (status.endpoint(ExportEndpoint::SleepHq).oximetry_generation) idle_backfill_due_ms_ = 0;
+    }
     for (const auto id : status.order) {
         if (!status.endpoint(id).configured) schedule(id).backfill_queued_generation = 0;
         if (!check_settled(id, status)) {
@@ -368,7 +372,11 @@ void ExportCoordinator::poll_idle_backfill(
         const bool ready = current.configured && current.ready() && current.backfill_ready() &&
             current.definition->rule(ExportOperation::Sync, ExportReason::IdleBackfill) &&
             schedule(id).backfill_queued_generation != current.config_generation;
-        if (!ready || busy) continue;
+        const bool supplement = !ready && current.oximetry_generation &&
+            current.ready() && current.backfill_ready() &&
+            (oximetry_generation_ != current.oximetry_generation ||
+             (current.oximetry_deadline && storage_export_current_epoch_seconds_or_zero() >= current.oximetry_deadline));
+        if ((!ready && !supplement) || busy) continue;
 
         if (idle_backfill_due_ms_ == 0) {
             idle_backfill_due_ms_ = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
@@ -376,8 +384,10 @@ void ExportCoordinator::poll_idle_backfill(
         }
         if (static_cast<int32_t>(now_ms - idle_backfill_due_ms_) < 0) return;
 
-        const ExportRequest work{id, ExportOperation::Sync, ExportReason::IdleBackfill};
+        const ExportRequest work{id, ExportOperation::Sync,
+            supplement ? ExportReason::Oximetry : ExportReason::IdleBackfill};
         if (task_->request(work)) {
+            if (supplement) oximetry_generation_ = current.oximetry_generation;
             record_request(work, current);
             idle_backfill_due_ms_ = 0;
         }

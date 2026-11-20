@@ -314,10 +314,13 @@ public:
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     std::shared_ptr<const ReportCatalogJson> catalog_json_snapshot() const;
     void request_oximetry_index();
+    std::shared_ptr<const ReportOximetryCatalog> oximetry_originals() const;
     // Register before begin() when another SD consumer needs the same clock mapping.
     using OximetryCatalogConsumer = void (*)(std::shared_ptr<const ReportOximetryCatalog>);
-    void set_oximetry_catalog_consumer(OximetryCatalogConsumer consumer) {
+    void set_oximetry_catalog_consumer(OximetryCatalogConsumer consumer,
+                                       void (*originals_ready)() = nullptr) {
         oximetry_consumer_ = consumer;
+        originals_ready_ = originals_ready;
     }
     std::shared_ptr<const ReportSignalStoreCatalog>
         store_catalog_snapshot() const;
@@ -349,6 +352,7 @@ private:
 
     Runtime *runtime_ = nullptr;
     OximetryCatalogConsumer oximetry_consumer_ = nullptr;
+    void (*originals_ready_)() = nullptr;
 };
 
 }  // namespace aircannect

@@ -133,6 +133,7 @@ void ReportOximetryArchive::release() {
     files_.reset();
     building_.reset();
     index_ = 0;
+    read_live_tail_ = false;
     clocks_ = false;
 }
 
@@ -273,8 +274,9 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
         cmd.path = entry.path;
         cmd.length = clocks_ ? entry.size : 40;
         if (live) {
-            cmd.length = std::min<uint64_t>(entry.size, OximetryCsv::MaxRow);
-            cmd.offset = entry.size - cmd.length;
+            cmd.length = std::min<uint64_t>(entry.size, read_live_tail_
+                ? OximetryCsv::MaxRow : OximetryCsv::MaxHeader);
+            cmd.offset = read_live_tail_ ? entry.size - cmd.length : 0;
         }
         cmd.generation = generation_;
         const auto submission = read_->request_read(cmd);
@@ -300,9 +302,19 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     }
     const auto view = read_->view_prepared(prepared_);
     if (view.state == PreparedByteReadState::Retry) return false;
+    if (!clocks_ && !read_live_tail_ && id.substr(0, 5) == "live-" && view.valid()) {
+        live_header_ = {};
+        live_header_.export_clock_known = OximetryCsv::parse_header(
+            {reinterpret_cast<const char *>(view.data), view.length}, source, id, live_header_);
+        read_->release_prepared(prepared_);
+        prepared_ = {};
+        read_live_tail_ = true;
+        return true;
+    }
     if (view.valid()) consume(entry, source, id, view.data, view.length);
     read_->release_prepared(prepared_);
     prepared_ = {};
+    read_live_tail_ = false;
     ++index_;
     return true;
 }
@@ -368,6 +380,7 @@ void ReportOximetryArchive::consume(const StorageScanEntryView &entry, std::stri
     if (!clocks_) {
         ReportOximetryRecording recording;
         if (id.substr(0, 5) == "live-") {
+            recording = live_header_;
             if (!live_bounds(id, bytes, length, recording)) return;
             recording.csv_bytes = entry.size;
         } else {
