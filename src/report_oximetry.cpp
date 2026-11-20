@@ -151,6 +151,7 @@ void ReportOximetryArchive::release() {
 void ReportOximetryArchive::reset() {
     release();
     if (signals_) signals_->reset();
+    active_track_.reset();
     preparing_.reset();
     ring_sources_.reset();
     originals_.reset();
@@ -196,9 +197,11 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
                 return false;
             std::string dir = OximetryArchiveRoot;
             if (scanning_.source[0]) dir += std::string("/") + scanning_.source;
+            const auto clocks = dir + "/clock";
             if (scanning_.directory_day[0]) dir += std::string("/") + scanning_.directory_day;
-            const StorageScanRoot root{dir.c_str(), true};
-            const auto submitted = scan_->request_scan({&root, 1, false, generation_});
+            const StorageScanRoot roots[] = {{dir.c_str(), true}, {clocks.c_str(), true}};
+            const size_t count = scanning_.ring && scanning_.directory_day[0] ? 2 : 1;
+            const auto submitted = scan_->request_scan({roots, count, false, generation_});
             scan_ticket_ = submitted.ticket;
             return submitted.accepted();
         }
@@ -227,6 +230,9 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     StorageScanEntryView entry;
     if (!files_->entry(index_, entry)) {
         if (!clocks_ && ring_changed_ && !building_->empty()) {
+            std::sort(building_->begin(), building_->end(), [](const auto &a, const auto &b) {
+                return a.key() < b.key();
+            });
             clocks_ = true;
             index_ = 0;
         } else {
@@ -248,23 +254,26 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
             });
             // A scoped scan may reread ring clocks. Keep ready tracks when the
             // immutable source and its night window still identify the same files.
-            if (published_) {
-                auto old = published_->begin();
+            const auto previous = preparing_ ? preparing_ : published_;
+            if (previous) {
+                auto old = previous->begin();
                 for (auto &r : *building_) {
                     r.invalid_tracks = false;
                     r.last_track_warning = 0;
-                    while (old != published_->end() && (old->key() < r.key() ||
+                    while (old != previous->end() && (old->key() < r.key() ||
                            (old->key() == r.key() && old->noon_s < r.noon_s))) ++old;
-                    if (old != published_->end() && old->key() == r.key() && old->noon_s == r.noon_s &&
-                        old->next_noon_s == r.next_noon_s && old->start_ms == r.start_ms &&
-                        old->size() == r.size() && old->modified == r.modified) {
+                    if (old != previous->end() && old->same_track(r)) {
                         r.planes = old->planes;
                         r.invalid_tracks = old->invalid_tracks;
                         r.last_track_warning = old->last_track_warning;
                     }
                 }
             }
-            if (signals_) signals_->reset();
+            if (active_track_ && std::none_of(building_->begin(), building_->end(),
+                [&](const auto &r) { return active_track_->same_track(r); })) {
+                signals_->reset();
+                active_track_.reset();
+            }
             preparing_.reset();
             prepare_pending_ = std::any_of(building_->begin(), building_->end(),
                 std::mem_fn(&ReportOximetryRecording::needs_tracks));
@@ -281,6 +290,16 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
     }
 
     std::string_view source, id;
+    std::string_view suffix;
+    if (clocks_ && !entry.directory && oximetry_archive_path(entry.path, source, suffix) &&
+        oximetry_recording_file(source, suffix, id) == OximetryArchiveFile::RingCsv) {
+        const auto key = std::make_pair(source, id);
+        auto it = std::lower_bound(building_->begin(), building_->end(), key,
+            [](const auto &r, const auto &wanted) { return r.key() < wanted; });
+        if (it != building_->end() && it->key() == key) it->missing_csv_scan = 0;
+        ++index_;
+        return true;
+    }
     if (entry.directory || !entry.size || !archive_name(entry.path, clocks_, source, id) ||
         (clocks_ && entry.size > 128 * 1024)) {
         ++index_;
@@ -365,13 +384,13 @@ bool ReportOximetryArchive::step(uint32_t now_ms, const NightCatalog *nights) {
 }
 
 void ReportOximetryArchive::pause_signals() {
-    if (signals_ && preparing_ && !manifest_only_) signals_->pause();
+    if (signals_ && active_track_ && !active_manifest_) signals_->pause();
 }
 
 bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowed) try {
     if (!signals_ || !prepare_pending_ || !published_ ||
         (!preparing_ && signal_retry_at_ && int32_t(now_ms - signal_retry_at_) < 0)) return false;
-    if (!manifest_only_ && !background_allowed) {
+    if (!(active_track_ ? active_manifest_ : manifest_only_) && !background_allowed) {
         pause_signals();
         return false;
     }
@@ -382,7 +401,7 @@ bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowe
         signal_retry_at_ = 0;
     }
 
-    while (signal_index_ < preparing_->size()) {
+    while (!active_track_ && signal_index_ < preparing_->size()) {
         const auto &r = (*preparing_)[signal_index_];
         if (r.needs_tracks()) break;
         ++signal_index_;
@@ -397,19 +416,35 @@ bool ReportOximetryArchive::poll_signals(uint32_t now_ms, bool background_allowe
     }
 
     using Mode = ReportOximetrySignalBuilder::Mode;
-    const bool worked = signals_->step((*preparing_)[signal_index_], manifest_only_ ? Mode::Manifest : Mode::Build);
+    if (!active_track_) {
+        active_track_ = (*preparing_)[signal_index_];
+        active_manifest_ = manifest_only_;
+    }
+    const bool worked = signals_->step(*active_track_, active_manifest_ ? Mode::Manifest : Mode::Build);
     if (signals_->finished()) {
         if (signals_->source_changed()) {
-            const auto &r = (*preparing_)[signal_index_];
+            const auto &r = *active_track_;
             invalidate(ReportOximetryChange::published(!r.csv_bytes, r.source));
         }
         if (signals_->retryable()) signal_retry_at_ = now_ms + 60000;
         signals_->reset();
-        ++signal_index_;
+        // A scan may have replaced the catalog while this file was being read.
+        auto it = std::lower_bound(preparing_->begin(), preparing_->end(), active_track_->key(),
+            [](const auto &r, const auto &key) { return r.key() < key; });
+        for (; it != preparing_->end() && it->key() == active_track_->key(); ++it) {
+            if (!active_track_->same_track(*it)) continue;
+            it->planes = active_track_->planes;
+            it->invalid_tracks = active_track_->invalid_tracks;
+            it->last_track_warning = active_track_->last_track_warning;
+            if (size_t(it - preparing_->begin()) == signal_index_) ++signal_index_;
+            break;
+        }
+        active_track_.reset();
     }
     return worked;
 } catch (const std::bad_alloc &) {
     signals_->reset();
+    active_track_.reset();
     preparing_.reset();
     signal_retry_at_ = now_ms + 60000;
     return false;
@@ -423,6 +458,7 @@ void ReportOximetryArchive::withdraw(const ReportOximetryRecording &recording) {
     }
 
     if (signals_) signals_->reset();
+    active_track_.reset();
     preparing_.reset();
     published_ = std::move(revised);
     manifest_only_ = false;
@@ -469,6 +505,7 @@ void ReportOximetryArchive::add_file(const StorageScanEntryView &entry, std::str
     auto &r = metadata_;
     memcpy(r.source, source.data(), source.size());
     if (!r.csv_bytes) {
+        r.missing_csv_scan = generation_;
         // The importer uses SN, or the peer's twelve hex digits without an SN.
         // Only an explicit clock record can disambiguate a twelve-hex SN.
         if (source.size() != 12 || source.find_first_not_of("0123456789abcdefABCDEF") != source.npos)

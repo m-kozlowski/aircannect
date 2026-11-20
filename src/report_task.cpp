@@ -830,8 +830,6 @@ struct ReportTask::Runtime {
         if (change.oximetry.pending && change.oximetry.refresh_originals) {
             originals_dirty.store(true);
             pending_oximetry_change.merge(change.oximetry);
-            // Clock observations live outside a ring's day directory.
-            if (pending_oximetry_change.ring) pending_oximetry_change.directory_day[0] = 0;
         }
 
         if (change.valid()) {

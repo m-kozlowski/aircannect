@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -28,6 +29,7 @@ struct ReportOximetryRecording : OximetryCsv::Header {
     uint64_t csv_bytes = 0;
     int64_t csv_end_ms = 0;
     uint64_t modified = 0;
+    uint32_t missing_csv_scan = 0; // Last directory scan that did not see the derived CSV.
     bool listed = false;
     bool export_clock_known = false;
     char day[9]{};
@@ -39,6 +41,13 @@ struct ReportOximetryRecording : OximetryCsv::Header {
     std::string path() const;
     bool needs_tracks() const { return !planes && !invalid_tracks; }
     auto key() const { return std::make_pair(std::string_view(source), std::string_view(id)); }
+    bool same_samples(const ReportOximetryRecording &r) const {
+        return key() == r.key() && start_ms == r.start_ms && size() == r.size() &&
+               modified == r.modified;
+    }
+    bool same_track(const ReportOximetryRecording &r) const {
+        return same_samples(r) && noon_s == r.noon_s && next_noon_s == r.next_noon_s;
+    }
     uint64_t data_end() const { return csv_bytes ? csv_bytes : bin.offset(samples); }
     uint64_t size() const { return csv_bytes ? csv_bytes : data_end() + bin.footer(); }
     int64_t end_ms() const {
@@ -95,6 +104,8 @@ private:
     size_t signal_index_ = 0;
     uint32_t signal_retry_at_ = 0;
     std::shared_ptr<ReportOximetryCatalog> preparing_;
+    std::optional<ReportOximetryRecording> active_track_;
+    bool active_manifest_ = false;
     std::shared_ptr<const ReportOximetryCatalog> ring_sources_;
     std::shared_ptr<const ReportOximetryCatalog> originals_;
     ReportOximetryChange pending_{true, true}, scanning_;
