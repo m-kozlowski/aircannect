@@ -2077,6 +2077,9 @@ void loop() {
 
     publish_export_config();
 
+    if (Storage::take_oximetry_publication()) {
+        export_coordinator.rearm_idle_backfill(ExportEndpoint::Smb);
+    }
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx();
 

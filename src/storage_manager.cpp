@@ -1,5 +1,6 @@
 #include "storage_internal.h"
 
+#include <atomic>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -35,6 +36,7 @@ namespace {
 StorageStatus owner_status;
 StorageStatus published_status;
 bool initialized = false;
+std::atomic<bool> oximetry_published{false};
 PathChangeCallback path_change_callback = nullptr;
 ReadReleaseCallback read_release_callback = nullptr;
 
@@ -539,6 +541,11 @@ bool rmdir(const char *path) {
     return !fs->exists(path);
 }
 
+bool take_oximetry_publication() {
+    return oximetry_published.load(std::memory_order_relaxed) &&
+           oximetry_published.exchange(false, std::memory_order_relaxed);
+}
+
 bool rename(const char *from, const char *to) {
     if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
@@ -551,8 +558,9 @@ bool rename(const char *from, const char *to) {
     // Advance the source/day revision durably before exposing a final recording.
     // Its length is visible in a shallow listing, even on FAT with coarse mtimes.
     std::string_view source, suffix, id;
-    if (oximetry_archive_path(to, source, suffix) &&
-        oximetry_recording_file(source, suffix, id) != OximetryArchiveFile::Other) {
+    const bool recording = oximetry_archive_path(to, source, suffix) &&
+        oximetry_recording_file(source, suffix, id) != OximetryArchiveFile::Other;
+    if (recording) {
         char revision[AC_STORAGE_PATH_MAX];
         snprintf(revision, sizeof(revision), "%.*s%s", int(suffix.data() - to + 8),
                  to, OximetryDayRevisionSuffix);
@@ -567,6 +575,7 @@ bool rename(const char *from, const char *to) {
         return false;
     }
 
+    if (recording) oximetry_published.store(true, std::memory_order_relaxed);
     if (path_change_callback) {
         path_change_callback(from);
         path_change_callback(to);

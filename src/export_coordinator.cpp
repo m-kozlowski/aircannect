@@ -171,7 +171,7 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
         !activity.ota_install_active;
 
     if (startup_idle) queue_startup_checks(status);
-    poll_startup_backfill(report, activity, status, now_ms);
+    poll_idle_backfill(report, activity, status, now_ms);
 }
 
 void ExportCoordinator::poll_manual_sync(const ExportTaskControlSnapshot &status) {
@@ -342,20 +342,26 @@ void ExportCoordinator::queue_startup_checks(const ExportTaskControlSnapshot &st
     }
 }
 
-void ExportCoordinator::poll_startup_backfill(
+void ExportCoordinator::rearm_idle_backfill(ExportEndpoint id) {
+    schedule(id).backfill_queued_generation = 0;
+    if (status_snapshot_.endpoint(id).configured) idle_backfill_due_ms_ = 0;
+}
+
+void ExportCoordinator::poll_idle_backfill(
     const ExportReportActivity &report, const ActivitySnapshot &activity,
     const ExportTaskControlSnapshot &status, uint32_t now_ms) {
     for (const auto id : status.order) {
         if (!status.endpoint(id).configured) schedule(id).backfill_queued_generation = 0;
         if (!check_settled(id, status)) {
-            startup_backfill_due_ms_ = 0;
+            idle_backfill_due_ms_ = 0;
             return;
         }
     }
 
     const bool busy = !status.network_ready || task_->endpoint_work_claimed() ||
         status.busy || report.foreground_active || report.background_active ||
-        activity.therapy_active || activity.realtime_stream_active || activity.ota_install_active;
+        activity.therapy_active || activity.realtime_stream_active || activity.ota_install_active ||
+        activity.edf_finalization_pending || post_therapy_pending();
 
     for (const auto id : status.order) {
         const auto &current = status.endpoint(id);
@@ -364,23 +370,23 @@ void ExportCoordinator::poll_startup_backfill(
             schedule(id).backfill_queued_generation != current.config_generation;
         if (!ready || busy) continue;
 
-        if (startup_backfill_due_ms_ == 0) {
-            startup_backfill_due_ms_ = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
+        if (idle_backfill_due_ms_ == 0) {
+            idle_backfill_due_ms_ = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
             return;
         }
-        if (static_cast<int32_t>(now_ms - startup_backfill_due_ms_) < 0) return;
+        if (static_cast<int32_t>(now_ms - idle_backfill_due_ms_) < 0) return;
 
         const ExportRequest work{id, ExportOperation::Sync, ExportReason::IdleBackfill};
         if (task_->request(work)) {
             record_request(work, current);
-            startup_backfill_due_ms_ = 0;
+            idle_backfill_due_ms_ = 0;
         }
         return;
     }
-    startup_backfill_due_ms_ = 0;
+    idle_backfill_due_ms_ = 0;
 }
 
-bool ExportCoordinator::startup_backfill_pending(const ExportTaskControlSnapshot &status) const {
+bool ExportCoordinator::idle_backfill_pending(const ExportTaskControlSnapshot &status) const {
     for (const auto id : status.order) {
         const auto &current = status.endpoint(id);
         if (current.configured && current.backfill_ready() &&
@@ -395,7 +401,7 @@ void ExportCoordinator::poll_maintenance(
     const ExportTaskControlSnapshot &status, uint32_t now_ms) {
     bool priority_work = !status.network_ready || report.foreground_active ||
         report.background_active || activity.therapy_active || activity.realtime_stream_active ||
-        activity.ota_install_active || post_therapy_pending() || startup_backfill_pending(status);
+        activity.ota_install_active || post_therapy_pending() || idle_backfill_pending(status);
 
     for (const auto id : status.order) {
         if (!check_settled(id, status)) priority_work = true;

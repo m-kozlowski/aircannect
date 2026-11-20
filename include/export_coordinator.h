@@ -39,6 +39,7 @@ public:
     // external requests
     bool request(const ExportRequest &request);
     bool request_sync();
+    void rearm_idle_backfill(ExportEndpoint endpoint);
 
 private:
     struct PostTherapyState {
@@ -90,12 +91,12 @@ private:
     bool check_settled(ExportEndpoint endpoint,
                        const ExportTaskControlSnapshot &status) const;
     void queue_startup_checks(const ExportTaskControlSnapshot &status);
-    void poll_startup_backfill(
+    void poll_idle_backfill(
         const ExportReportActivity &report,
         const ActivitySnapshot &activity,
         const ExportTaskControlSnapshot &task_status,
         uint32_t now_ms);
-    bool startup_backfill_pending(
+    bool idle_backfill_pending(
         const ExportTaskControlSnapshot &task_status) const;
 
     // manual all-endpoint sync
@@ -114,7 +115,7 @@ private:
     PostTherapyState post_therapy_;
     std::array<EndpointSchedule, AC_EXPORT_ENDPOINT_CAPACITY> endpoints_;
     bool startup_idle_grace_complete_ = false;
-    uint32_t startup_backfill_due_ms_ = 0;
+    uint32_t idle_backfill_due_ms_ = 0;
     ExportTaskControlSnapshot status_snapshot_;
 };
 
