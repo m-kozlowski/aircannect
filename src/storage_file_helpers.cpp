@@ -173,12 +173,12 @@ uint64_t file_modified(const char *path) {
         ? static_cast<uint64_t>(info.st_mtime) : 0;
 }
 
-WriteStagingBuffer::~WriteStagingBuffer() {
+DmaStagingBuffer::~DmaStagingBuffer() {
     reset();
 }
 
-uint8_t *WriteStagingBuffer::get(size_t write_size) {
-    if (!attempted_ && write_size >= 1024) {
+uint8_t *DmaStagingBuffer::get(size_t transfer_size) {
+    if (!attempted_ && transfer_size >= 1024) {
         attempted_ = true;
         data_ = static_cast<uint8_t *>(Memory::alloc_dma(Capacity));
     }
@@ -186,7 +186,7 @@ uint8_t *WriteStagingBuffer::get(size_t write_size) {
     return data_;
 }
 
-void WriteStagingBuffer::reset() {
+void DmaStagingBuffer::reset() {
     Memory::free(data_);
     data_ = nullptr;
     attempted_ = false;
@@ -196,7 +196,7 @@ namespace {
 
 template <typename Write, typename Span>
 size_t write_staged(Write write, Span span, size_t size,
-                    WriteStagingBuffer &staging) {
+                    DmaStagingBuffer &staging) {
     // S3 SDMMC otherwise bounces PSRAM data through one 512-byte DMA sector
     // per transaction. Keep stdio buffers small so they do not undo staging.
     uint8_t *dma = staging.get(size);
@@ -209,7 +209,7 @@ size_t write_staged(Write write, Span span, size_t size,
 
         size_t chunk = std::min(available, size - written);
         if (dma) {
-            chunk = std::min(WriteStagingBuffer::Capacity, size - written);
+            chunk = std::min(DmaStagingBuffer::Capacity, size - written);
             size_t copied = 0;
             while (copied < chunk) {
                 data = span(written + copied, available);
@@ -232,7 +232,7 @@ size_t write_staged(Write write, Span span, size_t size,
 }  // namespace
 
 size_t write_buffer(File &file, const uint8_t *data, size_t size,
-                    WriteStagingBuffer &staging) {
+                    DmaStagingBuffer &staging) {
     return write_staged([&file](const uint8_t *bytes, size_t count) {
         return file.write(bytes, count);
     }, [data, size](size_t offset, size_t &available) {
@@ -242,7 +242,7 @@ size_t write_buffer(File &file, const uint8_t *data, size_t size,
 }
 
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
-                     size_t offset, size_t size, WriteStagingBuffer &staging) {
+                     size_t offset, size_t size, DmaStagingBuffer &staging) {
     release_read_handle(command.path.c_str());
 
     return write_staged([descriptor, &command](const uint8_t *bytes, size_t count) {

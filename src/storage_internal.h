@@ -50,16 +50,16 @@ bool release_write_handles();
 void release_write_handle(const char *path);
 bool finish_write_handles();
 
-// Owned by one write operation, including all of its bounded worker turns.
-class WriteStagingBuffer {
+// Owned by the open reader or active write, not reserved while idle.
+class DmaStagingBuffer {
 public:
     static constexpr size_t Capacity = 4096;
-    WriteStagingBuffer() = default;
-    ~WriteStagingBuffer();
-    WriteStagingBuffer(const WriteStagingBuffer &) = delete;
-    WriteStagingBuffer &operator=(const WriteStagingBuffer &) = delete;
+    DmaStagingBuffer() = default;
+    ~DmaStagingBuffer();
+    DmaStagingBuffer(const DmaStagingBuffer &) = delete;
+    DmaStagingBuffer &operator=(const DmaStagingBuffer &) = delete;
 
-    uint8_t *get(size_t write_size);
+    uint8_t *get(size_t transfer_size);
     void reset();
 
 private:
@@ -68,7 +68,7 @@ private:
 };
 
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
-                     size_t offset, size_t size, WriteStagingBuffer &staging);
+                     size_t offset, size_t size, DmaStagingBuffer &staging);
 
 // Storage-task file preparation and post-close metadata
 enum class ParentDirectoryStep : uint8_t { More, Done, Failed };
@@ -83,7 +83,7 @@ bool ensure_parent_directories(const char *path);
 uint64_t file_modified(const char *path);
 
 size_t write_buffer(File &file, const uint8_t *data, size_t size,
-                    WriteStagingBuffer &staging);
+                    DmaStagingBuffer &staging);
 
 // Storage owner only. Arduino's void flush() hides fflush/fsync failures.
 bool flush_file(File &file);

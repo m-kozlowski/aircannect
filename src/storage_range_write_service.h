@@ -41,7 +41,7 @@ private:
         StorageRangeWriteCommand command;
         OperationTicket ticket;
         int output = -1;
-        Storage::WriteStagingBuffer staging;
+        Storage::DmaStagingBuffer staging;
         size_t written = 0;
         Storage::ParentDirectoryCursor parent_cursor;
         Phase phase = Phase::Open;

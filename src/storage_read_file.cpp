@@ -14,8 +14,9 @@ StorageReadFile::~StorageReadFile() {
 }
 
 bool StorageReadFile::open(const char *path, uint32_t generation,
-                           size_t whole_file_limit) {
+                           size_t whole_file_limit, bool dma_buffered) {
     if (file_ && generation_ == generation && strcmp(path_, path) == 0 &&
+        dma_requested_ == dma_buffered &&
         (has_modified_ || (whole_file_limit && size <= whole_file_limit))) {
         return true;
     }
@@ -54,8 +55,14 @@ bool StorageReadFile::open(const char *path, uint32_t generation,
         return false;
     }
 
-    // Match Arduino's SD stdio buffering without its stat-before-open lookup.
-    if (opened_stat.st_blksize == 0) setvbuf(file_, nullptr, _IOFBF, 4096);
+    // fread fills the stdio buffer before copying to the caller's PSRAM.
+    // Give FAT a multi-sector DMA destination during sequential report reads.
+    dma_requested_ = dma_buffered;
+    char *dma = dma_buffered ? reinterpret_cast<char *>(staging_.get(staging_.Capacity)) : nullptr;
+    if (!dma || setvbuf(file_, dma, _IOFBF, staging_.Capacity) != 0) {
+        if (opened_stat.st_blksize == 0) setvbuf(file_, nullptr, _IOFBF, 4096);
+    }
+
     copy_cstr(path_, sizeof(path_), path);
     generation_ = generation;
     has_modified_ = needs_modified;
@@ -99,6 +106,8 @@ bool StorageReadFile::close(const char *path) {
         Storage::log_io_error("close", path_, errno);
     }
     file_ = nullptr;
+    staging_.reset();
+    dma_requested_ = false;
     path_[0] = '\0';
     position = size = modified = 0;
     generation_ = 0;
