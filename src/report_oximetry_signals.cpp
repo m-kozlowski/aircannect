@@ -97,6 +97,8 @@ struct ReportOximetrySignalBuilder::Work {
     size_t slots = 0, channel = 0, read_offset = 0;
     std::array<std::shared_ptr<LargeByteBuffer>,4> planes;
     std::vector<BlockStatistics,LargeAllocator<BlockStatistics>> blocks;
+    // BLE measurements present in each UTC second, independent per channel.
+    std::vector<uint8_t,LargeAllocator<uint8_t>> coverage;
     Counts block_counts[4], total_counts[4];
     size_t current_block = SIZE_MAX;
     std::unique_ptr<LargeByteBuffer> raw, histograms;
@@ -187,6 +189,11 @@ struct ReportOximetrySignalBuilder::Work {
             if (c == 3) memcpy(p + 12, &v, sizeof(v));
             else put_le16(p + 4 + 2*c, static_cast<int16_t>(v));
             if (v < 0) continue;
+            if (record->csv_bytes && !strncmp(record->source, "ble-", 4)) {
+                const size_t second = (start - first_block) / 1000;
+                if (second >= coverage.size()) coverage.resize(second + 1);
+                coverage[second] |= uint8_t(1u << c);
+            }
             const auto weight = s.duration_ms ? uint32_t(end - start) : 1;
             block_counts[c][v] += weight;
             total_counts[c][v] += weight;
@@ -230,6 +237,29 @@ struct ReportOximetrySignalBuilder::Work {
             entry.add(b.first); entry.add(b.rows); entry.add(b.start); entry.add(b.end);
             entry.add(b.histogram_offset);
             entry.add(b.histogram_size);
+        }
+        if (!coverage.empty()) {
+            // Usually the same few channels cover an entire recording. Store
+            // runs as [end second (exclusive), mask]; bound noisy input by
+            // using one hex digit per second if runs would cost more.
+            size_t runs = 1;
+            for (size_t i = 1; i < coverage.size(); ++i)
+                if (coverage[i] != coverage[i - 1]) ++runs;
+            if (runs * 10 < coverage.size()) {
+                auto ranges = doc["coverage"].to<JsonArray>();
+                for (size_t i = 1; i <= coverage.size(); ++i) {
+                    if (i < coverage.size() && coverage[i] == coverage[i - 1]) continue;
+                    ranges.add(i);
+                    ranges.add(coverage[i - 1]);
+                }
+            } else {
+                auto masks = LargeByteBuffer::allocate(coverage.size() + 1);
+                if (!masks) return {};
+                for (size_t i = 0; i < coverage.size(); ++i)
+                    masks->data()[i] = "0123456789abcdef"[coverage[i]];
+                masks->data()[coverage.size()] = 0;
+                doc["coverage"] = reinterpret_cast<char *>(masks->data());
+            }
         }
         if (doc.overflowed()) return {};
         auto bytes = LargeByteBuffer::allocate(measureJson(doc));

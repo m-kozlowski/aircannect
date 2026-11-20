@@ -50,6 +50,8 @@ uint64_t catalog_identity(const NightCatalog &catalog,
     if (oximetry) for (const auto &r : *oximetry) {
         for (const char *c = r.source; *c; ++c) mix(*c);
         for (const char *c = r.id; *c; ++c) mix(*c);
+        for (const char *c = r.peer; *c; ++c) mix(*c);
+        for (const char *c = r.serial; *c; ++c) mix(*c);
         mix(r.start_ms); mix(r.end_ms()); mix(r.size()); mix(r.interval_s); mix(r.modified);
         mix(r.noon_s); mix(r.next_noon_s);
         mix(r.planes ? r.planes->index_bytes : 0);
@@ -66,7 +68,7 @@ bool format_catalog_etag(const NightCatalog &catalog,
     const int written = snprintf(
         out,
         out_size,
-        "\"catalog-v2-%08lx-%016llx\"",
+        "\"catalog-v3-%08lx-%016llx\"",
         static_cast<unsigned long>(generation),
         static_cast<unsigned long long>(catalog_identity(catalog, store, oximetry)));
     return written > 0 && static_cast<size_t>(written) < out_size;
@@ -293,11 +295,14 @@ bool ReportCatalogJsonReader::prepare_fragment() {
             case Phase::Recordings:
                 if (recording_index_ < publication_->oximetry->size()) {
                     const auto &r = (*publication_->oximetry)[recording_index_++];
-                    return format_fragment("%s{\"source\":\"%s\",\"id\":\"%s\",\"start\":%lld,"
-                        "\"end\":%lld,\"csv_bytes\":%llu,\"step\":%u,\"count\":%u,\"modified\":%llu,\"day\":\"%s\","
+                    char ble[17]{};
+                    const bool known_peer = oximetry_ble_source(r.peer, ble);
+                    return format_fragment("%s{\"source\":\"%s\",\"peer\":\"%s\",\"serial\":\"%s\",\"id\":\"%s\",\"start\":%lld,"
+                        "\"end\":%lld,\"size\":%llu,\"csv_bytes\":%llu,\"step\":%u,\"count\":%u,\"modified\":%llu,\"day\":\"%s\","
                         "\"noon\":%lld,\"next_noon\":%lld,\"channels\":%u}",
-                        recording_index_ == 1 ? "" : ",", r.source, r.id,
+                        recording_index_ == 1 ? "" : ",", r.source, known_peer ? ble : "", r.serial, r.id,
                         static_cast<long long>(r.start_ms), static_cast<long long>(r.end_ms()),
+                        static_cast<unsigned long long>(r.size()),
                         static_cast<unsigned long long>(r.csv_bytes), r.interval_s * 1000, r.samples,
                         static_cast<unsigned long long>(r.modified), r.day,
                         static_cast<long long>(r.noon_s * 1000),

@@ -42,7 +42,7 @@ private:
         Done,
     };
 
-    static constexpr size_t ScratchBytes = 320;
+    static constexpr size_t ScratchBytes = 416;
 
     bool prepare_fragment();
     bool format_fragment(const char *format, ...);
