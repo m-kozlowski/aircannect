@@ -6,40 +6,66 @@
 #include "utc_time.h"
 
 namespace aircannect::OximetryCsv {
+namespace {
+enum class Format { Unknown, Legacy, V2 };
 
-bool parse_header(std::string_view prefix, std::string_view source, std::string_view id,
+Format read_header(std::string_view &prefix, std::string_view source, std::string_view id,
                    Header &r) {
     const auto eol = prefix.find("\r\n");
-    if (eol == prefix.npos) return false;
+    if (eol == prefix.npos) return Format::Unknown;
     auto row = prefix.substr(0, eol);
+    prefix.remove_prefix(eol + 2);
 
     auto take = [&](std::string_view token) {
         if (row.substr(0, token.size()) != token) return false;
         row.remove_prefix(token.size());
         return true;
     };
-    if (!take("# Source=") || !take(source) || !take("/") || !take(id)) return false;
-    if (id.substr(0, 5) == "live-" && !take(".csv")) return false;
-    if (!take(" Version=2 OffsetMinutes=")) return false;
+    if (!take("# Source=") || !take(source) || !take("/") || !take(id)) return Format::Unknown;
+    if (id.substr(0, 5) == "live-" && !take(".csv")) return Format::Unknown;
+    if (row.empty()) return Format::Legacy;
+    if (!take(" Version=2 OffsetMinutes=")) return Format::Unknown;
 
     int offset;
     const auto number = std::from_chars(row.data(), row.data() + row.size(), offset);
-    if (number.ec != std::errc{} || offset < -1440 || offset > 1440) return false;
+    if (number.ec != std::errc{} || offset < -1440 || offset > 1440) return Format::Unknown;
     row.remove_prefix(number.ptr - row.data());
-    if (!take(" BLE=")) return false;
+    if (!take(" BLE=")) return Format::Unknown;
     const auto sn = row.find(" SN=");
-    if (sn == row.npos || sn >= sizeof(r.peer)) return false;
+    if (sn == row.npos || sn >= sizeof(r.peer)) return Format::Unknown;
     const auto peer = row.substr(0, sn);
     auto serial = row.substr(sn + 4);
     serial = serial.substr(0, serial.find_last_not_of(' ') + 1);
-    if (!serial.empty() && !oximetry_source_valid(serial)) return false;
+    if (!serial.empty() && !oximetry_source_valid(serial)) return Format::Unknown;
 
     memcpy(r.peer, peer.data(), peer.size());
     r.peer[peer.size()] = 0;
     memcpy(r.serial, serial.data(), serial.size());
     r.serial[serial.size()] = 0;
     r.offset_minutes = offset;
-    return true;
+    return Format::V2;
+}
+}  // namespace
+
+bool parse_header(std::string_view prefix, std::string_view source, std::string_view id, Header &r) {
+    return read_header(prefix, source, id, r) == Format::V2;
+}
+
+RingCsvStatus check_ring_csv(std::string_view prefix, std::string_view source, std::string_view id,
+                             int32_t offset_minutes, std::string_view first_row) {
+    Header stored;
+    const auto format = read_header(prefix, source, id, stored);
+    constexpr std::string_view columns = Columns;
+    if (format == Format::Unknown || prefix.substr(0, columns.size()) != columns)
+        return RingCsvStatus::Unrecognized;
+
+    // Peer and serial describe the ring at publication; neither changes its samples.
+    prefix.remove_prefix(columns.size());
+    if (format == Format::V2 && stored.offset_minutes == offset_minutes &&
+        prefix.substr(0, first_row.size()) == first_row)
+        return RingCsvStatus::Current;
+
+    return RingCsvStatus::Rebuild;
 }
 
 size_t format_header(char (&out)[MaxHeader], const char *source, const char *id,

@@ -76,6 +76,9 @@ struct Header {
     int32_t offset_minutes = 0;
 };
 bool parse_header(std::string_view prefix, std::string_view source, std::string_view id, Header &out);
+enum class RingCsvStatus { Current, Rebuild, Unrecognized };
+RingCsvStatus check_ring_csv(std::string_view prefix, std::string_view source, std::string_view id,
+                             int32_t offset_minutes, std::string_view first_row);
 inline constexpr char Columns[] =
     "Time,Oxygen Level,Pulse Rate,Motion,O2 Reminder,PR Reminder,UTC,PI\r\n";
 inline constexpr size_t MaxRow = 112;

@@ -126,22 +126,19 @@ bool step(uint32_t now) {
             // A later clock observation can change the first timestamp. Never
             // replace an unrelated file delivered by a user over USB.
             char first[MaxHeader + MaxRow];
-            if (used > sizeof(first)) return retry(now, "CSV prefix too long");
             const int csv = Storage::open_descriptor(final.c_str(), O_RDONLY);
             if (csv < 0) return retry(now, "CSV open failed");
-            const ssize_t got = read(csv, first, used);
-            if (Storage::close_descriptor(final.c_str(), csv) != 0 || got < 0)
+            const auto wanted = std::min<off_t>(sizeof(first), info.st_size);
+            const ssize_t got = read(csv, first, wanted);
+            if (Storage::close_descriptor(final.c_str(), csv) != 0 || got < 0 || got != wanted)
                 return retry(now, "CSV read failed");
-            if (size_t(got) == used && !memcmp(first, chunk->data(), used)) {
-                next();
-                return true;
-            }
-            const std::string identity = std::string("# Source=") + r.source + "/" + r.id;
-            const std::string_view existing(first, got);
-            if (existing.substr(0, identity.size()) != identity ||
-                (existing.substr(identity.size(), 12) != " Version=2 O" &&
-                 existing.substr(identity.size(), sizeof(Columns)+1) != std::string("\r\n") + Columns)) {
-                Log::logf(CAT_OXI, LOG_WARN, "ring CSV name occupied: %s\n", final.c_str());
+
+            const auto status = check_ring_csv({first, size_t(got)}, r.source, r.id,
+                                               r.offset_minutes, {row, n});
+
+            if (status != RingCsvStatus::Rebuild) {
+                if (status == RingCsvStatus::Unrecognized)
+                    Log::logf(CAT_OXI, LOG_WARN, "ring CSV name occupied: %s\n", final.c_str());
                 next();
                 return true;
             }
