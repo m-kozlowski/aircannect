@@ -13,6 +13,7 @@
 #include "debug_log.h"
 #include "string_util.h"
 #include "storage_path.h"
+#include "oximetry_archive.h"
 
 #if AC_STORAGE_SDMMC_ENABLED
 #include "soc/soc_caps.h"
@@ -546,6 +547,21 @@ bool rename(const char *from, const char *to) {
     release_read_handle(to);
     release_write_handles();
     if (!fs) return false;
+
+    // Advance the source/day revision durably before exposing a final recording.
+    // Its length is visible in a shallow listing, even on FAT with coarse mtimes.
+    std::string_view source, suffix, id;
+    if (oximetry_archive_path(to, source, suffix) &&
+        oximetry_recording_file(source, suffix, id) != OximetryArchiveFile::Other) {
+        char revision[AC_STORAGE_PATH_MAX];
+        snprintf(revision, sizeof(revision), "%.*s%s", int(suffix.data() - to + 8),
+                 to, OximetryDayRevisionSuffix);
+        const int fd = open_descriptor(revision, O_WRONLY | O_CREAT | O_APPEND);
+        if (fd < 0) return false;
+        const bool advanced = ::write(fd, "\n", 1) == 1 && ::fsync(fd) == 0;
+        if (close_descriptor(revision, fd) != 0 || !advanced) return false;
+    }
+
     if (!fs->rename(from, to)) {
         log_io_error("rename", from, errno);
         return false;

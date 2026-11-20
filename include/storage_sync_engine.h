@@ -269,6 +269,8 @@ private:
     bool queue_datalog_day_load_locked(const char *day,
                                        WorkPhase resume_phase);
     bool next_file_locked();
+    void reset_inventory_locked();
+    const char *inventory_state_dir() const;
     bool plan_file_locked(const StorageExportPlannerItem &item);
 
     // local state files
@@ -329,6 +331,10 @@ private:
     uint32_t completed_sequence_ = 0;
     // active run
     StorageExportInventorySession inventory_session_;
+    std::shared_ptr<const StorageExportInventory> source_catalog_;
+    size_t source_cursor_ = 0;
+    const char *oximetry_source_ = nullptr;
+    char source_state_dir_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
     StorageStreamPort *stream_port_ = nullptr;
     StorageExportPlanner export_planner_;
     StorageExportStateBatch state_batch_;

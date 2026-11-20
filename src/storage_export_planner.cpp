@@ -202,20 +202,10 @@ bool StorageExportPlanner::provide_datalog_day_inventory(
 
 StorageExportPlannerResult StorageExportPlanner::emit_datalog_day_complete(
     const char *day,
-    StorageExportPlannerItem &out,
-    char *error_out,
-    size_t error_out_size) const {
+    StorageExportPlannerItem &out) const {
     out = StorageExportPlannerItem();
     out.kind = StorageExportPlannerItemKind::DatalogDayComplete;
     copy_cstr(out.datalog_day, sizeof(out.datalog_day), day);
-    const int written = snprintf(out.path,
-                                 sizeof(out.path),
-                                 "/DATALOG/%s",
-                                 day ? day : "");
-    if (written <= 0 || static_cast<size_t>(written) >= sizeof(out.path)) {
-        set_error(error_out, error_out_size, "datalog_day_path");
-        return StorageExportPlannerResult::Error;
-    }
     return StorageExportPlannerResult::Item;
 }
 
@@ -287,10 +277,7 @@ StorageExportPlannerResult StorageExportPlanner::next_full_card(
             }
 
             day_complete_emitted_ = true;
-            return emit_datalog_day_complete(completed_day,
-                                             out,
-                                             error_out,
-                                             error_out_size);
+            return emit_datalog_day_complete(completed_day, out);
         }
 
         while (datalog_day_index_ < catalog_->datalog_day_count()) {
@@ -547,10 +534,7 @@ StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
         day_force_export_ = false;
         day_name_[0] = '\0';
         day_complete_emitted_ = true;
-        return emit_datalog_day_complete(completed_day,
-                                         out,
-                                         error_out,
-                                         error_out_size);
+        return emit_datalog_day_complete(completed_day, out);
     }
     return StorageExportPlannerResult::Yield;
 }

@@ -67,6 +67,8 @@ public:
     bool datalog_day_has_pending(const char *day) const override;
     const char *latest_datalog_day() const override;
     const char *state_dir() const override { return state_dir_; }
+    const char *next_oximetry_source(size_t &cursor) const;
+    uint64_t day_revision(const char *day) const;
 
 private:
     friend class StorageExportInventoryLoader;
@@ -75,6 +77,7 @@ private:
         char name[9] = {};
         uint32_t file_count = 0;
         uint32_t pending_count = 0;
+        uint64_t revision = 0;
         bool done = false;
     };
 
@@ -88,15 +91,16 @@ private:
         size_t export_root_count,
         size_t state_root_index,
         const char *state_dir,
-        uint64_t now_epoch);
+        uint64_t now_epoch, bool oximetry);
     static std::shared_ptr<StorageExportInventory> create_datalog_day(
         std::shared_ptr<const StorageScanSnapshot> scan,
         size_t state_root_index,
         size_t done_root_index,
         const char *state_dir,
-        const char *day);
+        const char *day, bool oximetry);
 
     bool build_sources();
+    bool source_file(const StorageScanEntryView &entry) const;
     bool build_catalog_days(uint64_t now_epoch);
     bool build_datalog_day(const char *day, size_t done_root_index);
     bool mark_complete(const char *state_path,
@@ -118,6 +122,7 @@ private:
     size_t state_root_index_ = 0;
     uint32_t generation_ = 0;
     StorageExportInventoryKind kind_ = StorageExportInventoryKind::Catalog;
+    bool oximetry_ = false;
     char loaded_datalog_day_[9] = {};
     char state_dir_[AC_STORAGE_PATH_MAX] = {};
 };
@@ -135,7 +140,9 @@ public:
     void begin(StorageScanPort &scan_port, StorageReadPort &read_port);
     OperationAdmission request(const char *state_dir,
                                uint32_t generation,
-                               uint64_t now_epoch = 0);
+                               uint64_t now_epoch = 0,
+                               const char *oximetry_source = nullptr,
+                               bool discover_oximetry = false);
     OperationAdmission request_datalog_day(const char *day,
                                            uint32_t generation);
     StorageExportInventoryLoadResult poll(char *error_out,
@@ -192,6 +199,8 @@ private:
     RequestKind request_kind_ = RequestKind::None;
     char state_dir_[AC_STORAGE_PATH_MAX] = {};
     char requested_day_[9] = {};
+    char daily_root_[AC_STORAGE_PATH_MAX] = {};
+    bool oximetry_ = false;
     char state_path_[AC_STORAGE_PATH_MAX] = {};
     char state_line_[AC_STORAGE_PATH_MAX + 96] = {};
     char error_[AC_STORAGE_ERROR_MAX] = {};

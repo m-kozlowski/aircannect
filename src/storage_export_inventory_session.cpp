@@ -30,10 +30,12 @@ void StorageExportInventorySession::advance_generation() {
 StorageExportInventoryLoadResult
 StorageExportInventorySession::poll_catalog(const char *state_dir,
                                             char *error_out,
-                                            size_t error_out_size) {
+                                            size_t error_out_size,
+                                            const char *oximetry_source,
+                                            bool discover_oximetry) {
     if (!catalog_requested_) {
         const OperationAdmission admission =
-            loader_.request(state_dir, next_generation_);
+            loader_.request(state_dir, next_generation_, 0, oximetry_source, discover_oximetry);
         if (admission == OperationAdmission::Busy) {
             return StorageExportInventoryLoadResult::Waiting;
         }

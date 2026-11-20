@@ -7,6 +7,7 @@
 
 #include "calendar_utils.h"
 #include "crc32.h"
+#include "oximetry_archive.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -234,7 +235,13 @@ bool storage_export_build_state_path(const char *state_dir,
 
     StorageExportStateWriteMode mode = StorageExportStateWriteMode::Replace;
     char bucket[AC_STORAGE_NAME_MAX] = {};
-    if (storage_export_path_starts_with(local_path,
+    std::string_view source, suffix;
+    if (oximetry_archive_path(local_path, source, suffix) && suffix.size() >= 8 &&
+        (suffix.size() == 8 || suffix[8] == '/')) {
+        memcpy(bucket, suffix.data(), 8);
+        if (!storage_export_is_datalog_day_name(bucket)) return false;
+        mode = StorageExportStateWriteMode::Append;
+    } else if (storage_export_path_starts_with(local_path,
                                         AC_STORAGE_EXPORT_DATALOG_PREFIX)) {
         const char *day =
             local_path + strlen(AC_STORAGE_EXPORT_DATALOG_PREFIX);

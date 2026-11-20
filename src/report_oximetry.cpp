@@ -18,29 +18,12 @@ namespace {
 // All paths in a snapshot come from the storage owner. Only accept the
 // importer's final layout: temporary files and unrelated USB files are not inputs.
 bool archive_name(const char *path, bool clock, std::string_view &source, std::string_view &id) {
-    const std::string_view full(path);
-    constexpr size_t prefix = sizeof(OximetryArchiveRoot);
-    if (full.size() <= prefix || full.substr(0, prefix - 1) != OximetryArchiveRoot ||
-        full[prefix - 1] != '/') return false;
-    const auto rest = full.substr(prefix);
-    const auto slash = rest.find('/');
-    if (slash == rest.npos || !oximetry_source_valid(source = rest.substr(0, slash))) return false;
-    const auto suffix = rest.substr(slash + 1);
+    std::string_view suffix;
+    if (!oximetry_archive_path(path, source, suffix)) return false;
     if (clock) return suffix.size() > 16 && suffix.substr(0, 6) == "clock/" &&
                       suffix.substr(suffix.size() - 5) == ".json";
-    if (suffix.size() == 49 && suffix.substr(8, 6) == "/live-" &&
-        suffix.substr(45) == ".csv") {
-        id = suffix.substr(9, 36);
-        return (source == "udp" || (source.size() == 16 && source.substr(0, 4) == "ble-" &&
-                source.substr(4).find_first_not_of("0123456789abcdef") == source.npos)) &&
-            id.substr(5, 8) == suffix.substr(0, 8) && id[13] == '-' && id[27] == '-' &&
-            id.substr(5, 8).find_first_not_of("0123456789") == id.npos &&
-            id.substr(14, 13).find_first_not_of("0123456789") == id.npos &&
-            id.substr(28).find_first_not_of("0123456789abcdef") == id.npos;
-    }
-    if (suffix.size() != 27 || suffix[8] != '/' || suffix.substr(23) != ".bin") return false;
-    id = suffix.substr(9, 14);
-    return id.substr(0, 8) == suffix.substr(0, 8) && id.find_first_not_of("0123456789") == id.npos;
+    const auto kind = oximetry_recording_file(source, suffix, id);
+    return kind == OximetryArchiveFile::LiveCsv || kind == OximetryArchiveFile::RingBin;
 }
 
 uint32_t little32(const uint8_t *p) {

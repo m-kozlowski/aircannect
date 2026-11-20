@@ -9,6 +9,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "oximetry_archive.h"
 #include "runtime_clock.h"
 #include "storage_export_plan.h"
 #include "storage_service.h"
@@ -167,9 +168,20 @@ bool StorageSyncEngine::release_media() {
     return true;
 }
 
+void StorageSyncEngine::reset_inventory_locked() {
+    inventory_session_.reset();
+    source_catalog_.reset();
+    source_cursor_ = 0;
+    oximetry_source_ = nullptr;
+}
+
+const char *StorageSyncEngine::inventory_state_dir() const {
+    return oximetry_source_ ? source_state_dir_ : state_dir_;
+}
+
 void StorageSyncEngine::reset_run_locked(bool keep_status) {
     close_local_locked();
-    inventory_session_.reset();
+    reset_inventory_locked();
     export_planner_.reset();
     state_batch_.clear();
     state_io_.reset();
@@ -685,7 +697,8 @@ void StorageSyncEngine::finish_metadata_load_locked() {
 ExportStep StorageSyncEngine::step_load_inventory_locked() {
     char error[AC_STORAGE_ERROR_MAX] = {};
     const StorageExportInventoryLoadResult result =
-        inventory_session_.poll_catalog(state_dir_, error, sizeof(error));
+        inventory_session_.poll_catalog(inventory_state_dir(), error, sizeof(error),
+                                        oximetry_source_, !oximetry_source_);
     if (result == StorageExportInventoryLoadResult::Waiting) {
         return ExportStep::Waiting;
     }
@@ -700,7 +713,8 @@ ExportStep StorageSyncEngine::step_load_inventory_locked() {
         return ExportStep::Idle;
     }
 
-    phase_ = WorkPhase::ResolveHost;
+    if (!oximetry_source_) source_catalog_ = inventory_session_.catalog();
+    phase_ = oximetry_source_ ? WorkPhase::NextFile : WorkPhase::ResolveHost;
     return ExportStep::Working;
 }
 
@@ -965,8 +979,21 @@ bool StorageSyncEngine::next_file_locked() {
             fail_locked("unexpected_planner_decision");
             return false;
         case StorageExportPlannerResult::Done:
-            phase_ = !state_batch_.empty() ? WorkPhase::FlushState
-                                           : WorkPhase::Finish;
+            if (!state_batch_.empty()) {
+                phase_ = WorkPhase::FlushState;
+            } else if (source_catalog_ && (oximetry_source_ = source_catalog_->next_oximetry_source(source_cursor_))) {
+                const int n = snprintf(source_state_dir_, sizeof(source_state_dir_), "%s/ox/%s",
+                                       state_dir_, oximetry_source_);
+                if (n < 0 || size_t(n) >= sizeof(source_state_dir_)) {
+                    fail_locked("state_path_too_long");
+                    return false;
+                }
+                inventory_session_.reset();
+                export_planner_.reset();
+                phase_ = WorkPhase::LoadInventory;
+            } else {
+                phase_ = WorkPhase::Finish;
+            }
             return true;
         case StorageExportPlannerResult::Error:
             fail_locked(error[0] ? error : "planner_failed");
@@ -985,7 +1012,7 @@ bool StorageSyncEngine::begin_export_planner_locked(char *error_out,
 
     StorageExportPlannerConfig config;
     config.scope = StorageExportPlannerScope::FullCard;
-    config.state_dir = state_dir_;
+    config.state_dir = inventory_state_dir();
     config.now_epoch = storage_export_current_epoch_seconds_or_zero();
     config.skip_completed_finalized_datalog_days =
         !run_kind_is_reconcile(current_run_kind_);
@@ -1063,7 +1090,7 @@ bool StorageSyncEngine::prepare_state_file_locked() {
     const char *state_path = state_batch_.first_state_path();
     if (!state_path || !state_path[0]) return false;
     const StorageExportInventoryView *inventory =
-        inventory_session_.inventory_for_state_path(state_dir_, state_path);
+        inventory_session_.inventory_for_state_path(inventory_state_dir(), state_path);
     if (!inventory) return false;
 
     copy_cstr(pending_state_path_, sizeof(pending_state_path_), state_path);
@@ -1074,16 +1101,19 @@ bool StorageSyncEngine::prepare_state_file_locked() {
 bool StorageSyncEngine::prepare_done_marker_locked() {
     if (pending_state_bytes_) return pending_state_path_[0] != '\0';
     if (!pending_done_day_[0] ||
-        !storage_export_build_done_path(state_dir_,
+        !storage_export_build_done_path(inventory_state_dir(),
                                         pending_done_day_,
                                         pending_state_path_,
                                         sizeof(pending_state_path_))) {
         return false;
     }
 
-    static constexpr char DONE_MARKER[] = "done\n";
-    pending_state_bytes_ = LargeByteBuffer::copy_and_freeze(
-        DONE_MARKER, sizeof(DONE_MARKER) - 1);
+    char marker[24] = "done\n";
+    if (oximetry_source_) {
+        const auto revision = inventory_session_.catalog()->day_revision(pending_done_day_);
+        snprintf(marker, sizeof(marker), "%llu\n", static_cast<unsigned long long>(revision));
+    }
+    pending_state_bytes_ = LargeByteBuffer::copy_and_freeze(marker, strlen(marker));
     return pending_state_bytes_ != nullptr;
 }
 
@@ -1143,6 +1173,11 @@ bool StorageSyncEngine::plan_file_locked(const StorageExportPlannerItem &item) {
             return true;
         }
     }
+    char archive_path[AC_STORAGE_PATH_MAX];
+    if (oximetry_source_) {
+        snprintf(archive_path, sizeof(archive_path), "/Oximetry%s", path + strlen(OximetryArchiveRoot));
+        path = archive_path;
+    }
     if (!smb_.make_remote_path(path,
                                current_file_.remote_path,
                                sizeof(current_file_.remote_path)) ||
@@ -1172,7 +1207,7 @@ void StorageSyncEngine::clear_current_file_locked() {
 
 void StorageSyncEngine::finish_run_locked() {
     export_planner_.reset();
-    inventory_session_.reset();
+    reset_inventory_locked();
     release_upload_buffer_locked();
     smb_configured_ = false;
     state_io_.reset();
@@ -1327,7 +1362,7 @@ void StorageSyncEngine::fail_locked(const char *error) {
         current_run_verify && !current_run_reconcile;
     close_local_locked();
     export_planner_.reset();
-    inventory_session_.reset();
+    reset_inventory_locked();
     smb_.abort_connection();
     smb_configured_ = false;
     release_upload_buffer_locked();
@@ -1621,9 +1656,9 @@ ExportStep StorageSyncEngine::step_flush_state_locked() {
         fail_locked("state_path_missing");
         return ExportStep::Idle;
     }
-    if (!inventory_session_.inventory_for_state_path(state_dir_, state_path)) {
+    if (!inventory_session_.inventory_for_state_path(inventory_state_dir(), state_path)) {
         char day[9] = {};
-        if (!storage_export_state_path_datalog_day(state_dir_,
+        if (!storage_export_state_path_datalog_day(inventory_state_dir(),
                                                    state_path,
                                                    day,
                                                    sizeof(day)) ||
@@ -1668,10 +1703,12 @@ ExportStep StorageSyncEngine::step_write_done_marker_locked() {
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
-        Log::logf(CAT_EXPORT,
-                  LOG_INFO,
-                  "[SMB] DATALOG day complete day=%s\n",
-                  pending_done_day_);
+        if (oximetry_source_) {
+            Log::logf(CAT_EXPORT, LOG_DEBUG, "[SMB] day complete source=%s day=%s\n",
+                      oximetry_source_, pending_done_day_);
+        } else {
+            Log::logf(CAT_EXPORT, LOG_INFO, "[SMB] DATALOG day complete day=%s\n", pending_done_day_);
+        }
         pending_done_day_[0] = '\0';
         pending_state_path_[0] = '\0';
         pending_state_bytes_.reset();
