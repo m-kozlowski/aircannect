@@ -141,11 +141,12 @@ bool step(uint32_t now) {
 
     const uint8_t *records = sample ? input->data() + input_pos * stride : first;
     const size_t count = std::min(Count, input_end - input_pos);
+    RingRows rows(r.start_ms + int64_t(sample) * r.interval_s * 1000, r.offset_minutes, r.interval_s);
+
     for (size_t i = 0; i < count; ++i) {
         const auto value = r.bin.decode(records + i * r.bin.stride());
         char row[MaxRow];
-        const size_t n = format_row(row, r.start_ms + int64_t(sample + i) * r.interval_s * 1000,
-                                    r.offset_minutes, value.oxygen, value.pulse, value.motion, -1);
+        const size_t n = rows.next(row, value.oxygen, value.pulse, value.motion);
         if (!n) return retry(now, "invalid row");
 
         if (!sample && !i) {

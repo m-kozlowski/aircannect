@@ -87,6 +87,20 @@ size_t format_header(char (&out)[MaxHeader], const char *source, const char *id,
                      int32_t offset_minutes, const char *peer, const char *serial);
 size_t format_row(char (&out)[MaxRow], int64_t utc_ms, int32_t offset_minutes, int oxygen, int pulse,
                   int motion, float pi_percent);
+
+// One contiguous batch of vendor samples, at whole-second intervals.
+class RingRows {
+public:
+    RingRows(int64_t first_ms, int32_t offset_minutes, uint32_t interval_s)
+        : utc_ms_(first_ms), offset_minutes_(offset_minutes), interval_s_(interval_s) {}
+    size_t next(char (&out)[MaxRow], int oxygen, int pulse, int motion);
+
+private:
+    int64_t utc_ms_;
+    int32_t offset_minutes_;
+    uint32_t interval_s_, second_ = 60;
+    char time_[32], utc_[32];
+};
 }
 
 }  // namespace aircannect
