@@ -312,7 +312,8 @@ struct ReportTask::Runtime {
 
     OperationAdmission enqueue(
         ReportTaskCommand command,
-        std::shared_ptr<const ReportPeriodResult> *period_ready = nullptr) {
+        std::shared_ptr<const ReportPeriodResult> *period_ready = nullptr,
+        bool retry_failed = false) {
         if (!lock()) return OperationAdmission::Busy;
         if (storage_suspend_requested.load()) {
             unlock();
@@ -344,6 +345,7 @@ struct ReportTask::Runtime {
             }
         }
 
+        std::shared_ptr<const ReportPeriodResult> *retry_slot = nullptr;
         if (command.kind == ReportTaskCommandKind::Period) {
             const ReportPeriodKey key{command.sleep_day, command.period_days, command.period_sessions,
                 command.period_source_revision, command.period_generation};
@@ -357,8 +359,12 @@ struct ReportTask::Runtime {
                     key, *published->catalog, published->store_catalog.get(),
                     issues.get());
 
-                for (const auto &cached : period_cache) {
+                for (auto &cached : period_cache) {
                     if (cached && cached->key == key && cached->revision == revision) {
+                        if (retry_failed && cached->error[0]) {
+                            retry_slot = &cached;
+                            break;
+                        }
                         if (period_ready) *period_ready = cached;
                         unlock();
                         return OperationAdmission::Accepted;
@@ -427,6 +433,7 @@ struct ReportTask::Runtime {
             unlock();
             return OperationAdmission::Busy;
         }
+        if (retry_slot) retry_slot->reset();
 
         if (command.kind == ReportTaskCommandKind::Rebuild) {
             RebuildSelection selected;
@@ -2847,7 +2854,11 @@ struct ReportTask::Runtime {
         published_operational = next_operational;
         published_diagnostic = next_diagnostic;
         published_date_preview = date_repair.preview();
-        published_completion = engine_status.last_completion;
+        const auto &night = engine_status.last_completion;
+        if (night.valid() && night.request.ticket != published_completion.request.ticket) {
+            completion_serial = increment_generation(completion_serial);
+        }
+        published_completion = night;
         unlock();
     }
 
@@ -2869,7 +2880,6 @@ struct ReportTask::Runtime {
             period_running = false;
             period_key = {};
             for (auto &cached : period_cache) cached.reset();
-            period_latest.reset();
             period_completed.reset();
             for (auto &failure : failures) failure = {};
             for (auto &failure : metadata_failures) failure = {};
@@ -3014,9 +3024,7 @@ struct ReportTask::Runtime {
     ReportPeriodKey period_key;
     bool period_running = false;
     std::shared_ptr<const ReportPeriodResult> period_cache[5];
-    std::shared_ptr<const ReportPeriodResult> period_latest;
     std::shared_ptr<const ReportPeriodResult> period_completed;
-    uint32_t period_serial = 0;
     size_t period_cache_cursor = 0;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
@@ -3159,6 +3167,7 @@ struct ReportTask::Runtime {
     ReportTaskOperationalSnapshot published_operational;
     ReportTaskDiagnosticSnapshot published_diagnostic;
     ReportEngineCompletion published_completion;
+    uint32_t completion_serial = 0;
 
 #ifdef ARDUINO
     mutable SemaphoreHandle_t mutex = nullptr;
@@ -3349,7 +3358,7 @@ ReportRebuildStatus ReportTask::rebuild_status() const {
 
 OperationAdmission ReportTask::request_period(
     ReportPeriodKey key,
-    std::shared_ptr<const ReportPeriodResult> *ready) {
+    std::shared_ptr<const ReportPeriodResult> *ready, bool retry_failed) {
     if (ready) ready->reset();
     if (!runtime_ || !runtime_->initialized || !key.valid()) return OperationAdmission::Rejected;
 
@@ -3360,7 +3369,7 @@ OperationAdmission ReportTask::request_period(
     command.period_sessions = key.sessions;
     command.period_source_revision = key.source_revision;
     command.period_generation = key.generation;
-    return runtime_->enqueue(command, ready);
+    return runtime_->enqueue(command, ready, retry_failed);
 }
 
 std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeriodKey key) const {
@@ -3379,12 +3388,12 @@ std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeri
     return result;
 }
 
-std::shared_ptr<const ReportPeriodResult> ReportTask::period_completion(uint32_t &serial) const {
-    if (!runtime_ || !runtime_->lock(0)) return {};
-    serial = runtime_->period_serial;
-    const auto result = runtime_->period_latest;
+bool ReportTask::completion_snapshot(uint32_t &serial, ReportEngineCompletion &night) const {
+    if (!runtime_ || !runtime_->lock(0)) return false;
+    serial = runtime_->completion_serial;
+    night = runtime_->published_completion;
     runtime_->unlock();
-    return result;
+    return true;
 }
 
 OperationAdmission ReportTask::request_night(
@@ -4762,19 +4771,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
 
         if (runtime.period_completed && runtime.lock(0)) {
-            if (!runtime.period_completed->error[0]) {
-                std::shared_ptr<const ReportPeriodResult> *slot = nullptr;
-                for (auto &cached : runtime.period_cache) {
-                    if (cached && cached->key == runtime.period_completed->key) {
-                        slot = &cached;
-                        break;
-                    }
+            std::shared_ptr<const ReportPeriodResult> *slot = nullptr;
+            for (auto &cached : runtime.period_cache) {
+                if (cached && cached->key == runtime.period_completed->key) {
+                    slot = &cached;
+                    break;
                 }
-                if (!slot) slot = &runtime.period_cache[runtime.period_cache_cursor++ % 5];
-                *slot = runtime.period_completed;
             }
-            runtime.period_latest = runtime.period_completed;
-            runtime.period_serial = increment_generation(runtime.period_serial);
+            if (!slot) slot = &runtime.period_cache[runtime.period_cache_cursor++ % 5];
+            *slot = runtime.period_completed;
+
+            runtime.completion_serial = increment_generation(runtime.completion_serial);
             runtime.period_running = false;
             runtime.unlock();
             if (runtime.period_completed->error[0]) {

@@ -289,9 +289,10 @@ public:
     // Admission returns an existing result instead of waiting for another completion.
     OperationAdmission request_period(
         ReportPeriodKey key,
-        std::shared_ptr<const ReportPeriodResult> *ready = nullptr);
+        std::shared_ptr<const ReportPeriodResult> *ready = nullptr,
+        bool retry_failed = false);
     std::shared_ptr<const ReportPeriodResult> period_snapshot(ReportPeriodKey key) const;
-    std::shared_ptr<const ReportPeriodResult> period_completion(uint32_t &serial) const;
+    bool completion_snapshot(uint32_t &serial, ReportEngineCompletion &night) const;
     OperationAdmission publish_session_ended(
         uint32_t sessions_ended,
         const NightCatalogRefreshTarget &target = {},

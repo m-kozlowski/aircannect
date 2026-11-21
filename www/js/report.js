@@ -624,7 +624,7 @@
               cancelReportPeriodRequest();
               reportSelectionResult = null;
               renderReportSummary();
-              loadReportPeriod();
+              loadReportPeriod(true);
             }
           };
         }
@@ -3156,10 +3156,10 @@
       if (reportPeriodController) reportPeriodController.abort();
       reportPeriodController = null;
       reportPeriodReload = false;
-      reportPeriodWaiting = false;
+      reportPeriodWaiting = null;
     }
 
-    async function loadReportPeriod() {
+    async function loadReportPeriod(retryFailed = false) {
       const selection = reportViewMode === "night" && reportSummaryScope === "sessions";
       if (reportViewMode !== "period" && !selection) return;
       if (selection && !reportResult) return;
@@ -3169,6 +3169,7 @@
 
       const controller = new AbortController();
       reportPeriodController = controller;
+      reportPeriodWaiting = null;
       const current = () => reportPeriodController === controller && !controller.signal.aborted;
       const selected = selection ? reportResult.sessions.map((s, i) =>
         reportHiddenSessions.has(Number(s.start)) ? null : i).filter((i) => i !== null) : null;
@@ -3183,22 +3184,25 @@
       try {
         saved = (await readReportCache([key])).get(key);
         if (!current()) return;
-        const response = await AirCANnect.http.request(url, conditionalRequestOptions(saved, controller.signal));
+        const options = conditionalRequestOptions(saved, controller.signal);
+        if (retryFailed) options.headers["X-Report-Retry"] = "1";
+        const revision = reportBuildRevision();
+        const response = await AirCANnect.http.request(url, options);
         if (!current()) return;
         if (response.status === 202) {
-          reportPeriodWaiting = true;
+          reportPeriodWaiting = revision;
+          if (revision !== reportBuildRevision()) reportPeriodReload = true;
           AirCANnect.ui.message("reportMsg", selection ? i18n.message("report.preparing_sessions") : i18n.message("report.preparing_period"), true, true);
           return;
         }
         if (response.status !== 200 && !(response.status === 304 && saved)) {
           const text = await response.text();
-          throw i18n.failure(text || i18n.message("report.period_unavailable"));
+          throw i18n.failure(AirCANnect.http.responseError(text, response.status));
         }
         const body = response.status === 304 ? saved.body : await response.json();
         if (!current()) return;
         if (selection) reportSelectionResult = body;
         else reportPeriodResult = body;
-        reportPeriodWaiting = false;
         if (response.status === 200) void writeReportCache([{key, value: {
           body, etag: response.headers.get("ETag") || "",
         }, bytes: JSON.stringify(body).length * 2}]);
@@ -3212,7 +3216,6 @@
           (selection ? i18n.message("report.sessions_loaded") : i18n.message("report.period_loaded")), true, !!notes.length);
       } catch (error) {
         if (!current()) return;
-        reportPeriodWaiting = false;
         if (saved) {
           if (selection) reportSelectionResult = saved.body;
           else reportPeriodResult = saved.body;
@@ -3311,6 +3314,7 @@
     }
 
     function cancelReportLoadRequest() {
+      reportNightWaiting = null;
       if (!reportLoadAbortController) return;
       reportLoadAbortController.abort();
       reportLoadAbortController = null;
@@ -3332,21 +3336,8 @@
       if (!preserveRange) reportRangeView = null;
     }
 
-    function reportCompletionMatches(data, url) {
-      if (!data || !url) return false;
-
-      const request = new URL(url, window.location.href);
-      const night = request.searchParams.get("night") || "";
-      if (String(data.night || "") !== night) return false;
-      return data.kind === "night";
-    }
-
-    async function waitForReportCompletion(url, afterSerial, timeoutMs) {
-      await AirCANnect.snapshots.wait(
-        "report",
-        (data) => reportCompletionMatches(data, url),
-        afterSerial,
-        timeoutMs);
+    function reportBuildRevision(data = AirCANnect.snapshots.read("report").data) {
+      return Number(data?.serial) || 0;
     }
 
     async function pollReportFetch(options) {
@@ -3372,9 +3363,9 @@
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) break;
 
-        if (action.waitForReport && options.waitUrl) {
-          await waitForReportCompletion(
-            options.waitUrl,
+        if (action.waitForReport) {
+          await AirCANnect.snapshots.wait("report",
+            (data) => reportBuildRevision(data) !== reportBuildRevision(reportSnapshot.data),
             reportSnapshot.serial,
             Math.min(REPORT_SSE_FALLBACK_MS, remainingMs));
         } else {
@@ -3745,14 +3736,15 @@
         }};
       };
       const timeoutValue = {status: 0, result: null};
+      let revisionAtRequest;
       return pollReportFetch({
         active: () => token === reportLoadToken,
-        waitUrl: url,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         timeoutValue,
         request: async () => {
           const cached = lruGet(reportResultClientCache, url);
+          revisionAtRequest = reportBuildRevision();
           try {
             return await AirCANnect.http.requestBody(
               url, conditionalRequestOptions(cached, signal));
@@ -3798,6 +3790,7 @@
           }
           if (response.status === 202) {
             timeoutValue.status = 202;
+            timeoutValue.revision = revisionAtRequest;
             AirCANnect.ui.message(
               "reportMsg", i18n.message("report.preparing"), true, true);
             return {done: false, waitForReport: true};
@@ -4113,7 +4106,6 @@
         "&v=" + context.generation + "." + encodeURIComponent(context.revision);
       const loaded = await pollReportFetch({
         active: context.active,
-        waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         request: () => AirCANnect.http.requestBody(url, {
@@ -4427,7 +4419,6 @@
         context.generation + "." + encodeURIComponent(context.revision);
       const events = await pollReportFetch({
         active: context.active,
-        waitUrl: url,
         maxAttempts: REPORT_SIGNAL_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         request: () => AirCANnect.http.requestBody(url, {
@@ -4788,6 +4779,8 @@
         }
         if (res.status === 202 && !res.result) {
           AirCANnect.ui.message("reportMsg", i18n.message("report.preparing"), true, true);
+          reportNightWaiting = res.revision;
+          if (reportBuildRevision() !== reportNightWaiting) void loadSelectedReportNight(true);
           return;
         }
         if ((res.status !== 200 && res.status !== 304) || !res.result) {
@@ -4867,6 +4860,7 @@
     }
 
     async function loadReportSummary(loadNight) {
+      const initialSnapshot = !reportSummary && AirCANnect.snapshots.read("report");
       try {
         if (!reportSummary) {
           const saved = (await readReportCache(["summary"])).get("summary");
@@ -4906,6 +4900,13 @@
           if (!cached) throw i18n.failure(error);
         }
         if (!reportSummary) throw i18n.failure("report.index_unavailable");
+        if (initialSnapshot && !cached) {
+          const latest = AirCANnect.snapshots.read("report");
+          if (latest.serial !== initialSnapshot.serial && latest.data?.oximetry_revision &&
+              latest.data.oximetry_revision !== reportSummary.oximetry_revision) {
+            return loadReportSummary(loadNight);
+          }
+        }
         if (cached) AirCANnect.ui.message(
           "reportMsg", i18n.message("report.browser_copy"), true, true);
 
@@ -4949,73 +4950,38 @@
     }
 
     function handleReportCompletion(data) {
-      const serial = Number(data && data.serial) || 0;
-      if (!serial) return;
-
-      const completionKey = [
-        serial,
-        data.night || "",
-        data.kind || "",
-        data.from || "",
-        data.to || "",
-        data.success ? 1 : 0,
-        data.forced ? 1 : 0,
-        data.generation || "",
-        data.source_revision || "",
-        data.error || "",
-      ].join(":");
-      if (completionKey === reportHandledCompletionKey) return;
-      reportHandledCompletionKey = completionKey;
-      if (data.kind === "oximetry") {
-        if (AirCANnect.pages.isActive("report") && reportViewMode === "night") {
-          const night = selectedReportNight();
-          const token = reportLoadToken;
-          const files = night && JSON.stringify(nightOximetryFiles(night));
-          void loadReportSummary(false).then(() => {
-            if (token !== reportLoadToken || reportViewMode !== "night" || !AirCANnect.pages.isActive("report")) return;
-            const next = selectedReportNight();
-            if (night?.id !== next?.id || (next && files !== JSON.stringify(nightOximetryFiles(next))))
-              return loadSelectedReportNight(true);
-          });
-        }
-        return;
-      }
-      if (data.kind === "sessions") {
-        const selected = reportResult?.sessions.map((s, i) =>
-          reportHiddenSessions.has(Number(s.start)) ? null : i).filter((i) => i !== null);
-        if (AirCANnect.pages.isActive("report") && reportViewMode === "night" &&
-            reportSummaryScope === "sessions" && data.night === reportCurrentNightId &&
-            data.version === reportCurrentGeneration + "." + reportCurrentRevision &&
-            Array.isArray(data.sessions) && data.sessions.join(",") === selected?.join(",")) {
-          if (data.success) loadReportPeriod();
-          else {
-            cancelReportPeriodRequest();
-            AirCANnect.ui.message("reportMsg", data.error || i18n.message("report.sessions_unavailable"), false, true);
-          }
-        }
-        return;
-      }
-      if (data.kind === "period") {
-        if (AirCANnect.pages.isActive("report") && reportViewMode === "period" &&
-            data.night === reportPeriodEnd && Number(data.days) === reportPeriodDays) {
-          if (data.success) loadReportPeriod();
-          else {
-            cancelReportPeriodRequest();
-            AirCANnect.ui.message("reportMsg", data.error || i18n.message("report.period_unavailable"), false, true);
-          }
-        } else if (reportPeriodWaiting && AirCANnect.pages.isActive("report") && reportViewMode === "period") {
-          loadReportPeriod();
-        }
-        return;
-      }
-      if (data.kind !== "night" || !data.night) return;
-
-      const nightId = String(data.night);
+      if (!data) return;
       const active = AirCANnect.pages.isActive("report");
+      const waiting = reportPeriodWaiting !== null;
+      if (active && waiting && reportPeriodWaiting !== reportBuildRevision(data)) loadReportPeriod();
+      if (active && reportNightWaiting !== null && reportNightWaiting !== reportBuildRevision(data)) {
+        void loadSelectedReportNight(true);
+      }
+
+      const ox = data.oximetry_revision;
+      if (active && reportViewMode === "night" && reportSummary && ox &&
+          ox !== reportSummary.oximetry_revision && ox !== reportRequestedOximetryRevision) {
+        reportRequestedOximetryRevision = ox;
+        const night = selectedReportNight();
+        const token = reportLoadToken;
+        const files = night && JSON.stringify(nightOximetryFiles(night));
+        void loadReportSummary(false).then(() => {
+          if (token !== reportLoadToken || reportViewMode !== "night" || !AirCANnect.pages.isActive("report")) return;
+          const next = selectedReportNight();
+          if (night?.id !== next?.id || (next && files !== JSON.stringify(nightOximetryFiles(next))))
+            return loadSelectedReportNight(true);
+        }).finally(() => {
+          if (ox === reportRequestedOximetryRevision) reportRequestedOximetryRevision = "";
+        });
+      }
+
+      if (!data.night_ticket || !data.night || data.night_ticket === reportHandledNightTicket) return;
+      reportHandledNightTicket = data.night_ticket;
+      const nightId = String(data.night);
       const selected = selectedReportNight();
       const selectedNightId = selected ? String(selected.id) : "";
       if (!data.success) {
-        if (active && nightId === selectedNightId &&
+        if (active && reportViewMode === "night" && nightId === selectedNightId &&
             data.error !== "cancelled") {
           const retained = data.error === REPORT_RETAINED_REASON;
           const deferred = data.error === REPORT_LOW_SPACE_REASON;
@@ -5045,10 +5011,11 @@
         (!reportResult && nightId === selectedNightId));
       invalidateReportNightCache(nightId, !!data.forced);
       if (active && reportViewMode === "period") {
-        if (reportPeriodWaiting || (nightId >= reportPeriodFirst() && nightId <= reportPeriodEnd)) loadReportPeriod();
+        if (!waiting && nightId >= reportPeriodFirst() && nightId <= reportPeriodEnd) loadReportPeriod();
         loadReportSummary(false);
         return;
       }
+      if (reload && !reportResult && reportLoadAbortController) return;
       if (current) cancelReportRequests(!data.forced);
       if (reload) loadSelectedReportNight(current && !!reportResult);
       if (active) {
@@ -5077,7 +5044,8 @@
       reportPeriodEnd = selectedReportNight()?.id || reportPeriodEnd;
       if (reportPeriodResult?.end !== reportPeriodEnd) reportPeriodResult = null;
       renderReportSummary();
-      loadSelectedReportNight();
+      if (mode === "period") loadReportPeriod(true);
+      else loadSelectedReportNight();
     });
     AirCANnect.actions.register("report.period-days", (_event, element) => {
       const days = Number(element.dataset.value);
@@ -5086,7 +5054,7 @@
       reportPeriodDays = days;
       reportPeriodResult = null;
       renderReportSummary();
-      loadReportPeriod();
+      loadReportPeriod(true);
     });
 
     AirCANnect.actions.register("report.scope", (_event, element) => {
@@ -5097,7 +5065,7 @@
       reportSelectionResult = null;
       renderReportSummary();
       renderReportCharts();
-      if (scope === "sessions") loadReportPeriod();
+      if (scope === "sessions") loadReportPeriod(true);
     });
     AirCANnect.actions.register("report.oximetry", async (_event, element) => {
       const night = selectedReportNight();
@@ -5122,7 +5090,7 @@
       reportPeriodEnd = latest && end > latest ? latest : end;
       reportPeriodResult = null;
       renderReportSummary();
-      loadReportPeriod();
+      loadReportPeriod(true);
     });
     AirCANnect.actions.register("report.period-night", (_event, element) => {
       cancelReportRequests();
@@ -5188,10 +5156,11 @@
     let reportPeriodResult = null;
     let reportPeriodController = null;
     let reportPeriodReload = false;
-    let reportPeriodWaiting = false;
+    let reportPeriodWaiting = null;
     let reportPollTimer = null;
     let reportLoadToken = 0;
     let reportLoadAbortController = null;
+    let reportNightWaiting = null;
     let reportSummaryEtag = "";
     let reportCacheOpening = null;
     let reportOffline = false;
@@ -5214,7 +5183,8 @@
     let reportCurrentNightId = "";
     let reportCurrentRevision = "";
     let reportCurrentGeneration = 0;
-    let reportHandledCompletionKey = "";
+    let reportHandledNightTicket = 0;
+    let reportRequestedOximetryRevision = "";
     const reportSignalBlockCache = new Map();
     const reportEventClientCache = new Map();
     let reportRangeView = null;

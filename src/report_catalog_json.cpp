@@ -78,7 +78,7 @@ bool format_catalog_etag(const NightCatalog &catalog,
     const int written = snprintf(
         out,
         out_size,
-        "\"catalog-v4-%08lx-%016llx\"",
+        "\"catalog-v5-%08lx-%016llx\"",
         static_cast<unsigned long>(generation),
         static_cast<unsigned long long>(catalog_identity(catalog, store, oximetry, oximetry_identity)));
     return written > 0 && static_cast<size_t>(written) < out_size;
@@ -147,8 +147,9 @@ bool ReportCatalogJsonReader::prepare_fragment() {
             case Phase::Prefix:
                 phase_ = Phase::Nights;
                 return format_fragment(
-                    "{\"state\":\"ready\",\"generation\":%lu,\"nights\":[",
-                    static_cast<unsigned long>(publication_->generation));
+                    "{\"state\":\"ready\",\"generation\":%lu,\"oximetry_revision\":\"%016llx\",\"nights\":[",
+                    static_cast<unsigned long>(publication_->generation),
+                    static_cast<unsigned long long>(publication_->oximetry_identity));
 
             case Phase::Nights:
                 while (night_index_ < catalog.size()) {

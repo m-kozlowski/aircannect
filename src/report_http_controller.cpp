@@ -679,7 +679,7 @@ void ReportHttpController::begin(ReportTask &report_task,
     report_task_ = &report_task;
     preferences_ = &preferences;
     stream_port_ = &stream_port;
-    observed_completion_ = {};
+    observed_oximetry_identity_ = 0;
     completion_serial_ = 0;
 
     if (completion_snapshot_.begin(REPORT_COMPLETION_JSON_RESERVE) &&
@@ -1181,7 +1181,10 @@ void ReportHttpController::send_summary(
         }
         if (!key.valid()) { send_json_error(request, 400, "bad_period"); return; }
         std::shared_ptr<const ReportPeriodResult> period;
-        if (report_task_->request_period(key, &period) != OperationAdmission::Accepted) {
+        const bool retry = request->hasHeader("X-Report-Retry") &&
+            request->getHeader("X-Report-Retry")->value() == "1";
+
+        if (report_task_->request_period(key, &period, retry) != OperationAdmission::Accepted) {
             send_json_error(request, 503, "period_busy");
             return;
         }
@@ -1646,98 +1649,41 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 void ReportHttpController::publish_completion() {
     if (!report_task_) return;
 
+    uint32_t serial;
+    ReportEngineCompletion night;
+    if (!report_task_->completion_snapshot(serial, night)) return;
+
     const auto catalog = report_task_->catalog_json_snapshot();
-    if (catalog && catalog->oximetry && catalog->oximetry_identity != observed_oximetry_identity_) {
-        completion_json_ = "{";
-        json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
-        json_add_string(completion_json_, "kind", "oximetry");
-        completion_json_ += '}';
-        if (completion_snapshot_.replace(completion_json_)) observed_oximetry_identity_ = catalog->oximetry_identity;
-        return;
-    }
+    const uint64_t ox = catalog ? catalog->oximetry_identity : observed_oximetry_identity_;
+    if (serial == completion_serial_ && ox == observed_oximetry_identity_) return;
 
-    uint32_t serial = observed_period_serial_;
-    const auto period = report_task_->period_completion(serial);
-    if (period && serial != observed_period_serial_) {
-        char day[9];
-        period->key.end.format_yyyymmdd(day, sizeof(day));
-        completion_json_ = "{";
-        json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
-        json_add_string(completion_json_, "kind", period->key.sessions ? "sessions" : "period");
-        json_add_string(completion_json_, "night", day);
-        json_add_int(completion_json_, "days", period->key.days);
-        if (period->key.sessions) {
-            char version[32];
-            snprintf(version, sizeof(version), "%lu.%016llx",
-                static_cast<unsigned long>(period->key.generation),
-                static_cast<unsigned long long>(period->key.source_revision.value()));
-            json_add_string(completion_json_, "version", version);
-            completion_json_ += ",\"sessions\":[";
-            for (size_t i = 0; i < period->key.sessions->size(); ++i) {
-                if (i) completion_json_ += ',';
-                append_json_float(completion_json_, (*period->key.sessions)[i]);
-            }
-            completion_json_ += ']';
-        }
-        json_add_bool(completion_json_, "success", !period->error[0]);
-        json_add_string(completion_json_, "error", period->error);
-        completion_json_ += '}';
-        if (!completion_json_.overflowed() && completion_snapshot_.replace(completion_json_)) {
-            observed_period_serial_ = serial;
-        }
-        return;
-    }
-
-    const ReportEngineCompletion completion = report_task_->last_completion();
-    if (!completion.valid() ||
-        completion.request.ticket == observed_completion_) {
-        return;
-    }
-
-    observed_completion_ = completion.request.ticket;
-    completion_serial_++;
-    if (completion_serial_ == 0) completion_serial_ = 1;
-
-    char day[9] = {};
-    if (!completion.request.artifact.sleep_day.format_yyyymmdd(
-            day, sizeof(day))) {
-        return;
-    }
-
-    const bool success = completion.outcome.disposition ==
-        OperationDisposition::Succeeded;
-    const char *error = completion.error;
-    if (!success && !error[0] &&
-        completion.outcome.disposition == OperationDisposition::Cancelled) {
-        error = "cancelled";
-    }
-
-    completion_json_.clear();
+    char revision[17];
+    snprintf(revision, sizeof(revision), "%016llx", static_cast<unsigned long long>(ox));
     completion_json_ = "{";
-    json_add_uint64(completion_json_, "serial", completion_serial_, false);
-    json_add_string(completion_json_, "night", day);
-    json_add_string(completion_json_, "kind", "night");
-    json_add_bool(completion_json_, "success", success);
-    json_add_bool(completion_json_, "source_preservation_failed",
-                  completion.source_preservation_failed);
-    json_add_bool(completion_json_,
-                  "forced",
-                  completion.request.force_rebuild);
-    json_add_uint64(completion_json_,
-                    "generation",
-                    completion.store_generation);
-    char revision[17] = {};
-    snprintf(revision,
-             sizeof(revision),
-             "%016llx",
-             static_cast<unsigned long long>(
-                 completion.request.artifact.source_revision.value()));
-    json_add_string(completion_json_, "source_revision", revision);
-    json_add_string(completion_json_, "error", error);
+    json_add_uint64(completion_json_, "serial", serial, false);
+    json_add_string(completion_json_, "oximetry_revision", revision);
+
+    char day[9];
+    if (night.valid() && night.request.artifact.sleep_day.format_yyyymmdd(day, sizeof(day))) {
+        const char *error = night.error;
+        if (!error[0] && night.outcome.disposition == OperationDisposition::Cancelled) error = "cancelled";
+
+        snprintf(revision, sizeof(revision), "%016llx",
+                 static_cast<unsigned long long>(night.request.artifact.source_revision.value()));
+        json_add_uint64(completion_json_, "night_ticket", night.request.ticket.id);
+        json_add_string(completion_json_, "night", day);
+        json_add_bool(completion_json_, "success", night.outcome.disposition == OperationDisposition::Succeeded);
+        json_add_bool(completion_json_, "source_preservation_failed", night.source_preservation_failed);
+        json_add_bool(completion_json_, "forced", night.request.force_rebuild);
+        json_add_uint64(completion_json_, "generation", night.store_generation);
+        json_add_string(completion_json_, "source_revision", revision);
+        json_add_string(completion_json_, "error", error);
+    }
     completion_json_ += '}';
 
-    if (!completion_json_.overflowed()) {
-        (void)completion_snapshot_.replace(completion_json_);
+    if (!completion_json_.overflowed() && completion_snapshot_.replace(completion_json_)) {
+        completion_serial_ = serial;
+        observed_oximetry_identity_ = ox;
     }
 }
 

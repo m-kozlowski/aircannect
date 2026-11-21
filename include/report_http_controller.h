@@ -67,9 +67,7 @@ private:
     std::unique_ptr<PendingResponses> pending_;
     PublishedJsonSnapshot completion_snapshot_;
     LargeTextBuffer completion_json_;
-    OperationTicket observed_completion_;
     uint32_t completion_serial_ = 0;
-    uint32_t observed_period_serial_ = 0;
     uint64_t observed_oximetry_identity_ = 0;
     mutable std::atomic<uint32_t> next_generation_{1};
     mutable std::atomic<uint32_t> next_preference_request_{1};
