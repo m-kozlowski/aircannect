@@ -71,16 +71,14 @@ struct StorageUploadService::Job {
     char temporary_path[AC_STORAGE_PATH_MAX] = {};
     char expected_sha256[65] = {};
     mbedtls_sha256_context sha;
-    bool sha_started = false;
 
     std::shared_ptr<const LargeByteBuffer> pending;
     size_t pending_offset = 0;
     OperationTicket publication_ticket;
 
-    Job() { mbedtls_sha256_init(&sha); }
     ~Job() {
         if (output) output.close();
-        mbedtls_sha256_free(&sha);
+        if (expected_sha256[0]) mbedtls_sha256_free(&sha);
     }
 };
 
@@ -272,6 +270,7 @@ StorageUploadStartResult StorageUploadService::start(
     job_->last_activity_ms = millis();
     copy_cstr(job_->expected_sha256, sizeof(job_->expected_sha256),
               expected_sha256);
+    if (job_->expected_sha256[0]) mbedtls_sha256_init(&job_->sha);
     publish_status_locked();
 
     result.admission = OperationAdmission::Accepted;
@@ -418,8 +417,11 @@ bool StorageUploadService::prepare_locked(const char *&error) {
         return false;
     }
     (void)job_->output.setBufferSize(4096);
-    mbedtls_sha256_starts(&job_->sha, 0);
-    job_->sha_started = true;
+
+    if (job_->expected_sha256[0] && mbedtls_sha256_starts(&job_->sha, 0) != 0) {
+        error = "sha256_failed";
+        return false;
+    }
     if (job_->status.total_bytes == 0) return finalize_locked(error);
 
     set_state_locked(StorageUploadState::Ready);
@@ -501,7 +503,7 @@ bool StorageUploadService::temporary_size_matches_locked(
 }
 
 bool StorageUploadService::write_locked(const char *&error) {
-    if (!job_->output || !job_->pending || !job_->sha_started ||
+    if (!job_->output || !job_->pending ||
         job_->pending_offset >= job_->pending->size()) {
         error = "write_state_invalid";
         return false;
@@ -516,7 +518,11 @@ bool StorageUploadService::write_locked(const char *&error) {
         return false;
     }
 
-    mbedtls_sha256_update(&job_->sha, data, written);
+    if (job_->expected_sha256[0] && mbedtls_sha256_update(&job_->sha, data, written) != 0) {
+        error = "sha256_failed";
+        return false;
+    }
+
     job_->pending_offset += written;
     job_->last_activity_ms = millis();
     if (job_->pending_offset != job_->pending->size()) return true;
@@ -533,7 +539,7 @@ bool StorageUploadService::write_locked(const char *&error) {
 }
 
 bool StorageUploadService::finalize_locked(const char *&error) {
-    if (!job_->output || !job_->sha_started) {
+    if (!job_->output) {
         error = "finalize_state_invalid";
         return false;
     }
@@ -541,16 +547,21 @@ bool StorageUploadService::finalize_locked(const char *&error) {
     job_->output.flush();
     job_->output.close();
 
-    uint8_t hash[32] = {};
-    char computed[65] = {};
-    mbedtls_sha256_finish(&job_->sha, hash);
-    job_->sha_started = false;
-    hash_to_hex(hash, computed);
-    if (job_->expected_sha256[0] &&
-        strcmp(job_->expected_sha256, computed) != 0) {
-        error = "sha256_mismatch";
-        return false;
+    if (job_->expected_sha256[0]) {
+        uint8_t hash[32];
+        if (mbedtls_sha256_finish(&job_->sha, hash) != 0) {
+            error = "sha256_failed";
+            return false;
+        }
+
+        char computed[65];
+        hash_to_hex(hash, computed);
+        if (strcmp(job_->expected_sha256, computed) != 0) {
+            error = "sha256_mismatch";
+            return false;
+        }
     }
+
     if (!validate_target_locked(error)) return false;
 
     return submit_publication_locked(error);
@@ -667,7 +678,6 @@ void StorageUploadService::finish_locked(StorageUploadState state,
 
 void StorageUploadService::close_input_locked() {
     if (job_->output) job_->output.close();
-    job_->sha_started = false;
 }
 
 void StorageUploadService::clear_job_locked() {
