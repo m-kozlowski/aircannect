@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#13292a">
+  <title>$title</title>
+  <link rel="icon" href="${root}assets/favicon.png">
+  <link rel="stylesheet" href="${root}assets/site.css">
+</head>
+<body>
+  <header>
+    <nav class="wrap" aria-label="Main navigation">
+      <a class="brand" href="${root}"><img src="${root}assets/favicon.png" alt="" width="32" height="32">AirCANnect</a>
+      <a href="$repo/blob/HEAD/docs/quickstart.md">Quickstart</a>
+      <a href="$repo">GitHub</a>
+      <a class="install-link" href="${root}install/" $install_current>USB installer</a>
+    </nav>
+  </header>
+  <main class="wrap $page">$content</main>
+  <footer><div class="wrap"><span>AirCANnect</span><a href="$release">Release $tag</a><a href="$repo/blob/HEAD/LICENSE">AGPL v3</a></div></footer>
+</body>
+</html>

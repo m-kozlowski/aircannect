@@ -5,6 +5,9 @@ the [hardware](hardware.md) is wired up.
 
 ## 1. Install firmware
 
+**USB installation erases all AirCANnect settings, including Wi-Fi credentials.
+To update without losing settings, use OTA.**
+
 Download the `-initial.zip` matching the board from the
 [latest release](https://github.com/m-kozlowski/aircannect/releases/latest)
 and extract the `-initial.bin` image.

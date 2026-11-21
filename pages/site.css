@@ -1,0 +1,57 @@
+:root {
+  color-scheme: light;
+  font: 100%/1.55 system-ui, sans-serif;
+  color: #182b32;
+  background: #f9fbfa;
+  --link: #006c68;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.wrap { width: min(70rem, calc(100% - 3rem)); margin-inline: auto; }
+a { color: var(--link); text-underline-offset: .18em; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid #c17718; outline-offset: 3px; }
+header { background: #13292a; color: white; }
+nav, footer .wrap, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 1.5rem; }
+nav { padding-block: .75rem; font-size: .94rem; font-weight: 600; }
+nav a { color: inherit; text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+.brand { display: inline-flex; gap: .65rem; align-items: center; margin-right: auto; font-size: 1.05rem; }
+.install-link { border: 1px solid #80dad0; border-radius: 4px; color: #c5fff5; padding: .42rem .9rem; }
+main { padding-block: 2.75rem 3.5rem; }
+h1, h2 { line-height: 1.12; }
+h1 { margin: 0; font-size: 3.25rem; }
+h2 { font-size: 2rem; margin: 2rem 0 1.25rem; }
+h1 + p { font-size: 1.2rem; margin: .8rem 0; }
+.home p:has(img) { margin: 1.6rem 0 2.5rem; }
+.home p img { width: 100%; height: auto; display: block; }
+.home > ul { padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem 2rem; list-style: none; }
+.home > ul > li { padding-top: .8rem; border-top: 2px solid #a4cbc2; }
+.home > ul > li > strong { font-size: 1.08rem; }
+.home li ul { margin-top: .45rem; padding-left: 1.15rem; }
+.home li li { margin-bottom: .25rem; }
+.install h1 { font-size: 2.4rem; }
+.release { font-size: .9rem; margin: 0 0 .7rem; }
+.install-form { max-width: 41rem; margin-top: 2rem; }
+label { font-weight: 650; }
+select, button { font: inherit; border-radius: 4px; }
+select { display: block; width: 100%; padding: .65rem; margin: .4rem 0; background: white; color: inherit; border: 1px solid #738782; }
+.install-form > a { font-size: .94rem; }
+.warning { border-left: 4px solid #c46a15; background: #fff2d9; color: #543414; padding: .85rem 1rem; margin: 1.6rem 0 1.1rem; }
+button { padding: .65rem 1.1rem; border: none; background: #00756a; color: white; font-weight: 650; cursor: pointer; }
+button:disabled { background: #dee5e3; color: #485755; cursor: default; }
+esp-web-install-button:not(:defined) [slot]:not([slot="activate"]) { display: none; }
+footer { border-top: 1px solid #d1ded9; }
+footer .wrap { padding-block: 1.1rem; font-size: .9rem; }
+footer span { margin-right: auto; font-weight: 650; }
+@media (max-width: 52rem) {
+  .home > ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 36rem) {
+  .wrap { width: calc(100% - 2rem); }
+  nav { gap: .65rem 1rem; }
+  .brand { flex-basis: 100%; }
+  main { padding-block: 1.7rem 2rem; }
+  h1 { font-size: 2.5rem; }
+  .home > ul { grid-template-columns: 1fr; }
+}
