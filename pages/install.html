@@ -1,0 +1,24 @@
+<p class="release"><a href="$release">Firmware $tag</a></p>
+<h1>USB installer</h1>
+<p>Connect your AirCANnect board to this computer with a USB data cable.</p>
+<div class="install-form">
+  <label for="board">Board profile</label>
+  <select id="board">
+    <option value="">Select a board profile</option>
+    $options
+  </select>
+  <a href="$repo/blob/HEAD/docs/hardware.md">Hardware and wiring guide</a>
+  <p class="warning"><strong>USB installation erases all AirCANnect settings, including Wi-Fi credentials.</strong>
+    To update without losing settings, use OTA.</p>
+  <div class="actions">
+    <esp-web-install-button>
+      <button slot="activate" type="button" disabled>Connect via USB</button>
+      <span slot="unsupported">USB installation is unavailable in this browser. Use desktop Chrome or Edge, or download the initial image.</span>
+      <span slot="not-allowed">Open the installer over HTTPS or localhost to connect via USB.</span>
+    </esp-web-install-button>
+    <a id="download" hidden>Download initial ZIP</a>
+  </div>
+  <p id="load-error" role="alert" hidden>Could not load the USB installer. Reload the page or download the initial image.</p>
+  <noscript>USB installation requires JavaScript. <a href="$release">Download a release ZIP instead.</a></noscript>
+</div>
+<script type="module" src="install.js"></script>

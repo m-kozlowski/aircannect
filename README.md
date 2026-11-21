@@ -1,3 +1,4 @@
+<!-- pages:home:start -->
 # AirCANnect
 
 ESP32 bridge for ResMed AirSense 11 / AirCurve 11 / AirMini CPAP.
@@ -5,7 +6,9 @@ ESP32 bridge for ResMed AirSense 11 / AirCurve 11 / AirMini CPAP.
 Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 
 ![AirCANnect dashboard](docs/screenshots/aircannect-dashboard.png)
+<!-- pages:home:end -->
 
+<!-- pages:home:start -->
 ## What it does
 
 - **Web UI** 
@@ -47,7 +50,7 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - flash compatible AirSense 11 / AirCurve 11 / AirMini firmware from web UI or CLI. \
     (Autodetects raw and .abc formats; CONF, APPL, and bootloader regions can
     be selected explicitly.)
-
+<!-- pages:home:end -->
 
 ## First setup
 
