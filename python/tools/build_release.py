@@ -168,6 +168,7 @@ def write_checksums(output_dir: pathlib.Path, artifacts: list[dict[str, object]]
 def write_release_manifest(
     output_dir: pathlib.Path, version: str,
     targets: dict[str, dict[str, object]],
+    migrate_url: list[str] | None = None,
 ) -> pathlib.Path:
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -176,6 +177,10 @@ def write_release_manifest(
         "release_notes_url": RELEASE_NOTES_FILENAME,
         "targets": targets,
     }
+    if migrate_url:
+        old, new = migrate_url
+        manifest["migrate_url"] = {"from": old, "to": new}
+
     manifest_path = output_dir / MANIFEST_FILENAME
     manifest_path.write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -197,6 +202,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=pathlib.Path,
                         default=PROJECT_DIR / "dist",
                         help="artifact output directory")
+    parser.add_argument("--migrate-url", nargs=2, metavar=("FROM", "TO"),
+                        help="offer to move devices using FROM to the manifest at TO")
     return parser.parse_args()
 
 
@@ -227,7 +234,7 @@ def main() -> None:
         artifacts.extend(target_artifacts)
 
     write_checksums(output_dir, artifacts)
-    write_release_manifest(output_dir, version, targets)
+    write_release_manifest(output_dir, version, targets, args.migrate_url)
 
     print(
         f"packaged {version} ({commit[:12]}) for "

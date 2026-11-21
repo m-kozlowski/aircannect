@@ -1686,7 +1686,11 @@ void setup() {
         history_transfer_active, &edf_recorder_manager);
     firmware_installer.begin();
     firmware_url_source.begin();
-    update_checker.begin(config_service.data(), export_task);
+    update_checker.begin(config_service.data(), export_task, [](const String &url) {
+        ConfigTransactionResult result;
+        config_service.set_value("update_url", url, false, &result);
+        return result.persisted && result.changed_fields != 0;
+    });
     config_backup.begin(config_service, wifi_manager,
                         &oximetry_sensor_source);
     settings_backup_service.begin(config_backup, as11_settings_manager,

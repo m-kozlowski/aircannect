@@ -10,6 +10,7 @@
 #include "app_config.h"
 #include "firmware_installer.h"
 #include "large_byte_buffer.h"
+#include "large_text_buffer.h"
 #include "ota_release_manifest.h"
 #include "runtime_snapshots.h"
 
@@ -46,7 +47,10 @@ struct OtaUpdateNotification {
 
 class UpdateChecker {
 public:
-    void begin(const AppConfigData &config, ExportTask &exports);
+    using SaveUpdateUrl = bool (*)(const String &url);
+
+    void begin(const AppConfigData &config, ExportTask &exports,
+               SaveUpdateUrl save_update_url);
     void poll(const NetworkSnapshot &network,
               bool check_allowed,
               bool install_active,
@@ -80,13 +84,14 @@ private:
     void reap_task_locked();
     void finish_task(char *url,
                      uint32_t generation,
-                     const OtaReleaseManifest *manifest,
+                     const char *version,
                      bool update_available,
                      OwnedArtifact artifact,
                      std::shared_ptr<const LargeByteBuffer> release_notes,
                      const char *error,
                      bool retry_soon,
-                     const struct OtaUrlError *transport_error = nullptr);
+                     const struct OtaUrlError *transport_error = nullptr,
+                     LargeTextBuffer *verified_migration = nullptr);
 
     void clear_release_locked();
     bool cancelled(uint32_t generation);
@@ -100,6 +105,7 @@ private:
     void trace_phase(const char *phase);
 
     const AppConfigData *config_ = nullptr;
+    SaveUpdateUrl save_update_url_ = nullptr;
     ExportTask *exports_ = nullptr;
     UpdateCheckerStatus status_;
     mutable SemaphoreHandle_t mutex_ = nullptr;
@@ -117,6 +123,8 @@ private:
     uint32_t config_generation_ = 1;
     uint32_t task_generation_ = 0;
     char *check_url_ = nullptr;
+    char *migration_from_ = nullptr;
+    LargeTextBuffer migration_to_;
     TaskHandle_t task_ = nullptr;
     bool task_manual_ = false;
     bool task_stack_external_ = false;

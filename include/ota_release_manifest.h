@@ -4,6 +4,8 @@
 
 namespace aircannect {
 
+class LargeTextBuffer;
+
 static constexpr size_t AC_OTA_RELEASE_VERSION_MAX = 48;
 static constexpr size_t AC_OTA_RELEASE_ERROR_MAX = 48;
 static constexpr size_t AC_OTA_RELEASE_ARTIFACT_URL_MAX = 512;
@@ -28,7 +30,9 @@ bool ota_parse_release_manifest(const char *json,
                                 size_t json_len,
                                 const char *target,
                                 OtaReleaseManifest &manifest,
-                                char error[AC_OTA_RELEASE_ERROR_MAX]);
+                                char error[AC_OTA_RELEASE_ERROR_MAX],
+                                const char *configured_url = nullptr,
+                                LargeTextBuffer *migration_to = nullptr);
 
 bool ota_release_is_newer(const char *current_version,
                           const char *release_version,

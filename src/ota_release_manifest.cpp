@@ -1,4 +1,6 @@
 #include "ota_release_manifest.h"
+#include "board_net.h"
+#include "large_text_buffer.h"
 
 #include <ArduinoJson.h>
 #include <ctype.h>
@@ -296,6 +298,25 @@ bool absolute_http_url(const char *url) {
            strncasecmp(url, "https://", 8) == 0;
 }
 
+void read_url_migration(JsonObjectConst rule, const char *configured_url,
+                        LargeTextBuffer &destination) {
+    const JsonString from = rule["from"].as<JsonString>();
+    if (from.isNull() || from.size() != strlen(configured_url) ||
+        memcmp(from.c_str(), configured_url, from.size()) != 0) return;
+
+    const JsonString to = rule["to"].as<JsonString>();
+    if (to.isNull() || to.size() > AC_OTA_URL_MAX_LENGTH) return;
+
+    const char *url = to.c_str();
+    if (to.size() != strlen(url) || !valid_url_text(url) ||
+        !absolute_http_url(url) || strcmp(url, configured_url) == 0) return;
+
+    if (strncasecmp(configured_url, "https://", 8) == 0 &&
+        strncasecmp(url, "http://", 7) == 0) return;
+
+    destination.append(url, to.size());
+}
+
 bool copy_url_parts(char *output,
                     size_t capacity,
                     const char *prefix,
@@ -318,8 +339,11 @@ bool ota_parse_release_manifest(const char *json,
                                 size_t json_len,
                                 const char *target,
                                 OtaReleaseManifest &manifest,
-                                char error[AC_OTA_RELEASE_ERROR_MAX]) {
+                                char error[AC_OTA_RELEASE_ERROR_MAX],
+                                const char *configured_url,
+                                LargeTextBuffer *migration_to) {
     manifest = {};
+    if (migration_to) migration_to->clear();
     if (error) error[0] = '\0';
     if (!json || json_len == 0 || !target || !*target || !error) return false;
 
@@ -393,6 +417,10 @@ bool ota_parse_release_manifest(const char *json,
     manifest.preferred_artifact = manifest.zlib_available
         ? zlib_artifact
         : raw_artifact;
+
+    if (migration_to && configured_url) {
+        read_url_migration(root["migrate_url"], configured_url, *migration_to);
+    }
     return true;
 }
 
