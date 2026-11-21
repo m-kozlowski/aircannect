@@ -203,6 +203,7 @@ struct ReportSignalRangeQuery {
     std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
     ReportStoreQueryState state = ReportStoreQueryState::Unavailable;
     ReportSignalStoreTrack track;
+    uint16_t compression_version = 0;
     ReportSignalStoreLevel level = ReportSignalStoreLevel::Raw;
     int64_t first_block_start_ms = 0;
     size_t block_count = 0;

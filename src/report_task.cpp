@@ -1961,7 +1961,7 @@ struct ReportTask::Runtime {
             store_catalog->ready(night->sleep_day, night->source_revision)) {
             const ReportSignalStoreCatalogRecord *stored =
                 store_catalog->find(night->sleep_day);
-            if (stored && stored->compression_version == ReportSignalTile::CompressionVersion) {
+            if (stored && ReportSignalTile::cache_complete(stored->compression_version)) {
                 ++idle_cursor;
                 return true;
             }
@@ -2466,7 +2466,7 @@ struct ReportTask::Runtime {
             if (current && current->sleep_day == completed_day) {
                 const auto *stored = store_catalog ? store_catalog->find(completed_day) : nullptr;
                 if (!succeeded || !stored ||
-                    stored->compression_version == ReportSignalTile::CompressionVersion) {
+                    ReportSignalTile::cache_complete(stored->compression_version)) {
                     ++idle_cursor;
                 }
             }
@@ -3647,6 +3647,7 @@ ReportSignalRangeQuery ReportTask::query_signal(
         return out;
     }
 
+    out.compression_version = night.view.night.compression_version;
     size_t file_size = 0;
     if (block_count == 0 ||
         !ReportSignalStoreFileCodec::plane_range(

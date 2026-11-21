@@ -28,12 +28,14 @@ uint64_t ReportSignalTile::storage_upper_bound(
         for (auto level : {ReportSignalStoreLevel::Raw,
                            ReportSignalStoreLevel::OneSecond,
                            ReportSignalStoreLevel::TenSeconds}) {
-            if (!track.has_level(level)) continue;
+            if (!track.has_level(level) || !cache_plane(track, level)) continue;
 
-            bytes += space.allocation_unit_bound; // per-plane directory
             for (size_t slot = 0; slot < track.block_slot_count;) {
                 ReportSignalTile tile;
                 if (!describe(track, level, slot, tile)) return UINT64_MAX;
+                if (!slot && !whole_track(tile.range.interval_ms, tile.range.envelope)) {
+                    bytes += space.allocation_unit_bound;
+                }
                 slot = tile.first_slot + tile.block_count;
                 if (tile.range.length < MinRawBytes) continue;
 
@@ -49,6 +51,13 @@ uint64_t ReportSignalTile::storage_upper_bound(
 
 bool ReportSignalTile::whole_track(uint32_t interval_ms, bool envelope) {
     return interval_ms >= (envelope ? 10000u : 1000u);
+}
+
+bool ReportSignalTile::cache_plane(
+    const ReportSignalStoreTrack &track, ReportSignalStoreLevel level) {
+    // The CPAP chart uses raw samples at 1 Hz and slower, including overview.
+    return level != ReportSignalStoreLevel::TenSeconds ||
+           !whole_track(track.sample_interval_ms, false);
 }
 
 size_t ReportSignalTile::blocks(uint32_t interval_ms, bool envelope) {
@@ -108,7 +117,10 @@ bool ReportSignalTile::describe(const ReportSignalStoreTrack &track,
 
 bool ReportSignalTile::path(const ReportSignalStoreTrack &track,
                             ReportSignalStoreLevel level,
-                            char *out, size_t capacity) const {
+                            char *out, size_t capacity, uint16_t version) const {
+    const bool legacy = version == DirectoryPerPlaneVersion;
+    if (!legacy && !cache_plane(track, level)) return false;
+
     char signal[AC_STORAGE_PATH_MAX] = {};
     if (!report_signal_store_signal_path(track, level, signal, sizeof(signal))) {
         return false;
@@ -116,8 +128,10 @@ bool ReportSignalTile::path(const ReportSignalStoreTrack &track,
     char *name = strrchr(signal, '/');
     if (!name) return false;
     *name++ = '\0';
-    const int n = snprintf(out, capacity, "%s/http/%s/%lld.deflate",
-        signal, name, static_cast<long long>(start_ms));
+    const int n = !legacy && whole_track(range.interval_ms, range.envelope)
+        ? snprintf(out, capacity, "%s/http/%s.deflate", signal, name)
+        : snprintf(out, capacity, "%s/http/%s/%lld.deflate",
+                   signal, name, static_cast<long long>(start_ms));
     return n > 0 && static_cast<size_t>(n) < capacity;
 }
 

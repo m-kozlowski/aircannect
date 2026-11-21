@@ -9,8 +9,8 @@ namespace aircannect {
 // Slow raw signals and overview LOD cover the whole track; detail tiles remain
 // UTC-aligned. Neither policy changes the underlying raw layout.
 struct ReportSignalTile {
-    // Bump when existing reports need their transport tiles prepared again.
-    static constexpr uint16_t CompressionVersion = 1;
+    static constexpr uint16_t DirectoryPerPlaneVersion = 1;
+    static constexpr uint16_t CompressionVersion = 2;
     static constexpr size_t IdentityBytes =
         28 + REPORT_SIGNAL_STORE_BLOCK_BITMAP_BYTES;
     static constexpr size_t HeaderBytes = IdentityBytes + 4;
@@ -28,6 +28,11 @@ struct ReportSignalTile {
     uint8_t header[HeaderBytes] = {};
 
     static bool whole_track(uint32_t interval_ms, bool envelope);
+    static bool cache_plane(const ReportSignalStoreTrack &track,
+                            ReportSignalStoreLevel level);
+    static bool cache_complete(uint16_t version) {
+        return version == DirectoryPerPlaneVersion || version == CompressionVersion;
+    }
     static uint64_t storage_upper_bound(const ReportSignalStoreNightView &night,
                                         const StorageSpaceSnapshot &space);
     static size_t blocks(uint32_t interval_ms, bool envelope);
@@ -35,7 +40,8 @@ struct ReportSignalTile {
                          ReportSignalStoreLevel level, size_t slot,
                          ReportSignalTile &tile);
     bool path(const ReportSignalStoreTrack &track,
-              ReportSignalStoreLevel level, char *out, size_t capacity) const;
+              ReportSignalStoreLevel level, char *out, size_t capacity,
+              uint16_t version = CompressionVersion) const;
     bool matches(const uint8_t *data, size_t length, uint64_t file_size) const;
 };
 

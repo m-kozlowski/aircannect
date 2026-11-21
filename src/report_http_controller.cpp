@@ -1584,7 +1584,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
             tile.path(query.track,
                       level,
                       sidecar_path,
-                      sizeof(sidecar_path))) {
+                      sizeof(sidecar_path),
+                      query.compression_version)) {
             memcpy(pending.tile_header,
                    tile.header,
                    ReportSignalTile::HeaderBytes);
