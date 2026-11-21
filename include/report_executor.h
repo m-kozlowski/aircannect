@@ -44,6 +44,12 @@ struct ReportExecutorStatus {
     uint32_t record_index = 0;
     uint32_t record_count = 0;
 
+    bool operator==(const ReportExecutorStatus &other) const {
+        return state == other.state && error == other.error && generation == other.generation &&
+               operation_index == other.operation_index && operation_count == other.operation_count &&
+               record_index == other.record_index && record_count == other.record_count;
+    }
+
     bool active() const;
     bool terminal() const;
 };

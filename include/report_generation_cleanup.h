@@ -33,6 +33,10 @@ public:
     // Reader-deferred nights do not hold up new background work.
     bool pending() const;
     bool pending_generations() const;
+    bool settled() const {
+        return !pending() && !restart_ && deferred_.empty() && !day_.valid() &&
+               !scan_ticket_.valid() && !tracking_failed_ && oximetry_.settled();
+    }
     bool waiting_for_storage() const {
         return scan_ticket_.valid() || metadata_.status().active() ||
                publication_.status().active() || delete_id_ != 0 || oximetry_.deleting();

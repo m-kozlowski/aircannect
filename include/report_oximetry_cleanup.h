@@ -17,6 +17,9 @@ public:
     bool poll(bool allowed, bool pressure);
     bool active() const { return scan_.valid() || entries_ || delete_id_; }
     bool deleting() const { return delete_id_ != 0 || remove_directory_.valid(); }
+    bool settled() const {
+        return !active() && !deleting() && (!due_ || (originals_ && originals_->empty()));
+    }
     void forget_media();
 
 private:

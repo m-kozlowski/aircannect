@@ -69,11 +69,13 @@ public:
     void set_signal_builder(ReportOximetrySignalBuilder &builder) { signals_ = &builder; }
     void reset();
     void invalidate(const ReportOximetryChange &change) { pending_.merge(change); }
+    bool scan_pending() const { return offsets_dirty_ || pending_.pending || scanning_.pending; }
+    bool tracks_pending() const { return prepare_pending_; }
     bool poll(uint32_t now_ms, const NightCatalog *nights = nullptr);
     void night_offsets_changed() { offsets_dirty_ = true; }
     bool poll_signals(uint32_t now_ms, bool background_allowed);
     void pause_signals();
-    auto ring_sources() const { return ring_sources_; }
+    const auto &ring_sources() const { return ring_sources_; }
     auto originals() const {
         return scanning_.pending || pending_.pending ? nullptr : originals_;
     }

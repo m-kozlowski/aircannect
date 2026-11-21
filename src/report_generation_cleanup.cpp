@@ -131,6 +131,9 @@ bool ReportGenerationCleanup::protected_generation(uint32_t generation) const {
 }
 
 bool ReportGenerationCleanup::discard_scan() {
+    if (!day_.valid() && !scan_ticket_.valid() && !entries_ &&
+        reclaim_phase_ == ReclaimPhase::Idle) return true;
+
     if (scan_ticket_.valid()) {
         if (!scans_->abandon(scan_ticket_)) return false;
         scan_ticket_ = {};

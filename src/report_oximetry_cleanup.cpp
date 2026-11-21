@@ -109,6 +109,8 @@ void ReportOximetryCleanup::forget_media() {
 
 bool ReportOximetryCleanup::poll(bool allowed, bool pressure) try {
     if (!archive_) return false;
+    if (!allowed && !active() && pressure == pressure_) return false;
+
     const auto originals = archive_->originals();
     if (!allowed || !originals || originals != originals_ || pressure != pressure_) {
         if (active()) {

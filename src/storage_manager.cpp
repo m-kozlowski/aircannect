@@ -415,9 +415,13 @@ StorageSpaceSnapshot refresh_space() {
 }
 
 StorageSpaceSnapshot space_snapshot() {
-    const auto current = status();
-    return {current.mounted && current.total_bytes != 0,
-            current.free_bytes, current.allocation_unit_bound};
+    if (!lock_status()) return {};
+
+    const StorageSpaceSnapshot out{
+        published_status.mounted && published_status.total_bytes != 0,
+        published_status.free_bytes, published_status.allocation_unit_bound};
+    unlock_status();
+    return out;
 }
 
 StorageStatus status() {
@@ -438,7 +442,10 @@ bool try_status(StorageStatus &out) {
 }
 
 bool mounted() {
-    return status().mounted;
+    if (!lock_status()) return false;
+    const bool result = published_status.mounted;
+    unlock_status();
+    return result;
 }
 
 bool ensure_dir(const char *path) {
