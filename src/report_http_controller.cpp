@@ -967,9 +967,9 @@ void ReportHttpController::poll() {
                 static_cast<size_t>(ready.response_size),
                 [ref](uint8_t *buffer,
                       size_t max_length,
-                      size_t offset) -> size_t {
+                      size_t offset) -> PreparedByteRead {
                     if (!buffer || !ref || !ref->port || !ref->stream) {
-                        return 0;
+                        return {};
                     }
 
                     const StorageStreamRead read = ref->port->read(
@@ -978,14 +978,14 @@ void ReportHttpController::poll() {
                         max_length,
                         ref->source_offset + offset);
                     if (read.state == StorageStreamReadState::Retry) {
-                        return RESPONSE_TRY_AGAIN;
+                        return {PreparedByteReadState::Retry, 0, read.wait};
                     }
-                    if (read.state != StorageStreamReadState::Data) return 0;
+                    if (read.state != StorageStreamReadState::Data) return {};
                     if (offset <= ref->size &&
                         read.bytes >= ref->size - offset) {
                         ref->finish(true);
                     }
-                    return read.bytes;
+                    return {PreparedByteReadState::Data, read.bytes};
                 });
         if (!response) {
             ref->finish(false);

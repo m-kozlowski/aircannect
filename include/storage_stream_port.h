@@ -10,6 +10,7 @@
 namespace aircannect {
 
 struct StorageByteStream;
+class PreparedReadWait;
 
 enum class StorageStreamLane : uint8_t {
     Foreground,
@@ -69,6 +70,7 @@ struct StorageStreamStatus {
 struct StorageStreamRead {
     StorageStreamReadState state = StorageStreamReadState::End;
     size_t bytes = 0;
+    PreparedReadWait *wait = nullptr;
 };
 
 class StorageStreamPort {

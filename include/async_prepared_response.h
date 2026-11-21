@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ESPAsyncWebServer.h>
+#include "prepared_byte_transfer.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -9,9 +10,10 @@ namespace aircannect {
 
 // Known-length response whose source must have its first bytes ready before
 // HTTP starts. A streaming producer may pause only after yielding initial data;
-// a later TCP ACK or poll then resumes it without consuming response credit.
+// storage readiness, TCP ACK or poll can then resume it.
 class AsyncPreparedResponse final : public AsyncWebServerResponse {
 public:
+    using StreamFiller = std::function<PreparedByteRead(uint8_t *, size_t, size_t)>;
     AsyncPreparedResponse(int status_code,
                           const char *content_type,
                           size_t content_length,
@@ -19,6 +21,7 @@ public:
     AsyncPreparedResponse(const char *content_type,
                           size_t content_length,
                           AwsResponseFiller content);
+    AsyncPreparedResponse(const char *content_type, size_t content_length, StreamFiller stream);
     ~AsyncPreparedResponse() override;
 
     bool _sourceValid() const override;
@@ -28,10 +31,14 @@ public:
                 uint32_t time) override;
 
 private:
-    bool fill_pending();
+    struct Wake;
+    bool fill_pending(AsyncWebServerRequest *request);
+    size_t pump(AsyncWebServerRequest *request);
     void fail(AsyncWebServerRequest *request);
 
     AwsResponseFiller content_;
+    StreamFiller stream_;
+    std::shared_ptr<Wake> wake_;
     String assembled_headers_;
     size_t written_headers_length_ = 0;
 

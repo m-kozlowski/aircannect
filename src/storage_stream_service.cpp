@@ -247,6 +247,7 @@ StorageStreamRead StorageStreamService::read(
     }
     if (prepared.state == PreparedByteReadState::Retry) {
         result.state = StorageStreamReadState::Retry;
+        result.wait = prepared.wait;
         return result;
     }
 
