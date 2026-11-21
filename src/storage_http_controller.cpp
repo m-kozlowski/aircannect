@@ -1009,7 +1009,7 @@ void StorageHttpController::send_storage_rename(
     if (storage_rename_generation_ == 0) storage_rename_generation_++;
 
     StoragePathCommand command;
-    command.operation = StoragePathOperation::Move;
+    command.operation = StoragePathOperation::UserMove;
     command.source = source;
     command.destination = destination;
     command.generation = storage_rename_generation_;

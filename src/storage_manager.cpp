@@ -539,7 +539,7 @@ bool rmdir(const char *path) {
     return !fs->exists(path);
 }
 
-bool rename(const char *from, const char *to) {
+bool rename(const char *from, const char *to, bool refresh_catalogs) {
     if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
 
@@ -570,8 +570,8 @@ bool rename(const char *from, const char *to) {
     }
 
     if (path_change_callback) {
-        path_change_callback(from, false);
-        path_change_callback(to, false);
+        path_change_callback(from, refresh_catalogs);
+        path_change_callback(to, refresh_catalogs);
     }
     return true;
 }

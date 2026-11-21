@@ -12,6 +12,7 @@ enum class StoragePathOperation : uint8_t {
     Stat,
     EnsureDirectory,
     Move,
+    UserMove,
     MoveReplacing,
     Remove,
     RemoveEmptyDirectory,

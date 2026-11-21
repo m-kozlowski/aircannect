@@ -22,7 +22,7 @@ bool exists(const char *path);
 bool file_stat(const char *path, struct stat &info);
 bool remove(const char *path);
 bool rmdir(const char *path);
-bool rename(const char *from, const char *to);
+bool rename(const char *from, const char *to, bool refresh_catalogs = false);
 File open(const char *path, const char *mode);
 // Optional output is the VFS constructor's path-stat snapshot. Request it
 // only for read-only opens; writes do not refresh it.
@@ -33,7 +33,7 @@ int open_descriptor(const char *path, int flags);
 int close_descriptor(const char *path, int descriptor);
 
 // Registered before the worker starts; callbacks run on the storage task.
-using PathChangeCallback = void (*)(const char *path, bool removed);
+using PathChangeCallback = void (*)(const char *path, bool refresh_catalogs);
 void set_path_change_callback(PathChangeCallback callback);
 
 // Before mutations; nullptr releases the reader for remount/resource pressure.

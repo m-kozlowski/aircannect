@@ -471,11 +471,10 @@ void queue_report_source_change(const JobSlot &job) {
                            0});
 }
 
-// remove/rmdir report successful mutations, not requests. Fold all children of
-// a recursive delete into one notice, including partial failure or cancellation.
-void storage_path_changed(const char *path, bool removed) {
+// Fold both ends of a user move or the removed children of a delete into one notice.
+void storage_path_changed(const char *path, bool refresh_catalogs) {
     edf_overview.path_changed(path);
-    if (!removed) return;
+    if (!refresh_catalogs) return;
 
     const std::string_view name(path);
     const auto below = [&](std::string_view root) {
