@@ -377,7 +377,7 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
 
     {
         errno = 0;
-        stream.input = Storage::open(stream.path, "r");
+        stream.input = Storage::open_sequential(stream.path);
         const int open_error = errno;
         if (!stream.input &&
             !(stream.missing_ok && open_error == ENOENT)) {
@@ -389,7 +389,6 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
         if (stream.input && !stream.input.isDirectory()) {
             stream.source_size = static_cast<uint64_t>(stream.input.size());
             stream.modified = file_modified(stream.input);
-            (void)stream.input.setBufferSize(512);
             stream.input_open = true;
         } else if (stream.input) {
             stream.input.close();

@@ -576,11 +576,8 @@ bool rename(const char *from, const char *to, bool refresh_catalogs) {
     return true;
 }
 
-File open(const char *path, const char *mode) {
-    return open(path, mode, nullptr);
-}
-
-File open(const char *path, const char *mode, struct stat *opened_stat) {
+static File open_file(const char *path, const char *mode, struct stat *opened_stat,
+                      bool sequential) {
     if (opened_stat) *opened_stat = {};
 
     if (!initialized || !path || !*path || !mode || !*mode) return File();
@@ -593,15 +590,27 @@ File open(const char *path, const char *mode, struct stat *opened_stat) {
     } else release_write_handle(path);
 
     File file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode,
-                                   opened_stat);
+                                   opened_stat, sequential);
     if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
         (release_read_handle() | release_write_handles())) {
         file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode,
-                                  opened_stat);
+                                  opened_stat, sequential);
     }
 
     if (!file) log_io_error("open", path, errno);
     return file;
+}
+
+File open(const char *path, const char *mode) {
+    return open_file(path, mode, nullptr, false);
+}
+
+File open(const char *path, const char *mode, struct stat *opened_stat) {
+    return open_file(path, mode, opened_stat, false);
+}
+
+File open_sequential(const char *path) {
+    return open_file(path, "r", nullptr, true);
 }
 
 const char *type_name(StorageType type) {

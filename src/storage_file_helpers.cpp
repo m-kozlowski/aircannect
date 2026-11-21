@@ -192,6 +192,16 @@ void DmaStagingBuffer::reset() {
     attempted_ = false;
 }
 
+void DmaStagingBuffer::configure_reader(FILE *file, size_t bytes, size_t fallback_size) {
+    if (bytes >= Capacity) {
+        auto *buffer = reinterpret_cast<char *>(get(Capacity));
+        if (buffer && setvbuf(file, buffer, _IOFBF, Capacity) == 0) return;
+        reset();
+    }
+
+    if (fallback_size) setvbuf(file, nullptr, _IOFBF, fallback_size);
+}
+
 namespace {
 
 template <typename Write, typename Span>

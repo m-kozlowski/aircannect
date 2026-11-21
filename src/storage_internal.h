@@ -24,11 +24,13 @@ bool remove(const char *path);
 bool rmdir(const char *path);
 bool rename(const char *from, const char *to, bool refresh_catalogs = false);
 File open(const char *path, const char *mode);
+File open_sequential(const char *path);
 // Optional output is the VFS constructor's path-stat snapshot. Request it
 // only for read-only opens; writes do not refresh it.
 File open(const char *path, const char *mode, struct stat *opened_stat);
 File open_observed_file(const char *mount_point, const char *path,
-                         const char *mode, struct stat *opened_stat = nullptr);
+                         const char *mode, struct stat *opened_stat = nullptr,
+                         bool sequential = false);
 int open_descriptor(const char *path, int flags);
 int close_descriptor(const char *path, int descriptor);
 
@@ -60,6 +62,7 @@ public:
     DmaStagingBuffer &operator=(const DmaStagingBuffer &) = delete;
 
     uint8_t *get(size_t transfer_size);
+    void configure_reader(FILE *file, size_t bytes, size_t fallback_size);
     void reset();
 
 private:

@@ -2286,10 +2286,9 @@ bool open_read_job(size_t index, const char *&error) {
     if (active_read_index != index) {
         active_read_index = SIZE_MAX;
         errno = 0;
-        const bool dma_buffered = job.lane == StorageReadLane::Report && job.retain_handle &&
-            job.mode == StorageReadMode::Range && job.requested_length >= AC_STORAGE_REPORT_READ_STEP_BYTES;
         if (!active_read.open(job.path, job.ticket.generation,
-                              job.whole_file_size_only ? job.requested_length : 0, dma_buffered)) {
+                              job.whole_file_size_only ? job.requested_length : 0,
+                              job.requested_length)) {
             const bool missing = errno == ENOENT;
             error = missing ? "read_not_found" : "read_open_failed";
             return false;

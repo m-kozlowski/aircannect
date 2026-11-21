@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cerrno>
+#include <algorithm>
 #include <fcntl.h>
 
 #include "storage_io_diagnostics.h"
@@ -14,7 +15,8 @@ StorageReadFile::~StorageReadFile() {
 }
 
 bool StorageReadFile::open(const char *path, uint32_t generation,
-                           size_t whole_file_limit, bool dma_buffered) {
+                           size_t whole_file_limit, size_t requested_bytes) {
+    const bool dma_buffered = requested_bytes >= staging_.Capacity;
     if (file_ && generation_ == generation && strcmp(path_, path) == 0 &&
         dma_requested_ == dma_buffered &&
         (has_modified_ || (whole_file_limit && size <= whole_file_limit))) {
@@ -55,13 +57,9 @@ bool StorageReadFile::open(const char *path, uint32_t generation,
         return false;
     }
 
-    // fread fills the stdio buffer before copying to the caller's PSRAM.
-    // Give FAT a multi-sector DMA destination during sequential report reads.
     dma_requested_ = dma_buffered;
-    char *dma = dma_buffered ? reinterpret_cast<char *>(staging_.get(staging_.Capacity)) : nullptr;
-    if (!dma || setvbuf(file_, dma, _IOFBF, staging_.Capacity) != 0) {
-        if (opened_stat.st_blksize == 0) setvbuf(file_, nullptr, _IOFBF, 4096);
-    }
+    staging_.configure_reader(file_, std::min(requested_bytes, size_t(opened_stat.st_size)),
+                              opened_stat.st_blksize == 0 ? 4096 : 0);
 
     copy_cstr(path_, sizeof(path_), path);
     generation_ = generation;
