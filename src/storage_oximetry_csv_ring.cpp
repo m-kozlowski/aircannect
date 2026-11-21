@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <fcntl.h>
+#include <mutex>
 #include <unistd.h>
 
 #include "debug_log.h"
@@ -14,7 +15,10 @@
 
 namespace aircannect::OximetryCsv {
 namespace {
-std::shared_ptr<const ReportOximetryCatalog> pending, current;
+std::mutex pending_mutex;
+std::shared_ptr<const ReportOximetryCatalog> pending;
+
+std::shared_ptr<const ReportOximetryCatalog> current;
 std::vector<uint8_t, LargeAllocator<uint8_t>> checked;
 size_t index = 0, offset = 0, used = 0;
 size_t input_pos = 0, input_end = 0;
@@ -84,8 +88,12 @@ bool step(uint32_t now) {
         return true;
     }
 
-    const auto latest = std::atomic_load(&pending);
-    if (current != latest) adopt(latest);
+    std::shared_ptr<const ReportOximetryCatalog> latest;
+    {
+        std::lock_guard lock(pending_mutex);
+        latest = pending;
+    }
+    if (current != latest) adopt(std::move(latest));
     if (current && index >= current->size() && retry_at &&
         int32_t(now - retry_at) >= 0) {
         index = retry_at = 0;
@@ -203,7 +211,8 @@ bool step(uint32_t now) {
 }  // namespace
 
 void publish_catalog(std::shared_ptr<const ReportOximetryCatalog> catalog) {
-    std::atomic_store(&pending, std::move(catalog));
+    std::lock_guard lock(pending_mutex);
+    pending.swap(catalog);
 }
 
 void reset_archive() {
