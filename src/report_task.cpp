@@ -3929,8 +3929,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (runtime.local_background_work_blocked()) runtime.oximetry_archive.pause_signals();
 
     if (runtime.staging_generation && !runtime.refresh_generation &&
-        (runtime.local_background_work_blocked() || !runtime.pending_refresh.valid() ||
-         runtime.pending_refresh.target.valid() || runtime.pending_catalog_save ||
+        (runtime.rebuild_started || runtime.local_background_work_blocked() ||
+         !runtime.pending_refresh.valid() || runtime.pending_refresh.target.valid() ||
+         runtime.pending_catalog_save ||
          static_cast<int32_t>(runtime.pending_refresh.generation -
                               runtime.staging_generation) > 0)) {
         runtime.discard_refresh_stage();
