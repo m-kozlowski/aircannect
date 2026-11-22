@@ -32,7 +32,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag=$(gh release view --json tagName --jq .tagName)
-          gh release download "$tag" --pattern '*-initial.zip' --dir "$RUNNER_TEMP/release"
+          gh release download "$tag" --dir "$RUNNER_TEMP/release" \
+            --pattern '*-initial.zip' --pattern aircannect-release.json --pattern RELEASE_NOTES.md
 
           package=$(npm pack --silent --ignore-scripts esp-web-tools@10.5.2 --pack-destination "$RUNNER_TEMP")
           tar -xzf "$RUNNER_TEMP/$package" -C "$RUNNER_TEMP"
