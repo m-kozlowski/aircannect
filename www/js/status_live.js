@@ -440,24 +440,21 @@
             (device.addr || "").toLowerCase() === activeSensor;
           const auto = document.createElement("button");
           auto.className = "btn" + (device.autoconnect ? " primary" : "");
-          AirCANnect.i18n.text(auto, device.autoconnect ?
-            AirCANnect.i18n.message("status.autoconnect_on") : AirCANnect.i18n.message("status.autoconnect_off"));
+          auto.setAttribute("aria-pressed", String(!!device.autoconnect));
+          AirCANnect.i18n.text(auto, AirCANnect.i18n.message("status.autoconnect"));
           auto.onclick = () => oxiSensorAutoconnect(
             device.addr, !device.autoconnect);
           controls.appendChild(auto);
 
           if (typeof device.recordings === "boolean") {
-            const label = document.createElement("label");
-            label.className = "check";
-            const check = document.createElement("input");
-            check.type = "checkbox";
-            check.checked = device.recordings;
-            check.onchange = () => oxiAction("sensor_recordings",
-              {addr: device.addr, enabled: check.checked}, "oxiKnownMsg");
-            const caption = document.createElement("span");
-            AirCANnect.i18n.text(caption, AirCANnect.i18n.message("status.import_recordings"));
-            label.append(check, caption);
-            controls.appendChild(label);
+            const download = document.createElement("button");
+            download.className = "btn" + (device.recordings ? " primary" : "");
+            download.setAttribute("aria-pressed", String(device.recordings));
+            AirCANnect.i18n.text(download, AirCANnect.i18n.message("status.auto_download"));
+            AirCANnect.i18n.text(download, AirCANnect.i18n.message("status.import_recordings"), "title");
+            download.onclick = () => oxiAction("sensor_recordings",
+              {addr: device.addr, enabled: !device.recordings}, "oxiKnownMsg");
+            controls.appendChild(download);
           }
 
           const connect = document.createElement("button");
