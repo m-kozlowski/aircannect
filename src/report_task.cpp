@@ -256,7 +256,14 @@ struct ReportTask::Runtime {
     using RebuildSelection =
         std::vector<ReportArtifactKey, LargeAllocator<ReportArtifactKey>>;
 
-    Runtime() : engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
+    enum WakeInput : uint32_t {
+        Command = 1, Activity = 2, Capture = 4, RefreshInputs = 8, Sources = 16,
+        Summary = 32, Archive = 64, Media = 128, Status = 256,
+    };
+    enum class Continuation { None, Engine, Tiles };
+
+    explicit Runtime(ReportTask &owner) : task_owner(owner),
+        engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
 
     void record_failure(const char *operation, const char *error,
                         SleepDayId sleep_day = {}, uint32_t retry_ms = 0,
@@ -305,8 +312,12 @@ struct ReportTask::Runtime {
 #endif
     }
 
-    void wake(bool inputs_changed = true) {
-        if (inputs_changed) status_input_changed.store(true);
+    void wake(WakeInput input) {
+        task_owner.wake_inputs_.fetch_or(input);
+        notify_task();
+    }
+
+    void notify_task() {
 #ifdef ARDUINO
         if (task) xTaskNotifyGive(task);
 #endif
@@ -425,7 +436,7 @@ struct ReportTask::Runtime {
                 }
                 queued.generation = command.generation;
                 unlock();
-                wake();
+                wake(Command);
                 return OperationAdmission::Accepted;
             }
         }
@@ -433,7 +444,7 @@ struct ReportTask::Runtime {
         if (command_count >= AC_REPORT_TASK_COMMAND_CAPACITY) {
             ++command_drops;
             unlock();
-            wake();
+            wake(Status);
             return OperationAdmission::Busy;
         }
         if (retry_slot) retry_slot->reset();
@@ -473,7 +484,7 @@ struct ReportTask::Runtime {
 
         commands[command_count++] = command;
         unlock();
-        wake();
+        wake(Command);
         return OperationAdmission::Accepted;
     }
 
@@ -549,7 +560,7 @@ struct ReportTask::Runtime {
         pending_activity = next;
         activity_pending = true;
         unlock();
-        wake();
+        wake(Activity);
     }
 
     void publish_capture_session(const EdfSessionMetadata &metadata) {
@@ -563,7 +574,7 @@ struct ReportTask::Runtime {
             capture_pending = true;
         }
         unlock();
-        if (changed) wake();
+        if (changed) wake(Capture);
     }
 
     bool apply_capture_session() {
@@ -765,7 +776,7 @@ struct ReportTask::Runtime {
         bool finalization_pending) {
         // Publish the storage gate even when the session-hint mutex is busy.
         if (edf_finalization_pending.exchange(finalization_pending) != finalization_pending) {
-            wake();
+            wake(RefreshInputs);
         }
 
         if (sessions_ended == 0) return OperationAdmission::Accepted;
@@ -801,7 +812,7 @@ struct ReportTask::Runtime {
         control.background_active = true;
         control.post_therapy_settle_pending = true;
         unlock();
-        wake();
+        wake(RefreshInputs);
         return OperationAdmission::Accepted;
     }
 
@@ -824,7 +835,7 @@ struct ReportTask::Runtime {
         pending_timezone_change = true;
         control.background_active = true;
         unlock();
-        wake();
+        wake(RefreshInputs);
         return OperationAdmission::Accepted;
     }
 
@@ -851,7 +862,7 @@ struct ReportTask::Runtime {
 
         if (change.valid() || change.removals.owners) control.background_active = true;
         unlock();
-        wake();
+        wake(Sources);
         return OperationAdmission::Accepted;
     }
 
@@ -1264,6 +1275,78 @@ struct ReportTask::Runtime {
             !control.background_active && !queued_inputs();
         unlock();
         return ready;
+    }
+
+    // The exchange at dispatch transfers ownership of the hints; it does not
+    // acknowledge them. A busy mailbox stays pending across subsequent passes.
+    void acknowledge_inputs(bool archive_observed) {
+        if (!pending_inputs || !lock(0)) return;
+        if (!command_count) pending_inputs &= ~Command;
+        if (!activity_pending) pending_inputs &= ~Activity;
+        if (!capture_pending) pending_inputs &= ~Capture;
+        if (!pending_session_ended.pending && !pending_timezone_change) pending_inputs &= ~RefreshInputs;
+        if (!pending_source_change_count && !pending_oximetry_change.pending && !pending_removals.owners)
+            pending_inputs &= ~Sources;
+        if (!pending_summary_count) pending_inputs &= ~Summary;
+        if (!status_pending) pending_inputs &= ~Status;
+        if (archive_observed) pending_inputs &= ~Archive;
+        pending_inputs &= ~Media;
+        unlock();
+    }
+
+    bool poll_engine(uint32_t now_ms, size_t record_budget, bool &internal_progress) {
+        const auto phase = engine.state();
+        const auto execution = phase == ReportEngineState::Executing
+            ? engine.execution_progress() : ReportExecutorStatus{};
+
+        const auto before = engine.storage_wait();
+        const uint32_t revision = task_owner.storage_revision_.load();
+        const bool progress = engine.poll(now_ms, activity.therapy_active
+            ? 1 : std::max<size_t>(record_budget, 1));
+
+        observe_wait(Continuation::Engine, before, engine.storage_wait(), revision);
+
+        if (phase == engine.state() && (phase == ReportEngineState::Publishing ||
+            (phase == ReportEngineState::Executing && execution == engine.execution_progress()))) {
+            internal_progress |= progress;
+            return false;
+        }
+        return progress;
+    }
+
+    Continuation next_continuation() const {
+        if (activity.therapy_active || activity.ota_install_active || activity.storage_low_space ||
+            period_running || date_repair.active() || !catalog_store.layout_ready() ||
+            catalog_store.active() || store_catalog_loader.status().active() ||
+            catalog_refresh.active() || capture_sources.active() || summary_acquisition.active() ||
+            summary_archive.status().active || spool_availability_probe.status().active() ||
+            generation_cleanup.waiting_for_storage() || generation_cleanup.deleting() ||
+            oximetry_archive.scan_pending() || presentation_pending) return Continuation::None;
+
+        if (signal_tile_backfill_started && signal_tile_backfill.active()) return Continuation::Tiles;
+        if (engine.building_signals()) return Continuation::Engine;
+        return Continuation::None;
+    }
+
+    void observe_wait(Continuation owner, OperationTicket before,
+                      OperationTicket after, uint32_t revision) {
+        if (before != after) {
+            waiting_owner = owner;
+            waiting_ticket = after;
+            waiting_revision = revision;
+        } else if (owner == waiting_owner && after != waiting_ticket) {
+            waiting_ticket = {};
+        }
+        // An unchanged ticket on a failed try-lock is never armed again:
+        // its completion may already have been published.
+    }
+
+    bool poll_tiles() {
+        const auto before = signal_tile_backfill.storage_wait();
+        const uint32_t revision = task_owner.storage_revision_.load();
+        const bool progress = signal_tile_backfill.poll();
+        observe_wait(Continuation::Tiles, before, signal_tile_backfill.storage_wait(), revision);
+        return progress;
     }
 
     bool queued_inputs() const {
@@ -3019,6 +3102,7 @@ struct ReportTask::Runtime {
         return worked;
     }
 
+    ReportTask &task_owner;
     std::atomic<bool> storage_suspend_requested{false};
     std::atomic<bool> storage_paused{false};
     bool storage_pause_started = false;
@@ -3082,7 +3166,12 @@ struct ReportTask::Runtime {
     bool presentation_pending = false;
     bool settled = false;
     bool status_pending = true;
-    std::atomic<bool> status_input_changed{true};
+    uint32_t pending_inputs = 0;
+    uint32_t last_full_ms = 0;
+    Continuation continuation = Continuation::None;
+    Continuation waiting_owner = Continuation::None;
+    OperationTicket waiting_ticket;
+    uint32_t waiting_revision = 0;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
     std::shared_ptr<const NightCatalog> pending_source_update;
     bool source_update_from_rpc = false;
@@ -3250,9 +3339,9 @@ bool ReportTask::begin(StorageReadPort &read_port,
 
 #ifdef ARDUINO
     void *memory = Memory::alloc_large(sizeof(Runtime), false);
-    runtime_ = memory ? new (memory) Runtime() : nullptr;
+    runtime_ = memory ? new (memory) Runtime(*this) : nullptr;
 #else
-    runtime_ = new (std::nothrow) Runtime();
+    runtime_ = new (std::nothrow) Runtime(*this);
 #endif
     if (!runtime_) return false;
 
@@ -3342,7 +3431,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
 void ReportTask::set_storage_suspended(bool suspended) {
     if (!runtime_) return;
     if (runtime_->storage_suspend_requested.exchange(suspended) != suspended) {
-        runtime_->wake();
+        runtime_->wake(Runtime::Media);
     }
 }
 
@@ -3497,19 +3586,19 @@ bool ReportTask::publish_summary_observation(SummaryObservation observation) {
     if ((!observation.payload && !observation.empty_payload) || observation.device_serial.empty() ||
         runtime_->storage_suspend_requested.load() || !runtime_->lock(0)) {
         ++runtime_->summary_archive_drops;
-        runtime_->wake();
+        runtime_->wake(Runtime::Status);
         return false;
     }
 
     if (runtime_->pending_summary_count == 2) {
         runtime_->unlock();
         ++runtime_->summary_archive_drops;
-        runtime_->wake();
+        runtime_->wake(Runtime::Status);
         return false;
     }
     runtime_->pending_summary[runtime_->pending_summary_count++] = std::move(observation);
     runtime_->unlock();
-    runtime_->wake();
+    runtime_->wake(Runtime::Summary);
     return true;
 }
 
@@ -3558,7 +3647,7 @@ ReportTask::catalog_json_snapshot() const {
 }
 
 void ReportTask::request_oximetry_index() {
-    if (runtime_ && !runtime_->oximetry_requested.exchange(true)) runtime_->wake();
+    if (runtime_ && !runtime_->oximetry_requested.exchange(true)) runtime_->wake(Runtime::Archive);
 }
 
 std::shared_ptr<const ReportOximetryCatalog> ReportTask::oximetry_originals() const {
@@ -3769,6 +3858,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     runtime.last_step_ms = now_ms;
 
     if (runtime.storage_suspend_requested.load()) {
+        runtime.continuation = Runtime::Continuation::None;
         return runtime.poll_storage_pause(now_ms);
     }
     if (runtime.storage_pause_started) {
@@ -3788,14 +3878,45 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.schedule_reconcile(now_ms, false);
     }
 
-    const bool input_changed = runtime.status_input_changed.exchange(false);
-    if (runtime.settled && !input_changed &&
-        !(runtime.reconcile_pending && deadline_due(now_ms, runtime.reconcile_due_ms))) {
-        const auto space = runtime.storage_status->space_snapshot();
-        if (space.known && space.free_bytes >= StorageSpacePolicy::ReclaimTarget) return false;
+    if (!wake_inputs_.load() && !runtime.pending_inputs &&
+        !(runtime.reconcile_pending && !runtime.rebuild_started && deadline_due(now_ms, runtime.reconcile_due_ms))) {
+        const auto owner = runtime.continuation;
+        if (owner == Runtime::Continuation::None && runtime.settled) {
+            const auto space = runtime.storage_status->space_snapshot();
+            if (space.known && space.free_bytes >= StorageSpacePolicy::ReclaimTarget) return false;
+        }
+
+        if (owner != Runtime::Continuation::None &&
+            now_ms - runtime.last_full_ms < AC_REPORT_TASK_FULL_PASS_MS) {
+            if (runtime.waiting_owner == owner && runtime.waiting_ticket.valid() &&
+                storage_revision_.load() == runtime.waiting_revision) return false;
+
+            bool progress = false;
+            bool needs_full = false;
+            if (owner == Runtime::Continuation::Engine) {
+                needs_full = runtime.poll_engine(now_ms, record_budget, progress);
+                needs_full |= !runtime.engine.building_signals();
+            } else {
+                progress = runtime.poll_tiles();
+                needs_full = !runtime.signal_tile_backfill.active();
+            }
+            if (needs_full) {
+                runtime.continuation = Runtime::Continuation::None;
+                // Consume this publication before the next full pass can start another job.
+                if (owner == Runtime::Continuation::Engine) runtime.observe_engine(now_ms);
+                else runtime.observe_signal_tile_backfill(now_ms);
+                runtime.status_pending = true;
+            }
+            return progress || needs_full;
+        }
     }
+
+    runtime.last_full_ms = now_ms;
+    runtime.pending_inputs |= wake_inputs_.exchange(0);
+    const bool input_changed = runtime.pending_inputs != 0;
     runtime.settled = false;
 
+    runtime.continuation = Runtime::Continuation::None;
     bool worked = runtime.apply_pending_refresh_inputs(now_ms);
     worked = runtime.apply_pending_source_changes(now_ms) || worked;
     if (!runtime.reconcile_deadline_initialized) {
@@ -4765,7 +4886,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.cancel_signal_tile_backfill();
             worked = true;
         } else if (runtime.signal_tile_backfill.active()) {
-            internal_progress = runtime.signal_tile_backfill.poll();
+            internal_progress = runtime.poll_tiles();
         }
         worked = runtime.observe_signal_tile_backfill(now_ms) || worked;
     }
@@ -4777,17 +4898,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     if (!runtime.generation_cleanup.deleting() &&
         (!runtime.activity.therapy_active || runtime.capture_storage_ready())) {
-        const auto phase = runtime.engine.state();
-        const auto execution = phase == ReportEngineState::Executing
-            ? runtime.engine.execution_progress() : ReportExecutorStatus{};
-
-        const bool progress = runtime.engine.poll(now_ms, runtime.activity.therapy_active
-            ? 1 : std::max<size_t>(record_budget, 1));
-
-        if (phase == runtime.engine.state() && (phase == ReportEngineState::Publishing ||
-            (phase == ReportEngineState::Executing && execution == runtime.engine.execution_progress())))
-            internal_progress |= progress;
-        else worked |= progress;
+        worked = runtime.poll_engine(now_ms, record_budget, internal_progress) || worked;
     }
     if (!runtime.catalog_store.installing()) {
         SourceRevision loaded_revision;
@@ -4851,6 +4962,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.publish_state();
     }
 
+    runtime.acknowledge_inputs(summary_media_available && !runtime.activity.ota_install_active &&
+                               !runtime.activity.realtime_stream_active);
+    runtime.continuation = runtime.next_continuation();
     if (worked || internal_progress) return true;
     runtime.settled = runtime.completed_pass();
     return false;
@@ -4863,7 +4977,9 @@ void ReportTask::publish_catalog(
 }
 
 void ReportTask::notify_storage_completion() {
-    if (runtime_) runtime_->wake(false);
+    if (!runtime_) return;
+    storage_revision_.fetch_add(1);
+    runtime_->notify_task();
 }
 
 void ReportTask::task_entry(void *context) {
@@ -4898,12 +5014,18 @@ void ReportTask::run() {
 
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
         } else {
-            const ReportTaskControlSnapshot status = control_snapshot();
-            ulTaskNotifyTake(pdTRUE,
-                             pdMS_TO_TICKS((status.background_active ||
-                                            runtime_->generation_cleanup.waiting_for_storage())
-                                 ? AC_REPORT_TASK_WAIT_TICK_MS
-                                 : AC_REPORT_TASK_IDLE_TICK_MS));
+            uint32_t wait = AC_REPORT_TASK_IDLE_TICK_MS;
+            if (!runtime_->settled || runtime_->storage_suspend_requested.load()) {
+                if (runtime_->continuation != Runtime::Continuation::None) {
+                    const uint32_t elapsed = millis() - runtime_->last_full_ms;
+                    wait = elapsed < AC_REPORT_TASK_FULL_PASS_MS
+                        ? std::min(AC_REPORT_TASK_WAIT_TICK_MS, AC_REPORT_TASK_FULL_PASS_MS - elapsed) : 0;
+                } else if (control_snapshot().background_active || runtime_->generation_cleanup.waiting_for_storage()) {
+                    wait = AC_REPORT_TASK_WAIT_TICK_MS;
+                }
+            }
+
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
         }
 
         batch_started_us = micros();

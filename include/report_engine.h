@@ -88,6 +88,10 @@ public:
     void clear();
 
     bool poll(uint32_t now_ms, size_t record_budget = 1);
+    bool building_signals() const {
+        return phase_ == ActivePhase::Executing || phase_ == ActivePhase::Publishing;
+    }
+    OperationTicket storage_wait() const;
     bool idle() const { return phase_ == ActivePhase::Idle && queue_.size() == 0; }
     bool foreground_active() const;
     ReportEngineState state() const;

@@ -22,6 +22,7 @@ public:
                size_t next_slot = SIZE_MAX,
                size_t closed_before_slot = SIZE_MAX);
     bool poll();
+    OperationTicket storage_wait() const { return read_ticket_.valid() ? read_ticket_ : write_ticket_; }
 
     bool active() const { return phase_ != Phase::Idle; }
     bool succeeded() const { return succeeded_; }

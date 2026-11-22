@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
@@ -349,6 +350,10 @@ private:
     bool step(uint32_t now_ms, size_t record_budget);
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog,
                          uint32_t generation);
+
+    // The task object is in internal RAM; the much larger Runtime lives in PSRAM.
+    std::atomic<uint32_t> wake_inputs_{0};
+    std::atomic<uint32_t> storage_revision_{0};
 
     Runtime *runtime_ = nullptr;
     OximetryCatalogConsumer oximetry_consumer_ = nullptr;

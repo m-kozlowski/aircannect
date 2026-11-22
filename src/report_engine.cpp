@@ -387,6 +387,13 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
     return worked;
 }
 
+OperationTicket ReportEngine::storage_wait() const {
+    if (phase_ == ActivePhase::Executing && executor_.storage_wait().valid())
+        return executor_.storage_wait();
+
+    return building_signals() ? store_.storage_wait() : OperationTicket{};
+}
+
 bool ReportEngine::foreground_active() const {
     return queue_.contains(ReportRequestPriority::Foreground) ||
         (phase_ != ActivePhase::Idle &&

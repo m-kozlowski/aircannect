@@ -137,6 +137,7 @@ public:
     // Fallback decoding consumes at most 32 sample/event positions per poll,
     // regardless of record_budget. A zero budget still polls operation end.
     bool poll(size_t record_budget = 1);
+    OperationTicket storage_wait() const { return ticket_; }
     void cancel();
     void reset();
 

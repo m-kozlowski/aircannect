@@ -56,6 +56,7 @@ public:
                StorageAtomicWritePort &write_port);
     void begin(StorageAtomicWritePort &write_port);
     bool poll();
+    OperationTicket storage_wait() const;
     void cancel();
     void reset();
 
