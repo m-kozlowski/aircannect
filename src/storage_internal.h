@@ -16,6 +16,7 @@ bool format_card_on_boot(char *error, size_t size);
 
 // Storage task only, after all local filesystem users have closed their files.
 void unmount();
+void set_sdmmc_mount_in_progress(bool mounting);
 
 bool ensure_dir(const char *path);
 bool exists(const char *path);

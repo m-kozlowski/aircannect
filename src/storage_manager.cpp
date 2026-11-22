@@ -191,8 +191,12 @@ bool mount_sdmmc() {
         return false;
     }
 
-    if (!SD_MMC.begin(AC_STORAGE_MOUNT_POINT, mode1bit, false,
-                      AC_SDMMC_FREQ_KHZ, AC_STORAGE_MAX_OPEN_FILES)) {
+    set_sdmmc_mount_in_progress(true);
+    const bool mounted = SD_MMC.begin(AC_STORAGE_MOUNT_POINT, mode1bit, false,
+                                      AC_SDMMC_FREQ_KHZ, AC_STORAGE_MAX_OPEN_FILES);
+    set_sdmmc_mount_in_progress(false);
+
+    if (!mounted) {
         set_state(StorageType::SdMmc, StorageState::NotPresent,
                   "SDMMC mount failed");
         return false;
