@@ -246,21 +246,25 @@
     function renderReleaseNotesMarkdown(container, markdown) {
       i18n.text(container, "");
       const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
-      let paragraph = [];
+      const paragraph = [];
       let list = null;
       let listItem = null;
-      let listParagraph = [];
       let code = null;
 
-      const appendParagraph = (parent, values) => {
-        if (!values.length) return;
-        const element = document.createElement("p");
-        appendReleaseNotesInline(element, values.join(" "));
-        parent.append(element);
-        values.length = 0;
+      const flushParagraph = () => {
+        if (!paragraph.length) return;
+
+        const parent = listItem || container;
+        const element = listItem && !listItem.hasChildNodes()
+          ? listItem : document.createElement("p");
+
+        appendReleaseNotesInline(element, paragraph.join(" "));
+        if (element !== parent) parent.append(element);
+        paragraph.length = 0;
       };
-      const closeList = () => {
-        if (listItem) appendParagraph(listItem, listParagraph);
+
+      const closeBlock = () => {
+        flushParagraph();
         list = null;
         listItem = null;
       };
@@ -281,16 +285,14 @@
           continue;
         }
         if (line.startsWith("```")) {
-          appendParagraph(container, paragraph);
-          closeList();
+          closeBlock();
           code = [];
           continue;
         }
 
-        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
         if (heading) {
-          appendParagraph(container, paragraph);
-          closeList();
+          closeBlock();
           const element = document.createElement("h" + heading[1].length);
           appendReleaseNotesInline(element, heading[2]);
           container.append(element);
@@ -299,34 +301,27 @@
 
         const item = line.match(/^-\s+(.+)$/);
         if (item) {
-          appendParagraph(container, paragraph);
-          if (listItem) appendParagraph(listItem, listParagraph);
+          flushParagraph();
           if (!list) {
             list = document.createElement("ul");
             container.append(list);
           }
           listItem = document.createElement("li");
-          appendReleaseNotesInline(listItem, item[1]);
+          paragraph.push(item[1]);
           list.append(listItem);
           continue;
         }
 
-        if (listItem && /^\s{2,}\S/.test(line)) {
-          listParagraph.push(line.trim());
-          continue;
-        }
         if (!line.trim()) {
-          appendParagraph(container, paragraph);
-          if (listItem) appendParagraph(listItem, listParagraph);
+          flushParagraph();
           continue;
         }
 
-        closeList();
+        if (listItem && !paragraph.length && !/^\s{2,}\S/.test(line)) closeBlock();
         paragraph.push(line.trim());
       }
 
-      appendParagraph(container, paragraph);
-      closeList();
+      flushParagraph();
       if (code !== null) appendCode();
       if (!container.childNodes.length) {
         i18n.text(container, i18n.message("ota.no_notes"));
