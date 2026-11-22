@@ -1,4 +1,4 @@
-"""Assemble the project site from README and the initial images of one release."""
+"""Assemble the project site, USB installer and OTA feed from one release."""
 
 import argparse
 from html import escape
@@ -7,12 +7,15 @@ import os
 from pathlib import Path
 import shutil
 from string import Template
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 import zipfile
 
 from markdown_it import MarkdownIt
 
-from build_release import DEFAULT_ENVIRONMENTS, PROJECT_DIR, manifest_version, validate_esp32_image
+from build_release import (
+    DEFAULT_ENVIRONMENTS, MANIFEST_FILENAME, PROJECT_DIR, RELEASE_NOTES_FILENAME,
+    manifest_version, validate_esp32_image,
+)
 
 
 PAGES = PROJECT_DIR / "pages"
@@ -66,12 +69,26 @@ def render_home(out: Path, repo: str) -> str:
     return parser.renderer.render(tokens, parser.options, {})
 
 
+def publish_ota_metadata(release_dir: Path, ota_dir: Path, download_base: str) -> None:
+    manifest = json.loads((release_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    for target in manifest["targets"].values():
+        image = target["zlib"]
+        image["url"] = urljoin(download_base, image["url"])
+
+    ota_dir.mkdir()
+    (ota_dir / MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    shutil.copyfile(release_dir / RELEASE_NOTES_FILENAME, ota_dir / RELEASE_NOTES_FILENAME)
+
+
 def build(tag: str, release_dir: Path, vendor: Path, out: Path) -> None:
     if manifest_version(tag) == tag:
         raise ValueError(f"expected a release tag, got {tag!r}")
     repo = "https://github.com/" + os.environ.get("GITHUB_REPOSITORY", "m-kozlowski/aircannect")
     release = f"{repo}/releases/tag/{tag}"
+    download_base = f"{repo}/releases/download/{tag}/"
     out.mkdir(parents=True, exist_ok=False)
+    publish_ota_metadata(release_dir, out / "ota", download_base)
+
     assets = out / "assets"
     assets.mkdir()
     shutil.copyfile(PAGES / "site.css", assets / "site.css")
@@ -102,7 +119,7 @@ def build(tag: str, release_dir: Path, vendor: Path, out: Path) -> None:
             "builds": [{"chipFamily": "ESP32-S3", "parts": [{"path": stem + ".bin", "offset": 0}]}],
         }
         (images / f"{profile}.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        zip_url = f"{repo}/releases/download/{tag}/{archive.name}"
+        zip_url = download_base + archive.name
         options.append(f'<option value="{tag}/{profile}.json" data-zip="{zip_url}">{escape(name)}</option>')
 
     template = Template((PAGES / "layout.html").read_text())
