@@ -54,8 +54,8 @@ bool StorageRangeWriteService::ready() const {
     return mutex_ && job_ && task_available_.load(std::memory_order_acquire);
 }
 
-bool StorageRangeWriteService::lock() const {
-    return mutex_ && xSemaphoreTake(mutex_, 0) == pdTRUE;
+bool StorageRangeWriteService::lock(uint32_t timeout_ms) const {
+    return mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void StorageRangeWriteService::unlock() const {
@@ -312,7 +312,7 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
 }
 
 bool StorageRangeWriteService::step(StorageAtomicWriteLane lane) {
-    if (!ready() || !lock()) return false;
+    if (!ready() || !lock(50)) return false;
 
     const bool abandoned = apply_abandon_locked();
     const bool release = release_requested_.exchange(false,

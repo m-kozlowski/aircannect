@@ -51,7 +51,7 @@ private:
 
     // Lifecycle and cross-task admission
     bool ready() const;
-    bool lock() const;
+    bool lock(uint32_t timeout_ms = 0) const;
     void unlock() const;
     void wake() const;
     bool apply_abandon_locked();
