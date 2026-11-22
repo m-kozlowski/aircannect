@@ -39,7 +39,9 @@ public:
 
     bool seek(uint32_t offset, SeekMode mode) override {
         errno = 0;
-        const bool ok = VFSFileImpl::seek(offset, mode);
+        const bool ok = _f && mode == SeekSet && offset <= INT32_MAX
+            ? staging_.seek_reader(_f, offset, _stat.st_size)
+            : VFSFileImpl::seek(offset, mode);
         if (!ok) log_io_error("seek", _path, errno);
         return ok;
     }

@@ -64,6 +64,7 @@ public:
 
     uint8_t *get(size_t transfer_size);
     void configure_reader(FILE *file, size_t bytes, size_t fallback_size);
+    bool seek_reader(FILE *file, uint32_t offset, uint64_t file_size) const;
     void reset();
 
 private:

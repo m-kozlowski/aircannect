@@ -85,8 +85,8 @@ bool StorageReadFile::seek(uint32_t offset) {
     if (!file_) return false;
 
     errno = 0;
-    if (offset > INT32_MAX || fseek(file_, static_cast<long>(offset), SEEK_SET)) {
-        Storage::log_io_error("seek", path_, offset > INT32_MAX ? EOVERFLOW : errno);
+    if (!staging_.seek_reader(file_, offset, size)) {
+        Storage::log_io_error("seek", path_, errno);
         return false;
     }
     return true;
