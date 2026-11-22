@@ -43,7 +43,7 @@ jobs:
             --tag "$tag" --release-dir "$RUNNER_TEMP/release" \
             --esp-web-tools "$RUNNER_TEMP/package" --output _site
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
