@@ -237,20 +237,35 @@ size_t write_staged(Write write, Span span, size_t size,
         if (!data || !available) break;
 
         size_t chunk = std::min(available, size - written);
-        if (dma) {
-            const size_t remaining = DmaStagingBuffer::Capacity -
-                (first_offset + written) % DmaStagingBuffer::Capacity;
-            chunk = std::min(remaining, size - written);
+        const size_t position = first_offset + written;
+        constexpr size_t sector = DmaStagingBuffer::SectorBytes;
+        alignas(4) uint8_t joined_sector[sector];
+        uint8_t *gather = dma;
+        if (gather) {
+            chunk = std::min(DmaStagingBuffer::Capacity -
+                position % DmaStagingBuffer::Capacity, size - written);
+        } else if (chunk < size - written) {
+            // A payload span may end mid-sector even without DMA staging.
+            const size_t suffix = (position + chunk) % sector;
+            if (chunk > suffix) {
+                chunk -= suffix;
+            } else {
+                gather = joined_sector;
+                chunk = std::min(sector - position % sector, size - written);
+            }
+        }
+
+        if (gather) {
             size_t copied = 0;
             while (copied < chunk) {
                 data = span(written + copied, available);
                 if (!data || !available) break;
                 const size_t count = std::min(available, chunk - copied);
-                memcpy(dma + copied, data, count);
+                memcpy(gather + copied, data, count);
                 copied += count;
             }
             if (copied != chunk) break;
-            data = dma;
+            data = gather;
         }
         const size_t part = write(data, chunk);
         written += part;

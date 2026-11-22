@@ -56,7 +56,9 @@ bool finish_write_handles();
 // Owned by the open reader or active write, not reserved while idle.
 class DmaStagingBuffer {
 public:
+    static constexpr size_t SectorBytes = 512;
     static constexpr size_t Capacity = 4096;
+    static_assert(Capacity % SectorBytes == 0);
     DmaStagingBuffer() = default;
     ~DmaStagingBuffer();
     DmaStagingBuffer(const DmaStagingBuffer &) = delete;

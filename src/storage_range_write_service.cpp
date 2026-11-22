@@ -220,8 +220,16 @@ const char *StorageRangeWriteService::write_locked() {
     if (!reserve_available()) return "storage_reserve";
 
     const size_t size = job_->command.size();
-    const size_t count = std::min(size - job_->written,
-                                  AC_STORAGE_RANGE_WRITE_STEP_BYTES);
+    const size_t remaining = size - job_->written;
+    constexpr size_t page = Storage::DmaStagingBuffer::Capacity;
+    static_assert(AC_STORAGE_RANGE_WRITE_STEP_BYTES >= page);
+
+    size_t count = std::min(remaining, AC_STORAGE_RANGE_WRITE_STEP_BYTES);
+    if (count < remaining) {
+        // Leave the next turn a full DMA page, not two partial writes.
+        count -= (job_->command.offset + job_->written + count) % page;
+    }
+
     const size_t written = Storage::write_buffers(
         job_->output, job_->command, job_->written, count, job_->staging);
 
