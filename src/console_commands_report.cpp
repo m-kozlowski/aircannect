@@ -21,8 +21,8 @@ const char *report_condition_name(ReportTaskCondition condition) {
     }
 }
 
-const char *report_operation_name(ReportTaskOperation operation) {
-    switch (operation) {
+const char *report_operation_name(const ReportTaskOperationalSnapshot &status) {
+    switch (status.operation) {
         case ReportTaskOperation::LoadingCatalog: return "loading_catalog";
         case ReportTaskOperation::LoadingStoreCatalog:
             return "loading_report_index";
@@ -34,6 +34,8 @@ const char *report_operation_name(ReportTaskOperation operation) {
         case ReportTaskOperation::SavingCatalog: return "saving_catalog";
         case ReportTaskOperation::RepairingDates: return "repairing_dates";
         case ReportTaskOperation::None:
+            return status.wait_reason == ReportTaskWaitReason::Catalog
+                ? "waiting_for_catalog" : "--";
         default: return "--";
     }
 }
@@ -55,12 +57,15 @@ void print_report_status(Print &out, const ReportTask &task) {
 
     out.print("[REPORT] state=");
     out.print(report_condition_name(status.condition));
-    if (status.condition == ReportTaskCondition::Working) {
-        out.print(" operation=");
-        out.print(report_operation_name(status.operation));
-    } else if (status.condition == ReportTaskCondition::Waiting) {
+    if (status.condition == ReportTaskCondition::Waiting) {
         out.print(" reason=");
         out.print(report_wait_reason_name(status.wait_reason));
+    }
+
+    if (status.condition == ReportTaskCondition::Working ||
+        status.condition == ReportTaskCondition::Waiting) {
+        out.print(" operation=");
+        out.print(report_operation_name(status));
     }
 
     print_report_sleep_day(out, status.sleep_day);
