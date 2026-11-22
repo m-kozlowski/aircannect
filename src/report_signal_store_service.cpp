@@ -924,6 +924,7 @@ bool ReportSignalStoreService::poll() {
                 tiles_.succeeded = tiles_.succeeded && tile_writer_.succeeded();
                 tiles_.next_slot[static_cast<size_t>(level_)] = tile_writer_.next_slot();
                 advance_level();
+                return true;
             }
             return worked;
         }
