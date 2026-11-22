@@ -8,16 +8,14 @@ the [hardware](hardware.md) is wired up.
 **USB installation erases all AirCANnect settings, including Wi-Fi credentials.
 To update without losing settings, use OTA.**
 
-Download the `-initial.zip` matching the board from the
-[latest release](https://github.com/m-kozlowski/aircannect/releases/latest)
-and extract the `-initial.bin` image.
+Connect the board with a USB data cable and open the
+[AirCANnect USB installer](https://aircannect.empeka.pl/install/) in Chrome
+or Edge. Select your board profile, click **Connect via USB**, choose the
+serial port, and follow the installation prompts.
 
-Open [ESPWebTool](https://esptool.spacehuhn.com/) in Chrome or Edge:
-
-1. Connect the board to the computer over USB.
-2. Select **Connect** and choose its serial port.
-3. Add the extracted `-initial.bin` at address `0x0`.
-4. Select **Program** and wait for flashing to finish.
+**Manual alternative:** Download the `*-initial.zip` for your board from the
+[latest release](https://github.com/m-kozlowski/aircannect/releases/latest),
+extract `*-initial.bin`, and flash it at address `0x0`.
 
 For later updates through the WebUI, use the matching `.bin.zlib` file
 instead of the initial image.

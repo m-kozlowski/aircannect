@@ -55,13 +55,12 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 ## First setup
 
 1. Wire up the [hardware](docs/hardware.md).
-2. Download the `*-initial.zip` matching the board from the
-   [latest release](https://github.com/m-kozlowski/aircannect/releases/latest)
-   and extract the `*-initial.bin` image.
-3. Program the board with the extracted image. See the
-   [quickstart](docs/quickstart.md) for installation options.
-4. Open `http://aircannect/` (default login: `admin` / `aircannect`) and follow
+2. Open the [AirCANnect USB installer](https://aircannect.empeka.pl/install/),
+   select your board profile, and install the firmware.
+3. Open `http://aircannect/` (default login: `admin` / `aircannect`) and follow
    the setup wizard.
+
+See the [quickstart](docs/quickstart.md) for manual installation and Wi-Fi setup.
 
 ## AirMini
 
