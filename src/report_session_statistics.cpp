@@ -49,10 +49,17 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
     ReportSignalId signal, int32_t value_milli, bool expiration, bool closed) {
     if (!interval_ms) return true;
 
+    auto *metrics = contribution(session, interval_ms, signal, closed);
+    return metrics && (expiration ? metrics->accept_expiration_time(value_milli)
+        : metrics->accept(signal, value_milli, interval_ms));
+}
+
+ReportMetricAccumulator *ReportSessionStatistics::contribution(
+    uint16_t session, uint32_t interval_ms, ReportSignalId signal, bool closed) {
     if (current_ == SIZE_MAX || parts_[current_].session != session ||
         parts_[current_].interval_ms != interval_ms || parts_[current_].closed != closed ||
         signal_ != signal) {
-        if (!account_current()) return false;
+        if (!account_current()) return nullptr;
         size_t index = 0;
         for (; index < parts_.size(); ++index) {
             if (parts_[index].metrics && parts_[index].session == session &&
@@ -62,18 +69,16 @@ bool ReportSessionStatistics::accept(uint16_t session, uint32_t interval_ms,
             auto metrics = std::unique_ptr<ReportMetricAccumulator>(
                 new (std::nothrow) ReportMetricAccumulator);
 
-            if (!metrics || !metrics->begin(UINT32_MAX)) return false;
+            if (!metrics || !metrics->begin(UINT32_MAX)) return nullptr;
             try {
                 parts_.push_back({session, interval_ms, std::move(metrics), 0, {}, closed});
-            } catch (const std::bad_alloc &) { return false; }
+            } catch (const std::bad_alloc &) { return nullptr; }
         }
         current_ = index;
         signal_ = signal;
     }
 
-    auto &metrics = *parts_[current_].metrics;
-    return expiration ? metrics.accept_expiration_time(value_milli)
-        : metrics.accept(signal, value_milli, interval_ms);
+    return parts_[current_].metrics.get();
 }
 
 bool ReportSessionStatistics::resume(StorageWritePayload previous,

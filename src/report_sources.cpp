@@ -218,17 +218,16 @@ bool report_source_is_sampled(const ReportSourceDef &source) {
 int32_t report_series_canonical_value_milli(
     const ReportSeriesDescriptor &series,
     int32_t value_milli) {
-    const int32_t multiplier =
-        (series.signal == ReportSignalId::Flow &&
+    return report_scale_value_milli(report_series_unit_multiplier(series), value_milli);
+}
+
+int32_t report_series_unit_multiplier(const ReportSeriesDescriptor &series) {
+    return (series.signal == ReportSignalId::Flow &&
          series.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
         (series.signal == ReportSignalId::Leak &&
          series.source == ReportSourceId::Leak0p5Hz)
             ? 60
             : 1;
-    const int64_t scaled = static_cast<int64_t>(value_milli) * multiplier;
-    if (scaled > INT32_MAX) return INT32_MAX;
-    if (scaled < INT32_MIN) return INT32_MIN;
-    return static_cast<int32_t>(scaled);
 }
 
 }  // namespace aircannect

@@ -1,6 +1,7 @@
 #include "report_night_summary.h"
 
 #include <algorithm>
+#include <array>
 #include <limits.h>
 #include <math.h>
 #include <string.h>
@@ -81,6 +82,30 @@ static_assert(sizeof(METRIC_HISTOGRAM_CONFIGS) /
                   sizeof(METRIC_HISTOGRAM_CONFIGS[0]) ==
               METRIC_HISTOGRAM_COUNT,
               "metric histogram config must cover every metric");
+
+constexpr uint32_t LastBin = METRIC_HISTOGRAM_BINS - 1;
+constexpr auto TeSpan = METRIC_HISTOGRAM_CONFIGS[
+    static_cast<size_t>(MetricHistogramId::ExpirationTime)].maximum_milli;
+
+static_assert([] {
+    for (const auto &config : METRIC_HISTOGRAM_CONFIGS) {
+        const int64_t span = int64_t(config.maximum_milli) - config.minimum_milli;
+        if (span <= 0 || span * LastBin + span / 2 > UINT32_MAX ||
+            (config.quadratic_bins && span != TeSpan)) return false;
+    }
+    return true;
+}(), "linear bin numerator must fit uint32_t");
+
+// First integer offset for which round(LastBin * sqrt(offset / TeSpan)) >= k.
+constexpr auto TeBinStarts = [] {
+    std::array<uint32_t, LastBin> starts{};
+    constexpr uint32_t divisor = 4 * LastBin * LastBin;
+    for (uint32_t k = 1; k <= LastBin; ++k) {
+        const uint64_t edge = 2 * k - 1;
+        starts[k - 1] = (edge * edge * TeSpan + divisor - 1) / divisor;
+    }
+    return starts;
+}();
 
 struct MetricHistogram {
     std::unique_ptr<LargeByteBuffer> bins;
@@ -220,23 +245,8 @@ int32_t index_milli(uint32_t count, uint32_t duration_min) {
         : static_cast<int32_t>(value);
 }
 
-bool add_metric_sample(MetricHistogram &histogram,
-                       const MetricHistogramConfig &config,
+bool add_metric_sample(MetricHistogram &histogram, uint16_t bin,
                        int32_t value_milli) {
-    if (!histogram.active) return true;
-
-    const int32_t bounded = std::max(
-        config.minimum_milli,
-        std::min(config.maximum_milli, value_milli));
-    const uint64_t offset = static_cast<uint64_t>(
-        bounded - config.minimum_milli);
-    const uint64_t span = static_cast<uint64_t>(
-        config.maximum_milli - config.minimum_milli);
-    const size_t bin = config.quadratic_bins
-        ? static_cast<size_t>(llround(sqrt(static_cast<double>(offset) / span) *
-                                     (METRIC_HISTOGRAM_BINS - 1)))
-        : static_cast<size_t>(
-            (offset * (METRIC_HISTOGRAM_BINS - 1) + span / 2) / span);
     if (!histogram.reserve(bin, bin)) return false;
     auto &count = histogram.data()[bin - histogram.first_bin];
     if (count != UINT32_MAX) ++count;
@@ -401,14 +411,36 @@ bool ReportMetricAccumulator::begin(const ReportReadPlan &plan,
 bool ReportMetricAccumulator::accept(ReportSignalId signal,
                                      int32_t value_milli,
                                      uint32_t duration_ms) {
-    if (!runtime_) return false;
-    const int index = metric_histogram_index(signal);
-    if (index < 0 || !runtime_->histograms[index].active) return true;
-    if (!add_metric_sample(runtime_->histograms[index],
-                      METRIC_HISTOGRAM_CONFIGS[index],
-                      value_milli)) return false;
+    const Channel channel(signal);
+    return accept(channel, channel.bin(value_milli), value_milli, duration_ms);
+}
 
-    if (signal == ReportSignalId::Leak) {
+ReportMetricAccumulator::Channel::Channel(ReportSignalId signal, bool expiration)
+    : index_(expiration ? static_cast<int>(MetricHistogramId::ExpirationTime)
+                        : metric_histogram_index(signal)) {}
+
+uint16_t ReportMetricAccumulator::Channel::bin(int32_t value_milli) const {
+    if (!tracked()) return 0;
+    const auto &config = METRIC_HISTOGRAM_CONFIGS[index_];
+    const uint32_t offset = std::clamp(value_milli, config.minimum_milli,
+                                       config.maximum_milli) - config.minimum_milli;
+    if (config.quadratic_bins) {
+        return std::upper_bound(TeBinStarts.begin(), TeBinStarts.end(), offset) -
+            TeBinStarts.begin();
+    }
+
+    const uint32_t span = config.maximum_milli - config.minimum_milli;
+    return (offset * LastBin + span / 2) / span;
+}
+
+bool ReportMetricAccumulator::accept(Channel channel, uint16_t bin,
+                                     int32_t value_milli, uint32_t duration_ms) {
+    if (!runtime_) return false;
+    const int index = channel.index_;
+    if (index < 0 || !runtime_->histograms[index].active) return true;
+    if (!add_metric_sample(runtime_->histograms[index], bin, value_milli)) return false;
+
+    if (index == static_cast<int>(MetricHistogramId::Leak)) {
         runtime_->leak_recorded_ms = saturating_add_uint64(
             runtime_->leak_recorded_ms, duration_ms);
         if (value_milli > ReportCalculatedMetrics::LeakThresholdMilli) {
@@ -420,10 +452,8 @@ bool ReportMetricAccumulator::accept(ReportSignalId signal,
 }
 
 bool ReportMetricAccumulator::accept_expiration_time(int32_t value_milli) {
-    if (!runtime_) return false;
-    constexpr size_t index = static_cast<size_t>(MetricHistogramId::ExpirationTime);
-    return add_metric_sample(runtime_->histograms[index], METRIC_HISTOGRAM_CONFIGS[index],
-                      value_milli);
+    const Channel channel(ReportSignalId::InspiratoryDuration, true);
+    return accept(channel, channel.bin(value_milli), value_milli, 0);
 }
 
 ReportCalculatedMetrics ReportMetricAccumulator::finish() const {
