@@ -119,16 +119,24 @@ bool SleepHqOximetryPlan::eligible(const char *path, int64_t now, MemoryEnabled 
     auto *file = find(path);
     if (!file || !file->published || file->confirmed) return false;
     const auto &r = *file->record;
+    const bool live = r.csv_bytes != 0;
+    bool counterpart_ready = false;
 
     for (const auto &other : files_) {
         const auto &s = *other.record;
-        if (&other == file || !other.published || !overlaps(r, s)) continue;
+        if (&other == file || !other.published || strcmp(r.device, s.device) || !overlaps(r, s)) continue;
+        if (other.confirmed) return false;
+        if (live == (s.csv_bytes != 0)) continue;
 
-        if (!strcmp(r.device, s.device) && (other.confirmed || (r.csv_bytes && !s.csv_bytes))) return false;
+        // Ring live samples are nominally 1 Hz; CSV timestamps have no fixed interval in the catalog.
+        counterpart_ready = true;
+        const auto &memory = live ? s : r;
+        const bool prefer_live = memory.interval_s > 1;
+        if (live != prefer_live) return false;
     }
 
-    if (r.csv_bytes && now < r.next_noon_s && r.peer[0] &&
-        downloads && downloads(r.peer)) {
+    if (!counterpart_ready && now < r.next_noon_s &&
+        (r.peer[0] ? downloads && downloads(r.peer) : !live)) {
         if (!deadline_ || r.next_noon_s < deadline_) deadline_ = r.next_noon_s;
         return false;
     }
