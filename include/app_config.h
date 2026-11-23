@@ -82,7 +82,7 @@ struct AppConfigData {
     String sleephq_team_id;
     String sleephq_device_id;
     String sleephq_mask_id;
-    String sleephq_oximetry_source;
+    String sleephq_oximetry_source = "auto";
 
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
