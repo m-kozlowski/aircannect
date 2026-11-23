@@ -119,7 +119,7 @@ private:
     bool startup_idle_grace_complete_ = false;
     uint32_t idle_backfill_due_ms_ = 0;
     uint32_t oximetry_generation_ = 0;
-    ReportOximetryChange oximetry_inbox_, pending_csv_;
+    ReportOximetryChange oximetry_inbox_, pending_oximetry_;
     std::mutex oximetry_mutex_;
     std::atomic<bool> oximetry_changed_{false};
     ExportTaskControlSnapshot status_snapshot_;

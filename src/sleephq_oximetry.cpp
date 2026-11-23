@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <cstring>
 
-#include "oximetry_archive.h"
-
 namespace aircannect {
 namespace {
 
@@ -18,12 +16,14 @@ bool overlaps(const ReportOximetryRecording &a, const ReportOximetryRecording &b
 
 }  // namespace
 
-void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference, std::string_view day) {
+void SleepHqOximetryPlan::begin(Catalog catalog, std::string_view preference, std::string_view day,
+                                bool prefer_bin) {
     catalog_ = std::move(catalog);
     decltype(files_)().swap(files_);
     cursor_ = 0;
     collecting_ = true;
     scoped_ = !day.empty();
+    prefer_bin_ = prefer_bin;
     inventory_day_[0] = 0;
     deadline_ = 0;
     if (!catalog_ || preference.empty()) return;
@@ -77,7 +77,7 @@ const char *SleepHqOximetryPlan::next_source() {
         bool needed = collecting_;
         do {
             const auto &f = files_[cursor_++];
-            needed |= f.published && !f.confirmed;
+            needed |= f.upload != OximetryArchiveFile::Other && !f.confirmed;
         } while (cursor_ < files_.size() && !strcmp(source, files_[cursor_].record->source) &&
                  (!scoped_ || day == directory_day(*files_[cursor_].record)));
         if (needed) return source;
@@ -90,11 +90,11 @@ void SleepHqOximetryPlan::start_uploads() {
     cursor_ = 0;
 }
 
-SleepHqOximetryPlan::File *SleepHqOximetryPlan::find(const char *path) {
+SleepHqOximetryPlan::File *SleepHqOximetryPlan::find(const char *path, OximetryArchiveFile &kind) {
     std::string_view source, suffix, id;
     if (!oximetry_archive_path(path, source, suffix)) return nullptr;
-    const auto kind = oximetry_recording_file(source, suffix, id);
-    if (kind != OximetryArchiveFile::LiveCsv && kind != OximetryArchiveFile::RingCsv) return nullptr;
+    kind = oximetry_recording_file(source, suffix, id);
+    if (kind == OximetryArchiveFile::Other) return nullptr;
 
     const auto key = std::make_pair(source, id);
     auto it = std::lower_bound(files_.begin(), files_.end(), key,
@@ -103,40 +103,58 @@ SleepHqOximetryPlan::File *SleepHqOximetryPlan::find(const char *path) {
 }
 
 bool SleepHqOximetryPlan::inspect(const char *path, bool confirmed) {
-    auto *file = find(path);
+    OximetryArchiveFile kind;
+    auto *file = find(path, kind);
     if (!file) return false;
-    file->published = true;
+
     file->confirmed |= confirmed;
+    if (kind == OximetryArchiveFile::RingBin) {
+        if (prefer_bin_) file->upload = kind;
+    } else if (file->upload != OximetryArchiveFile::RingBin) {
+        file->upload = kind;
+    }
     return true;
 }
 
 const ReportOximetryRecording *SleepHqOximetryPlan::ring_csv(const char *path) {
-    auto *file = find(path);
-    return file && !file->record->csv_bytes ? file->record : nullptr;
+    OximetryArchiveFile kind;
+    auto *file = find(path, kind);
+    return file && kind == OximetryArchiveFile::RingCsv &&
+           file->upload != OximetryArchiveFile::RingBin ? file->record : nullptr;
 }
 
 bool SleepHqOximetryPlan::eligible(const char *path, int64_t now, MemoryEnabled downloads) {
-    auto *file = find(path);
-    if (!file || !file->published || file->confirmed) return false;
+    OximetryArchiveFile kind;
+    auto *file = find(path, kind);
+    if (!file || file->upload != kind || file->confirmed) return false;
     const auto &r = *file->record;
     const bool live = r.csv_bytes != 0;
     bool counterpart_ready = false;
 
     for (const auto &other : files_) {
         const auto &s = *other.record;
-        if (&other == file || !other.published || strcmp(r.device, s.device) || !overlaps(r, s)) continue;
+        if (&other == file || strcmp(r.device, s.device) || !overlaps(r, s)) continue;
         if (other.confirmed) return false;
-        if (live == (s.csv_bytes != 0)) continue;
+        if (other.upload == OximetryArchiveFile::Other || live == (s.csv_bytes != 0)) continue;
 
         // Ring live samples are nominally 1 Hz; CSV timestamps have no fixed interval in the catalog.
         counterpart_ready = true;
-        const auto &memory = live ? s : r;
-        const bool prefer_live = memory.interval_s > 1;
+        const auto &memory = live ? other : *file;
+        const bool prefer_live = memory.upload != OximetryArchiveFile::RingBin &&
+                                 memory.record->interval_s > 1;
         if (live != prefer_live) return false;
     }
 
-    if (!counterpart_ready && now < r.next_noon_s &&
-        (r.peer[0] ? downloads && downloads(r.peer) : !live)) {
+    const bool before_deadline = !counterpart_ready && now < r.next_noon_s;
+    if (kind == OximetryArchiveFile::RingBin || (!prefer_bin_ && !before_deadline)) return true;
+
+    char ble[17];
+    const char *device = live ? r.source : r.device;
+    if (!live && oximetry_ble_source(r.peer, ble)) device = ble;
+    const bool downloads_enabled = !strncmp(device, "ble-", 4) && downloads && downloads(device);
+    if (prefer_bin_) return !downloads_enabled;
+
+    if (r.peer[0] ? downloads_enabled : !live) {
         if (!deadline_ || r.next_noon_s < deadline_) deadline_ = r.next_noon_s;
         return false;
     }

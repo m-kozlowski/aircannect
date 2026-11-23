@@ -83,6 +83,7 @@ struct AppConfigData {
     String sleephq_device_id;
     String sleephq_mask_id;
     String sleephq_oximetry_source = "auto";
+    String sleephq_oximetry_format = "csv";
 
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
@@ -158,6 +159,7 @@ private:
                                  const String &device_id);
     bool set_sleephq_mask_id(const String &mask_id);
     bool set_sleephq_oximetry_source(const String &source);
+    bool set_sleephq_oximetry_format(const String &format);
 
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);

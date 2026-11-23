@@ -82,6 +82,7 @@ struct ExportEndpointStatus {
     bool pending = false;
     bool durable_state_pending = false;
     uint32_t oximetry_generation = 0; // Zero while supplemental imports are off.
+    bool prefer_oximetry_bin = false;
     uint32_t oximetry_deadline = 0;
     uint32_t config_generation = 0;
     uint32_t ready_generation = 0;

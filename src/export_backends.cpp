@@ -103,6 +103,7 @@ ExportEndpointStatus engine_status(SleepHqSyncEngine &engine) {
     auto out = common_status(source);
     out.ready_generation = source.completed_check_generation;
     out.oximetry_generation = source.oximetry_generation;
+    out.prefer_oximetry_bin = source.prefer_oximetry_bin;
     out.oximetry_deadline = source.oximetry_deadline;
     return out;
 }

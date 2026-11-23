@@ -1088,6 +1088,14 @@ bool AppConfig::set_sleephq_oximetry_source(const String &source) {
     return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
 }
 
+bool AppConfig::set_sleephq_oximetry_format(const String &format) {
+    if (format != "csv" && format != "bin") return false;
+    if (data_.sleephq_oximetry_format == format) return true;
+
+    data_.sleephq_oximetry_format = format;
+    return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
+}
+
 bool AppConfig::set_sleephq_credentials(const String &client_id,
                                         const String &client_secret,
                                         const String &team_id,

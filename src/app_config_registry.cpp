@@ -148,6 +148,11 @@ static constexpr AppConfigEnumValue BOOL_VALUES[] = {
     {"off", "Off"},
 };
 
+static constexpr AppConfigEnumValue SLEEPHQ_OXIMETRY_FORMATS[] = {
+    {"csv", "CSV"},
+    {"bin", "Prefer original BIN"},
+};
+
 static constexpr AppConfigFieldFlags PROVISIONABLE =
     AC_CONFIG_FIELD_PROVISIONABLE;
 static constexpr AppConfigFieldFlags SECRET_PROVISIONABLE =
@@ -408,6 +413,13 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "Oximetry source",
      "Source for supplemental SleepHQ imports.", nullptr, 0, -1,
      AC_CFG_OFFSET(sleephq_oximetry_source)},
+    {"shq_oxi_format", AppConfigFieldId::SleepHqOximetryFormat,
+     AppConfigGroup::SleepHq, 70, AppConfigFieldType::String, PROVISIONABLE,
+     AC_CONFIG_DIRTY_SLEEPHQ_SYNC, "Oximetry upload format",
+     "CSV uses corrected time. BIN keeps the device clock and statistics. In BIN mode, oximeters with recording "
+     "downloads enabled send only BIN; other sources use CSV if no BIN is available.",
+     SLEEPHQ_OXIMETRY_FORMATS, std::size(SLEEPHQ_OXIMETRY_FORMATS), -1,
+     AC_CFG_OFFSET(sleephq_oximetry_format)},
 
     AC_SCHEDULE_FIELD(1),
     AC_SCHEDULE_FIELD(2),
@@ -742,6 +754,8 @@ bool AppConfigFieldWriter::set_value(
             return config.set_sleephq_mask_id(value);
         case AppConfigFieldId::SleepHqOximetrySource:
             return config.set_sleephq_oximetry_source(value);
+        case AppConfigFieldId::SleepHqOximetryFormat:
+            return config.set_sleephq_oximetry_format(value);
         case AppConfigFieldId::HttpUser:
             return config.set_http_auth(value, cfg.http_password);
         case AppConfigFieldId::HttpPassword:

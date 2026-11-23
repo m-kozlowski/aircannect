@@ -188,6 +188,7 @@ void SleepHqSyncEngine::unlock() const {
 
 void SleepHqSyncEngine::publish_runtime_locked() {
     runtime_oximetry_generation_.store(config_.oximetry_source[0] ? oximetry_generation_ : 0);
+    runtime_prefer_oximetry_bin_.store(config_.prefer_oximetry_bin);
     const uint32_t generation = status_.config_generation;
     runtime_state_.store(static_cast<uint8_t>(status_.state));
     runtime_pending_.store(status_.pending);
@@ -347,17 +348,20 @@ void SleepHqSyncEngine::configure(const SleepHqExportConfig &config) {
     if (!lock(50)) return;
 
     const bool core_unchanged = config_matches_locked(config);
-    const bool source_changed = strcmp((pending_config_valid_ ? pending_config_ : config_).oximetry_source,
-                                       config.oximetry_source) != 0;
-    if (core_unchanged && source_changed && !pending_config_valid_ &&
+    const auto &previous = pending_config_valid_ ? pending_config_ : config_;
+    const bool oximetry_changed = strcmp(previous.oximetry_source, config.oximetry_source) != 0 ||
+                                  previous.prefer_oximetry_bin != config.prefer_oximetry_bin;
+
+    if (core_unchanged && oximetry_changed && !pending_config_valid_ &&
         current_run_kind_ != RunKind::Oximetry &&
         !(pending_run_kind_ == RunKind::Oximetry && (status_.pending || retry_due_ms_))) {
-        // Changing the supplemental source must not restart a running CPAP import.
+        // Supplemental preferences must not restart a running CPAP import.
         copy_cstr(config_.oximetry_source, sizeof(config_.oximetry_source), config.oximetry_source);
+        config_.prefer_oximetry_bin = config.prefer_oximetry_bin;
         ++oximetry_generation_;
         oximetry_deadline_.store(0);
         publish_runtime_locked();
-    } else if (!core_unchanged || source_changed) {
+    } else if (!core_unchanged || oximetry_changed) {
         if (status_.state == SleepHqSyncState::Working) {
             pending_config_ = config;
             pending_config_valid_ = true;
@@ -547,7 +551,8 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     if (kind == RunKind::Oximetry) {
         if (!datalog_day[0]) oximetry_deadline_.store(0);
         try {
-            oximetry_plan_.begin(originals, config_.oximetry_source, datalog_day);
+            oximetry_plan_.begin(originals, config_.oximetry_source, datalog_day,
+                                 config_.prefer_oximetry_bin);
         } catch (const std::bad_alloc &) {
             fail_locked("oximetry_plan_alloc_failed");
             return false;
@@ -1501,8 +1506,7 @@ bool SleepHqSyncEngine::merge_import_files_locked(
             if (!oximetry_archive_path(path, source, suffix) || source != oximetry_source_)
                 return false;
             const auto kind = oximetry_recording_file(source, suffix, id);
-            if (kind != OximetryArchiveFile::LiveCsv && kind != OximetryArchiveFile::RingCsv)
-                return false;
+            if (kind == OximetryArchiveFile::Other) return false;
         } else if (!storage_export_contains_path(path)) return false;
 
         StagedFile *entry = find_staged_locked(path);
@@ -3569,6 +3573,7 @@ SleepHqSyncRuntimeStatus SleepHqSyncEngine::runtime_status() const {
     out.completed_check_generation =
         runtime_completed_check_generation_.load();
     out.oximetry_generation = runtime_oximetry_generation_.load();
+    out.prefer_oximetry_bin = runtime_prefer_oximetry_bin_.load();
     out.oximetry_deadline = oximetry_deadline_.load();
     return out;
 }

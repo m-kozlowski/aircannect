@@ -70,6 +70,7 @@ struct SleepHqSyncStatus {
 
 struct SleepHqSyncRuntimeStatus {
     uint32_t oximetry_generation = 0;
+    bool prefer_oximetry_bin = false;
     uint32_t oximetry_deadline = 0;
     SleepHqSyncState state = SleepHqSyncState::Disabled;
     bool pending = false;
@@ -393,6 +394,7 @@ private:
     const ReportOximetryRecording *ring_header_check_ = nullptr;
     uint32_t oximetry_generation_ = 0;
     std::atomic<uint32_t> runtime_oximetry_generation_{0};
+    std::atomic<bool> runtime_prefer_oximetry_bin_{false};
     std::atomic<uint32_t> oximetry_deadline_{0};
     StorageStreamPort *stream_port_ = nullptr;
     StorageExportPlanner export_planner_;

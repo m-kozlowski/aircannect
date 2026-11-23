@@ -1487,11 +1487,14 @@ void setup() {
         StorageService::atomic_write_port(),
         StorageService::path_port(),
         [] { return report_task.oximetry_originals(); },
-        [](const char *peer) {
+        [](const char *ble_source_id) {
             OximetrySensorDevice known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
             const auto count = oximetry_sensor_source.known_sensors(known, AC_OXIMETRY_SENSOR_MAX_KNOWN);
-            for (size_t i = 0; i < count; ++i)
-                if (!strcasecmp(known[i].addr, peer)) return known[i].recordings;
+            for (size_t i = 0; i < count; ++i) {
+                char id[17];
+                if (known[i].recordings && oximetry_ble_source(known[i].addr, id) &&
+                    !strcmp(id, ble_source_id)) return true;
+            }
             return false;
         });
     if (!export_started) {

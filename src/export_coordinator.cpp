@@ -360,8 +360,10 @@ void ExportCoordinator::poll_idle_backfill(
     if (oximetry_changed_.exchange(false)) {
         std::lock_guard<std::mutex> lock(oximetry_mutex_);
         if (oximetry_inbox_.file_published) rearm_idle_backfill(ExportEndpoint::Smb);
-        if (oximetry_inbox_.csv_published && status.endpoint(ExportEndpoint::SleepHq).oximetry_generation) {
-            pending_csv_.merge(oximetry_inbox_);
+        const auto &shq = status.endpoint(ExportEndpoint::SleepHq);
+        if (shq.oximetry_generation && (oximetry_inbox_.csv_published ||
+            (shq.prefer_oximetry_bin && oximetry_inbox_.file_published))) {
+            pending_oximetry_.merge(oximetry_inbox_);
             idle_backfill_due_ms_ = 0;
         }
         oximetry_inbox_ = {};
@@ -388,7 +390,7 @@ void ExportCoordinator::poll_idle_backfill(
             (oximetry_generation_ != current.oximetry_generation ||
              (current.oximetry_deadline && storage_export_current_epoch_seconds_or_zero() >= current.oximetry_deadline));
         const bool supplement = !ready && current.oximetry_generation &&
-            current.ready() && current.backfill_ready() && (reconcile || pending_csv_.pending);
+            current.ready() && current.backfill_ready() && (reconcile || pending_oximetry_.pending);
         if ((!ready && !supplement) || busy) continue;
 
         if (idle_backfill_due_ms_ == 0) {
@@ -400,11 +402,11 @@ void ExportCoordinator::poll_idle_backfill(
         ExportRequest work{id, ExportOperation::Sync,
             supplement ? ExportReason::Oximetry : ExportReason::IdleBackfill};
         if (supplement && !reconcile)
-            copy_cstr(work.day, sizeof(work.day), pending_csv_.directory_day);
+            copy_cstr(work.day, sizeof(work.day), pending_oximetry_.directory_day);
         if (task_->request(work)) {
             if (supplement) {
                 oximetry_generation_ = current.oximetry_generation;
-                pending_csv_ = {};
+                pending_oximetry_ = {};
             }
             record_request(work, current);
             idle_backfill_due_ms_ = 0;

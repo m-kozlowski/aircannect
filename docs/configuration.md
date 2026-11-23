@@ -180,6 +180,7 @@ and `vpn_error`.
 | `shq_device` | Numeric SleepHQ device ID, or empty | empty | Optional SleepHQ device type override. |
 | `shq_mask` | Numeric SleepHQ mask ID, or empty | empty | Default mask for new post-therapy imports only. |
 | `shq_oxi` | Empty, `auto`, `udp`, or an oximeter source ID | `auto` | Oximetry to upload separately from CPAP. Empty disables it. |
+| `shq_oxi_format` | `csv`, `bin` | `csv` | CSV uses corrected time. BIN keeps the oximeter's clock and statistics. In BIN mode, oximeters with recording downloads enabled send only BIN; other sources use CSV if no BIN is available. |
 
 ## Logging
 
