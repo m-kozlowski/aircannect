@@ -177,6 +177,9 @@ BleSensorStatus BleSensorSource::status() const {
     portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
 #endif
     out = status_;
+#if AC_OXIMETRY_BLE_ENABLED
+    out.notification_drops = protocols_.notification_drops();
+#endif
     out.task_started = task_started_;
     out.scan_count = scan_count_;
     out.scan_generation = scan_generation_;

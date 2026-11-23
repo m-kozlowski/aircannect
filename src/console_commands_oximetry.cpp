@@ -5,6 +5,7 @@
 #include "config_service.h"
 #include "management_console_utils.h"
 #include "oximetry_hub.h"
+#include "oximetry_csv_capture.h"
 #include "oximetry_status.h"
 #include "plx_peripheral.h"
 #include "udp_oximeter_source.h"
@@ -40,6 +41,8 @@ void print_oximetry_status(Print &out,
 
     out.print("[OXI] enabled=");
     print_yes_no(out, status.enabled);
+    out.print(" csv_lost=");
+    out.print(OximetryCsv::lost_rows());
     out.print(" source=");
     out.print(oximetry_source_name(status.source));
     if (status.source_detail[0]) {
@@ -161,10 +164,10 @@ void print_sensor_status(Print &out, const BleSensorSource &sensor) {
     out.print(status.notifications);
     out.print(" invalid=");
     out.print(status.invalid_notifications);
-    if (status.sample_queue_drops) {
-        out.print(" queue_drops=");
-        out.print(status.sample_queue_drops);
-    }
+    out.print(" notification_drops=");
+    out.print(status.notification_drops);
+    out.print(" sample_queue_drops=");
+    out.print(status.sample_queue_drops);
     out.print(" connects=");
     out.print(status.connects);
     out.print(" disconnects=");

@@ -31,6 +31,7 @@ public:
     void set_sample_callback(SampleCallback callback, void *context);
 
 #if AC_OXIMETRY_BLE_ENABLED
+    uint32_t notification_drops() const { return notification_drops_.load(); }
     bool matches(const NimBLEAdvertisedDevice *device) const;
     bool subscribe(NimBLEClient *client);
 #endif

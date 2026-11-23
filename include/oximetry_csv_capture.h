@@ -10,5 +10,6 @@ void observe(const OximetrySample &sample, int64_t utc_ms, int32_t device_offset
 void publish_catalog(std::shared_ptr<const ReportOximetryCatalog> catalog);
 void pause(bool paused);
 bool drained();
+uint32_t lost_rows();
 
 }  // namespace aircannect::OximetryCsv

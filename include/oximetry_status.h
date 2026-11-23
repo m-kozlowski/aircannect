@@ -67,6 +67,7 @@ struct BleSensorStatus {
     uint32_t notifications = 0;
     uint32_t invalid_notifications = 0;
     uint32_t sample_queue_drops = 0;
+    uint32_t notification_drops = 0;
     uint32_t connects = 0;
     uint32_t disconnects = 0;
     uint32_t connect_failures = 0;
