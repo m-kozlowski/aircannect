@@ -35,6 +35,10 @@ enum class LocalActionId : uint16_t {
     WarmupStart = 9,
     WarmupStop = 10,
     WarmupToggle = 11,
+    DisplayBacklightOn = 12,
+    DisplayBacklightOff = 13,
+    TherapyStart = 14,
+    TherapyStop = 15,
 };
 
 struct LocalActionDefinition {

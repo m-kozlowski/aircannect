@@ -306,9 +306,15 @@ static void note_session_stream_frame(void *context,
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
 }
 
-static const char *toggle_display_backlight(void *, ActionInvocation) {
+template <LocalActionId Action>
+static const char *set_display_backlight(void *, ActionInvocation) {
     if (!display_manager.available()) return "display_unavailable";
-    display_manager.toggle_backlight();
+
+    if constexpr (Action == LocalActionId::DisplayToggleBacklight) {
+        display_manager.toggle_backlight();
+    } else {
+        display_manager.set_backlight(Action == LocalActionId::DisplayBacklightOn);
+    }
     return nullptr;
 }
 
@@ -322,19 +328,17 @@ static const char *display_next_page(void *, ActionInvocation call) {
         ? nullptr : "display_unavailable";
 }
 
-static const char *toggle_therapy(void *, ActionInvocation call) {
-    const As11TherapyState therapy =
-        as11_device_service.state().therapy_state();
-    const As11TherapyTarget target =
-        therapy == As11TherapyState::Running
-            ? As11TherapyTarget::Standby
-            : As11TherapyTarget::Running;
-    const OperationSubmission submission =
-        as11_device_service.request_therapy(
-            rpc_transport, target, RpcSource::Internal, call.now_ms);
+template <LocalActionId Action>
+static const char *set_therapy(void *, ActionInvocation call) {
+    const bool running = Action == LocalActionId::TherapyToggle
+        ? as11_device_service.state().therapy_state() != As11TherapyState::Running
+        : Action == LocalActionId::TherapyStart;
 
-    if (submission.accepted()) return nullptr;
-    return submission.admission == OperationAdmission::Busy ? "busy" : "therapy_rejected";
+    const auto result = as11_device_service.set_therapy_running(
+        rpc_transport, running, RpcSource::Internal, call.now_ms);
+
+    if (result == OperationAdmission::Accepted) return nullptr;
+    return result == OperationAdmission::Busy ? "busy" : "therapy_rejected";
 }
 
 template <LocalActionId Action>
@@ -1360,11 +1364,20 @@ void setup() {
     (void)local_actions.register_handler(
         LocalActionId::DisplayNextPage,
         display_next_page, nullptr);
-    (void)local_actions.register_handler(
-        LocalActionId::DisplayToggleBacklight,
-        toggle_display_backlight, nullptr);
-    (void)local_actions.register_handler(
-        LocalActionId::TherapyToggle, toggle_therapy, nullptr);
+    (void)local_actions.register_handler(LocalActionId::DisplayBacklightOn,
+        set_display_backlight<LocalActionId::DisplayBacklightOn>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::DisplayBacklightOff,
+        set_display_backlight<LocalActionId::DisplayBacklightOff>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::DisplayToggleBacklight,
+        set_display_backlight<LocalActionId::DisplayToggleBacklight>, nullptr);
+
+    (void)local_actions.register_handler(LocalActionId::TherapyStart,
+        set_therapy<LocalActionId::TherapyStart>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::TherapyStop,
+        set_therapy<LocalActionId::TherapyStop>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::TherapyToggle,
+        set_therapy<LocalActionId::TherapyToggle>, nullptr);
+
     (void)local_actions.register_handler(
         LocalActionId::PowerOff, power_off_aircannect, nullptr);
     (void)local_actions.register_handler(
