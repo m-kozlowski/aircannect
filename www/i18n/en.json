@@ -1214,6 +1214,7 @@
   "status.clock_invalid": "Clock invalid",
   "status.config_queued": "Config update queued",
   "status.connected": "Connected",
+  "status.csv_rows_lost": "CSV rows lost since restart: {count}",
   "status.edf_suspended": "EDF recording suspended",
   "status.file_preview": "Open device HTTP UI, not file preview",
   "status.forget_airsense": "Forget paired AirSense oximeter bond?",

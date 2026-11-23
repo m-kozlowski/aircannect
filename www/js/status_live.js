@@ -269,7 +269,10 @@
       AirCANnect.ui.text("oxiSource", sourceIdentity === "none" ?
         sourceStatus : AirCANnect.i18n.join([sourceIdentity, sourceStatus], " "));
       AirCANnect.ui.text("oxiTabSource", sourceIdentity);
-      AirCANnect.ui.text("oxiTabStatus", sourceStatus);
+      AirCANnect.ui.text("oxiTabStatus", oxi.csv_lost > 0 ?
+        AirCANnect.i18n.join([sourceStatus,
+          AirCANnect.i18n.message("status.csv_rows_lost", {count:oxi.csv_lost})], " / ") :
+        sourceStatus);
 
       const integrationAvailable =
         oxi.airsense_integration_available !== false;

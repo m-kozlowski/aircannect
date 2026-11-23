@@ -36,13 +36,13 @@ void print_oximetry_status(Print &out,
                            const PlxPeripheral &peripheral) {
     const uint32_t now_ms = millis();
     const OximetryRuntimeStatus status = compose_oximetry_status(
-        hub.snapshot(now_ms), udp.status(), peripheral.status(now_ms));
+        hub.snapshot(now_ms), udp.status(), peripheral.status(now_ms), OximetryCsv::lost_rows());
     const BleSensorStatus sensor = sensor_source.status();
 
     out.print("[OXI] enabled=");
     print_yes_no(out, status.enabled);
     out.print(" csv_lost=");
-    out.print(OximetryCsv::lost_rows());
+    out.print(status.csv_lost);
     out.print(" source=");
     out.print(oximetry_source_name(status.source));
     if (status.source_detail[0]) {

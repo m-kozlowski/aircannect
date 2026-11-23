@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <ctime>
@@ -84,7 +85,7 @@ struct Live {
     char pending_serial[33]{};
     uint32_t retry_at = 0, buffered_rows = 0;
     PartialWrite partial;
-    bool closing = false, incomplete = false;
+    bool closing = false, has_gap = false;
 };
 
 std::vector<Live, LargeAllocator<Live>> live;
@@ -103,23 +104,17 @@ struct Gap {
     char source[18]{};
     uint32_t first = 0, last = 0;
 };
-struct Gaps {
-    Gap notes[1 + AC_OXIMETRY_SENSOR_MAX_KNOWN]{};
-    bool untracked = false;
-} gaps;
+std::array<Gap, 1 + AC_OXIMETRY_SENSOR_MAX_KNOWN> gaps{};
 portMUX_TYPE gap_lock = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> have_gaps{false};
 
 void input_lost(const Input &in) {
     ++lost;
     portENTER_CRITICAL(&gap_lock);
-    auto end = std::end(gaps.notes);
-    auto note = std::find_if(std::begin(gaps.notes), end, [&](const Gap &g) {
+    auto note = std::find_if(gaps.begin(), gaps.end(), [&](const Gap &g) {
         return !g.source[0] || !strcmp(g.source, in.source);
     });
-    if (note == end) {
-        gaps.untracked = true;
-    } else {
+    if (note != gaps.end()) {
         if (!note->source[0]) {
             memcpy(note->source, in.source, sizeof(note->source));
             note->first = in.observed;
@@ -133,17 +128,16 @@ void input_lost(const Input &in) {
 void mark_input_gaps() {
     if (!have_gaps.load()) return;
     portENTER_CRITICAL(&gap_lock);
-    const Gaps observed = gaps;
+    const auto observed = gaps;
     gaps = {};
     have_gaps.store(false);
     portEXIT_CRITICAL(&gap_lock);
 
     for (auto &f : live) {
-        if (observed.untracked) f.incomplete = true;
-        for (const auto &gap : observed.notes) {
+        for (const auto &gap : observed) {
             if (gap.source[0] && f.source == gap.source &&
                 int32_t(gap.last - f.first) >= -int32_t(GapMs) &&
-                int32_t(gap.first - f.last) <= int32_t(GapMs)) f.incomplete = true;
+                int32_t(gap.first - f.last) <= int32_t(GapMs)) f.has_gap = true;
         }
     }
 }
@@ -159,19 +153,8 @@ bool vacant(const std::string &path) {
     return !Storage::file_stat(path.c_str(), st) && errno == ENOENT;
 }
 
-bool needs_quarantine(const Live &f) {
-    return f.incomplete && f.part.compare(f.part.size() - 5, 5, ".part") == 0;
-}
-
 bool flush(Live &f) {
     if (!f.partial.created && !Storage::ensure_parent_directories(f.part.c_str())) return false;
-    if (needs_quarantine(f)) {
-        auto incomplete = f.part.substr(0, f.part.size() - 4) + "incomplete";
-        if (f.partial.created && (!vacant(incomplete) ||
-            !Storage::rename(f.part.c_str(), incomplete.c_str()))) return false;
-        f.part.swap(incomplete);
-        Log::logf(CAT_OXI, LOG_WARN, "keeping incomplete recording: %s\n", f.part.c_str());
-    }
     if (f.pending_serial[0]) {
         const size_t n = strlen(f.pending_serial);
         if (!f.offset) {
@@ -197,7 +180,7 @@ bool flush(Live &f) {
     return true;
 }
 
-bool publish(const std::string &part, const std::string &final) {
+bool publish(const std::string &part, const std::string &final, bool has_gap) {
     if (!vacant(final) || !Storage::ensure_parent_directories(final.c_str()) ||
         !Storage::rename(part.c_str(), final.c_str())) return false;
     const auto dir = std::string_view(final).substr(sizeof(OximetryArchiveRoot));
@@ -205,11 +188,13 @@ bool publish(const std::string &part, const std::string &final) {
     StorageService::notify_oximetry_publication(
         ReportOximetryChange::file(OximetryArchiveFile::LiveCsv, dir.substr(0, slash),
                                    dir.substr(slash + 1, 8)));
+    if (has_gap)
+        Log::logf(CAT_OXI, LOG_WARN, "published live CSV with missing rows: %s\n", final.c_str());
     return true;
 }
 
 bool finish(Live &f) {
-    return flush(f) && (f.incomplete || publish(f.part, f.final));
+    return flush(f) && publish(f.part, f.final, f.has_gap);
 }
 
 bool due(const Live &f, uint32_t now) {
@@ -225,16 +210,20 @@ void deferred(Live &f, uint32_t now) {
 // Only files with our live filename and header can be recovered. A derived
 // partial is in a date directory and never reaches this function.
 bool recover(const std::string &path, const char *name) {
-    const size_t n = strlen(name);
-    if (n < 28 || strncmp(name, "live-", 5) ||
-        strspn(name + 5, "0123456789") != 8 || name[13] != '-' ||
-        strcmp(name + n - 9, ".csv.part")) return true;
+    const std::string_view filename(name);
+    const auto csv = filename.rfind(".csv.");
+    if (csv == filename.npos || csv < 19 || filename.substr(0, 5) != "live-" ||
+        strspn(name + 5, "0123456789") != 8 || name[13] != '-') return true;
 
-    const std::string final = path.substr(0, path.size() - n) +
-        std::string(name + 5, 8) + "/" + std::string(name, n - 5);
+    const auto suffix = filename.substr(csv + 5);
+    const bool legacy_gap = suffix == "incomplete";
+    if (!legacy_gap && suffix != "part") return true;
+
+    const std::string final = path.substr(0, path.size() - filename.size()) +
+        std::string(name + 5, 8) + "/" + std::string(name, csv + 4);
     if (!vacant(final)) return false;
 
-    const int fd = Storage::open_descriptor(path.c_str(), O_RDWR);
+    const int fd = Storage::open_descriptor(path.c_str(), legacy_gap ? O_RDONLY : O_RDWR);
     if (fd < 0) return false;
     char header[MaxHeader], tail[MaxRow];
     const off_t size = lseek(fd, 0, SEEK_END);
@@ -262,12 +251,12 @@ bool recover(const std::string &path, const char *name) {
     const off_t complete = size - count + end;
     ok = ok && end && complete >= off_t(header_n);
     if (ok && end != count)
-        ok = ftruncate(fd, complete) == 0 && fsync(fd) == 0;
+        ok = !legacy_gap && ftruncate(fd, complete) == 0 && fsync(fd) == 0;
     ok = Storage::close_descriptor(path.c_str(), fd) == 0 && ok;
     if (!ok) return false;
-    if (complete == off_t(header_n)) return Storage::remove(path.c_str());
+    if (complete == off_t(header_n)) return !legacy_gap && Storage::remove(path.c_str());
 
-    return publish(path, final);
+    return publish(path, final, legacy_gap);
 }
 
 bool recovery_step() {
@@ -351,13 +340,17 @@ bool append(const Input &in, uint32_t now) {
     const size_t len = format_row(row, in.utc_ms, it->offset_minutes,
                                   in.oxygen, in.pulse, in.motion, in.pi);
     if (!len) return false;
+    it->night = night;
+    it->last_utc = in.utc_ms;
+    if (in.measured) it->last = in.observed;
+
     if (it->used + len > Batch && due(*it, now)) {
         if (!flush(*it)) deferred(*it, now);
         else it->retry_at = 0;
     }
     if (it->used + len > it->buffer->size()) {
         if (allocated_buffers() + Batch > buffer_budget || !it->buffer->grow(it->buffer->size() + Batch)) {
-            it->incomplete = true;
+            it->has_gap = true;
             ++lost;
             return true;
         }
@@ -366,9 +359,6 @@ bool append(const Input &in, uint32_t now) {
     memcpy(it->buffer->data() + it->used, row, len);
     it->used += len;
     ++it->buffered_rows;
-    it->night = night;
-    it->last_utc = in.utc_ms;
-    if (in.measured) it->last = in.observed;
     if (!it->offset && due(*it, now)) {
         if (!flush(*it)) deferred(*it, now);
         else it->retry_at = 0;
@@ -466,7 +456,7 @@ bool live_step(uint32_t now) try {
             else live.erase(it);
             return true;
         }
-        if (needs_quarantine(*it) || (it->used && now - it->dirty >= FlushMs)) {
+        if (it->used && now - it->dirty >= FlushMs) {
             if (!flush(*it)) deferred(*it, now);
             else it->retry_at = 0;
             return true;

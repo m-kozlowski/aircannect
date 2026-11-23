@@ -107,6 +107,7 @@ struct OximetryRuntimeStatus {
     OximetrySource source = OximetrySource::None;
     char source_detail[48] = {};
     OximetryReading reading;
+    uint32_t csv_lost = 0;
     uint16_t udp_port = 0;
     bool udp_started = false;
     bool ble_available = false;
@@ -128,6 +129,6 @@ struct OximetryRuntimeStatus {
 OximetryRuntimeStatus compose_oximetry_status(
     const OximetryHubSnapshot &hub,
     const UdpOximeterStatus &udp,
-    const PlxPeripheralStatus &peripheral);
+    const PlxPeripheralStatus &peripheral, uint32_t csv_lost);
 
 }  // namespace aircannect

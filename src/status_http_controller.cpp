@@ -133,6 +133,7 @@ bool build_status_json(LargeTextBuffer &json,
 
     json += ",\"oximetry\":{";
     json_add_bool(json, "enabled", oxi.enabled, false);
+    json_add_uint64(json, "csv_lost", oxi.csv_lost);
     json_add_bool(json, "airsense_integration_available",
                   oxi.airsense_integration_available);
     json_add_string(json, "source", oximetry_source_name(oxi.source));

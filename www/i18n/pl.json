@@ -1226,6 +1226,7 @@
   "status.clock_invalid": "Nieprawidłowy czas",
   "status.config_queued": "Zapis konfiguracji w kolejce",
   "status.connected": "Połączono",
+  "status.csv_rows_lost": "Utracone wiersze CSV od restartu: {count}",
   "status.edf_suspended": "Rejestrowanie EDF wstrzymane",
   "status.file_preview": "Otwórz WebUI urządzenia przez HTTP, nie podgląd pliku",
   "status.forget_airsense": "Usunąć parowanie pulsoksymetru z AirSense?",
