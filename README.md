@@ -28,7 +28,8 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - let the AirSense record HR/SpO2 when application control uses CAN, or write
     it directly to local SA2 EDF when application control uses BLE or the
     device is an AirMini
-  - currently supported: O2Ring, O2Ring-S, Checkme O2, Nonin 3150, generic PLX/HR sensors
+  - currently supported: O2Ring, O2Ring-S, Checkme O2, Checkme O2 Max,
+    Nonin 3150, generic PLX/HR sensors
 - **Local display and controls**
   - optional status and therapy display with motion wake and automatic rotation
   - configurable local buttons for common device actions
