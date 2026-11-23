@@ -688,6 +688,7 @@
       reportRangeView = null;
       reportRangeToken++;
       reportDrawItems = [];
+      setReportPin(null);
       reportDrawPending = false;
       reportDrawRetryCount = 0;
       const charts = document.getElementById("reportCharts");
@@ -1045,11 +1046,13 @@
     }
 
     function reportTimeTicks(start, end, graphW) {
-      const rough = (end - start) / Math.max(2, Math.floor(graphW / 100));
       const steps = [100, 200, 500, 1000, 2000, 5000, 10000, 15000, 30000,
         60000, 120000, 300000, 600000, 900000, 1800000,
         3600000, 7200000, 10800000, 21600000, 43200000, 86400000];
-      const step = steps.find((value) => value >= rough) || 86400000;
+      const step = steps.find((value) => {
+        const chars = value < 1000 ? 12 : value < 60000 ? 8 : 5;
+        return value * graphW >= (end - start) * (chars * REPORT_TICK_CHAR_PX + 6);
+      }) || 86400000;
       const offset = -new Date(start).getTimezoneOffset() * 60000;
       const first = Math.ceil((start + offset) / step) * step - offset;
       const ticks = [];
@@ -1067,10 +1070,10 @@
     // Vertical gridlines + time labels along the x-axis, shared by every chart
     // so they line up. Drawn before the data so traces/marks sit on top.
     function drawReportTimeAxis(svg, pad, graphW, graphH, height, start, end) {
+      let previousLabelEnd = -Infinity;
       for (const {time, label} of reportTimeTicks(start, end, graphW)) {
         const frac = (time - start) / (end - start);
         const x = pad.left + graphW * frac;
-        const anchor = frac < 0.05 ? "start" : frac > 0.95 ? "end" : "middle";
         svg.appendChild(svgNode("line", {
           x1: x.toFixed(1),
           y1: String(pad.top),
@@ -1080,8 +1083,12 @@
           "stroke-width": "1",
           "stroke-dasharray": "2 5",
         }));
-        svg.appendChild(svgText(label,
-          x, height - 5, {"text-anchor": anchor}));
+
+        const half = label.length * REPORT_TICK_CHAR_PX / 2;
+        const labelX = Math.min(x, pad.left + graphW + pad.right - half - 2);
+        if (labelX - half < previousLabelEnd + 4) continue;
+        svg.appendChild(svgText(label, labelX, height - 5, {"text-anchor": "middle"}));
+        previousLabelEnd = labelX + half;
       }
     }
 
@@ -1518,10 +1525,10 @@
     // Item 6: one cursor time, drawn on every chart, with each header showing
     // that chart's value at the cursor.
     function updateReportHover() {
+      const t = reportHoverTime ?? reportPinnedTime;
       reportDrawItems.forEach((item) => {
         const canvas = item.canvas;
         if (!canvas || !canvas._geom || !canvas._cursor) return;
-        const t = reportHoverTime;
         const inRange = t != null && t >= item.start && t <= item.end;
         if (!inRange) {
           canvas._cursor.setAttribute("visibility", "hidden");
@@ -1533,11 +1540,20 @@
         canvas._cursor.setAttribute("x1", x.toFixed(1));
         canvas._cursor.setAttribute("x2", x.toFixed(1));
         canvas._cursor.setAttribute("visibility", "visible");
-        updateReportTimeTooltip(canvas, x, t);
+        if (reportHoverTime != null) updateReportTimeTooltip(canvas, x, t);
+        else hideReportTimeTooltip(canvas);
         if (canvas._readout) {
           i18n.text(canvas._readout, reportReadoutText(item, t));
         }
       });
+    }
+
+    function setReportPin(time) {
+      reportPinnedTime = time;
+      document.getElementById("reportClearPin").disabled = time == null;
+      document.getElementById("reportPinTime").textContent =
+        time == null ? "--:--:--" : fmtReportClock(time);
+      updateReportHover();
     }
 
     function reportSelectionRect(canvas) {
@@ -1636,6 +1652,8 @@
       if (zoomOut) zoomOut.disabled = !reportZoom;
       if (zoomReset) zoomReset.disabled = !reportZoom;
       if (zoomIn) zoomIn.disabled = !haveRange;
+      document.getElementById("reportPanLeft").disabled = !reportZoom;
+      document.getElementById("reportPanRight").disabled = !reportZoom;
     }
 
     function setReportZoomRange(start, end, preview = false) {
@@ -1671,7 +1689,9 @@
       const base = reportZoom || reportRange();
       if (!validReportRange(base)) return;
       if (!reportZoom && scale > 1) return;
-      const center = base.start + (base.end - base.start) / 2;
+      const pinnedInView = reportPinnedTime != null &&
+        reportPinnedTime >= base.start && reportPinnedTime <= base.end;
+      const center = pinnedInView ? reportPinnedTime : (base.start + base.end) / 2;
       const width = (base.end - base.start) * scale;
       setReportZoomRange(center - width / 2, center + width / 2);
     }
@@ -1726,19 +1746,23 @@
         // A pointer can have been cancelled by the browser before capture.
         try { canvas.setPointerCapture(id); } catch (_) {}
       };
+      let fromTouch = false;
       canvas.addEventListener("pointermove", (ev) => {
         const t = reportCanvasTime(canvas, ev.clientX);
         if (t == null) return;
         if (reportDrag) {
           const drag = reportDrag;
           if (drag.canvas !== canvas || !drag.pointers.has(ev.pointerId)) return;
-          if (drag.awaitDirection) {
-            const dx = Math.abs(ev.clientX - drag.origin[0]);
+          const dx = Math.abs(ev.clientX - drag.origin[0]);
+          if (drag.pressPending) {
             const dy = Math.abs(ev.clientY - drag.origin[1]);
-            if (dy >= 5 && dy > dx) { reportFinishDrag(true); return; }
-            if (dx < 5) return;
-            drag.awaitDirection = false;
-            capture(ev.pointerId);
+            if (Math.max(dx, dy) < drag.pressSlop) return;
+            if (fromTouch && dy > dx) {
+              reportFinishDrag(true);
+              return;
+            }
+            drag.pressPending = false;
+            if (fromTouch) capture(ev.pointerId);
           }
           drag.pointers.set(ev.pointerId, fraction(ev.clientX));
           if (drag.pinch) {
@@ -1756,11 +1780,12 @@
             const start = anchor - (points[0] + points[1]) / 2 * width;
             setReportZoomRange(start, start + width, true);
           } else {
-            drag.t1 = Math.abs(ev.clientX - drag.origin[0]) >= 3 ? t : drag.t0;
+            drag.t1 = dx >= REPORT_RANGE_DRAG_PX ? t : drag.t0;
           }
           updateReportSelectionRects();
           return;
         }
+        if (ev.pointerType === "touch") return;
         reportHoverTime = t;
         updateReportHover();
       });
@@ -1774,20 +1799,22 @@
         if (t == null || !canvas._geom || ev.button !== 0) return;
         if (reportDrag && (reportDrag.canvas !== canvas ||
             reportDrag.pointers.size >= 2 || reportDrag.pinch)) return;
-        if (ev.pointerType !== "touch") {
+        fromTouch = ev.pointerType === "touch";
+        if (!fromTouch) {
           ev.preventDefault();
           capture(ev.pointerId);
         }
         canvas.focus({preventScroll: true});
         if (!reportDrag) reportDrag = {
           canvas, t0: t, t1: t, pointers: new Map(), initialZoom: reportZoom,
-          origin: [ev.clientX, ev.clientY], awaitDirection: ev.pointerType === "touch",
+          origin: [ev.clientX, ev.clientY], pressPending: true,
+          pressSlop: fromTouch ? REPORT_TOUCH_DRAG_PX : REPORT_RANGE_DRAG_PX,
         };
         reportDrag.pointers.set(ev.pointerId, fraction(ev.clientX));
         if (reportDrag.pointers.size === 2) {
           reportDrag.pinch = {points: [...reportDrag.pointers.values()],
             range: reportZoom || reportRange()};
-          reportDrag.awaitDirection = false;
+          reportDrag.pressPending = false;
           reportDrag.pointers.forEach((_point, id) => capture(id));
           cancelReportRangeRequest();
           reportRangeView = null;
@@ -1802,6 +1829,11 @@
         drag.pointers.delete(ev.pointerId);
         if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
         if (!drag.pointers.size) reportFinishDrag();
+
+        if (drag.pressPending && Math.max(Math.abs(ev.clientX - drag.origin[0]),
+            Math.abs(ev.clientY - drag.origin[1])) < drag.pressSlop) {
+          setReportPin(drag.t0);
+        }
       });
       const cancel = (ev) => {
         if (reportDrag?.canvas === canvas && reportDrag.pointers.has(ev.pointerId)) {
@@ -1809,8 +1841,12 @@
         }
       };
       canvas.addEventListener("pointercancel", cancel);
-      canvas.addEventListener("lostpointercapture", cancel);
+      canvas.addEventListener("lostpointercapture", (ev) => {
+        // Touch capture can transfer from a trace to its SVG mid-gesture.
+        if (ev.target === canvas) cancel(ev);
+      });
       canvas.addEventListener("dblclick", () => {
+        if (fromTouch) return;
         reportFinishDrag(true, false);
         resetReportZoom();
       });
@@ -3052,7 +3088,7 @@
       const oximetryOnly = !period && !!reportResult?.oximetryOnly;
       const picker = document.getElementById("reportOximetryPicker");
       if (picker) picker.hidden = period || !oximetryView.options.length;
-      for (const id of ["reportNightActions", "reportCharts"]) {
+      for (const id of ["reportNightActions", "reportZoomTools", "reportCharts"]) {
         const element = document.getElementById(id);
         if (element) element.hidden = period;
       }
@@ -4800,10 +4836,12 @@
           res.result.generation !== reportCurrentGeneration;
         reportOffline = !!res.cached;
         if (changed) {
+          const savedPin = keepView ? reportPinnedTime : null;
           if (keepView) resetReportData();
           reportSummaryScope = savedScope;
           reportResult = res.result;
           reportZoom = savedZoom;
+          setReportPin(savedPin);
           savedHiddenSessions.forEach((key) => reportHiddenSessions.add(key));
 
           const loaded = await loadSignalStoreBase(
@@ -5123,7 +5161,10 @@
       stepReportCalMonth(Number(element.dataset.value)));
     AirCANnect.actions.register("report.zoom", (_event, element) =>
       zoomReportWindow(Number(element.dataset.value)));
+    AirCANnect.actions.register("report.pan", (_event, element) =>
+      panReportZoom(Number(element.dataset.value)));
     AirCANnect.actions.register("report.reset-zoom", () => resetReportZoom());
+    AirCANnect.actions.register("report.clear-pin", () => setReportPin(null));
     AirCANnect.actions.register("report.configure-charts", () =>
       showReportChartOptions());
     AirCANnect.actions.register("report.reset-charts", () =>
@@ -5191,6 +5232,7 @@
     let reportRangeToken = 0;
     let reportRangeAbortController = null;
     let reportHoverTime = null;
+    let reportPinnedTime = null;
     let reportDrag = null;
     let reportSelectedNightId = "";
     let reportCalView = null;
@@ -5205,6 +5247,9 @@
     const REPORT_CACHE_MAX_BYTES = 128 * 1024 * 1024;
     const REPORT_CACHE_MAX_ENTRIES = 16384;
     const REPORT_MIN_ZOOM_MS = 1000;
+    const REPORT_TICK_CHAR_PX = 6.3;  // 10px monospace SVG labels.
+    const REPORT_RANGE_DRAG_PX = 3;
+    const REPORT_TOUCH_DRAG_PX = 12;
     const SIGNAL_STORE_BLOCK_MS = 15 * 60 * 1000;
     const SIGNAL_STORE_SESSION_BYTES = 16;
     const SIGNAL_STORE_TRACK_BYTES = 88;

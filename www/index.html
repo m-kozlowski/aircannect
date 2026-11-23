@@ -349,12 +349,6 @@
                   <div class="np-grid" id="reportCalGrid"></div>
                 </div>
               </div>
-              <button class="btn np-arrow" id="reportZoomOut"
-                      title="Zoom out" data-action="report.zoom" data-value="2" data-i18n-title="ui.zoom.out">-</button>
-              <button class="btn np-arrow" id="reportZoomIn"
-                      title="Zoom in" data-action="report.zoom" data-value="0.5" data-i18n-title="ui.zoom.in">+</button>
-              <button class="btn" id="reportZoomReset"
-                      data-action="report.reset-zoom" data-i18n="ui.reset.zoom"></button>
               <button class="btn" id="reportChartsButton"
                       data-action="report.configure-charts" data-i18n="ui.charts"></button>
             </div>
@@ -412,6 +406,21 @@
               <table class="report-settings-table"><tbody id="reportSettingsBody"></tbody></table>
             </details>
             <div class="report-sessions" id="reportSessions"></div>
+          </div>
+          <div class="report-zoom-bar" id="reportZoomTools" role="group" aria-label="Report charts" data-i18n-aria-label="ui.report.charts">
+            <button class="btn" type="button" id="reportPanLeft" disabled
+                    data-action="report.pan" data-value="-1" data-i18n-title="report.pan_left" data-i18n-aria-label="report.pan_left">&larr;</button>
+            <button class="btn" type="button" id="reportPanRight" disabled
+                    data-action="report.pan" data-value="1" data-i18n-title="report.pan_right" data-i18n-aria-label="report.pan_right">&rarr;</button>
+            <button class="btn" type="button" id="reportZoomOut" disabled
+                    data-action="report.zoom" data-value="2" data-i18n-title="ui.zoom.out" data-i18n-aria-label="ui.zoom.out">&minus;</button>
+            <button class="btn" type="button" id="reportZoomIn" disabled
+                    data-action="report.zoom" data-value="0.5" data-i18n-title="ui.zoom.in" data-i18n-aria-label="ui.zoom.in">+</button>
+            <button class="btn" type="button" id="reportZoomReset" disabled
+                    data-action="report.reset-zoom" data-i18n-title="ui.reset.zoom" data-i18n-aria-label="ui.reset.zoom">&#8634;</button>
+            <button class="btn report-clear-pin" type="button" id="reportClearPin" disabled
+                    data-action="report.clear-pin" data-i18n-title="report.clear_pin" data-i18n-aria-label="report.clear_pin">
+              <span id="reportPinTime">--:--:--</span><span aria-hidden="true">&times;</span></button>
           </div>
           <div id="reportCharts" class="report-charts"></div>
           <details class="report-details" id="reportPeriodTrends" hidden open>
