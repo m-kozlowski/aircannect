@@ -149,6 +149,9 @@ bool build_status_json(LargeTextBuffer &json,
     } else {
         json += ",\"spo2\":null,\"pulse_bpm\":null";
     }
+    if (oxi.reading.pi_percent >= 0) {
+        json_add_float(json, "pi_percent", oxi.reading.pi_percent);
+    }
     json_add_int(json, "source_age_ms", oxi.last_source_age_ms);
     json_add_string(json, "advertise_mode",
                     oximetry_advertise_mode_name(oxi.advertise_mode));

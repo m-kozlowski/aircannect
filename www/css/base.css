@@ -414,22 +414,30 @@
     }
 
     .metric-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      display: flex;
+      flex-wrap: wrap;
       gap: 10px;
       margin-bottom: 14px;
     }
 
+    .metric-grid:has([data-oxi-pi]:not([hidden])) {
+      container-type: inline-size;
+      --metric-inset: clamp(4px, 2cqi, 12px);
+      --metric-font-size: clamp(16px, 7cqi, 26px);
+    }
+
     .metric {
+      flex: 1 1 0;
+      min-width: max-content;
       border: 1px solid #30364166;
       border-radius: 7px;
-      padding: 12px;
+      padding: 12px var(--metric-inset, 12px);
       background: #10111466;
     }
 
     .metric .metric-value {
       display: inline-block;
-      font-size: 26px;
+      font-size: var(--metric-font-size, 26px);
       font-weight: 760;
       line-height: 1.1;
     }

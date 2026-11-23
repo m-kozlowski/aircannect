@@ -19,6 +19,7 @@ struct OximetryReading {
     bool contact_known = false;
     bool contact_present = false;
     uint32_t timestamp_ms = 0;
+    float pi_percent = -1;
 };
 
 struct OximetrySample {

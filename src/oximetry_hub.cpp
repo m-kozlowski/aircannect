@@ -50,6 +50,7 @@ bool OximetryHub::ingest(const OximetrySample &sample,
 
     reading_.spo2 = sample.valid ? sample.spo2 : -1;
     reading_.pulse_bpm = sample.valid ? sample.pulse_bpm : -1;
+    reading_.pi_percent = sample.contact_known && !sample.contact_present ? -1 : sample.pi_percent;
     reading_.valid = sample.valid;
     reading_.contact_known = sample.contact_known;
     reading_.contact_present = sample.contact_present;

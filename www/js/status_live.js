@@ -216,6 +216,13 @@
       AirCANnect.ui.text("oxiTabSpo2", sourceValid ? oxi.spo2 : "--");
       AirCANnect.ui.text("oxiTabPulse", sourceValid ? oxi.pulse_bpm : "--");
 
+      const pi = oxi.source_fresh && Number.isFinite(oxi.pi_percent)
+        ? AirCANnect.i18n.numberMessage(oxi.pi_percent, 3) : null;
+      document.querySelectorAll("[data-oxi-pi]").forEach((tile) => {
+        tile.toggleAttribute("hidden", !pi);
+        if (pi) AirCANnect.i18n.text(tile.querySelector(".metric-value"), pi);
+      });
+
       let badgeLabel = AirCANnect.i18n.message("ui.off");
       let badgeStyle = "";
       if (!oxi.enabled) {
