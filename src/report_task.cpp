@@ -577,6 +577,23 @@ struct ReportTask::Runtime {
         if (changed) wake(Capture);
     }
 
+    // Both callers hold the publication lock. Release it before cancelling I/O.
+    void replace_capture_session_and_unlock() {
+        capture_session = pending_capture;
+        capture_pending = false;
+        unlock();
+
+        (void)engine.cancel_background();
+        capture_build = {};
+        capture_evaluated_end_ms = 0;
+        capture_attempt_end_ms = 0;
+        capture_retry_at_ms = 0;
+        capture_checked_revision = 0;
+        capture_input.reset();
+        capture_progress.reset();
+        capture_attempt_progress.reset();
+    }
+
     bool apply_capture_session() {
         if (!lock()) return false;
         if (!capture_pending) {
@@ -603,19 +620,8 @@ struct ReportTask::Runtime {
             rollover_session = capture_session;
             rollover_sources_ready = false;
         }
-        capture_session = pending_capture;
-        capture_pending = false;
-        unlock();
 
-        (void)engine.cancel_background();
-        capture_build = {};
-        capture_evaluated_end_ms = 0;
-        capture_attempt_end_ms = 0;
-        capture_retry_at_ms = 0;
-        capture_checked_revision = 0;
-        capture_input.reset();
-        capture_progress.reset();
-        capture_attempt_progress.reset();
+        replace_capture_session_and_unlock();
         return true;
     }
 
@@ -1409,10 +1415,16 @@ struct ReportTask::Runtime {
 
         next = pending_activity;
         activity_pending = false;
-        unlock();
 
-        const bool therapy_ended =
-            activity.therapy_active && !next.therapy_active;
+        const bool therapy_ended = activity.therapy_active && !next.therapy_active;
+        if (therapy_ended && !pending_capture.raw_segment_start_ms &&
+            (capture_session.raw_segment_start_ms || capture_pending)) {
+            // The recorder can close before the stop, and the next pass may see a restart.
+            replace_capture_session_and_unlock();
+        } else {
+            unlock();
+        }
+
         const bool became_blocked =
             (!background_suspended &&
              (next.therapy_active || next.realtime_stream_active ||
@@ -1426,8 +1438,7 @@ struct ReportTask::Runtime {
             activity.supports_as11_spools != next.supports_as11_spools;
         const bool storage_recovered = activity.storage_low_space && !next.storage_low_space;
 
-        if (therapy_ended || next.ota_install_active ||
-            next.manual_update_check_active || next.export_work_claimed) {
+        if (next.ota_install_active || next.manual_update_check_active || next.export_work_claimed) {
             capture_input.reset();
             capture_checked_revision = 0;
         }
