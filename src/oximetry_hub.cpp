@@ -61,7 +61,8 @@ bool OximetryHub::ingest(const OximetrySample &sample,
         sample_observer_(sample_observer_context_, accepted);
     }
 
-    if (sample.source != OximetrySource::Ble || sample.valid) {
+    if (sample.source != OximetrySource::Ble || sample.valid || sample.contact_present ||
+        sample.spo2 >= 0 || sample.pulse_bpm >= 0) {
         ble_invalid_since_ms_ = 0;
         return true;
     }

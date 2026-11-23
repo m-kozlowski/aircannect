@@ -256,11 +256,11 @@ void failed(uint32_t now) {
 
 bool begin(void (*wake)()) {
     if (queue) return true;
-    constexpr size_t Count = 32;
-    auto *bytes = static_cast<uint8_t *>(Memory::alloc_large(Count * sizeof(Input)));
+    const size_t count = Memory::buffer_budget(64 * 1024, 16 * 1024) / sizeof(Input);
+    auto *bytes = static_cast<uint8_t *>(Memory::alloc_large(count * sizeof(Input), false));
     if (!bytes) return false;
     notify = wake;
-    queue = xQueueCreateStatic(Count, sizeof(Input), bytes, &queue_control);
+    queue = xQueueCreateStatic(count, sizeof(Input), bytes, &queue_control);
     return queue != nullptr;
 }
 
@@ -275,10 +275,10 @@ void observe(const OximetrySample &s, int64_t utc_ms, int32_t device_offset_minu
     in.device_offset = device_offset_minutes;
     in.utc_ms = utc_ms;
     in.observed = s.observed_ms ? s.observed_ms : millis();
-    in.removed = s.contact_known && !s.contact_present;
-    in.measured = !in.removed && (s.valid || s.pi_percent >= 0 || s.motion >= 0);
-    in.oxygen = s.valid ? s.spo2 : 255;
-    in.pulse = s.valid ? s.pulse_bpm : 255;
+    in.removed = s.contact_known && !s.contact_present && s.spo2 < 0 && s.pulse_bpm < 0;
+    in.measured = !in.removed && (s.spo2 >= 0 || s.pulse_bpm >= 0 || s.pi_percent >= 0 || s.motion >= 0);
+    in.oxygen = s.spo2 >= 0 ? s.spo2 : 255;
+    in.pulse = s.pulse_bpm >= 0 ? s.pulse_bpm : 255;
     in.pi = s.pi_percent;
     in.motion = s.motion;
     if (!xQueueSend(queue, &in, 0)) ++lost;
@@ -310,6 +310,8 @@ bool live_step(uint32_t now) try {
     if (!queue) return false;
     const bool stop = paused.load() || StorageUsb::suspended();
     if (retry_at && int32_t(now - retry_at) < 0) {
+        if (!stop) return false;
+        // A media handoff cannot wait for the storage retry deadline.
         xQueueReset(queue);
         quiet.store(true);
         return false;

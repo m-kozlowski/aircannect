@@ -24,7 +24,8 @@ public:
                                     bool invalid,
                                     bool contact_known,
                                     bool contact_present,
-                                    bool charging, float pi_percent, int16_t motion);
+                                    bool charging, float pi_percent, int16_t motion,
+                                    uint32_t observed_ms);
 
     bool begin();
     void set_sample_callback(SampleCallback callback, void *context);
@@ -59,12 +60,18 @@ private:
                      bool charging = false, float pi_percent = -1, int16_t motion = -1);
 
 #if AC_OXIMETRY_BLE_ENABLED
+    bool observe_wear(bool evidence, bool charging, uint32_t now_ms);
+    bool worn_ = false;
+    uint32_t last_worn_ms_ = 0;
+
     // NimBLE host callback -> sensor worker SPSC mailbox.
     static constexpr size_t NotificationQueueCapacity = 8;
     static constexpr size_t NotificationMaxBytes = BLE_ATT_MTU_MAX - 3;
 
     struct NotificationSlot {
         uint32_t generation = 0;
+        uint32_t preceding_drops = 0;
+        uint32_t observed_ms = 0;
         ActiveProtocol protocol = ActiveProtocol::None;
         NimBLERemoteCharacteristic *characteristic = nullptr;
         uint16_t length = 0;
@@ -186,7 +193,7 @@ private:
     std::atomic<uint32_t> connection_generation_{1};
     std::atomic<uint32_t> notification_read_sequence_{0};
     std::atomic<uint32_t> notification_write_sequence_{0};
-    std::atomic<uint32_t> notification_fault_generation_{0};
+    uint32_t consumed_drops_ = 0;
     std::atomic<uint32_t> notification_drops_{0};
     NotificationSlot *notification_queue_ = nullptr;
     std::atomic<TaskHandle_t> notification_worker_{nullptr};
@@ -200,6 +207,7 @@ private:
 
     ActiveProtocol active_protocol_ = ActiveProtocol::None;
     SampleCallback sample_callback_ = nullptr;
+    uint32_t observed_ms_ = 0;
     void *sample_context_ = nullptr;
 };
 

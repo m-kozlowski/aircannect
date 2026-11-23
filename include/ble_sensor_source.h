@@ -125,7 +125,8 @@ private:
                                          bool invalid,
                                          bool contact_known,
                                          bool contact_present,
-                                         bool charging, float pi_percent, int16_t motion);
+                                         bool charging, float pi_percent, int16_t motion,
+                                         uint32_t observed_ms);
     static void advertisement_callback(
         void *context, const BleAdvertisement &advertisement);
     void note_advertisement(const BleAdvertisement &advertisement);
@@ -133,7 +134,8 @@ private:
                         bool from_invalid_packet,
                         bool contact_known,
                         bool contact_present,
-                        bool charging, float pi_percent, int16_t motion);
+                        bool charging, float pi_percent, int16_t motion,
+                        uint32_t observed_ms);
     void callback_disconnected(int reason);
 
     BleRuntime &runtime_;

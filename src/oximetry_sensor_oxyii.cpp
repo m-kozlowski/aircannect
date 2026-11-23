@@ -406,18 +406,19 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
     const uint8_t *p = frame.payload;
     const uint8_t spo2 = p[6];
     const uint16_t pulse = uint16_t(p[8]) | (uint16_t(p[9]) << 8);
-    const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse < 250;
+    const bool have_o2 = spo2 > 0 && spo2 <= 100;
+    const bool have_pulse = pulse > 0 && pulse < 250;
+    const bool valid = have_o2 && have_pulse;
 
     // Off-finger placeholders are not measurements. Keep motion during
     // poor signal if the sensor still reports contact (RtParam.sensorState).
-    const bool measured = valid || p[5] == 1;
-    const float pi = measured ? p[7] / 10.0f : -1.0f;
-    const int16_t motion = measured && frame.payload_len >= 12 ? p[11] : -1;
     const bool charging = frame.payload_len >= 13 && (p[12] == 1 || p[12] == 2);
-    const bool contact = measured || (p[5] != 0 &&
+    const bool evidence = have_o2 || have_pulse || (p[5] != 0 &&
         !(p[5] == 3 && oxyii_.file_open && oxyii_.off_finger));
+    const bool contact = observe_wear(evidence, charging, millis());
     oxyii_.off_finger = charging || !contact;
-    if (recordings_) recordings_->observe_contact(contact, charging, millis());
+    const float pi = contact ? p[7] / 10.0f : -1.0f;
+    const int16_t motion = contact && frame.payload_len >= 12 ? p[11] : -1;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor OxyII reading %s spo2=%u pulse=%u\n",
@@ -425,8 +426,8 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse));
 
-    emit_sample(valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
-                valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
+    emit_sample(have_o2 ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
+                have_pulse ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
                 !valid, history_ring_, contact, history_ring_ && charging, pi, motion);
 }
 

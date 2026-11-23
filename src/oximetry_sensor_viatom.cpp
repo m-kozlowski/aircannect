@@ -62,11 +62,9 @@ bool decode_viatom_reading(const BleSensorFrameView &frame,
     pi = payload[10];
     lead_state = payload[11] & 0x01;
 
-    const bool valid = spo2 > 0 && spo2 != 0xff && spo2 <= 100 &&
-                       pulse > 0 && pulse != 0xff && pulse < 250;
-    spo2_raw = valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN;
-    pulse_raw = valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN;
-    invalid = !valid;
+    spo2_raw = spo2 > 0 && spo2 <= 100 ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN;
+    pulse_raw = pulse > 0 && pulse < 250 ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN;
+    invalid = spo2_raw == PLX_SFLOAT_NAN || pulse_raw == PLX_SFLOAT_NAN;
     return true;
 }
 
@@ -348,20 +346,21 @@ void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {
 
     viatom_clear_pending();
     const bool charging = battery_state == 1 || battery_state == 2;
-    if (recordings_) recordings_->observe_contact(lead_state != 0, charging, millis());
+    const bool worn = observe_wear(lead_state || spo2_raw != PLX_SFLOAT_NAN ||
+                                   pulse_raw != PLX_SFLOAT_NAN, charging, millis());
     viatom_.initial_probe_complete = !charging || (recordings_ && recordings_->active());
     if (charging && viatom_.clock_step == ClockStep::Probe) viatom_.clock_step = ClockStep::Done;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",
+              "Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f motion=%u\n",
               invalid ? "invalid" : "valid",
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse),
               static_cast<unsigned>(lead_state),
               static_cast<unsigned>(battery),
               static_cast<unsigned>(battery_state),
-              static_cast<double>(pi) / 10.0);
-    emit_sample(spo2_raw, pulse_raw, invalid, true, lead_state != 0,
+              static_cast<double>(pi) / 10.0, unsigned(motion));
+    emit_sample(spo2_raw, pulse_raw, invalid, true, worn,
                 charging, pi == 0xff ? -1.0f : pi / 10.0f, motion);
 }
 

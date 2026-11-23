@@ -32,9 +32,9 @@ static float decode_sfloat(uint16_t raw) {
     return value;
 }
 
-int16_t decode_sfloat_int_value(uint16_t raw, bool &valid) {
+int16_t decode_sfloat_int_value(uint16_t raw, bool &valid, int16_t maximum) {
     const float value = decode_sfloat(raw);
-    valid = value >= 0 && value <= 300;
+    valid = value >= 0 && value <= maximum;
     return valid ? static_cast<int16_t>(value + 0.5f) : -1;
 }
 
@@ -60,8 +60,7 @@ bool decode_nonin_df19(const uint8_t *packet,
     reading.pi_percent = ((uint16_t(packet[3]) << 8) | packet[4]) / 100.0f;
     reading.pulse_bpm =
         (static_cast<uint16_t>(packet[8]) << 8) | packet[9];
-    reading.valid = reading.spo2 != 127 && reading.spo2 <= 100 &&
-                    reading.pulse_bpm != 511 && reading.pulse_bpm <= 321;
+    reading.valid = reading.has_oxygen() && reading.has_pulse();
     return true;
 }
 
