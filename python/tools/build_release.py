@@ -202,9 +202,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=pathlib.Path,
                         default=PROJECT_DIR / "dist",
                         help="artifact output directory")
-    parser.add_argument("--migrate-url", nargs=2, metavar=("FROM", "TO"),
-                        help="offer to move devices using FROM to the manifest at TO")
-    return parser.parse_args()
+    parser.add_argument("--migrate-url", nargs="+", metavar="URL",
+                        help="TO or FROM TO; omitted FROM matches any source")
+    args = parser.parse_args()
+    if args.migrate_url:
+        if len(args.migrate_url) == 1:
+            args.migrate_url.insert(0, "*")
+        elif len(args.migrate_url) != 2:
+            parser.error("--migrate-url expects TO or FROM TO")
+    elif new := os.getenv("OTA_MIGRATE_TO"):
+        args.migrate_url = [os.getenv("OTA_MIGRATE_FROM") or "*", new]
+
+    return args
 
 
 def main() -> None:

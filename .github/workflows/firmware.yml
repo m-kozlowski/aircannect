@@ -70,17 +70,12 @@ jobs:
 
       - name: Build firmware artifacts
         env:
+          OTA_MIGRATE_FROM: ${{ vars.OTA_MIGRATE_FROM }}
           OTA_MIGRATE_TO: ${{ vars.OTA_MIGRATE_TO }}
         run: |
-          migration=()
-          if [[ -n "$OTA_MIGRATE_TO" ]]; then
-            from="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/latest/download/aircannect-release.json"
-            migration=(--migrate-url "$from" "$OTA_MIGRATE_TO")
-          fi
-
           .ci-venv/bin/python python/tools/build_release.py \
             --pio .ci-venv/bin/pio \
-            --output dist "${migration[@]}"
+            --output dist
 
       - name: Build release notes
         run: |
