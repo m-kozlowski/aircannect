@@ -1988,10 +1988,10 @@ void loop() {
     audible_alert_sink.poll(now_ms);
 
     // Wi-Fi and network services
-    const bool stream_activity_active = stream_broker.activity_active(
+    const bool stream_blocks_roaming = stream_broker.activity_active(
         now_ms, AC_WIFI_ROAM_STREAM_QUIET_MS);
 
-    wifi_manager.set_roaming_suspended(stream_activity_active ||
+    wifi_manager.set_roaming_suspended(stream_blocks_roaming ||
                                        firmware_installer.active() ||
                                        resmed_ota_transport_active);
 
@@ -2083,7 +2083,7 @@ void loop() {
         resmed_ota_manager.storage_upload_active();
 
     publish_runtime_activity(foreground_report_active,
-                             stream_activity_active,
+                             stream_broker.realtime_active(),
                              export_work_claimed,
                              storage_ota_active,
                              update_checker.manual_check_active(),
