@@ -49,7 +49,7 @@ bool ring_start(time_t wall, std::string_view id, ReportOximetryRecording &out) 
 bool decode_original_header(const uint8_t *p, size_t length, uint64_t size, std::string_view id,
                             ReportOximetryRecording &out) {
     const auto header = out.bin.offset(0);
-    if (length != header || p[0] != 3 || p[1] != 0 || size <= header ||
+    if (length != header || (p[0] != 3 && p[0] != 5) || p[1] != 0 || size <= header ||
         size != get_le32(p + 9) || (size - header) % out.bin.stride()) return false;
 
     const uint32_t samples = (size - header) / out.bin.stride();

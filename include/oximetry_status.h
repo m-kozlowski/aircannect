@@ -40,8 +40,11 @@ struct OximetrySensorDevice {
     }
 
     bool supports_recordings() const {
+        const std::string_view n(name);
+        const bool checkme_max = n.size() == 8 && n.substr(0, 4) == "O2M " &&
+                                 n.find_first_not_of("0123456789", 4) == n.npos;
         return AC_STORAGE_HAS_SDCARD &&
-               (oxyii_ring() || std::strcmp(name, "O2Ring") == 0 ||
+               (oxyii_ring() || checkme_max || std::strcmp(name, "O2Ring") == 0 ||
                 (std::strncmp(name, "O2Ring ", 7) == 0 && name[7] >= '0' && name[7] <= '9'));
     }
 };
