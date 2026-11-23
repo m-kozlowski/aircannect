@@ -3,6 +3,7 @@
 #include "board_report.h"
 #include "debug_log.h"
 #include "storage_export_plan.h"
+#include "string_util.h"
 
 namespace aircannect {
 
@@ -79,7 +80,7 @@ void ExportCoordinator::record_request(
     const ExportRequest &work, const ExportEndpointStatus &status) {
     auto &state = schedule(work.endpoint);
     const bool full_sync = work.operation != ExportOperation::Check &&
-                           work.reason != ExportReason::Maintenance &&
+                           work.reason != ExportReason::Maintenance && work.reason != ExportReason::Oximetry &&
                            !work.day[0];
 
     if (work.operation == ExportOperation::Check ||
@@ -171,7 +172,7 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
         !activity.ota_install_active;
 
     if (startup_idle) queue_startup_checks(status);
-    poll_startup_backfill(report, activity, status, now_ms);
+    poll_idle_backfill(report, activity, status, now_ms);
 }
 
 void ExportCoordinator::poll_manual_sync(const ExportTaskControlSnapshot &status) {
@@ -342,45 +343,80 @@ void ExportCoordinator::queue_startup_checks(const ExportTaskControlSnapshot &st
     }
 }
 
-void ExportCoordinator::poll_startup_backfill(
+void ExportCoordinator::rearm_idle_backfill(ExportEndpoint id) {
+    schedule(id).backfill_queued_generation = 0;
+    if (status_snapshot_.endpoint(id).configured) idle_backfill_due_ms_ = 0;
+}
+
+void ExportCoordinator::oximetry_published(const ReportOximetryChange &change) {
+    std::lock_guard<std::mutex> lock(oximetry_mutex_);
+    oximetry_inbox_.merge(change);
+    oximetry_changed_.store(true);
+}
+
+void ExportCoordinator::poll_idle_backfill(
     const ExportReportActivity &report, const ActivitySnapshot &activity,
     const ExportTaskControlSnapshot &status, uint32_t now_ms) {
+    if (oximetry_changed_.exchange(false)) {
+        std::lock_guard<std::mutex> lock(oximetry_mutex_);
+        if (oximetry_inbox_.file_published) rearm_idle_backfill(ExportEndpoint::Smb);
+        const auto &shq = status.endpoint(ExportEndpoint::SleepHq);
+        if (shq.oximetry_generation && (oximetry_inbox_.csv_published ||
+            (shq.prefer_oximetry_bin && oximetry_inbox_.file_published))) {
+            pending_oximetry_.merge(oximetry_inbox_);
+            idle_backfill_due_ms_ = 0;
+        }
+        oximetry_inbox_ = {};
+    }
     for (const auto id : status.order) {
         if (!status.endpoint(id).configured) schedule(id).backfill_queued_generation = 0;
         if (!check_settled(id, status)) {
-            startup_backfill_due_ms_ = 0;
+            idle_backfill_due_ms_ = 0;
             return;
         }
     }
 
     const bool busy = !status.network_ready || task_->endpoint_work_claimed() ||
         status.busy || report.foreground_active || report.background_active ||
-        activity.therapy_active || activity.realtime_stream_active || activity.ota_install_active;
+        activity.therapy_active || activity.realtime_stream_active || activity.ota_install_active ||
+        activity.edf_finalization_pending || post_therapy_pending();
 
     for (const auto id : status.order) {
         const auto &current = status.endpoint(id);
         const bool ready = current.configured && current.ready() && current.backfill_ready() &&
             current.definition->rule(ExportOperation::Sync, ExportReason::IdleBackfill) &&
             schedule(id).backfill_queued_generation != current.config_generation;
-        if (!ready || busy) continue;
+        const bool reconcile = current.oximetry_generation &&
+            (oximetry_generation_ != current.oximetry_generation ||
+             (current.oximetry_deadline && storage_export_current_epoch_seconds_or_zero() >= current.oximetry_deadline));
+        const bool supplement = !ready && current.oximetry_generation &&
+            current.ready() && current.backfill_ready() && (reconcile || pending_oximetry_.pending);
+        if ((!ready && !supplement) || busy) continue;
 
-        if (startup_backfill_due_ms_ == 0) {
-            startup_backfill_due_ms_ = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
+        if (idle_backfill_due_ms_ == 0) {
+            idle_backfill_due_ms_ = due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
             return;
         }
-        if (static_cast<int32_t>(now_ms - startup_backfill_due_ms_) < 0) return;
+        if (static_cast<int32_t>(now_ms - idle_backfill_due_ms_) < 0) return;
 
-        const ExportRequest work{id, ExportOperation::Sync, ExportReason::IdleBackfill};
+        ExportRequest work{id, ExportOperation::Sync,
+            supplement ? ExportReason::Oximetry : ExportReason::IdleBackfill};
+        if (supplement && !reconcile)
+            copy_cstr(work.day, sizeof(work.day), pending_oximetry_.directory_day);
         if (task_->request(work)) {
+            if (supplement) {
+                oximetry_generation_ = current.oximetry_generation;
+                pending_oximetry_ = {};
+            }
             record_request(work, current);
-            startup_backfill_due_ms_ = 0;
+            idle_backfill_due_ms_ = 0;
         }
         return;
     }
-    startup_backfill_due_ms_ = 0;
+    idle_backfill_due_ms_ = 0;
 }
 
-bool ExportCoordinator::startup_backfill_pending(const ExportTaskControlSnapshot &status) const {
+bool ExportCoordinator::idle_backfill_pending(const ExportTaskControlSnapshot &status) const {
     for (const auto id : status.order) {
         const auto &current = status.endpoint(id);
         if (current.configured && current.backfill_ready() &&
@@ -395,7 +431,7 @@ void ExportCoordinator::poll_maintenance(
     const ExportTaskControlSnapshot &status, uint32_t now_ms) {
     bool priority_work = !status.network_ready || report.foreground_active ||
         report.background_active || activity.therapy_active || activity.realtime_stream_active ||
-        activity.ota_install_active || post_therapy_pending() || startup_backfill_pending(status);
+        activity.ota_install_active || post_therapy_pending() || idle_backfill_pending(status);
 
     for (const auto id : status.order) {
         if (!check_settled(id, status)) priority_work = true;

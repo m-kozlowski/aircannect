@@ -4,6 +4,7 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "o2ring_recording_import.h"
 #include "oximetry_codec.h"
 
 namespace aircannect {
@@ -32,16 +33,27 @@ void BleSensorProtocolEngine::emit_sample(uint16_t spo2_raw,
                                           bool invalid,
                                           bool contact_known,
                                           bool contact_present,
-                                          bool charging) {
+                                          bool charging, float pi_percent, int16_t motion) {
     if (!sample_callback_) return;
 
     sample_callback_(sample_context_, spo2_raw, pulse_raw, invalid,
-                     contact_known, contact_present, charging);
+                     contact_known, contact_present, charging, pi_percent, motion,
+                     observed_ms_);
 }
 
 #if AC_OXIMETRY_BLE_ENABLED
 std::atomic<BleSensorProtocolEngine *> BleSensorProtocolEngine::active_ =
     nullptr;
+
+bool BleSensorProtocolEngine::observe_wear(bool evidence, bool charging, uint32_t now_ms) {
+    // A brief loss of the optical signal is not a new recording or an import window.
+    constexpr uint32_t grace_ms = 3000;
+    if (evidence && !charging) last_worn_ms_ = now_ms;
+    worn_ = !charging && (evidence || (worn_ && now_ms - last_worn_ms_ < grace_ms));
+
+    if (recordings_) recordings_->observe_contact(worn_, charging, now_ms);
+    return worn_;
+}
 
 bool BleSensorProtocolEngine::matches(
     const NimBLEAdvertisedDevice *device) const {
@@ -93,6 +105,7 @@ bool BleSensorProtocolEngine::subscribe(NimBLEClient *client) {
     if (!client || !notification_queue_) return false;
 
     client_ = client;
+    notification_worker_.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
     active_.store(this, std::memory_order_release);
     active_protocol_ = ActiveProtocol::Plx;
     if (subscribe_plx()) {
@@ -146,6 +159,7 @@ void BleSensorProtocolEngine::on_connected() {
 
 void BleSensorProtocolEngine::reset() {
 #if AC_OXIMETRY_BLE_ENABLED
+    worn_ = false;
     invalidate_connection();
     viatom_reset();
     oxyii_reset();
@@ -154,8 +168,11 @@ void BleSensorProtocolEngine::reset() {
     active_protocol_ = ActiveProtocol::None;
 }
 
-void BleSensorProtocolEngine::poll(uint32_t now_ms) {
+void BleSensorProtocolEngine::poll(uint32_t now_ms, O2RingRecordingImport *recordings,
+                                   bool history_ring) {
 #if AC_OXIMETRY_BLE_ENABLED
+    recordings_ = recordings;
+    history_ring_ = history_ring || recordings;
     drain_notifications();
     if (!client_ || !client_->isConnected()) return;
 
@@ -173,6 +190,8 @@ void BleSensorProtocolEngine::poll(uint32_t now_ms) {
     }
 #else
     (void)now_ms;
+    (void)recordings;
+    (void)history_ring;
 #endif
 }
 
@@ -186,8 +205,6 @@ bool BleSensorProtocolEngine::enqueue_notification(
         connection_generation_.load(std::memory_order_acquire);
     if (!notification_queue_ || !data || !len ||
         len > NotificationMaxBytes) {
-        notification_fault_generation_.store(generation,
-                                             std::memory_order_release);
         notification_drops_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -197,8 +214,6 @@ bool BleSensorProtocolEngine::enqueue_notification(
     const uint32_t read =
         notification_read_sequence_.load(std::memory_order_acquire);
     if (write - read >= NotificationQueueCapacity) {
-        notification_fault_generation_.store(generation,
-                                             std::memory_order_release);
         notification_drops_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -206,27 +221,20 @@ bool BleSensorProtocolEngine::enqueue_notification(
     NotificationSlot &slot =
         notification_queue_[write % NotificationQueueCapacity];
     slot.generation = generation;
+    slot.observed_ms = millis();
+    slot.preceding_drops = notification_drops_.load(std::memory_order_relaxed);
     slot.protocol = protocol;
     slot.characteristic = characteristic;
     slot.length = static_cast<uint16_t>(len);
     memcpy(slot.bytes, data, len);
     notification_write_sequence_.store(write + 1,
                                        std::memory_order_release);
+    xTaskNotifyGive(notification_worker_.load(std::memory_order_acquire));
     return true;
 }
 
 void BleSensorProtocolEngine::drain_notifications() {
     if (!notification_queue_) return;
-
-    const uint32_t generation =
-        connection_generation_.load(std::memory_order_acquire);
-    if (notification_fault_generation_.exchange(
-            0, std::memory_order_acq_rel) == generation) {
-        reset_fragment_assemblers();
-        const uint32_t write =
-            notification_write_sequence_.load(std::memory_order_acquire);
-        notification_read_sequence_.store(write, std::memory_order_release);
-    }
 
     uint32_t read =
         notification_read_sequence_.load(std::memory_order_relaxed);
@@ -261,6 +269,12 @@ void BleSensorProtocolEngine::process_notification(
         return;
     }
 
+    if (notification.preceding_drops != consumed_drops_) {
+        reset_fragment_assemblers();
+        consumed_drops_ = notification.preceding_drops;
+    }
+
+    observed_ms_ = notification.observed_ms;
     switch (notification.protocol) {
         case ActiveProtocol::Plx:
             process_plx_notification(notification.bytes,

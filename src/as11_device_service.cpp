@@ -168,6 +168,19 @@ OperationSubmission As11DeviceService::request_therapy(
     return submitted;
 }
 
+OperationAdmission As11DeviceService::set_therapy_running(
+    RpcRequestPort &rpc, bool running, RpcSource source, uint32_t now_ms) {
+    const auto desired = running ? As11TherapyState::Running : As11TherapyState::Standby;
+
+    if (state_.therapy_state() == desired && state_.model() != ResmedDeviceModel::Unknown &&
+        !therapy_ticket_.valid() && !state_.therapy_command_pending()) {
+        return OperationAdmission::Accepted;
+    }
+
+    const auto target = running ? As11TherapyTarget::Running : As11TherapyTarget::Standby;
+    return request_therapy(rpc, target, source, now_ms).admission;
+}
+
 OperationSubmission As11DeviceService::request_reset(
     RpcRequestPort &rpc,
     As11ResetMode mode,

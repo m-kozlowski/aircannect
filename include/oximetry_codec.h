@@ -14,11 +14,15 @@ static constexpr uint16_t PLX_SFLOAT_RESERVED = 0x0801;
 struct NoninDf19Reading {
     uint8_t spo2 = 0;
     uint16_t pulse_bpm = 0;
+    float pi_percent = -1;
     bool valid = false;
+    bool has_oxygen() const { return spo2 <= 100; }
+    bool has_pulse() const { return pulse_bpm <= 321; }
 };
 
 uint16_t encode_sfloat_int_value(int16_t value);
-int16_t decode_sfloat_int_value(uint16_t raw, bool &valid);
+int16_t decode_sfloat_int_value(uint16_t raw, bool &valid, int16_t maximum = 300);
+float decode_plx_pi(const uint8_t *packet, size_t size, bool spot_check);
 bool decode_nonin_df19(const uint8_t *packet,
                        size_t len,
                        NoninDf19Reading &reading);

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 
 #include "as11_ble_recovery.h"
 #include "as11_ble_rpc_link.h"
@@ -55,6 +56,7 @@
 #include "ota_http_controller.h"
 #include "ble_runtime.h"
 #include "oximetry_hub.h"
+#include "oximetry_csv_capture.h"
 #include "oximetry_http_controller.h"
 #include "plx_peripheral.h"
 #include "provisioning.h"
@@ -173,7 +175,9 @@ static ResmedOtaManager resmed_ota_manager;
 static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static DisplayManager display_manager;
-static LocalInputController local_inputs;
+static ActionSchedule action_schedule;
+static LocalActionRouter local_actions;
+static LocalInputController local_inputs(local_actions);
 static LiveChartService live_chart_service;
 static TherapyTelemetryBroker therapy_telemetry_broker;
 static DisplayTelemetryAdapter display_telemetry_adapter;
@@ -302,56 +306,104 @@ static void note_session_stream_frame(void *context,
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
 }
 
-static bool toggle_display_backlight(void *, uint32_t) {
-    if (!display_manager.available()) return false;
-    display_manager.toggle_backlight();
-    return true;
+template <LocalActionId Action>
+static const char *set_display_backlight(void *, ActionInvocation) {
+    if (!display_manager.available()) return "display_unavailable";
+
+    if constexpr (Action == LocalActionId::DisplayToggleBacklight) {
+        display_manager.toggle_backlight();
+    } else {
+        display_manager.set_backlight(Action == LocalActionId::DisplayBacklightOn);
+    }
+    return nullptr;
 }
 
-static bool display_previous_page(void *, uint32_t) {
-    return display_manager.previous_page();
+static const char *display_previous_page(void *, ActionInvocation call) {
+    return display_manager.previous_page(call.source == ActionSource::Button)
+        ? nullptr : "display_unavailable";
 }
 
-static bool display_next_page(void *, uint32_t) {
-    return display_manager.next_page();
+static const char *display_next_page(void *, ActionInvocation call) {
+    return display_manager.next_page(call.source == ActionSource::Button)
+        ? nullptr : "display_unavailable";
 }
 
-static bool toggle_therapy(void *, uint32_t now_ms) {
-    const As11TherapyState therapy =
-        as11_device_service.state().therapy_state();
-    const As11TherapyTarget target =
-        therapy == As11TherapyState::Running
-            ? As11TherapyTarget::Standby
-            : As11TherapyTarget::Running;
-    const OperationSubmission submission =
-        as11_device_service.request_therapy(
-            rpc_transport, target, RpcSource::Internal, now_ms);
+template <LocalActionId Action>
+static const char *set_therapy(void *, ActionInvocation call) {
+    const bool running = Action == LocalActionId::TherapyToggle
+        ? as11_device_service.state().therapy_state() != As11TherapyState::Running
+        : Action == LocalActionId::TherapyStart;
 
-    return submission.accepted();
+    const auto result = as11_device_service.set_therapy_running(
+        rpc_transport, running, RpcSource::Internal, call.now_ms);
+
+    if (result == OperationAdmission::Accepted) return nullptr;
+    return result == OperationAdmission::Busy ? "busy" : "therapy_rejected";
 }
 
-static bool power_off_aircannect(void *, uint32_t) {
+template <LocalActionId Action>
+static const char *set_warmup(void *, ActionInvocation) {
+    const auto &device = as11_device_service.state();
+    const auto state = device.warmup_state();
+    if (state == As11WarmupState::Unknown) return "warmup_state_unknown";
+
+    const bool active = state == As11WarmupState::Active;
+    const bool enable = Action == LocalActionId::WarmupToggle
+        ? !active : Action == LocalActionId::WarmupStart;
+    if (enable == active) return nullptr;
+
+    const auto submission = as11_settings_manager.request_warmup(
+        rpc_transport, device, enable, RpcSource::Internal);
+    if (submission.accepted()) return nullptr;
+    return submission.admission == OperationAdmission::Busy ? "busy" : "warmup_rejected";
+}
+
+static void poll_scheduled_actions(uint32_t now_ms) {
+    static uint32_t last_check = 0;
+    if (now_ms - last_check < 1000) return;
+    last_check = now_ms;
+
+    const time_t now = time_sync_service.esp_clock_valid() ? time(nullptr) : 0;
+    const uint8_t due = action_schedule.take_due(now, esp_timer_get_time() / 1000);
+    if (!due) return;
+
+    const auto &rules = config_service.data().schedule;
+    for (size_t i = 0; i < rules.size(); ++i) {
+        if (!(due & (1u << i))) continue;
+        const auto action = rules[i].action;
+        const char *error = local_actions.dispatch(action, {ActionSource::Schedule, now_ms});
+        if (!action_schedule.should_log_result(i, error)) continue;
+
+        const auto level = error ? LOG_WARN : rules[i].interval_s ? LOG_DEBUG : LOG_INFO;
+        Log::logf(CAT_GENERAL, level,
+                  "[SCHEDULE] slot=%u action=%s result=%s\n",
+                  unsigned(i + 1), local_action_find(action)->name,
+                  error ? error : "accepted");
+    }
+}
+
+static const char *power_off_aircannect(void *, ActionInvocation) {
     if (!board_power_off_supported() || local_poweroff_requested ||
         StorageUsb::suspended() ||
         firmware_installer.active() || resmed_ota_manager.active()) {
-        return false;
+        return "power_off_unavailable";
     }
 
     local_poweroff_backlight_was_on = display_manager.backlight_on();
     display_manager.set_backlight(false);
     local_poweroff_requested = true;
     local_poweroff_attempted = false;
-    return true;
+    return nullptr;
 }
 
-static bool restart_aircannect(void *, uint32_t) {
+static const char *restart_aircannect(void *, ActionInvocation) {
     if (StorageUsb::suspended() || firmware_installer.active() ||
         resmed_ota_manager.active()) {
-        return false;
+        return "usb_or_update_active";
     }
 
     firmware_installer.schedule_reboot(500);
-    return true;
+    return nullptr;
 }
 
 static const char *factory_reset_blocked() {
@@ -365,8 +417,8 @@ static const char *factory_reset_blocked() {
     return nullptr;
 }
 
-static bool trigger_export_sync(void *, uint32_t) {
-    return export_coordinator.request_sync();
+static const char *trigger_export_sync(void *, ActionInvocation) {
+    return export_coordinator.request_sync() ? nullptr : "sync_unavailable";
 }
 
 static bool disconnect_cpap(void *, uint32_t) {
@@ -546,6 +598,10 @@ static OperationAdmission route_report_source_change(
     ReportTask *task = static_cast<ReportTask *>(context);
     if (!task) return OperationAdmission::Busy;
     const OperationAdmission admission = task->publish_source_change(change);
+    if (admission == OperationAdmission::Accepted && (change.removals.owners & RemovedStorageFiles::Firmware))
+        resmed_firmware_repository.notify_removal();
+    if (admission == OperationAdmission::Accepted && change.oximetry.file_published)
+        export_coordinator.oximetry_published(change.oximetry);
     return admission == OperationAdmission::Rejected
         ? OperationAdmission::Busy : admission;
 }
@@ -914,7 +970,7 @@ static void poll_oximetry(bool network_available, uint32_t now_ms) {
         (!after.source_present || after.source == OximetrySource::Ble));
 
     if (oximetry_action_has(actions, OximetryHubAction::DisconnectBleSensor)) {
-        (void)oximetry_sensor_source.request_disconnect(true);
+        oximetry_sensor_source.request_live_disconnect();
     }
     if (oximetry_action_has(actions, OximetryHubAction::SourceBecameStale)) {
         Log::logf(CAT_OXI, LOG_INFO, "source stale\n");
@@ -994,6 +1050,9 @@ static void apply_config_runtime_effects(void *,
     }
     if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
         edf_recorder_manager.set_enabled(config.edf_capture_enabled);
+    }
+    if (dirty & AC_CONFIG_DIRTY_SCHEDULE) {
+        action_schedule.configure(config.schedule, time(nullptr), esp_timer_get_time() / 1000);
     }
     if (dirty & AC_CONFIG_DIRTY_KEYBINDINGS) {
         if (!local_inputs.apply_config(config.keybindings, millis())) {
@@ -1294,29 +1353,48 @@ void setup() {
                   "[INIT] display manager failed to start\n");
     }
 
+    action_schedule.configure(config_service.data().schedule, time(nullptr), esp_timer_get_time() / 1000);
     local_inputs.set_interaction_handler([](void *) {
         display_manager.note_interaction();
     }, nullptr);
 
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::DisplayPreviousPage,
         display_previous_page, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::DisplayNextPage,
         display_next_page, nullptr);
-    (void)local_inputs.register_action(
-        LocalActionId::DisplayToggleBacklight,
-        toggle_display_backlight, nullptr);
-    (void)local_inputs.register_action(
-        LocalActionId::TherapyToggle, toggle_therapy, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(LocalActionId::DisplayBacklightOn,
+        set_display_backlight<LocalActionId::DisplayBacklightOn>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::DisplayBacklightOff,
+        set_display_backlight<LocalActionId::DisplayBacklightOff>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::DisplayToggleBacklight,
+        set_display_backlight<LocalActionId::DisplayToggleBacklight>, nullptr);
+
+    (void)local_actions.register_handler(LocalActionId::TherapyStart,
+        set_therapy<LocalActionId::TherapyStart>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::TherapyStop,
+        set_therapy<LocalActionId::TherapyStop>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::TherapyToggle,
+        set_therapy<LocalActionId::TherapyToggle>, nullptr);
+
+    (void)local_actions.register_handler(
         LocalActionId::PowerOff, power_off_aircannect, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::RestartAirCANnect, restart_aircannect, nullptr);
-    (void)local_inputs.register_action(
+    (void)local_actions.register_handler(
         LocalActionId::TriggerSync, trigger_export_sync, nullptr);
-    (void)local_inputs.register_action(
-        LocalActionId::DisconnectCpap, disconnect_cpap, nullptr);
+    (void)local_actions.register_handler(
+        LocalActionId::DisconnectCpap, [](void *ctx, ActionInvocation call) -> const char * {
+            return disconnect_cpap(ctx, call.now_ms) ? nullptr : "disconnect_unavailable";
+        }, nullptr);
+    (void)local_actions.register_handler(LocalActionId::WarmupStart,
+        set_warmup<LocalActionId::WarmupStart>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::WarmupStop,
+        set_warmup<LocalActionId::WarmupStop>, nullptr);
+    (void)local_actions.register_handler(LocalActionId::WarmupToggle,
+        set_warmup<LocalActionId::WarmupToggle>, nullptr);
+
     if (!local_inputs.begin() ||
         !local_inputs.apply_config(config_service.data().keybindings,
                                    millis())) {
@@ -1407,14 +1485,25 @@ void setup() {
         StorageService::read_port(),
         StorageService::stream_port(),
         StorageService::atomic_write_port(),
-        StorageService::path_port());
+        StorageService::path_port(),
+        [] { return report_task.oximetry_originals(); },
+        [](const char *ble_source_id) {
+            OximetrySensorDevice known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+            const auto count = oximetry_sensor_source.known_sensors(known, AC_OXIMETRY_SENSOR_MAX_KNOWN);
+            for (size_t i = 0; i < count; ++i) {
+                char id[17];
+                if (known[i].recordings && oximetry_ble_source(known[i].addr, id) &&
+                    !strcmp(id, ble_source_id)) return true;
+            }
+            return false;
+        });
     if (!export_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] export task failed to start\n");
     }
 
     export_coordinator.begin(export_task);
-    export_http_controller.begin(export_coordinator);
+    export_http_controller.begin(export_coordinator, report_task, oximetry_sensor_source);
 
     const bool storage_http_started = storage_http_controller.begin(
         StorageService::read_port(),
@@ -1525,6 +1614,19 @@ void setup() {
                                report_spool_service);
     oximetry_hub.set_sample_observer(route_oximetry_sample,
                                      &edf_recorder_manager);
+    oximetry_hub.set_archive_observer([](void *, const OximetrySample &sample) {
+        timeval tv{};
+        gettimeofday(&tv, nullptr);
+        const uint32_t delay = sample.observed_ms ? millis() - sample.observed_ms : 0;
+        const int64_t utc_ms = time_sync_service.esp_clock_valid()
+            ? int64_t(tv.tv_sec) * 1000 + tv.tv_usec / 1000 - delay : 0;
+        int32_t offset = INT32_MIN;
+        const auto &device = as11_device_service.state();
+        if (!edf_recorder_manager.session_offset_minutes(offset) &&
+            device.timezone_offset_valid()) offset = device.timezone_offset_minutes();
+
+        OximetryCsv::observe(sample, utc_ms, offset);
+    }, nullptr);
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);
 
@@ -1550,6 +1652,7 @@ void setup() {
         Log::logf(CAT_BLE, LOG_ERROR,
                   "AS11 reconnect recovery failed to start\n");
     }
+    report_task.set_oximetry_catalog_consumer(OximetryCsv::publish_catalog);
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
@@ -1599,7 +1702,11 @@ void setup() {
         history_transfer_active, &edf_recorder_manager);
     firmware_installer.begin();
     firmware_url_source.begin();
-    update_checker.begin(config_service.data(), export_task);
+    update_checker.begin(config_service.data(), export_task, [](const String &url) {
+        ConfigTransactionResult result;
+        config_service.set_value("update_url", url, false, &result);
+        return result.persisted && result.changed_fields != 0;
+    });
     config_backup.begin(config_service, wifi_manager,
                         &oximetry_sensor_source);
     settings_backup_service.begin(config_backup, as11_settings_manager,
@@ -1752,15 +1859,16 @@ void loop() {
     const bool esp_ota_quiesce_requested =
         firmware_installer.as11_quiesce_required();
     oximetry_sensor_source.set_suspended(esp_ota_quiesce_requested);
+    OximetryCsv::pause(esp_ota_quiesce_requested);
     plx_peripheral.set_suspended(esp_ota_quiesce_requested);
 
     const bool esp_reboot_pending = firmware_installer.reboot_pending();
     const bool as11_service_exclusive =
         as11_service_manager.exclusive_requested();
+    const bool external_quiesce = esp_ota_quiesce_requested || local_poweroff_requested;
     as11_ble_rpc_link.set_pairing_blocker(ble_pairing_blocker());
     rpc_quiesce_coordinator.update(
-        esp_ota_quiesce_requested || as11_service_exclusive ||
-            local_poweroff_requested,
+        external_quiesce || as11_service_exclusive,
         esp_reboot_pending || local_poweroff_requested,
         rpc_link_selector.selected() == As11Transport::Ble,
         now_ms,
@@ -1849,7 +1957,8 @@ void loop() {
         esp_ota_quiesce_requested &&
             !as11_service_exclusive &&
             rpc_quiesce_coordinator.timed_out(),
-        oximetry_sensor_source.suspended() && plx_peripheral.suspended());
+        oximetry_sensor_source.suspended() && plx_peripheral.suspended() &&
+            OximetryCsv::drained());
 
     drain_can_rx();
 
@@ -1879,6 +1988,7 @@ void loop() {
     session_manager.poll(as11_device_service.state(), now_ms);
 
     local_inputs.poll(now_ms);
+    poll_scheduled_actions(now_ms);
     drain_can_rx();
 
     edf_recorder_manager.poll(now_ms);
@@ -1894,10 +2004,10 @@ void loop() {
     audible_alert_sink.poll(now_ms);
 
     // Wi-Fi and network services
-    const bool stream_activity_active = stream_broker.activity_active(
+    const bool stream_blocks_roaming = stream_broker.activity_active(
         now_ms, AC_WIFI_ROAM_STREAM_QUIET_MS);
 
-    wifi_manager.set_roaming_suspended(stream_activity_active ||
+    wifi_manager.set_roaming_suspended(stream_blocks_roaming ||
                                        firmware_installer.active() ||
                                        resmed_ota_transport_active);
 
@@ -1920,6 +2030,7 @@ void loop() {
     if (!resmed_ota_transport_active &&
         !as11_application_quiesce_requested) {
         time_sync_service.poll(session_manager.idle_for(now_ms, 10 * 1000));
+        oximetry_sensor_source.publish_clock_source(time_sync_service.esp_clock_source_name());
     }
 
     drain_can_rx();
@@ -1988,7 +2099,7 @@ void loop() {
         resmed_ota_manager.storage_upload_active();
 
     publish_runtime_activity(foreground_report_active,
-                             stream_activity_active,
+                             stream_broker.realtime_active(),
                              export_work_claimed,
                              storage_ota_active,
                              update_checker.manual_check_active(),
@@ -2020,8 +2131,9 @@ void loop() {
     web_ui.poll(drain_can_rx);
     drain_can_rx();
 
+    // The service owner checks its own session when TCP submits the packet.
     const bool service_entry_allowed =
-        !as11_application_quiesce_requested &&
+        !external_quiesce && !rpc_quiesce_coordinator.connection_held() &&
         !firmware_installer.active() &&
         !resmed_ota_manager.active();
     tcp_bridge.poll(rpc_transport, service_entry_allowed);

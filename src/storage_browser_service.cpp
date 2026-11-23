@@ -829,12 +829,11 @@ StorageBrowserStep StorageDownloadProducer::step() {
         bool directory = false;
         uint64_t size = 0;
         if (ring_storage) {
-            input = Storage::open(download->path, "r");
+            input = Storage::open_sequential(download->path);
             if (input) {
                 directory = input.isDirectory();
                 if (!directory) {
                     size = static_cast<uint64_t>(input.size());
-                    (void)input.setBufferSize(512);
                 }
             }
         }

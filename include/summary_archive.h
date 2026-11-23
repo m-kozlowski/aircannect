@@ -11,6 +11,7 @@
 #include "summary_fetch_reason.h"
 
 namespace aircannect {
+inline constexpr char SUMMARY_ARCHIVE_ROOT[] = "/aircannect/as11/summary";
 
 // Facts observed at each end of a transfer, not inferred historical timezone.
 struct SummaryClockObservation {

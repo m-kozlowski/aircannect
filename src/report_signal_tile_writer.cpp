@@ -48,6 +48,8 @@ void ReportSignalTileWriter::start(
         remember_error(metadata_valid
                            ? "report_signal_tile_invalid_range"
                            : "report_signal_tile_invalid_metadata");
+    } else if (!ReportSignalTile::cache_plane(track, level)) {
+        cursor_ = end_slot_;
     }
     if (succeeded_ && cursor_ < end_slot_) phase_ = Phase::Select;
     if (!active()) memory_ = {};

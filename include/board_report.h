@@ -16,6 +16,7 @@ static constexpr size_t AC_REPORT_TASK_BATCH_STEPS = 4;
 static constexpr uint32_t AC_REPORT_TASK_BATCH_US = 4000;
 static constexpr uint32_t AC_REPORT_TASK_WAIT_TICK_MS = 5;
 static constexpr uint32_t AC_REPORT_TASK_IDLE_TICK_MS = 1000;
+static constexpr uint32_t AC_REPORT_TASK_FULL_PASS_MS = 100;
 static constexpr size_t AC_REPORT_TASK_COMMAND_CAPACITY = 8;
 static constexpr size_t AC_REPORT_TASK_BUILD_CAPACITY = 8;
 static constexpr size_t AC_REPORT_FILE_LOAD_COPY_BYTES = 16 * 1024;

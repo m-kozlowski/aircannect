@@ -387,19 +387,20 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
     return worked;
 }
 
-ReportEngineStatus ReportEngine::status() const {
-    ReportEngineStatus out;
-    out.queued = queue_.size();
-    out.active_request = active_request_;
-    out.foreground_active =
-        queue_.contains(ReportRequestPriority::Foreground) ||
+OperationTicket ReportEngine::storage_wait() const {
+    if (phase_ == ActivePhase::Executing && executor_.storage_wait().valid())
+        return executor_.storage_wait();
+
+    return building_signals() ? store_.storage_wait() : OperationTicket{};
+}
+
+bool ReportEngine::foreground_active() const {
+    return queue_.contains(ReportRequestPriority::Foreground) ||
         (phase_ != ActivePhase::Idle &&
          active_request_.priority == ReportRequestPriority::Foreground);
-    out.fallback = fallback_acquisition_.status();
-    out.executor = executor_.status();
-    out.store = store_.status();
-    out.last_completion = last_completion_;
+}
 
+ReportEngineState ReportEngine::state() const {
     switch (phase_) {
         case ActivePhase::ProtectingHistory:
         case ActivePhase::LoadingMetadata:
@@ -408,28 +409,33 @@ ReportEngineStatus ReportEngine::status() const {
         case ActivePhase::LoadingCheckpoint:
         case ActivePhase::LoadingSessionStatistics:
         case ActivePhase::RecoveringSessionStatistics:
-            out.state = ReportEngineState::Executing;
-            break;
+            return ReportEngineState::Executing;
         case ActivePhase::AcquiringFallback:
-            out.state = ReportEngineState::AcquiringFallback;
-            break;
+            return ReportEngineState::AcquiringFallback;
         case ActivePhase::WaitingForCatalog:
-            out.state = ReportEngineState::WaitingForCatalog;
-            break;
+            return ReportEngineState::WaitingForCatalog;
         case ActivePhase::Executing:
-            out.state = ReportEngineState::Executing;
-            break;
+            return ReportEngineState::Executing;
         case ActivePhase::Publishing:
-            out.state = ReportEngineState::Publishing;
-            break;
+            return ReportEngineState::Publishing;
         case ActivePhase::Idle:
-            if (queue_.size() > 0 && !catalog_) {
-                out.state = ReportEngineState::WaitingForCatalog;
-            } else if (queue_.size() > 0) {
-                out.state = ReportEngineState::Queued;
-            }
+            if (queue_.size()) return catalog_ ? ReportEngineState::Queued
+                                               : ReportEngineState::WaitingForCatalog;
             break;
     }
+    return ReportEngineState::Idle;
+}
+
+ReportEngineStatus ReportEngine::status() const {
+    ReportEngineStatus out;
+    out.state = state();
+    out.queued = queue_.size();
+    out.foreground_active = foreground_active();
+    out.active_request = active_request_;
+    out.fallback = fallback_acquisition_.status();
+    out.executor = executor_.status();
+    out.store = store_.status();
+    out.last_completion = last_completion_;
     return out;
 }
 

@@ -5,6 +5,7 @@
 
 #include "large_allocator.h"
 #include "report_signal_store_catalog.h"
+#include "report_oximetry_cleanup.h"
 #include "storage_bounded_file_loader.h"
 #include "storage_delete_port.h"
 #include "storage_scan_port.h"
@@ -25,20 +26,27 @@ public:
                StorageDeletePort &deletes, StorageAtomicWritePort *writes = nullptr);
     void publish(std::shared_ptr<const ReportSignalStoreCatalog> catalog);
     void publish_layout(std::shared_ptr<const NightCatalogLayoutIssues> issues);
+    ReportOximetryCleanup &oximetry() { return oximetry_; }
     bool poll(bool allowed, uint32_t now_ms, StorageSpaceSnapshot space = {});
     ReportSignalStoreMetadata take_published_metadata();
 
     // Reader-deferred nights do not hold up new background work.
     bool pending() const;
     bool pending_generations() const;
+    bool settled() const {
+        return !pending() && !restart_ && deferred_.empty() && !day_.valid() &&
+               !scan_ticket_.valid() && !tracking_failed_ && oximetry_.settled();
+    }
     bool waiting_for_storage() const {
         return scan_ticket_.valid() || metadata_.status().active() ||
-               publication_.status().active() || delete_id_ != 0;
+               publication_.status().active() || delete_id_ != 0 || oximetry_.deleting();
     }
 
     // The writer must not reuse an orphan path until storage has stopped
     // deleting it, even after requesting cancellation.
-    bool deleting() const { return delete_id_ != 0 || reclaim_phase_ != ReclaimPhase::Idle; }
+    bool deleting() const {
+        return delete_id_ != 0 || reclaim_phase_ != ReclaimPhase::Idle || oximetry_.deleting();
+    }
     bool forget_media();
 
 private:
@@ -59,6 +67,7 @@ private:
     StorageBoundedFileLoader metadata_;
     ReportSignalStoreService publication_;
     bool can_publish_ = false;
+    ReportOximetryCleanup oximetry_;
 
     // Published generations and reader lifetimes
     std::shared_ptr<const ReportSignalStoreCatalog> catalog_;

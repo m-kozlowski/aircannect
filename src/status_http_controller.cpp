@@ -133,6 +133,7 @@ bool build_status_json(LargeTextBuffer &json,
 
     json += ",\"oximetry\":{";
     json_add_bool(json, "enabled", oxi.enabled, false);
+    json_add_uint64(json, "csv_lost", oxi.csv_lost);
     json_add_bool(json, "airsense_integration_available",
                   oxi.airsense_integration_available);
     json_add_string(json, "source", oximetry_source_name(oxi.source));
@@ -147,6 +148,9 @@ bool build_status_json(LargeTextBuffer &json,
         json_add_int(json, "pulse_bpm", oxi.reading.pulse_bpm);
     } else {
         json += ",\"spo2\":null,\"pulse_bpm\":null";
+    }
+    if (oxi.reading.pi_percent >= 0) {
+        json_add_float(json, "pi_percent", oxi.reading.pi_percent);
     }
     json_add_int(json, "source_age_ms", oxi.last_source_age_ms);
     json_add_string(json, "advertise_mode",

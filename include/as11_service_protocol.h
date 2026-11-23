@@ -35,6 +35,7 @@ static constexpr uint8_t AS11_SERVICE_COMMAND_WRITE_LZ4 = 0x08;
 static constexpr uint8_t AS11_SERVICE_STATUS_OK = 0x00;
 static constexpr uint8_t AS11_SERVICE_STATUS_BAD_COMMAND = 0x01;
 static constexpr uint8_t AS11_SERVICE_STATUS_ENTRY_TIMEOUT = 0x0B;
+static constexpr uint8_t AS11_SERVICE_STATUS_BUSY = 0x0D;
 
 // Storage payloads
 static constexpr uint8_t AS11_SERVICE_TARGET_FGCB = 0x01;

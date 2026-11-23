@@ -13,6 +13,7 @@
 #include "debug_log.h"
 #include "string_util.h"
 #include "storage_path.h"
+#include "oximetry_archive.h"
 
 #if AC_STORAGE_SDMMC_ENABLED
 #include "soc/soc_caps.h"
@@ -190,8 +191,12 @@ bool mount_sdmmc() {
         return false;
     }
 
-    if (!SD_MMC.begin(AC_STORAGE_MOUNT_POINT, mode1bit, false,
-                      AC_SDMMC_FREQ_KHZ, AC_STORAGE_MAX_OPEN_FILES)) {
+    set_sdmmc_mount_in_progress(true);
+    const bool mounted = SD_MMC.begin(AC_STORAGE_MOUNT_POINT, mode1bit, false,
+                                      AC_SDMMC_FREQ_KHZ, AC_STORAGE_MAX_OPEN_FILES);
+    set_sdmmc_mount_in_progress(false);
+
+    if (!mounted) {
         set_state(StorageType::SdMmc, StorageState::NotPresent,
                   "SDMMC mount failed");
         return false;
@@ -414,9 +419,13 @@ StorageSpaceSnapshot refresh_space() {
 }
 
 StorageSpaceSnapshot space_snapshot() {
-    const auto current = status();
-    return {current.mounted && current.total_bytes != 0,
-            current.free_bytes, current.allocation_unit_bound};
+    if (!lock_status()) return {};
+
+    const StorageSpaceSnapshot out{
+        published_status.mounted && published_status.total_bytes != 0,
+        published_status.free_bytes, published_status.allocation_unit_bound};
+    unlock_status();
+    return out;
 }
 
 StorageStatus status() {
@@ -437,7 +446,10 @@ bool try_status(StorageStatus &out) {
 }
 
 bool mounted() {
-    return status().mounted;
+    if (!lock_status()) return false;
+    const bool result = published_status.mounted;
+    unlock_status();
+    return result;
 }
 
 bool ensure_dir(const char *path) {
@@ -514,7 +526,7 @@ bool remove(const char *path) {
     release_read_handle(path);
     release_write_handle(path);
     if (fs->remove(path)) {
-        if (path_change_callback) path_change_callback(path);
+        if (path_change_callback) path_change_callback(path, true);
         return true;
     }
     const int error = errno;
@@ -530,7 +542,7 @@ bool rmdir(const char *path) {
     release_read_handle(path);
     release_write_handles();
     if (fs->rmdir(path)) {
-        if (path_change_callback) path_change_callback(path);
+        if (path_change_callback) path_change_callback(path, true);
         return true;
     }
     const int error = errno;
@@ -538,7 +550,7 @@ bool rmdir(const char *path) {
     return !fs->exists(path);
 }
 
-bool rename(const char *from, const char *to) {
+bool rename(const char *from, const char *to, bool refresh_catalogs) {
     if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
 
@@ -546,23 +558,37 @@ bool rename(const char *from, const char *to) {
     release_read_handle(to);
     release_write_handles();
     if (!fs) return false;
+
+    // Advance the source/day revision durably before exposing a final recording.
+    // Its length is visible in a shallow listing, even on FAT with coarse mtimes.
+    std::string_view source, suffix, id;
+    const auto kind = oximetry_archive_path(to, source, suffix)
+        ? oximetry_recording_file(source, suffix, id) : OximetryArchiveFile::Other;
+    const bool recording = kind != OximetryArchiveFile::Other;
+    if (recording) {
+        char revision[AC_STORAGE_PATH_MAX];
+        snprintf(revision, sizeof(revision), "%.*s%s", int(suffix.data() - to + 8),
+                 to, OximetryDayRevisionSuffix);
+        const int fd = open_descriptor(revision, O_WRONLY | O_CREAT | O_APPEND);
+        if (fd < 0) return false;
+        const bool advanced = ::write(fd, "\n", 1) == 1 && ::fsync(fd) == 0;
+        if (close_descriptor(revision, fd) != 0 || !advanced) return false;
+    }
+
     if (!fs->rename(from, to)) {
         log_io_error("rename", from, errno);
         return false;
     }
 
     if (path_change_callback) {
-        path_change_callback(from);
-        path_change_callback(to);
+        path_change_callback(from, refresh_catalogs);
+        path_change_callback(to, refresh_catalogs);
     }
     return true;
 }
 
-File open(const char *path, const char *mode) {
-    return open(path, mode, nullptr);
-}
-
-File open(const char *path, const char *mode, struct stat *opened_stat) {
+static File open_file(const char *path, const char *mode, struct stat *opened_stat,
+                      bool sequential) {
     if (opened_stat) *opened_stat = {};
 
     if (!initialized || !path || !*path || !mode || !*mode) return File();
@@ -575,15 +601,27 @@ File open(const char *path, const char *mode, struct stat *opened_stat) {
     } else release_write_handle(path);
 
     File file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode,
-                                   opened_stat);
+                                   opened_stat, sequential);
     if (!file && (errno == ENFILE || errno == EMFILE || errno == ENOMEM) &&
         (release_read_handle() | release_write_handles())) {
         file = open_observed_file(AC_STORAGE_MOUNT_POINT, path, mode,
-                                  opened_stat);
+                                  opened_stat, sequential);
     }
 
     if (!file) log_io_error("open", path, errno);
     return file;
+}
+
+File open(const char *path, const char *mode) {
+    return open_file(path, mode, nullptr, false);
+}
+
+File open(const char *path, const char *mode, struct stat *opened_stat) {
+    return open_file(path, mode, opened_stat, false);
+}
+
+File open_sequential(const char *path) {
+    return open_file(path, "r", nullptr, true);
 }
 
 const char *type_name(StorageType type) {

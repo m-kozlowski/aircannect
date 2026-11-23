@@ -6,13 +6,16 @@
 
 #include "night_catalog.h"
 #include "report_signal_store_catalog.h"
+#include "report_oximetry.h"
 
 namespace aircannect {
 
 struct ReportCatalogJson {
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const ReportSignalStoreCatalog> store;
+    std::shared_ptr<const ReportOximetryCatalog> oximetry;
     char etag[64] = {};
+    uint64_t oximetry_identity = 0;
     uint32_t generation = 0;
     size_t content_length = 0;
 
@@ -36,10 +39,11 @@ private:
         Sessions,
         Means,
         NightEnd,
+        Recordings,
         Done,
     };
 
-    static constexpr size_t ScratchBytes = 256;
+    static constexpr size_t ScratchBytes = 416;
 
     bool prepare_fragment();
     bool format_fragment(const char *format, ...);
@@ -50,6 +54,7 @@ private:
     size_t offset_ = 0;
     size_t night_index_ = 0;
     size_t session_index_ = 0;
+    size_t recording_index_ = 0;
     const NightCatalogRecord *current_night_ = nullptr;
     const ReportSignalStoreCatalogRecord *current_stored_ = nullptr;
     size_t fragment_length_ = 0;
@@ -64,6 +69,7 @@ std::shared_ptr<const ReportCatalogJson> build_report_catalog_json(
     std::shared_ptr<const NightCatalog> catalog,
     std::shared_ptr<const ReportSignalStoreCatalog> store,
     uint32_t generation,
-    std::shared_ptr<const ReportCatalogJson> previous = {});
+    std::shared_ptr<const ReportCatalogJson> previous = {},
+    std::shared_ptr<const ReportOximetryCatalog> oximetry = {});
 
 }  // namespace aircannect

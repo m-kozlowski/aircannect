@@ -1,0 +1,125 @@
+#include "oximetry_archive.h"
+
+#include <cstdio>
+#include <charconv>
+#include <ctime>
+#include "utc_time.h"
+
+namespace aircannect::OximetryCsv {
+namespace {
+enum class Format { Unknown, Legacy, V2 };
+
+Format read_header(std::string_view &prefix, std::string_view source, std::string_view id,
+                   Header &r) {
+    const auto eol = prefix.find("\r\n");
+    if (eol == prefix.npos) return Format::Unknown;
+    auto row = prefix.substr(0, eol);
+    prefix.remove_prefix(eol + 2);
+
+    auto take = [&](std::string_view token) {
+        if (row.substr(0, token.size()) != token) return false;
+        row.remove_prefix(token.size());
+        return true;
+    };
+    if (!take("# Source=") || !take(source) || !take("/") || !take(id)) return Format::Unknown;
+    if (id.substr(0, 5) == "live-" && !take(".csv")) return Format::Unknown;
+    if (row.empty()) return Format::Legacy;
+    if (!take(" Version=2 OffsetMinutes=")) return Format::Unknown;
+
+    int offset;
+    const auto number = std::from_chars(row.data(), row.data() + row.size(), offset);
+    if (number.ec != std::errc{} || offset < -1440 || offset > 1440) return Format::Unknown;
+    row.remove_prefix(number.ptr - row.data());
+    if (!take(" BLE=")) return Format::Unknown;
+    const auto sn = row.find(" SN=");
+    if (sn == row.npos || sn >= sizeof(r.peer)) return Format::Unknown;
+    const auto peer = row.substr(0, sn);
+    auto serial = row.substr(sn + 4);
+    serial = serial.substr(0, serial.find_last_not_of(' ') + 1);
+    if (!serial.empty() && !oximetry_source_valid(serial)) return Format::Unknown;
+
+    memcpy(r.peer, peer.data(), peer.size());
+    r.peer[peer.size()] = 0;
+    memcpy(r.serial, serial.data(), serial.size());
+    r.serial[serial.size()] = 0;
+    r.offset_minutes = offset;
+    return Format::V2;
+}
+}  // namespace
+
+bool parse_header(std::string_view prefix, std::string_view source, std::string_view id, Header &r) {
+    return read_header(prefix, source, id, r) == Format::V2;
+}
+
+RingCsvStatus check_ring_csv(std::string_view prefix, std::string_view source, std::string_view id,
+                             int32_t offset_minutes, std::string_view first_row) {
+    Header stored;
+    const auto format = read_header(prefix, source, id, stored);
+    constexpr std::string_view columns = Columns;
+    if (format == Format::Unknown || prefix.substr(0, columns.size()) != columns)
+        return RingCsvStatus::Unrecognized;
+
+    // Peer and serial describe the ring at publication; neither changes its samples.
+    prefix.remove_prefix(columns.size());
+    if (format == Format::V2 && stored.offset_minutes == offset_minutes &&
+        prefix.substr(0, first_row.size()) == first_row)
+        return RingCsvStatus::Current;
+
+    return RingCsvStatus::Rebuild;
+}
+
+size_t format_header(char (&out)[MaxHeader], const char *source, const char *id,
+                     int32_t offset_minutes, const char *peer, const char *serial) {
+    const int n = snprintf(out, sizeof(out),
+        "# Source=%s/%s Version=2 OffsetMinutes=%ld BLE=%s SN=%-32s\r\n%s",
+        source, id, long(offset_minutes), peer, serial, Columns);
+    return n > 0 && size_t(n) < sizeof(out) ? size_t(n) : 0;
+}
+
+namespace {
+int format_times(int64_t utc_ms, int32_t offset_minutes, char (&time)[32], char (&utc)[32]) {
+    const time_t epoch = utc_ms / 1000 + int64_t(offset_minutes) * 60;
+    tm local{};
+    if (!gmtime_r(&epoch, &local) ||
+        !strftime(time, sizeof(time), "%H:%M:%S %b %d %Y", &local) ||
+        !format_utc_iso8601_ms(utc_ms, utc, sizeof(utc))) return -1;
+    return local.tm_sec;
+}
+
+size_t write_row(char (&out)[MaxRow], const char *time, const char *utc, int oxygen, int pulse,
+                 int motion, float pi_percent) {
+    char movement[6]{}, pi[12]{};
+    if (motion >= 0) snprintf(movement, sizeof(movement), "%d", motion);
+    if (pi_percent >= 0)
+        snprintf(pi, sizeof(pi), "%.6g", double(pi_percent));
+
+    const int n = snprintf(out, sizeof(out), "%s,%d,%d,%s,,,%s,%s\r\n",
+                           time, oxygen, pulse, movement, utc, pi);
+    return n > 0 && size_t(n) < sizeof(out) ? size_t(n) : 0;
+}
+}  // namespace
+
+size_t format_row(char (&out)[MaxRow], int64_t utc_ms, int32_t offset_minutes, int oxygen, int pulse,
+                  int motion, float pi_percent) {
+    char time[32], utc[32];
+    if (format_times(utc_ms, offset_minutes, time, utc) < 0) return 0;
+    return write_row(out, time, utc, oxygen, pulse, motion, pi_percent);
+}
+
+size_t RingRows::next(char (&out)[MaxRow], int oxygen, int pulse, int motion) {
+    if (second_ >= 60) {
+        const int second = format_times(utc_ms_, offset_minutes_, time_, utc_);
+        if (second < 0) return 0;
+        second_ = second;
+    } else {
+        // The frozen offset is in whole minutes, so both clocks share SS.
+        time_[6] = utc_[17] = char('0' + second_ / 10);
+        time_[7] = utc_[18] = char('0' + second_ % 10);
+    }
+
+    utc_ms_ += int64_t(interval_s_) * 1000;
+    second_ += interval_s_;
+    return write_row(out, time_, utc_, oxygen, pulse, motion, -1);
+}
+
+}  // namespace aircannect::OximetryCsv

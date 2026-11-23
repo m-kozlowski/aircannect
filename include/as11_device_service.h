@@ -40,6 +40,8 @@ public:
                                         As11TherapyTarget target,
                                         RpcSource source,
                                         uint32_t now_ms);
+    OperationAdmission set_therapy_running(RpcRequestPort &rpc, bool running,
+                                           RpcSource source, uint32_t now_ms);
     OperationSubmission request_reset(RpcRequestPort &rpc,
                                       As11ResetMode mode,
                                       RpcSource source);

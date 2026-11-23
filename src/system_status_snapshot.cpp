@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "plx_peripheral.h"
+#include "oximetry_csv_capture.h"
 #include "app_config_registry.h"
 #include "storage_service.h"
 #include "udp_oximeter_source.h"
@@ -122,7 +123,7 @@ SystemStatusSnapshot collect_system_status(
     out.oximetry = compose_oximetry_status(
         sources.oximetry_hub.snapshot(out.now_ms),
         sources.oximetry_udp.status(),
-        sources.plx_peripheral.status(out.now_ms));
+        sources.plx_peripheral.status(out.now_ms), OximetryCsv::lost_rows());
     if (service_pending_work) service_pending_work();
 
     out.time.resmed_time_sync_enabled =

@@ -901,6 +901,13 @@ bool ReportSignalStoreService::finish_current() {
     return true;
 }
 
+OperationTicket ReportSignalStoreService::storage_wait() const {
+    if (read_ticket_.valid()) return read_ticket_;
+    if (range_ticket_.valid()) return range_ticket_;
+    if (write_ticket_.valid()) return write_ticket_;
+    return tile_writer_.storage_wait();
+}
+
 bool ReportSignalStoreService::poll() {
     switch (phase_) {
         case Phase::SubmitRead:
@@ -924,6 +931,7 @@ bool ReportSignalStoreService::poll() {
                 tiles_.succeeded = tiles_.succeeded && tile_writer_.succeeded();
                 tiles_.next_slot[static_cast<size_t>(level_)] = tile_writer_.next_slot();
                 advance_level();
+                return true;
             }
             return worked;
         }

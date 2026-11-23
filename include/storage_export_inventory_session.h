@@ -21,7 +21,8 @@ public:
     void reset();
 
     StorageExportInventoryLoadResult poll_catalog(
-        const char *state_dir, char *error_out, size_t error_out_size);
+        const char *state_dir, char *error_out, size_t error_out_size,
+        const char *oximetry_source = nullptr, bool discover_oximetry = false);
     StorageExportDayRequestResult request_datalog_day(
         const char *day,
         StorageExportPlanner &planner,

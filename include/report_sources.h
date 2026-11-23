@@ -106,5 +106,11 @@ bool report_source_is_sampled(const ReportSourceDef &source);
 int32_t report_series_canonical_value_milli(
     const ReportSeriesDescriptor &series,
     int32_t value_milli);
+int32_t report_series_unit_multiplier(const ReportSeriesDescriptor &series);
+inline int32_t report_scale_value_milli(int32_t multiplier, int32_t value) {
+    if (multiplier == 1) return value;
+    const int64_t scaled = int64_t(value) * multiplier;
+    return scaled > INT32_MAX ? INT32_MAX : scaled < INT32_MIN ? INT32_MIN : int32_t(scaled);
+}
 
 }  // namespace aircannect

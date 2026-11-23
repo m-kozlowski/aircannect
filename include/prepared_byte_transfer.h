@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -8,7 +9,21 @@
 
 namespace aircannect {
 
-class PreparedByteTransfer {
+class PreparedReadSignal {
+public:
+    virtual ~PreparedReadSignal() = default;
+    virtual void notify(uint32_t generation) = 0;
+};
+
+class PreparedReadWait {
+public:
+    virtual void arm(const std::shared_ptr<PreparedReadSignal> &signal,
+                     uint32_t generation) = 0;
+protected:
+    ~PreparedReadWait() = default;
+};
+
+class PreparedByteTransfer : private PreparedReadWait {
 public:
     PreparedByteTransfer() = default;
     PreparedByteTransfer(const PreparedByteTransfer &) = delete;
@@ -19,11 +34,12 @@ public:
     // must use a fresh transfer rather than reusing one after completion.
     void bind(uint8_t *storage, size_t capacity);
     uint8_t *write_span(size_t &length) { return ring_.write_span(length); }
-    bool commit_write(size_t length) { return ring_.commit_write(length); }
+    bool commit_write(size_t length);
     size_t readable() const { return ring_.readable(); }
     size_t writable() const { return ring_.writable(); }
     void mark_producer_done() {
         producer_done_.store(true, std::memory_order_release);
+        notify_reader();
     }
     bool producer_done() const {
         return producer_done_.load(std::memory_order_acquire);
@@ -51,6 +67,12 @@ public:
     bool cancel_requested() const;
 
 private:
+    void arm(const std::shared_ptr<PreparedReadSignal> &signal, uint32_t generation) override;
+    void notify_reader();
+
+    // One consumer per transfer. The first arm publishes its permanent binding.
+    std::shared_ptr<PreparedReadSignal> signal_;
+    std::atomic<uint32_t> waiting_{0};
     PreparedByteRing ring_;
     std::atomic<uint32_t> consumed_{0};
     std::atomic<uint32_t> consumer_activity_ms_{0};

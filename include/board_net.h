@@ -43,7 +43,7 @@
 
 #ifndef AC_DEFAULT_UPDATE_URL
 #define AC_DEFAULT_UPDATE_URL                                                   \
-    "https://github.com/m-kozlowski/aircannect/releases/latest/download/"     \
+    "https://aircannect.empeka.pl/ota/"     \
     "aircannect-release.json"
 #endif
 

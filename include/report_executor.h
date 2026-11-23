@@ -44,6 +44,12 @@ struct ReportExecutorStatus {
     uint32_t record_index = 0;
     uint32_t record_count = 0;
 
+    bool operator==(const ReportExecutorStatus &other) const {
+        return state == other.state && error == other.error && generation == other.generation &&
+               operation_index == other.operation_index && operation_count == other.operation_count &&
+               record_index == other.record_index && record_count == other.record_count;
+    }
+
     bool active() const;
     bool terminal() const;
 };
@@ -131,6 +137,7 @@ public:
     // Fallback decoding consumes at most 32 sample/event positions per poll,
     // regardless of record_budget. A zero budget still polls operation end.
     bool poll(size_t record_budget = 1);
+    OperationTicket storage_wait() const { return ticket_; }
     void cancel();
     void reset();
 

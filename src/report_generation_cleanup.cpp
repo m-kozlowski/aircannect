@@ -64,6 +64,8 @@ bool ReportGenerationCleanup::forget_media() {
     // The caller has already waited for poll(false) to acknowledge deletion.
     metadata_.cancel();
     if (!discard_scan()) return false;
+    if (oximetry_.active()) return false;
+    oximetry_.forget_media();
     catalog_.reset();
     layout_issues_.reset();
     retired_.clear();
@@ -86,7 +88,7 @@ bool ReportGenerationCleanup::forget_media() {
 }
 
 bool ReportGenerationCleanup::pending() const {
-    return pending_generations() || reclaim_phase_ != ReclaimPhase::Idle ||
+    return oximetry_.active() || pending_generations() || reclaim_phase_ != ReclaimPhase::Idle ||
         (scans_ && deletes_ && catalog_ && !tracking_failed_ &&
          can_publish_ && reclaim_requested_ && reclaim_cursor_ < catalog_->size());
 }
@@ -129,6 +131,9 @@ bool ReportGenerationCleanup::protected_generation(uint32_t generation) const {
 }
 
 bool ReportGenerationCleanup::discard_scan() {
+    if (!day_.valid() && !scan_ticket_.valid() && !entries_ &&
+        reclaim_phase_ == ReclaimPhase::Idle) return true;
+
     if (scan_ticket_.valid()) {
         if (!scans_->abandon(scan_ticket_)) return false;
         scan_ticket_ = {};
@@ -191,6 +196,15 @@ bool ReportGenerationCleanup::poll(bool allowed, uint32_t now_ms,
         reclaim_cursor_ = 0;
     } else if (space.known && space.free_bytes < StorageSpacePolicy::ReclaimBelow) {
         reclaim_requested_ = true;
+    }
+
+    const bool http_first = reclaim_requested_ && catalog_ && can_publish_ &&
+        reclaim_cursor_ < catalog_->size();
+    if (oximetry_.active() || (!http_first && !delete_id_ && reclaim_phase_ == ReclaimPhase::Idle &&
+        !scan_ticket_.valid() && !day_.valid() && night_cursor_ >= pending_.size())) {
+        const bool worked = oximetry_.poll(allowed && !tracking_failed_ && !http_first &&
+            (!reclaim_requested_ || space.known), reclaim_requested_);
+        if (worked || oximetry_.active()) return worked;
     }
 
     if (delete_id_) {

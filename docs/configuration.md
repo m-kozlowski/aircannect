@@ -89,6 +89,20 @@ individual overrides can be changed with
 | --- | --- | --- | --- |
 | `keybindings` | Hardware-specific binding set | Hardware profile | Assign local button gestures to available actions. Missing overrides retain the hardware defaults. |
 
+## Scheduled Actions
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `schedule_1` ... `schedule_4` | `STATE HH:MM DAYS ACTION`, `STATE every DURATION ACTION`, or empty | empty | One rule per slot. `on` enables the rule; `off` keeps it disabled. Any button action can be scheduled. |
+
+Times use the local timezone (`tz`). Use `*` for every day or a comma-separated
+list of days or ranges, e.g. `on 22:30 mon-fri warmup_start`. Missed times
+are skipped; a repeated hour does not run the same rule twice.
+
+Intervals use whole positive seconds (`s`), minutes (`m`), or hours (`h`),
+e.g. `on every 15s display_next_page`. The first interval starts at boot or
+when the rule is enabled or changed. No clock synchronization is required.
+
 ## Display
 
 These keys are available on builds with a local display.
@@ -165,6 +179,8 @@ and `vpn_error`.
 | `shq_team` | Numeric SleepHQ team ID | empty | Optional team ID. |
 | `shq_device` | Numeric SleepHQ device ID, or empty | empty | Optional SleepHQ device type override. |
 | `shq_mask` | Numeric SleepHQ mask ID, or empty | empty | Default mask for new post-therapy imports only. |
+| `shq_oxi` | Empty, `auto`, `udp`, or an oximeter source ID | `auto` | Oximetry to upload separately from CPAP. Empty disables it. |
+| `shq_oxi_format` | `csv`, `bin` | `csv` | CSV uses corrected time. BIN keeps the oximeter's clock and statistics. In BIN mode, oximeters with recording downloads enabled send only BIN; other sources use CSV if no BIN is available. |
 
 ## Logging
 

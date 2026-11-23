@@ -108,8 +108,7 @@ ReportSignalStoreTrack track_format(const ReportSeriesDescriptor &series,
                                     const EdfSignalScale *scale,
                                     int64_t timestamp_ms) {
     ReportSignalStoreTrack track;
-    const float multiplier =
-        report_series_canonical_value_milli(series, 1000) / 1000.0f;
+    const float multiplier = report_series_unit_multiplier(series);
     track.signal = series.signal;
     track.sample_interval_ms = series.sample_interval_ms;
     track.grid_phase_ms = grid_phase(timestamp_ms, series.sample_interval_ms);
@@ -394,36 +393,46 @@ struct ReportSignalStoreBuilder::Runtime {
             work.closed.valid_sample_count += closed_count;
         }
 
-        if (report_signal_has_metric_consumer(series.signal)) {
+        const ReportMetricAccumulator::Channel channel(series.signal);
+        if (channel.tracked()) {
             if (closed_count < count && !prepare_tail(work)) {
                 failure = "report_signal_store_tail_allocation_failed";
                 return false;
             }
 
-            for (uint32_t i = 0; i < count; ++i) {
-                const int32_t canonical_value = scale
-                    ? report_series_canonical_value_milli(
-                          series,
-                          edf_report_physical_value_milli(
-                              *scale, edf_read_i16_le_sample(raw_bytes, i)))
-                    : single_canonical_value;
-                const int64_t timestamp = first_timestamp_ms +
-                    static_cast<int64_t>(i) * series.sample_interval_ms;
-                const uint32_t duration = static_cast<uint32_t>(std::min<int64_t>(
-                    series.sample_interval_ms,
-                    plan->session(session_index)->output_window.end_ms - timestamp));
+            const uint32_t interval = series.sample_interval_ms;
+            const uint32_t last_duration = std::min<int64_t>(interval,
+                plan->session(session_index)->output_window.end_ms - last_timestamp_ms);
+            const uint32_t full_duration_count = count - (last_duration != interval);
+            const int32_t multiplier = report_series_unit_multiplier(series);
 
-                auto &metrics = i < closed_count ? closed_metrics : *work.tail_metrics;
-                if (!metrics.accept(series.signal, canonical_value, duration)) {
-                    failure = "report_signal_store_metrics_allocation_failed";
+            for (uint32_t i = 0; i < count;) {
+                const bool closed = i < closed_count;
+                uint32_t end = closed ? closed_count : count;
+                if (i < full_duration_count) end = std::min(end, full_duration_count);
+
+                const uint32_t duration = i < full_duration_count ? interval : last_duration;
+                auto &metrics = closed ? closed_metrics : *work.tail_metrics;
+                auto *part = duration ? session_statistics.contribution(
+                    session_index, duration, series.signal, closed) : nullptr;
+                if (duration && !part) {
+                    failure = "report_session_statistics_allocation_failed";
                     return false;
                 }
 
-                if (!session_statistics.accept(
-                        session_index, duration, series.signal, canonical_value, false,
-                        timestamp < closed_before_ms)) {
-                    failure = "report_session_statistics_allocation_failed";
-                    return false;
+                for (; i < end; ++i) {
+                    const int32_t value = scale ? report_scale_value_milli(multiplier,
+                        edf_report_physical_value_milli(*scale, edf_read_i16_le_sample(raw_bytes, i)))
+                        : single_canonical_value;
+                    const uint16_t bin = channel.bin(value);
+                    if (!metrics.accept(channel, bin, value, duration)) {
+                        failure = "report_signal_store_metrics_allocation_failed";
+                        return false;
+                    }
+                    if (part && !part->accept(channel, bin, value, duration)) {
+                        failure = "report_session_statistics_allocation_failed";
+                        return false;
+                    }
                 }
             }
         }
@@ -978,19 +987,15 @@ bool ReportSignalStoreBuilder::accept_series_span(
     // Executor supplies a clipped EDF span for a configured plan mapping.
     // Missing words and chronological track placement are still checked here.
 
-    size_t first_valid = span.sample_count;
-    for (uint32_t i = 0; i < span.sample_count; ++i) {
-        if (!span.missing_at(i)) {
-            first_valid = i;
-            break;
-        }
-    }
+    const bool missing_minus_one = edf_digital_sample_is_missing(span.scale, -1);
+    uint32_t first_valid = 0;
+    while (first_valid < span.sample_count && missing_minus_one &&
+           edf_read_i16_le_sample(span.data, first_valid) == -1) ++first_valid;
     if (first_valid == span.sample_count) return true;
 
     if (!accept_raw_sample(
-            session_index, series, span.timestamp_at(
-                static_cast<uint32_t>(first_valid)),
-            span.raw_at(static_cast<uint32_t>(first_valid)), &span.scale)) {
+            session_index, series, span.timestamp_at(first_valid),
+            edf_read_i16_le_sample(span.data, first_valid), &span.scale)) {
         return false;
     }
 
@@ -1009,41 +1014,31 @@ bool ReportSignalStoreBuilder::accept_series_span(
     const bool regular = static_cast<uint64_t>(span.samples_per_record) *
             series.sample_interval_ms == span.record_duration_ms;
     if (!regular) {
-        for (size_t i = first_valid + 1; i < span.sample_count; ++i) {
-            if (span.missing_at(static_cast<uint32_t>(i))) continue;
-            if (!accept_raw_sample(
-                    session_index, series, span.timestamp_at(
-                        static_cast<uint32_t>(i)),
-                    span.raw_at(static_cast<uint32_t>(i)), &span.scale)) {
+        for (uint32_t i = first_valid + 1; i < span.sample_count; ++i) {
+            const auto raw = edf_read_i16_le_sample(span.data, i);
+            if (missing_minus_one && raw == -1) continue;
+            if (!accept_raw_sample(session_index, series, span.timestamp_at(i),
+                                   raw, &span.scale)) {
                 return false;
             }
         }
         return true;
     }
 
-    size_t cursor = first_valid + 1;
-    while (cursor < span.sample_count) {
-        while (cursor < span.sample_count && span.missing_at(
-                   static_cast<uint32_t>(cursor))) {
-            ++cursor;
-        }
-        if (cursor == span.sample_count) break;
-
-        const size_t begin = cursor;
-        while (cursor < span.sample_count && !span.missing_at(
-                   static_cast<uint32_t>(cursor))) {
-            if (span.raw_at(static_cast<uint32_t>(cursor)) ==
-                runtime_->tracks[runtime_->last_track].track.missing_value) {
-                failure_reason_ = "report_signal_store_value_invalid";
-                return false;
-            }
-            ++cursor;
-        }
-        if (!accept_raw_run(session_index, series, span, begin, cursor)) {
+    const auto reserved = runtime_->tracks[runtime_->last_track].track.missing_value;
+    uint32_t begin = first_valid + 1;
+    for (uint32_t i = begin; i < span.sample_count; ++i) {
+        const auto raw = edf_read_i16_le_sample(span.data, i);
+        if (missing_minus_one && raw == -1) {
+            if (begin < i && !accept_raw_run(session_index, series, span, begin, i)) return false;
+            begin = i + 1;
+        } else if (raw == reserved) {
+            failure_reason_ = "report_signal_store_value_invalid";
             return false;
         }
     }
-    return true;
+    return begin == span.sample_count ||
+        accept_raw_run(session_index, series, span, begin, span.sample_count);
 }
 
 

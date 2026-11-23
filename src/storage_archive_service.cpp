@@ -20,7 +20,6 @@
 namespace aircannect {
 namespace {
 
-static constexpr size_t ARCHIVE_FILE_BUFFER_BYTES = 512;
 static constexpr size_t ARCHIVE_RING_BYTES = 256 * 1024;
 static constexpr size_t ARCHIVE_PRODUCE_BYTES = 16 * 1024;
 static constexpr uint32_t ARCHIVE_PREPARE_SLICE_US = 10 * 1000;
@@ -101,10 +100,6 @@ void log_archive_alloc_failed(const char *context, size_t bytes) {
               "[ARCHIVE] allocation failed context=%s bytes=%u\n",
               context ? context : "--",
               static_cast<unsigned>(bytes));
-}
-
-void set_archive_file_buffer(File &file) {
-    if (file) (void)file.setBufferSize(ARCHIVE_FILE_BUFFER_BYTES);
 }
 
 size_t copy_static_bytes(uint8_t *dst,
@@ -1200,8 +1195,7 @@ size_t StorageArchiveService::produce_download_locked(
                              status_.source_path,
                              name);
                 }
-                download.input = Storage::open(absolute, "r");
-                if (download.input) set_archive_file_buffer(download.input);
+                download.input = Storage::open_sequential(absolute);
                 if (!download.input || download.input.isDirectory()) {
                     if (download.input) download.input.close();
                     set_error_locked("input_open");

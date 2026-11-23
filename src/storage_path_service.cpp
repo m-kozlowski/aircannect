@@ -123,7 +123,8 @@ OperationSubmission StoragePathService::request(
         command.destination.size() >= AC_STORAGE_PATH_MAX) {
         return OperationSubmission::rejected();
     }
-    if (command.operation == StoragePathOperation::Move) {
+    if (command.operation == StoragePathOperation::Move ||
+        command.operation == StoragePathOperation::UserMove) {
         if (StorageService::storage_request_admission(
                 StorageAdmissionKind::PathMutation) !=
             StorageAdmissionResult::Accepted) {
@@ -282,7 +283,8 @@ StoragePathCompletion StoragePathService::execute_move(
             return completion;
         }
     }
-    if (!Storage::rename(job.source, job.destination)) {
+    if (!Storage::rename(job.source, job.destination,
+                         job.operation == StoragePathOperation::UserMove)) {
         completion.outcome = OperationOutcome::failed();
         copy_cstr(completion.error, sizeof(completion.error),
                   "move_failed");
@@ -328,7 +330,8 @@ StoragePathCompletion StoragePathService::execute(const JobSlot &job) const {
                   "storage_not_mounted");
         return completion;
     }
-    if (job.operation == StoragePathOperation::Move ||
+    if (job.operation == StoragePathOperation::UserMove ||
+        job.operation == StoragePathOperation::Move ||
         job.operation == StoragePathOperation::MoveReplacing) {
         return execute_move(
             job, job.operation == StoragePathOperation::MoveReplacing);

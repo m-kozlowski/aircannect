@@ -9,6 +9,7 @@
 #include "fixed_queue.h"
 #include "oximetry_hub.h"
 #include "oximetry_status.h"
+#include "o2ring_recording_import.h"
 
 #if AC_OXIMETRY_BLE_ENABLED
 #include <NimBLEDevice.h>
@@ -40,6 +41,7 @@ public:
     bool begin(bool enabled, const char *runtime_name);
     void configure(bool enabled, const char *runtime_name);
     void set_auto_allowed(bool allowed);
+    void publish_clock_source(const char *name) { recordings_.publish_clock_source(name); }
     bool has_autoconnect() const;
 
     void set_suspended(bool suspended);
@@ -49,8 +51,10 @@ public:
     bool request_connect(const char *addr_or_index);
     bool request_connect(const OximetrySensorDevice &device);
     bool request_disconnect(bool hold_until_absent = true);
+    void request_live_disconnect();
     bool forget(const char *addr_or_all);
     bool set_autoconnect(const char *addr, bool enabled);
+    bool set_recordings(const char *addr, bool enabled);
     // Replaces the saved sensor list, as when restoring a backup.
     bool replace_known_sensors(const OximetrySensorDevice *devices,
                                size_t count);
@@ -64,6 +68,8 @@ public:
 #endif
 
 private:
+    enum class LiveDisconnect : uint8_t { None, Requested, DeferredForImport };
+
     enum class AutoconnectHoldoffKind : uint8_t {
         Standard,
         Charging,
@@ -119,7 +125,8 @@ private:
                                          bool invalid,
                                          bool contact_known,
                                          bool contact_present,
-                                         bool charging);
+                                         bool charging, float pi_percent, int16_t motion,
+                                         uint32_t observed_ms);
     static void advertisement_callback(
         void *context, const BleAdvertisement &advertisement);
     void note_advertisement(const BleAdvertisement &advertisement);
@@ -127,11 +134,13 @@ private:
                         bool from_invalid_packet,
                         bool contact_known,
                         bool contact_present,
-                        bool charging);
+                        bool charging, float pi_percent, int16_t motion,
+                        uint32_t observed_ms);
     void callback_disconnected(int reason);
 
     BleRuntime &runtime_;
     BleSensorProtocolEngine protocols_;
+    O2RingRecordingImport recordings_;
 #if AC_OXIMETRY_BLE_ENABLED
     NimBLEClient *client_ = nullptr;
     portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
@@ -154,6 +163,7 @@ private:
     bool scan_requested_ = false;
     bool manual_connect_requested_ = false;
     bool disconnect_requested_ = false;
+    LiveDisconnect live_disconnect_ = LiveDisconnect::None;
     bool disconnect_hold_until_absent_ = false;
     AutoconnectHoldoffKind disconnect_holdoff_kind_ =
         AutoconnectHoldoffKind::Standard;

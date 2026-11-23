@@ -95,6 +95,11 @@
         flex-direction: column;
       }
 
+      .schedule-field {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 6px;
+      }
+
       .connection-control {
         width: 100%;
         justify-content: space-between;

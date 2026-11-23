@@ -83,7 +83,8 @@ public:
         uint32_t team_id,
         const char *mask_id,
         SleepHqImportInfo &out,
-        const BackgroundOperationControl *operation = nullptr);
+        const BackgroundOperationControl *operation = nullptr,
+        bool oximetry = false);
     bool list_masks(uint32_t team_id, SleepHqMaskList &masks,
                     const BackgroundOperationControl *operation = nullptr);
     bool attach_file(const SleepHqAttachRequest &request,
@@ -174,6 +175,7 @@ private:
     bool append_body(SleepHqHttpResponse &out, const char *data, size_t len);
 
     bool parse_token(const SleepHqHttpResponse &response);
+    bool resolve_oximetry_device(const BackgroundOperationControl *operation);
     bool parse_team_id(const SleepHqHttpResponse &response,
                        uint32_t &team_id);
     bool parse_import(const SleepHqHttpResponse &response,
@@ -203,6 +205,7 @@ private:
     void set_error(const char *error);
 
     SleepHqConfig config_;
+    uint32_t oximetry_device_id_ = 0;
     esp_http_client_handle_t client_ = nullptr;
     size_t header_capacity_ = 0;
 #if AC_STACK_PROFILE_ENABLED

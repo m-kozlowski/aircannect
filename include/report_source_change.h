@@ -2,19 +2,75 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <cstring>
+#include <string_view>
 
 #include "operation_outcome.h"
+#include "oximetry_archive.h"
 #include "sleep_day_id.h"
 
 namespace aircannect {
 
-// A durable source publication invalidates the report materialized for this
-// canonical sleep-day range. ReportTask stamps revision when it accepts the
-// notice; producer generations are not comparable across producers.
+// An empty source denotes the archive; an empty directory day denotes all
+// recordings of the source (a clock observation can affect old ring files).
+struct ReportOximetryChange {
+    bool pending = false, ring = false;
+    char source[33]{}, directory_day[9]{};
+    bool file_published = false, csv_published = false, refresh_originals = true;
+
+    static ReportOximetryChange published(bool ring, std::string_view source = {},
+                                          std::string_view day = {}) {
+        ReportOximetryChange out{true, ring};
+        source.copy(out.source, sizeof(out.source)-1);
+        day.copy(out.directory_day, sizeof(out.directory_day)-1);
+        return out;
+    }
+
+    static ReportOximetryChange file(OximetryArchiveFile kind, std::string_view source,
+                                     std::string_view day) {
+        auto out = published(kind == OximetryArchiveFile::RingBin, source, day);
+        out.file_published = true;
+        out.csv_published = !out.ring;
+        out.refresh_originals = kind != OximetryArchiveFile::RingCsv;
+        return out;
+    }
+
+    void merge(const ReportOximetryChange &other) {
+        if (!other.pending) return;
+        if (!pending) { *this = other; return; }
+
+        ring |= other.ring;
+        file_published |= other.file_published;
+        csv_published |= other.csv_published;
+        refresh_originals |= other.refresh_originals;
+        if (strcmp(source, other.source)) source[0] = 0;
+        if (!source[0] || strcmp(directory_day, other.directory_day)) directory_day[0] = 0;
+    }
+};
+
+struct RemovedStorageFiles {
+    enum Owner : uint8_t {
+        NightSources = 1, NightStore = 2, SummaryJournal = 4, Firmware = 8
+    };
+    uint8_t owners = 0;
+    SleepDayId first_source, last_source;
+
+    void merge(const RemovedStorageFiles &other) {
+        owners |= other.owners;
+        if (!other.first_source.valid()) return;
+        if (!first_source.valid() || other.first_source < first_source) first_source = other.first_source;
+        if (!last_source.valid() || last_source < other.last_source) last_source = other.last_source;
+    }
+};
+
+// ReportTask stamps the revision of a durable source publication on admission;
+// producer generations are not comparable across producers.
 struct ReportSourceChange {
     SleepDayId first_day;
     SleepDayId last_day;
     uint32_t revision = 0;
+    ReportOximetryChange oximetry{};
+    RemovedStorageFiles removals{};
 
     bool valid() const {
         return first_day.valid() && last_day.valid() &&

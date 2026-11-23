@@ -53,6 +53,7 @@ public:
     bool set_storage_suspended(bool suspended);
 
     bool request_refresh(bool foreground = true);
+    void notify_removal() { files_removed_.store(true); }
     bool request_remove(const char *path);
     bool consume_file_published(const char *path);
     void publish_activity(const ActivitySnapshot &activity);
@@ -112,6 +113,7 @@ private:
     mutable SemaphoreHandle_t mutex_ = nullptr;
     ResmedFirmwareRepositoryStatus status_;
     std::atomic<uint32_t> status_generation_{0};
+    std::atomic<bool> files_removed_{false};
     std::shared_ptr<const ResmedFirmwareCatalogSnapshot> snapshot_;
     ActivitySnapshot activity_;
     bool storage_suspended_ = false;

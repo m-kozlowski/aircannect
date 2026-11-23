@@ -2,7 +2,12 @@
 
 #include "http_route_registry.h"
 
+#include <algorithm>
+
 #include "export_coordinator.h"
+#include "report_task.h"
+#include "ble_sensor_source.h"
+#include "oximetry_archive.h"
 #include "http_response_utils.h"
 #include "json_util.h"
 #include "large_text_buffer.h"
@@ -146,7 +151,9 @@ bool send_status_json(AsyncWebServerRequest *request, LargeTextBuffer &json) {
 
 }  // namespace
 
-bool ExportHttpController::begin(ExportCoordinator &coordinator) {
+bool ExportHttpController::begin(ExportCoordinator &coordinator, ReportTask &reports, BleSensorSource &sensors) {
+    reports_ = &reports;
+    sensors_ = &sensors;
     coordinator_ = &coordinator;
     return true;
 }
@@ -312,6 +319,34 @@ void ExportHttpController::send_sleephq_sync_status(
     append_sleephq_sync_json(json, status,
                              snapshot.sleephq_team_id,
                              snapshot.sleephq_device_id);
+    if (request->hasParam("sources")) {
+        json += ",\"oximetry_sources\":[";
+        OximetrySensorDevice known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+        const size_t count = sensors_->known_sensors(known, AC_OXIMETRY_SENSOR_MAX_KNOWN);
+        std::vector<std::string, LargeAllocator<std::string>> ids;
+        auto add = [&](const char *id, const char *label) {
+            if (strcmp(id, "udp") == 0 || std::find(ids.begin(), ids.end(), id) != ids.end()) return;
+            if (!ids.empty()) json += ',';
+            ids.emplace_back(id);
+            json += '{';
+            json_add_string(json, "id", id, false);
+            json_add_string(json, "name", label[0] ? label : id);
+            json += '}';
+        };
+        try {
+            char id[17];
+            for (size_t i = 0; i < count; ++i)
+                if (oximetry_ble_source(known[i].addr, id)) add(id, known[i].name);
+            const auto originals = reports_->oximetry_originals();
+            if (originals) for (const auto &r : *originals) {
+                add(r.device, r.serial);
+            }
+        } catch (const std::bad_alloc &) {
+            request->send(503);
+            return;
+        }
+        json += ']';
+    }
     json += '}';
 
     (void)send_status_json(request, json);

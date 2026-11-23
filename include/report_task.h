@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
@@ -203,6 +204,7 @@ struct ReportSignalRangeQuery {
     std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
     ReportStoreQueryState state = ReportStoreQueryState::Unavailable;
     ReportSignalStoreTrack track;
+    uint16_t compression_version = 0;
     ReportSignalStoreLevel level = ReportSignalStoreLevel::Raw;
     int64_t first_block_start_ms = 0;
     size_t block_count = 0;
@@ -289,9 +291,10 @@ public:
     // Admission returns an existing result instead of waiting for another completion.
     OperationAdmission request_period(
         ReportPeriodKey key,
-        std::shared_ptr<const ReportPeriodResult> *ready = nullptr);
+        std::shared_ptr<const ReportPeriodResult> *ready = nullptr,
+        bool retry_failed = false);
     std::shared_ptr<const ReportPeriodResult> period_snapshot(ReportPeriodKey key) const;
-    std::shared_ptr<const ReportPeriodResult> period_completion(uint32_t &serial) const;
+    bool completion_snapshot(uint32_t &serial, ReportEngineCompletion &night) const;
     OperationAdmission publish_session_ended(
         uint32_t sessions_ended,
         const NightCatalogRefreshTarget &target = {},
@@ -313,6 +316,13 @@ public:
     ReportEngineCompletion last_completion() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     std::shared_ptr<const ReportCatalogJson> catalog_json_snapshot() const;
+    void request_oximetry_index();
+    std::shared_ptr<const ReportOximetryCatalog> oximetry_originals() const;
+    // Register before begin() when another SD consumer needs the same clock mapping.
+    using OximetryCatalogConsumer = void (*)(std::shared_ptr<const ReportOximetryCatalog>);
+    void set_oximetry_catalog_consumer(OximetryCatalogConsumer consumer) {
+        oximetry_consumer_ = consumer;
+    }
     std::shared_ptr<const ReportSignalStoreCatalog>
         store_catalog_snapshot() const;
     DisplayReportSummary display_summary_snapshot() const;
@@ -341,7 +351,12 @@ private:
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog,
                          uint32_t generation);
 
+    // The task object is in internal RAM; the much larger Runtime lives in PSRAM.
+    std::atomic<uint32_t> wake_inputs_{0};
+    std::atomic<uint32_t> storage_revision_{0};
+
     Runtime *runtime_ = nullptr;
+    OximetryCatalogConsumer oximetry_consumer_ = nullptr;
 };
 
 }  // namespace aircannect

@@ -171,6 +171,7 @@ std::string config_backup_format_sensor(const ConfigBackupSensor &sensor) {
     out += std::to_string(static_cast<unsigned>(sensor.address_type));
     out += ',';
     out += sensor.autoconnect ? "on" : "off";
+    if (sensor.recordings) out += "+recordings";
     out += ',';
     out += sensor.name;
     return out;
@@ -198,8 +199,14 @@ bool config_backup_parse_sensor(const std::string &value,
     if (type.size() != 1 || type[0] < '0' || type[0] > '3') return false;
     sensor.address_type = static_cast<uint8_t>(type[0] - '0');
 
-    const std::string autoconnect =
+    std::string autoconnect =
         trimmed(value.substr(second + 1, third - second - 1));
+    const auto option = autoconnect.find('+');
+    if (option != std::string::npos) {
+        if (autoconnect.substr(option) != "+recordings") return false;
+        sensor.recordings = true;
+        autoconnect.resize(option);
+    }
     if (autoconnect == "on" || autoconnect == "1") {
         sensor.autoconnect = true;
     } else if (autoconnect == "off" || autoconnect == "0") {

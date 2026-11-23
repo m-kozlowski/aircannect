@@ -11,6 +11,7 @@
 #include "app_config_registry.h"
 #include "board_motion.h"
 #include "debug_log.h"
+#include "oximetry_archive.h"
 
 namespace aircannect {
 
@@ -339,6 +340,14 @@ void load_config_field(Preferences &prefs,
     const PreferenceType stored_type = prefs.getType(load_key);
 
     switch (field.type) {
+        case AppConfigFieldType::Schedule:
+            if (stored_type == PT_STR) {
+                const String text = prefs.getString(load_key);
+                if (!parse_scheduled_action(text.c_str(), data.schedule[field.index])) {
+                    Log::logf(CAT_CONFIG, LOG_WARN, "invalid rule key=%s\n", field.key);
+                }
+            }
+            return;
         case AppConfigFieldType::Bool:
             if (stored_type != PT_U8) return;
             config_field_ref<bool>(data, field) =
@@ -438,6 +447,7 @@ bool save_config_field(Preferences &prefs,
         case AppConfigFieldType::Secret:
         case AppConfigFieldType::Enum:
         case AppConfigFieldType::LogLevel:
+        case AppConfigFieldType::Schedule:
             return put_string(prefs, field.key, raw);
         case AppConfigFieldType::Keybindings: {
             std::vector<uint8_t> bytes;
@@ -957,6 +967,14 @@ bool AppConfig::set_edf_capture_enabled(bool enabled) {
     return mark_dirty(AC_CONFIG_DIRTY_EDF_CAPTURE);
 }
 
+bool AppConfig::set_schedule(size_t slot, const ScheduledAction &rule) {
+    if (slot >= data_.schedule.size()) return false;
+    if (data_.schedule[slot] == rule) return true;
+
+    data_.schedule[slot] = rule;
+    return mark_dirty(AC_CONFIG_DIRTY_SCHEDULE);
+}
+
 bool AppConfig::set_keybindings(
     const ButtonBindingConfig &keybindings) {
     if (data_.keybindings == keybindings) return true;
@@ -1059,6 +1077,22 @@ bool AppConfig::set_sleephq_mask_id(const String &mask_id) {
     if (data_.sleephq_mask_id == parsed) return true;
 
     data_.sleephq_mask_id = parsed;
+    return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
+}
+
+bool AppConfig::set_sleephq_oximetry_source(const String &source) {
+    if (source.length() && !oximetry_source_valid(source.c_str())) return false;
+    if (source == data_.sleephq_oximetry_source) return true;
+
+    data_.sleephq_oximetry_source = source;
+    return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
+}
+
+bool AppConfig::set_sleephq_oximetry_format(const String &format) {
+    if (format != "csv" && format != "bin") return false;
+    if (data_.sleephq_oximetry_format == format) return true;
+
+    data_.sleephq_oximetry_format = format;
     return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
 }
 

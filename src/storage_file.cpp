@@ -13,8 +13,10 @@ namespace {
 // void flush/close API discards. No extra I/O is needed on successful transfers.
 class ObservedFile final : public VFSFileImpl {
 public:
-    ObservedFile(VFSImpl *fs, const char *path, const char *mode)
-        : VFSFileImpl(fs, path, mode) {}
+    ObservedFile(VFSImpl *fs, const char *path, const char *mode, bool sequential)
+        : VFSFileImpl(fs, path, mode) {
+        if (sequential && _f) staging_.configure_reader(_f, _stat.st_size, 512);
+    }
 
     ~ObservedFile() override { close(); }
 
@@ -37,7 +39,9 @@ public:
 
     bool seek(uint32_t offset, SeekMode mode) override {
         errno = 0;
-        const bool ok = VFSFileImpl::seek(offset, mode);
+        const bool ok = _f && mode == SeekSet && offset <= INT32_MAX
+            ? staging_.seek_reader(_f, offset, _stat.st_size)
+            : VFSFileImpl::seek(offset, mode);
         if (!ok) log_io_error("seek", _path, errno);
         return ok;
     }
@@ -67,6 +71,7 @@ public:
         if (_f) {
             if (fclose(_f) != 0) log_io_error("close", _path, errno);
             _f = nullptr;
+            staging_.reset();
         }
         if (_d) {
             if (closedir(_d) != 0) log_io_error("closedir", _path, errno);
@@ -124,15 +129,18 @@ public:
 
     static FileImplPtr open_observed(VFSImpl *fs, const char *path,
                                      const char *mode,
-                                     struct stat *opened_stat) {
+                                     struct stat *opened_stat, bool sequential = false) {
         errno = 0;
-        auto file = std::make_shared<ObservedFile>(fs, path, mode);
+        auto file = std::make_shared<ObservedFile>(fs, path, mode, sequential);
         if (opened_stat) {
             *opened_stat = {};
             if (static_cast<bool>(*file)) *opened_stat = file->_stat;
         }
         return file;
     }
+
+private:
+    DmaStagingBuffer staging_;
 };
 
 }  // namespace
@@ -146,11 +154,11 @@ bool flush_file(File &file) {
 }
 
 File open_observed_file(const char *mount_point, const char *path,
-                         const char *mode, struct stat *opened_stat) {
+                         const char *mode, struct stat *opened_stat, bool sequential) {
     static VFSImpl backend;
     backend.mountpoint(mount_point);
     return File(ObservedFile::open_observed(&backend, path, mode,
-                                            opened_stat));
+                                            opened_stat, sequential));
 }
 
 }  // namespace aircannect::Storage

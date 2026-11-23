@@ -43,6 +43,8 @@ void append_sensor(LargeTextBuffer &json,
     json_add_string(json, "name", device.name);
     json_add_int(json, "rssi", device.rssi);
     json_add_bool(json, "autoconnect", device.autoconnect);
+    if (!include_index && device.supports_recordings())
+        json_add_bool(json, "recordings", device.recordings);
     json += '}';
 }
 
@@ -215,6 +217,11 @@ void OximetryHttpController::execute(Command &command) {
         case CommandKind::SensorAutoconnect:
             sensor_->set_autoconnect(command.target.c_str(), command.enabled);
             break;
+        case CommandKind::SensorRecordings:
+            if (!sensor_->set_recordings(command.target.c_str(), command.enabled))
+                Log::logf(CAT_OXI, LOG_WARN, "could not set recording import for %s\n",
+                          command.target.c_str());
+            break;
     }
 
     snapshot_dirty_ = true;
@@ -303,9 +310,11 @@ void OximetryHttpController::send_action(
     } else if (strcmp(action, "sensor_forget") == 0) {
         command.kind = CommandKind::SensorForget;
         command.target = doc["addr"] | "";
-    } else if (strcmp(action, "sensor_autoconnect") == 0 &&
+    } else if ((strcmp(action, "sensor_autoconnect") == 0 ||
+                strcmp(action, "sensor_recordings") == 0) &&
                doc["enabled"].is<bool>()) {
-        command.kind = CommandKind::SensorAutoconnect;
+        command.kind = strcmp(action, "sensor_recordings") == 0
+            ? CommandKind::SensorRecordings : CommandKind::SensorAutoconnect;
         command.target = doc["addr"] | "";
         command.enabled = doc["enabled"].as<bool>();
     } else {

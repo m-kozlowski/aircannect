@@ -1,4 +1,5 @@
 #include "report_http_controller.h"
+#include "report_oximetry_signals.h"
 #include "storage_usb.h"
 
 #include "http_route_registry.h"
@@ -59,6 +60,7 @@ constexpr const char *REPORT_ENVELOPE_HEADER = "X-Report-Envelope";
 enum class PendingKind : uint8_t {
     Events,
     Signal,
+    Oximetry,
 };
 
 void send_json_error(AsyncWebServerRequest *request,
@@ -603,6 +605,8 @@ struct HttpStreamRef {
 struct ReportHttpController::PendingResponses {
     struct Entry {
         std::shared_ptr<const ReportSignalStoreCatalog> generation_owner;
+        std::shared_ptr<const ReportOximetryCatalog> archive;
+        const ReportOximetryRecording *recording = nullptr;
         PendingKind kind = PendingKind::Events;
         std::shared_ptr<AsyncDeferredResponse::State> response;
         StorageStreamCommand command;
@@ -675,7 +679,7 @@ void ReportHttpController::begin(ReportTask &report_task,
     report_task_ = &report_task;
     preferences_ = &preferences;
     stream_port_ = &stream_port;
-    observed_completion_ = {};
+    observed_oximetry_identity_ = 0;
     completion_serial_ = 0;
 
     if (completion_snapshot_.begin(REPORT_COMPLETION_JSON_RESERVE) &&
@@ -871,10 +875,23 @@ void ReportHttpController::poll() {
 
         // Admission now protects the source range. Check its version after
         // admission so a concurrent append cannot enter under an old cache key.
-        const ReportNightQuery current = report_task_->query_night(entry.sleep_day);
-        const bool version_changed = current.state != ReportStoreQueryState::Ready ||
-            current.source_revision != entry.source_revision ||
-            current.generation != entry.generation;
+        bool version_changed;
+        if (entry.kind == PendingKind::Oximetry) {
+            const auto current = report_task_->catalog_json_snapshot();
+            version_changed = !current || !current->oximetry;
+            if (!version_changed && current->oximetry != entry.archive) {
+                const auto &previous = *entry.recording;
+                version_changed = std::none_of(current->oximetry->begin(), current->oximetry->end(),
+                    [&](const auto &r) { return r.planes && r.key() == previous.key() &&
+                        r.noon_s == previous.noon_s && r.next_noon_s == previous.next_noon_s &&
+                        r.start_ms == previous.start_ms &&
+                        r.modified == previous.modified && r.size() == previous.size(); });
+            }
+        } else {
+            const ReportNightQuery current = report_task_->query_night(entry.sleep_day);
+            version_changed = current.state != ReportStoreQueryState::Ready ||
+                current.source_revision != entry.source_revision || current.generation != entry.generation;
+        }
 
         const bool keep_pending = !expired && !timed_out &&
             !version_changed && waiting;
@@ -950,9 +967,9 @@ void ReportHttpController::poll() {
                 static_cast<size_t>(ready.response_size),
                 [ref](uint8_t *buffer,
                       size_t max_length,
-                      size_t offset) -> size_t {
+                      size_t offset) -> PreparedByteRead {
                     if (!buffer || !ref || !ref->port || !ref->stream) {
-                        return 0;
+                        return {};
                     }
 
                     const StorageStreamRead read = ref->port->read(
@@ -961,14 +978,14 @@ void ReportHttpController::poll() {
                         max_length,
                         ref->source_offset + offset);
                     if (read.state == StorageStreamReadState::Retry) {
-                        return RESPONSE_TRY_AGAIN;
+                        return {PreparedByteReadState::Retry, 0, read.wait};
                     }
-                    if (read.state != StorageStreamReadState::Data) return 0;
+                    if (read.state != StorageStreamReadState::Data) return {};
                     if (offset <= ref->size &&
                         read.bytes >= ref->size - offset) {
                         ref->finish(true);
                     }
-                    return read.bytes;
+                    return {PreparedByteReadState::Data, read.bytes};
                 });
         if (!response) {
             ref->finish(false);
@@ -983,7 +1000,8 @@ void ReportHttpController::poll() {
                            ready.source_revision,
                            ready.generation,
                            ready.versioned,
-                           ready.kind == PendingKind::Signal);
+                           ready.kind == PendingKind::Signal || ready.kind == PendingKind::Oximetry);
+        if (use_deflate) response->addHeader("Content-Encoding", "deflate");
         if (ready.kind == PendingKind::Signal) {
             add_signal_headers(response,
                                ready.track_index,
@@ -996,9 +1014,6 @@ void ReportHttpController::poll() {
                                ready.value_offset,
                                ready.grid_phase_ms,
                                ready.envelope);
-            if (use_deflate) {
-                response->addHeader("Content-Encoding", "deflate");
-            }
         }
         ready.response->publish(
             std::unique_ptr<AsyncWebServerResponse>(response));
@@ -1166,7 +1181,10 @@ void ReportHttpController::send_summary(
         }
         if (!key.valid()) { send_json_error(request, 400, "bad_period"); return; }
         std::shared_ptr<const ReportPeriodResult> period;
-        if (report_task_->request_period(key, &period) != OperationAdmission::Accepted) {
+        const bool retry = request->hasHeader("X-Report-Retry") &&
+            request->getHeader("X-Report-Retry")->value() == "1";
+
+        if (report_task_->request_period(key, &period, retry) != OperationAdmission::Accepted) {
             send_json_error(request, 503, "period_busy");
             return;
         }
@@ -1194,6 +1212,7 @@ void ReportHttpController::send_summary(
         return;
     }
 
+    report_task_->request_oximetry_index();
     const auto summary = report_task_->catalog_json_snapshot();
     if (!summary) {
         if (report_task_->catalog_snapshot()) {
@@ -1329,7 +1348,82 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
     command.verification = StorageStreamVerification::Size;
 
     const String part = request->arg("part");
-    if (part == "events") {
+    if (part == "signal" && request->hasArg("source")) {
+        const auto summary = report_task_->catalog_json_snapshot();
+        const String source = request->arg("source"), id = request->arg("id");
+        const String slice = request->arg("slice"), level = request->arg("level");
+        uint64_t modified, start, size, noon, end;
+        if (!summary || !summary->oximetry || !parse_uint64_arg(request, "mtime", UINT64_MAX, modified) ||
+            !parse_uint64_arg(request, "start", INT64_MAX, start) ||
+            !parse_uint64_arg(request, "size", UINT32_MAX, size) ||
+            !parse_uint64_arg(request, "noon", INT64_MAX, noon) ||
+            !parse_uint64_arg(request, "end", INT64_MAX, end)) {
+            send_json_error(request, 400, "bad_signal_request");
+            return;
+        }
+        const auto &files = *summary->oximetry;
+        const auto file = std::find_if(files.begin(), files.end(), [&](const auto &r) {
+            return source == r.source && id == r.id && slice == r.day;
+        });
+        if (file == files.end() || file->modified != modified || file->start_ms != int64_t(start) ||
+            file->size() != size || file->noon_s * 1000 != int64_t(noon) ||
+            file->next_noon_s * 1000 != int64_t(end) || !file->planes) {
+            send_json_error(request, 409, "report_version_changed");
+            return;
+        }
+        pending.kind = PendingKind::Oximetry;
+        pending.archive = summary->oximetry;
+        pending.recording = &*file;
+        const auto &p = *file->planes;
+        if (level == "index") {
+            command.path = report_oximetry_signal_path(*file, "index");
+            command.source_length = command.expected_size = p.index_bytes;
+        } else if (level == "histogram") {
+            uint64_t offset, bytes;
+            if (!parse_uint64_arg(request, "offset", UINT32_MAX, offset) ||
+                !parse_uint64_arg(request, "bytes", 65536, bytes) || !bytes ||
+                offset + bytes > p.histogram_bytes) {
+                send_json_error(request, 400, "bad_signal_range");
+                return;
+            }
+            command.path = report_oximetry_signal_path(*file, "histograms");
+            command.expected_size = p.histogram_bytes;
+            command.source_offset = offset;
+            command.source_length = bytes;
+        } else if (level == "raw") {
+            uint64_t first, count;
+            if (!parse_uint64_arg(request, "first", UINT32_MAX, first) ||
+                !parse_uint64_arg(request, "count", 4096, count) || !count || first + count > p.rows) {
+                send_json_error(request, 400, "bad_signal_range");
+                return;
+            }
+            command.path = report_oximetry_signal_path(*file, "raw");
+            command.expected_size = uint64_t(p.rows) * 16;
+            command.source_offset = first * 16;
+            command.source_length = count * 16;
+        } else if (level == "10s") {
+            uint64_t channel;
+            if (!parse_uint64_arg(request, "channel", 3, channel) || !p.plane_bytes[channel]) {
+                send_json_error(request, 400, "bad_signal_request");
+                return;
+            }
+            command.path = report_oximetry_signal_path(*file, ReportOximetryChannels[channel]);
+            command.source_length = command.expected_size = p.plane_bytes[channel];
+            ReportSignalTile tile;
+            if (p.compressed_bytes[channel] && accepts_deflate(request) &&
+                report_oximetry_overview_tile(*file, tile)) {
+                memcpy(pending.tile_header, tile.header, sizeof(tile.header));
+                pending.sidecar_command.path = command.path + ".deflate";
+                pending.sidecar_command.lane = StorageStreamLane::Foreground;
+                pending.sidecar_command.missing_ok = true;
+                pending.sidecar_command.verification = StorageStreamVerification::None;
+            }
+        } else {
+            send_json_error(request, 400, "bad_signal_level");
+            return;
+        }
+        pending.response_size = pending.raw_response_size = command.source_length;
+    } else if (part == "events") {
         const ReportEventFileQuery query =
             report_task_->query_events(sleep_day);
         if (!handle_query_state(request,
@@ -1490,7 +1584,8 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
             tile.path(query.track,
                       level,
                       sidecar_path,
-                      sizeof(sidecar_path))) {
+                      sizeof(sidecar_path),
+                      query.compression_version)) {
             memcpy(pending.tile_header,
                    tile.header,
                    ReportSignalTile::HeaderBytes);
@@ -1555,88 +1650,41 @@ void ReportHttpController::send_plot(AsyncWebServerRequest *request) {
 void ReportHttpController::publish_completion() {
     if (!report_task_) return;
 
-    uint32_t serial = observed_period_serial_;
-    const auto period = report_task_->period_completion(serial);
-    if (period && serial != observed_period_serial_) {
-        char day[9];
-        period->key.end.format_yyyymmdd(day, sizeof(day));
-        completion_json_ = "{";
-        json_add_uint64(completion_json_, "serial", ++completion_serial_, false);
-        json_add_string(completion_json_, "kind", period->key.sessions ? "sessions" : "period");
-        json_add_string(completion_json_, "night", day);
-        json_add_int(completion_json_, "days", period->key.days);
-        if (period->key.sessions) {
-            char version[32];
-            snprintf(version, sizeof(version), "%lu.%016llx",
-                static_cast<unsigned long>(period->key.generation),
-                static_cast<unsigned long long>(period->key.source_revision.value()));
-            json_add_string(completion_json_, "version", version);
-            completion_json_ += ",\"sessions\":[";
-            for (size_t i = 0; i < period->key.sessions->size(); ++i) {
-                if (i) completion_json_ += ',';
-                append_json_float(completion_json_, (*period->key.sessions)[i]);
-            }
-            completion_json_ += ']';
-        }
-        json_add_bool(completion_json_, "success", !period->error[0]);
-        json_add_string(completion_json_, "error", period->error);
-        completion_json_ += '}';
-        if (!completion_json_.overflowed() && completion_snapshot_.replace(completion_json_)) {
-            observed_period_serial_ = serial;
-        }
-        return;
-    }
+    uint32_t serial;
+    ReportEngineCompletion night;
+    if (!report_task_->completion_snapshot(serial, night)) return;
 
-    const ReportEngineCompletion completion = report_task_->last_completion();
-    if (!completion.valid() ||
-        completion.request.ticket == observed_completion_) {
-        return;
-    }
+    const auto catalog = report_task_->catalog_json_snapshot();
+    const uint64_t ox = catalog ? catalog->oximetry_identity : observed_oximetry_identity_;
+    if (serial == completion_serial_ && ox == observed_oximetry_identity_) return;
 
-    observed_completion_ = completion.request.ticket;
-    completion_serial_++;
-    if (completion_serial_ == 0) completion_serial_ = 1;
-
-    char day[9] = {};
-    if (!completion.request.artifact.sleep_day.format_yyyymmdd(
-            day, sizeof(day))) {
-        return;
-    }
-
-    const bool success = completion.outcome.disposition ==
-        OperationDisposition::Succeeded;
-    const char *error = completion.error;
-    if (!success && !error[0] &&
-        completion.outcome.disposition == OperationDisposition::Cancelled) {
-        error = "cancelled";
-    }
-
-    completion_json_.clear();
+    char revision[17];
+    snprintf(revision, sizeof(revision), "%016llx", static_cast<unsigned long long>(ox));
     completion_json_ = "{";
-    json_add_uint64(completion_json_, "serial", completion_serial_, false);
-    json_add_string(completion_json_, "night", day);
-    json_add_string(completion_json_, "kind", "night");
-    json_add_bool(completion_json_, "success", success);
-    json_add_bool(completion_json_, "source_preservation_failed",
-                  completion.source_preservation_failed);
-    json_add_bool(completion_json_,
-                  "forced",
-                  completion.request.force_rebuild);
-    json_add_uint64(completion_json_,
-                    "generation",
-                    completion.store_generation);
-    char revision[17] = {};
-    snprintf(revision,
-             sizeof(revision),
-             "%016llx",
-             static_cast<unsigned long long>(
-                 completion.request.artifact.source_revision.value()));
-    json_add_string(completion_json_, "source_revision", revision);
-    json_add_string(completion_json_, "error", error);
+    json_add_uint64(completion_json_, "serial", serial, false);
+    json_add_string(completion_json_, "oximetry_revision", revision);
+
+    char day[9];
+    if (night.valid() && night.request.artifact.sleep_day.format_yyyymmdd(day, sizeof(day))) {
+        const char *error = night.error;
+        if (!error[0] && night.outcome.disposition == OperationDisposition::Cancelled) error = "cancelled";
+
+        snprintf(revision, sizeof(revision), "%016llx",
+                 static_cast<unsigned long long>(night.request.artifact.source_revision.value()));
+        json_add_uint64(completion_json_, "night_ticket", night.request.ticket.id);
+        json_add_string(completion_json_, "night", day);
+        json_add_bool(completion_json_, "success", night.outcome.disposition == OperationDisposition::Succeeded);
+        json_add_bool(completion_json_, "source_preservation_failed", night.source_preservation_failed);
+        json_add_bool(completion_json_, "forced", night.request.force_rebuild);
+        json_add_uint64(completion_json_, "generation", night.store_generation);
+        json_add_string(completion_json_, "source_revision", revision);
+        json_add_string(completion_json_, "error", error);
+    }
     completion_json_ += '}';
 
-    if (!completion_json_.overflowed()) {
-        (void)completion_snapshot_.replace(completion_json_);
+    if (!completion_json_.overflowed() && completion_snapshot_.replace(completion_json_)) {
+        completion_serial_ = serial;
+        observed_oximetry_identity_ = ox;
     }
 }
 

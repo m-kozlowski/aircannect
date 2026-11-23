@@ -64,6 +64,7 @@ public:
     bool poll(bool allow_layout_mutation = true);
     void cancel();
     void forget_media();
+    void invalidate_sources(SleepDayId first, SleepDayId last);
 
     // Prepare the on-card directory layout before any report readers/writers.
     void configure_layout(StorageScanPort &scans, StoragePathPort &paths);
@@ -173,6 +174,7 @@ private:
     std::shared_ptr<const NightCatalog> published_;
     // Night-only reads must not replace the catalog's persistence baseline.
     std::shared_ptr<const NightCatalog> stored_;
+    SleepDayId missing_first_, missing_last_;
 };
 
 }  // namespace aircannect

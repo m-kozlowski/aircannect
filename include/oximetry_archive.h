@@ -1,0 +1,106 @@
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <cctype>
+#include <cstring>
+#include <string_view>
+
+namespace aircannect {
+
+inline constexpr char OximetryArchiveRoot[] = "/aircannect/oximetry";
+inline constexpr char OximetryDayRevisionSuffix[] = ".rev";
+
+inline bool oximetry_ble_source(std::string_view address, char *out) {
+    if (address.size() != 17) return false;
+    size_t n = 4;
+    for (size_t i = 0; i < address.size(); ++i) {
+        const unsigned char c = address[i];
+        if (i % 3 == 2) {
+            if (c != ':') return false;
+        } else if (std::isxdigit(c)) {
+            out[n++] = std::tolower(c);
+        } else return false;
+    }
+    memcpy(out, "ble-", 4);
+    out[n] = 0;
+    return true;
+}
+
+inline bool oximetry_source_valid(std::string_view source) {
+    return !source.empty() && source.size() <= 32 && source.find_first_not_of(
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_") == source.npos;
+}
+
+enum class OximetryArchiveFile { Other, LiveCsv, RingBin, RingCsv };
+
+inline bool oximetry_archive_path(std::string_view full, std::string_view &source,
+                                  std::string_view &suffix) {
+    constexpr size_t prefix = sizeof(OximetryArchiveRoot);
+    if (full.size() <= prefix || full.substr(0, prefix - 1) != OximetryArchiveRoot ||
+        full[prefix - 1] != '/') return false;
+    const auto rest = full.substr(prefix);
+    const auto slash = rest.find('/');
+    if (slash == rest.npos || !oximetry_source_valid(source = rest.substr(0, slash))) return false;
+    suffix = rest.substr(slash + 1);
+    return true;
+}
+
+inline OximetryArchiveFile oximetry_recording_file(std::string_view source,
+                                                   std::string_view suffix,
+                                                   std::string_view &id) {
+    if (suffix.size() == 49 && suffix.substr(8, 6) == "/live-" &&
+        suffix.substr(45) == ".csv") {
+        id = suffix.substr(9, 36);
+        if ((source == "udp" || (source.size() == 16 && source.substr(0, 4) == "ble-" &&
+             source.substr(4).find_first_not_of("0123456789abcdef") == source.npos)) &&
+            id.substr(5, 8) == suffix.substr(0, 8) && id[13] == '-' && id[27] == '-' &&
+            id.substr(5, 8).find_first_not_of("0123456789") == id.npos &&
+            id.substr(14, 13).find_first_not_of("0123456789") == id.npos &&
+            id.substr(28).find_first_not_of("0123456789abcdef") == id.npos)
+            return OximetryArchiveFile::LiveCsv;
+    }
+    if (suffix.size() == 27 && suffix[8] == '/') {
+        id = suffix.substr(9, 14);
+        if (id.substr(0, 8) == suffix.substr(0, 8) && id.find_first_not_of("0123456789") == id.npos) {
+            if (suffix.substr(23) == ".bin") return OximetryArchiveFile::RingBin;
+            if (suffix.substr(23) == ".csv") return OximetryArchiveFile::RingCsv;
+        }
+    }
+    return OximetryArchiveFile::Other;
+}
+
+namespace OximetryCsv {
+struct Header {
+    char peer[18]{}, serial[33]{};
+    int32_t offset_minutes = 0;
+};
+bool parse_header(std::string_view prefix, std::string_view source, std::string_view id, Header &out);
+enum class RingCsvStatus { Current, Rebuild, Unrecognized };
+RingCsvStatus check_ring_csv(std::string_view prefix, std::string_view source, std::string_view id,
+                             int32_t offset_minutes, std::string_view first_row);
+inline constexpr char Columns[] =
+    "Time,Oxygen Level,Pulse Rate,Motion,O2 Reminder,PR Reminder,UTC,PI\r\n";
+inline constexpr size_t MaxRow = 112;
+constexpr size_t MaxHeader = 256;
+size_t format_header(char (&out)[MaxHeader], const char *source, const char *id,
+                     int32_t offset_minutes, const char *peer, const char *serial);
+size_t format_row(char (&out)[MaxRow], int64_t utc_ms, int32_t offset_minutes, int oxygen, int pulse,
+                  int motion, float pi_percent);
+
+// One contiguous batch of vendor samples, at whole-second intervals.
+class RingRows {
+public:
+    RingRows(int64_t first_ms, int32_t offset_minutes, uint32_t interval_s)
+        : utc_ms_(first_ms), offset_minutes_(offset_minutes), interval_s_(interval_s) {}
+    size_t next(char (&out)[MaxRow], int oxygen, int pulse, int motion);
+
+private:
+    int64_t utc_ms_;
+    int32_t offset_minutes_;
+    uint32_t interval_s_, second_ = 60;
+    char time_[32], utc_[32];
+};
+}
+
+}  // namespace aircannect

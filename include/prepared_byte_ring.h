@@ -6,6 +6,8 @@
 
 namespace aircannect {
 
+class PreparedReadWait;
+
 enum class PreparedByteReadState : uint8_t {
     Data,
     Retry,
@@ -15,6 +17,7 @@ enum class PreparedByteReadState : uint8_t {
 struct PreparedByteRead {
     PreparedByteReadState state = PreparedByteReadState::End;
     size_t bytes = 0;
+    PreparedReadWait *wait = nullptr; // Borrowed from the attached transfer on Retry.
 };
 
 class PreparedByteRing {

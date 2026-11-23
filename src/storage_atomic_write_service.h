@@ -47,7 +47,7 @@ private:
         StorageWritePayload payload;
         StorageWritePayload::Cursor cursor;
         File output;
-        Storage::WriteStagingBuffer staging;
+        Storage::DmaStagingBuffer staging;
         size_t offset = 0;
         uint64_t source_size = 0;
         uint64_t free_reserve_bytes = 0;

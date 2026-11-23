@@ -49,7 +49,7 @@ public:
         return available_ && model_ != ResmedDeviceModel::AirMini;
     }
     bool acquire(As11ServiceOwner owner);
-    // A departing TCP client leaves an on-wire transaction to finish first.
+    // Drain accepted TCP requests; abandon those still awaiting the first CTS.
     void release(As11ServiceOwner owner);
     bool owned_by(As11ServiceOwner owner) const { return owner_ == owner; }
 

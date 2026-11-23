@@ -36,7 +36,9 @@ bool ExportTask::begin(const ExportEndpointConfig &config,
                        StorageReadPort &read_port,
                        StorageStreamPort &stream_port,
                        StorageAtomicWritePort &write_port,
-                       StoragePathPort &path_port) {
+                       StoragePathPort &path_port,
+                       SleepHqOximetryPlan::CatalogProvider originals,
+                       SleepHqOximetryPlan::MemoryEnabled memory_enabled) {
     if (runtime_) return true;
 
     input_lock_ = xSemaphoreCreateMutexStatic(&input_lock_storage_);
@@ -52,6 +54,7 @@ bool ExportTask::begin(const ExportEndpointConfig &config,
 
     runtime_ = new (memory) Runtime();
     runtime_->inputs.config = config;
+    runtime_->sleephq.set_oximetry_sources(originals, memory_enabled);
     runtime_->smb.begin(config.smb, scan_port, read_port, stream_port,
                         write_port, path_port);
     runtime_->sleephq.begin(config.sleephq, scan_port, read_port, stream_port,

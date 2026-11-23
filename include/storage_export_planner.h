@@ -109,9 +109,7 @@ private:
     void release_datalog_day_inventory();
     StorageExportPlannerResult emit_datalog_day_complete(
         const char *day,
-        StorageExportPlannerItem &out,
-        char *error_out,
-        size_t error_out_size) const;
+        StorageExportPlannerItem &out) const;
 
     StorageExportPlannerResult next_full_card(StorageExportPlannerItem &out,
                                               char *error_out,

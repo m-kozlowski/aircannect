@@ -27,6 +27,11 @@ struct StorageScanCommand {
     bool include_directories = false;
     uint32_t generation = 0;
 
+    // Optional pruning for recursive scans. Depth 1 is a child of the root.
+    enum class Visit { Skip, Descend, Collect };
+    using Filter = Visit (*)(size_t depth, const char *name, bool directory);
+    Filter filter = nullptr;
+
     bool valid() const {
         return roots && root_count > 0 &&
                root_count <= AC_STORAGE_SCAN_ROOT_MAX && generation != 0;

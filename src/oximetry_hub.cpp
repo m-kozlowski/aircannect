@@ -31,6 +31,8 @@ bool OximetryHub::ingest(const OximetrySample &sample,
                          OximetryHubAction &actions) {
     actions = OximetryHubAction::None;
     if (!enabled_ || sample.source == OximetrySource::None) return false;
+    if (archive_observer_) archive_observer_(archive_context_, sample);
+
     if (source_present_ && source_ != sample.source) return false;
     if (!source_present_ && !sample.valid &&
         sample.source != OximetrySource::Ble) {
@@ -48,6 +50,7 @@ bool OximetryHub::ingest(const OximetrySample &sample,
 
     reading_.spo2 = sample.valid ? sample.spo2 : -1;
     reading_.pulse_bpm = sample.valid ? sample.pulse_bpm : -1;
+    reading_.pi_percent = sample.contact_known && !sample.contact_present ? -1 : sample.pi_percent;
     reading_.valid = sample.valid;
     reading_.contact_known = sample.contact_known;
     reading_.contact_present = sample.contact_present;
@@ -59,7 +62,8 @@ bool OximetryHub::ingest(const OximetrySample &sample,
         sample_observer_(sample_observer_context_, accepted);
     }
 
-    if (sample.source != OximetrySource::Ble || sample.valid) {
+    if (sample.source != OximetrySource::Ble || sample.valid || sample.contact_present ||
+        sample.spo2 >= 0 || sample.pulse_bpm >= 0) {
         ble_invalid_since_ms_ = 0;
         return true;
     }

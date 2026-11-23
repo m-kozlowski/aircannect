@@ -9,20 +9,22 @@
 
 namespace aircannect {
 
+enum class ActionSource : uint8_t { Button, Schedule };
+
+struct ActionInvocation {
+    ActionSource source;
+    uint32_t now_ms;
+};
+
 class LocalActionRouter {
 public:
-    using Handler = bool (*)(void *context, uint32_t now_ms);
+    // Null means accepted; otherwise return a stable, static reason string.
+    using Handler = const char * (*)(void *context, ActionInvocation call);
 
     bool register_handler(LocalActionId action,
                           Handler handler,
                           void *context);
-    void apply_bindings(const ButtonBinding *bindings, size_t count);
-    bool dispatch(ButtonInput input,
-                  ButtonGesture gesture,
-                  uint32_t now_ms) const;
-
-    LocalActionId effective_action(ButtonInput input,
-                                   ButtonGesture gesture) const;
+    const char *dispatch(LocalActionId action, ActionInvocation call) const;
 
 private:
     struct HandlerEntry {
@@ -31,7 +33,6 @@ private:
         void *context = nullptr;
     };
 
-    std::vector<ButtonBinding> bindings_;
     std::vector<HandlerEntry> handlers_;
 };
 

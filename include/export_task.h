@@ -88,7 +88,9 @@ public:
                StorageReadPort &read_port,
                StorageStreamPort &stream_port,
                StorageAtomicWritePort &write_port,
-               StoragePathPort &path_port);
+               StoragePathPort &path_port,
+               SleepHqOximetryPlan::CatalogProvider originals = nullptr,
+               SleepHqOximetryPlan::MemoryEnabled memory_enabled = nullptr);
 
     // immutable runtime inputs
     bool publish_config(const ExportEndpointConfig &config);

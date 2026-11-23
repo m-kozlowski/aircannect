@@ -589,8 +589,7 @@ void EdfRecorderManager::accept_oximetry_sample(
     queued.observed_ms = sample.observed_ms;
     queued.spo2 = sample.spo2;
     queued.pulse_bpm = sample.pulse_bpm;
-    queued.valid = sample.valid &&
-        (!sample.contact_known || sample.contact_present);
+    queued.valid = sample.valid;
     if (!local_sa2_queue_.push(queued)) {
         status_.local_sa2_queue_drops++;
     }

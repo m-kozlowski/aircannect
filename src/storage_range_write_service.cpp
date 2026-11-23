@@ -54,8 +54,8 @@ bool StorageRangeWriteService::ready() const {
     return mutex_ && job_ && task_available_.load(std::memory_order_acquire);
 }
 
-bool StorageRangeWriteService::lock() const {
-    return mutex_ && xSemaphoreTake(mutex_, 0) == pdTRUE;
+bool StorageRangeWriteService::lock(uint32_t timeout_ms) const {
+    return mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void StorageRangeWriteService::unlock() const {
@@ -220,8 +220,16 @@ const char *StorageRangeWriteService::write_locked() {
     if (!reserve_available()) return "storage_reserve";
 
     const size_t size = job_->command.size();
-    const size_t count = std::min(size - job_->written,
-                                  AC_STORAGE_RANGE_WRITE_STEP_BYTES);
+    const size_t remaining = size - job_->written;
+    constexpr size_t page = Storage::DmaStagingBuffer::Capacity;
+    static_assert(AC_STORAGE_RANGE_WRITE_STEP_BYTES >= page);
+
+    size_t count = std::min(remaining, AC_STORAGE_RANGE_WRITE_STEP_BYTES);
+    if (count < remaining) {
+        // Leave the next turn a full DMA page, not two partial writes.
+        count -= (job_->command.offset + job_->written + count) % page;
+    }
+
     const size_t written = Storage::write_buffers(
         job_->output, job_->command, job_->written, count, job_->staging);
 
@@ -312,7 +320,7 @@ void StorageRangeWriteService::finish_locked(OperationOutcome outcome,
 }
 
 bool StorageRangeWriteService::step(StorageAtomicWriteLane lane) {
-    if (!ready() || !lock()) return false;
+    if (!ready() || !lock(50)) return false;
 
     const bool abandoned = apply_abandon_locked();
     const bool release = release_requested_.exchange(false,

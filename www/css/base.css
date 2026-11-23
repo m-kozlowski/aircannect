@@ -68,17 +68,13 @@
       word-break: break-word;
     }
 
-    .release-notes-content h1,
-    .release-notes-content h2,
-    .release-notes-content h3 {
+    .release-notes-content :is(h1, h2, h3, h4, h5, h6) {
       margin: 18px 0 8px;
       color: var(--text);
       text-transform: none;
     }
 
-    .release-notes-content h1:first-child,
-    .release-notes-content h2:first-child,
-    .release-notes-content h3:first-child {
+    .release-notes-content :is(h1, h2, h3, h4, h5, h6):first-child {
       margin-top: 0;
     }
 
@@ -90,7 +86,7 @@
       font-size: 16px;
     }
 
-    .release-notes-content h3 {
+    .release-notes-content :is(h3, h4, h5, h6) {
       font-size: 14px;
     }
 
@@ -418,22 +414,30 @@
     }
 
     .metric-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      display: flex;
+      flex-wrap: wrap;
       gap: 10px;
       margin-bottom: 14px;
     }
 
+    .metric-grid:has([data-oxi-pi]:not([hidden])) {
+      container-type: inline-size;
+      --metric-inset: clamp(4px, 2cqi, 12px);
+      --metric-font-size: clamp(16px, 7cqi, 26px);
+    }
+
     .metric {
+      flex: 1 1 0;
+      min-width: max-content;
       border: 1px solid #30364166;
       border-radius: 7px;
-      padding: 12px;
+      padding: 12px var(--metric-inset, 12px);
       background: #10111466;
     }
 
     .metric .metric-value {
       display: inline-block;
-      font-size: 26px;
+      font-size: var(--metric-font-size, 26px);
       font-weight: 760;
       line-height: 1.1;
     }
@@ -637,6 +641,26 @@
     .endpoint-config .row:last-child {
       border-bottom: 1px solid #30364166;
     }
+
+    .schedule-field {
+      display: grid;
+      grid-template-columns: 5em minmax(0, 1fr);
+      align-items: baseline;
+    }
+
+    .schedule-rule, .schedule-timing, .schedule-days, .schedule-rule label {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .schedule-rule { min-width: 0; }
+    .schedule-timing { flex: 0 1 19rem; min-width: 0; flex-wrap: nowrap; }
+    .schedule-rule select, .schedule-rule input { width: auto; min-width: 0; max-width: 100%; }
+    .schedule-rule input[type="number"] { width: 6em; }
+    .schedule-rule [hidden] { display: none; }
+    .schedule-rule label { gap: 3px; white-space: nowrap; }
 
     .keybindings-field {
       display: block;

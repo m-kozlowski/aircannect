@@ -100,16 +100,13 @@ bool As11ServiceManager::acquire(As11ServiceOwner owner) {
 void As11ServiceManager::release(As11ServiceOwner owner) {
     if (owner == As11ServiceOwner::None || owner_ != owner) return;
 
-    if (owner == As11ServiceOwner::TcpBridge && pending() &&
-        request_frame_count_ != 0) {
-        if (release_pending_) return;
+    // A later block may be waiting for another CTS, after the first was granted.
+    const bool waiting_first_grant = state_ == State::EntryProbing ||
+        (state_ == State::WaitingRequestFlowControl && request_frame_count_ == 1);
 
-        // Finish only the last INFO probe, without further entry attempts.
-        if (state_ == State::EntryProbing) {
-            state_ = State::WaitingRequestFlowControl;
-            request_started_ms_ = phase_activity_ms_;
-            release_entry_can_policy();
-        }
+    if (owner == As11ServiceOwner::TcpBridge && pending() &&
+        request_frame_count_ != 0 && !waiting_first_grant) {
+        if (release_pending_) return;
 
         release_pending_ = true;
         Log::logf(CAT_CAN, LOG_DEBUG,

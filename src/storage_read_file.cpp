@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cerrno>
+#include <algorithm>
 #include <fcntl.h>
 
 #include "storage_io_diagnostics.h"
@@ -14,8 +15,10 @@ StorageReadFile::~StorageReadFile() {
 }
 
 bool StorageReadFile::open(const char *path, uint32_t generation,
-                           size_t whole_file_limit) {
+                           size_t whole_file_limit, size_t requested_bytes) {
+    const bool dma_buffered = requested_bytes >= staging_.Capacity;
     if (file_ && generation_ == generation && strcmp(path_, path) == 0 &&
+        dma_requested_ == dma_buffered &&
         (has_modified_ || (whole_file_limit && size <= whole_file_limit))) {
         return true;
     }
@@ -54,8 +57,10 @@ bool StorageReadFile::open(const char *path, uint32_t generation,
         return false;
     }
 
-    // Match Arduino's SD stdio buffering without its stat-before-open lookup.
-    if (opened_stat.st_blksize == 0) setvbuf(file_, nullptr, _IOFBF, 4096);
+    dma_requested_ = dma_buffered;
+    staging_.configure_reader(file_, std::min(requested_bytes, size_t(opened_stat.st_size)),
+                              opened_stat.st_blksize == 0 ? 4096 : 0);
+
     copy_cstr(path_, sizeof(path_), path);
     generation_ = generation;
     has_modified_ = needs_modified;
@@ -80,8 +85,8 @@ bool StorageReadFile::seek(uint32_t offset) {
     if (!file_) return false;
 
     errno = 0;
-    if (offset > INT32_MAX || fseek(file_, static_cast<long>(offset), SEEK_SET)) {
-        Storage::log_io_error("seek", path_, offset > INT32_MAX ? EOVERFLOW : errno);
+    if (!staging_.seek_reader(file_, offset, size)) {
+        Storage::log_io_error("seek", path_, errno);
         return false;
     }
     return true;
@@ -99,6 +104,8 @@ bool StorageReadFile::close(const char *path) {
         Storage::log_io_error("close", path_, errno);
     }
     file_ = nullptr;
+    staging_.reset();
+    dma_requested_ = false;
     path_[0] = '\0';
     position = size = modified = 0;
     generation_ = 0;

@@ -216,6 +216,13 @@
       AirCANnect.ui.text("oxiTabSpo2", sourceValid ? oxi.spo2 : "--");
       AirCANnect.ui.text("oxiTabPulse", sourceValid ? oxi.pulse_bpm : "--");
 
+      const pi = oxi.source_fresh && Number.isFinite(oxi.pi_percent)
+        ? AirCANnect.i18n.numberMessage(oxi.pi_percent, 3) : null;
+      document.querySelectorAll("[data-oxi-pi]").forEach((tile) => {
+        tile.toggleAttribute("hidden", !pi);
+        if (pi) AirCANnect.i18n.text(tile.querySelector(".metric-value"), pi);
+      });
+
       let badgeLabel = AirCANnect.i18n.message("ui.off");
       let badgeStyle = "";
       if (!oxi.enabled) {
@@ -269,7 +276,10 @@
       AirCANnect.ui.text("oxiSource", sourceIdentity === "none" ?
         sourceStatus : AirCANnect.i18n.join([sourceIdentity, sourceStatus], " "));
       AirCANnect.ui.text("oxiTabSource", sourceIdentity);
-      AirCANnect.ui.text("oxiTabStatus", sourceStatus);
+      AirCANnect.ui.text("oxiTabStatus", oxi.csv_lost > 0 ?
+        AirCANnect.i18n.join([sourceStatus,
+          AirCANnect.i18n.message("status.csv_rows_lost", {count:oxi.csv_lost})], " / ") :
+        sourceStatus);
 
       const integrationAvailable =
         oxi.airsense_integration_available !== false;
@@ -440,11 +450,22 @@
             (device.addr || "").toLowerCase() === activeSensor;
           const auto = document.createElement("button");
           auto.className = "btn" + (device.autoconnect ? " primary" : "");
-          AirCANnect.i18n.text(auto, device.autoconnect ?
-            AirCANnect.i18n.message("status.autoconnect_on") : AirCANnect.i18n.message("status.autoconnect_off"));
+          auto.setAttribute("aria-pressed", String(!!device.autoconnect));
+          AirCANnect.i18n.text(auto, AirCANnect.i18n.message("status.autoconnect"));
           auto.onclick = () => oxiSensorAutoconnect(
             device.addr, !device.autoconnect);
           controls.appendChild(auto);
+
+          if (typeof device.recordings === "boolean") {
+            const download = document.createElement("button");
+            download.className = "btn" + (device.recordings ? " primary" : "");
+            download.setAttribute("aria-pressed", String(device.recordings));
+            AirCANnect.i18n.text(download, AirCANnect.i18n.message("status.auto_download"));
+            AirCANnect.i18n.text(download, AirCANnect.i18n.message("status.import_recordings"), "title");
+            download.onclick = () => oxiAction("sensor_recordings",
+              {addr: device.addr, enabled: !device.recordings}, "oxiKnownMsg");
+            controls.appendChild(download);
+          }
 
           const connect = document.createElement("button");
           connect.className = "btn primary";

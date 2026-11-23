@@ -7,7 +7,7 @@ namespace aircannect {
 OximetryRuntimeStatus compose_oximetry_status(
     const OximetryHubSnapshot &hub,
     const UdpOximeterStatus &udp,
-    const PlxPeripheralStatus &peripheral) {
+    const PlxPeripheralStatus &peripheral, uint32_t csv_lost) {
     OximetryRuntimeStatus out;
     out.enabled = hub.enabled;
     out.airsense_integration_available =
@@ -17,6 +17,7 @@ OximetryRuntimeStatus compose_oximetry_status(
     out.source_fresh = hub.source_fresh;
     out.source = hub.source;
     out.reading = hub.reading;
+    out.csv_lost = csv_lost;
     out.last_source_age_ms = hub.last_source_age_ms;
     strncpy(out.source_detail, hub.source_detail,
             sizeof(out.source_detail) - 1);

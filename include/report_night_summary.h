@@ -101,6 +101,16 @@ class ReportMetricAccumulator {
 public:
     static constexpr size_t HistogramBins = 2048;
 
+    class Channel {
+    public:
+        explicit Channel(ReportSignalId signal, bool expiration = false);
+        bool tracked() const { return index_ >= 0; }
+        uint16_t bin(int32_t value_milli) const;
+    private:
+        friend class ReportMetricAccumulator;
+        int index_;
+    };
+
     struct Histogram {
         // Stored window; count() addresses the full logical histogram.
         const uint32_t *bins = nullptr;
@@ -131,6 +141,8 @@ public:
     bool accept(ReportSignalId signal, int32_t value_milli,
                 uint32_t duration_ms = 0);
     bool accept_expiration_time(int32_t value_milli);
+    bool accept(Channel channel, uint16_t bin, int32_t value_milli,
+                uint32_t duration_ms);
     ReportCalculatedMetrics finish() const;
 
     std::shared_ptr<const LargeByteBuffer> snapshot() const;

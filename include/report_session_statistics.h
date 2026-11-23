@@ -31,6 +31,9 @@ public:
                 uint32_t retained_signals, bool close_retained_tail);
     bool accept(uint16_t session, uint32_t interval_ms, ReportSignalId signal,
                 int32_t value_milli, bool expiration = false, bool closed = true);
+    // Borrowed until the next contribution is selected or packed.
+    ReportMetricAccumulator *contribution(uint16_t session, uint32_t interval_ms,
+                                          ReportSignalId signal, bool closed);
     StorageWritePayload finish(const ReportSignalStoreNight &night,
                                int64_t closed_before_ms = 0);
     void clear();

@@ -71,6 +71,7 @@ def render_home(out: Path, repo: str) -> str:
 
 def publish_ota_metadata(release_dir: Path, ota_dir: Path, download_base: str) -> None:
     manifest = json.loads((release_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    manifest.pop("migrate_url", None)
     for target in manifest["targets"].values():
         image = target["zlib"]
         image["url"] = urljoin(download_base, image["url"])

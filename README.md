@@ -28,7 +28,8 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - let the AirSense record HR/SpO2 when application control uses CAN, or write
     it directly to local SA2 EDF when application control uses BLE or the
     device is an AirMini
-  - currently supported: O2Ring, O2Ring-S, Checkme O2, Nonin 3150, generic PLX/HR sensors
+  - currently supported: O2Ring, O2Ring-S, Checkme O2, Checkme O2 Max,
+    Nonin 3150, generic PLX/HR sensors
 - **Local display and controls**
   - optional status and therapy display with motion wake and automatic rotation
   - configurable local buttons for common device actions
@@ -55,13 +56,12 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 ## First setup
 
 1. Wire up the [hardware](docs/hardware.md).
-2. Download the `*-initial.zip` matching the board from the
-   [latest release](https://github.com/m-kozlowski/aircannect/releases/latest)
-   and extract the `*-initial.bin` image.
-3. Program the board with the extracted image. See the
-   [quickstart](docs/quickstart.md) for installation options.
-4. Open `http://aircannect/` (default login: `admin` / `aircannect`) and follow
+2. Open the [AirCANnect USB installer](https://aircannect.empeka.pl/install/),
+   select your board profile, and install the firmware.
+3. Open `http://aircannect/` (default login: `admin` / `aircannect`) and follow
    the setup wizard.
+
+See the [quickstart](docs/quickstart.md) for manual installation and Wi-Fi setup.
 
 ## AirMini
 

@@ -32,6 +32,7 @@ enum class AppConfigGroup : uint8_t {
     Keybindings,
     Display,
     Vpn,
+    Schedule,
     Count,
 };
 
@@ -46,6 +47,7 @@ enum class AppConfigFieldType : uint8_t {
     Enum,
     LogLevel,
     Keybindings,
+    Schedule,
 };
 
 enum AppConfigFieldFlags : uint16_t {
@@ -82,6 +84,7 @@ enum AppConfigDirty : uint32_t {
     AC_CONFIG_DIRTY_PSU_90W = 1UL << 24,
     AC_CONFIG_DIRTY_VPN = 1UL << 25,
     AC_CONFIG_DIRTY_UI_LANGUAGE = 1UL << 26,
+    AC_CONFIG_DIRTY_SCHEDULE = 1UL << 27,
 };
 
 static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
@@ -98,7 +101,7 @@ static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
     AC_CONFIG_DIRTY_ONBOARDING | AC_CONFIG_DIRTY_KEYBINDINGS |
     AC_CONFIG_DIRTY_DISPLAY | AC_CONFIG_DIRTY_ALERTS |
     AC_CONFIG_DIRTY_PSU_90W | AC_CONFIG_DIRTY_VPN |
-    AC_CONFIG_DIRTY_UI_LANGUAGE;
+    AC_CONFIG_DIRTY_UI_LANGUAGE | AC_CONFIG_DIRTY_SCHEDULE;
 
 enum class AppConfigFieldId : uint8_t {
     OnboardingComplete,
@@ -133,6 +136,8 @@ enum class AppConfigFieldId : uint8_t {
     SleepHqTeamId,
     SleepHqDeviceId,
     SleepHqMaskId,
+    SleepHqOximetrySource,
+    SleepHqOximetryFormat,
     HttpUser,
     HttpPassword,
     AuthWhitelist,
@@ -158,6 +163,7 @@ enum class AppConfigFieldId : uint8_t {
     WireguardKeepalive,
     WireguardAllowedIps,
     WireguardDns,
+    Schedule,
 };
 
 struct AppConfigEnumValue {

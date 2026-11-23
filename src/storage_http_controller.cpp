@@ -10,6 +10,7 @@
 #include <string.h>
 #include <string>
 
+#include "async_deferred_response.h"
 #include "async_prepared_response.h"
 #include "board.h"
 #include "board_net.h"
@@ -197,22 +198,17 @@ struct ArchiveDownloadRef {
         if (port && download) port->finish_download(*download);
     }
 
-    size_t fill(uint8_t *buffer, size_t capacity, size_t offset) {
-        if (!port || !download || !buffer || capacity == 0) return 0;
+    PreparedByteRead fill(uint8_t *buffer, size_t capacity, size_t offset) {
+        if (!port || !download || !buffer || capacity == 0) return {};
 
         if (prefix && offset < prefix->size()) {
             const size_t copied = std::min(
                 capacity, prefix->size() - offset);
             memcpy(buffer, prefix->data() + offset, copied);
-            return copied;
+            return {PreparedByteReadState::Data, copied};
         }
 
-        const PreparedByteRead read =
-            port->read_download(*download, buffer, capacity, offset);
-        if (read.state == PreparedByteReadState::Retry) {
-            return RESPONSE_TRY_AGAIN;
-        }
-        return read.bytes;
+        return port->read_download(*download, buffer, capacity, offset);
     }
 };
 
@@ -275,7 +271,7 @@ struct StorageHttpController::PendingFileLogTail {
 struct StorageHttpController::PendingArchiveDownload {
     std::shared_ptr<ArchiveDownloadRef> response;
     std::unique_ptr<LargeByteBuffer> prefix;
-    AsyncWebServerRequestPtr request;
+    std::shared_ptr<AsyncDeferredResponse::State> transport;
     uint64_t archive_size = 0;
     uint32_t deadline_ms = 0;
     char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
@@ -553,7 +549,7 @@ void StorageHttpController::poll_archive_download() {
     }
 
     PendingArchiveDownload &pending = *pending_archive_download_;
-    if (pending.request.expired()) {
+    if (pending.transport->cancelled()) {
         pending_archive_download_.reset();
         xSemaphoreGive(job_mutex_);
         return;
@@ -580,7 +576,7 @@ void StorageHttpController::poll_archive_download() {
         }
     }
 
-    const AsyncWebServerRequestPtr pending_request = pending.request;
+    auto transport = std::move(pending.transport);
     std::shared_ptr<ArchiveDownloadRef> ref = std::move(pending.response);
     const uint64_t archive_size = pending.archive_size;
     char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
@@ -588,11 +584,8 @@ void StorageHttpController::poll_archive_download() {
     pending_archive_download_.reset();
     xSemaphoreGive(job_mutex_);
 
-    std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
-    if (!request) return;
     if (failed) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"archive_stream_unavailable\"}");
+        transport->publish(http_json_error_response(503, "archive_stream_unavailable"));
         return;
     }
 
@@ -602,12 +595,11 @@ void StorageHttpController::poll_archive_download() {
             static_cast<size_t>(archive_size),
             [ref](uint8_t *buffer,
                   size_t max_length,
-                  size_t offset) -> size_t {
+                  size_t offset) -> PreparedByteRead {
                 return ref->fill(buffer, max_length, offset);
             });
     if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        transport->publish(http_json_error_response(503, "response_alloc"));
         return;
     }
 
@@ -618,7 +610,7 @@ void StorageHttpController::poll_archive_download() {
     response->addHeader("Content-Disposition", disposition);
     response->addHeader("Cache-Control", "no-store");
     response->addHeader("Accept-Ranges", "none");
-    request->send(response);
+    transport->publish(std::unique_ptr<AsyncWebServerResponse>(response));
 }
 
 void StorageHttpController::register_routes(HttpRouteRegistry &server) {
@@ -935,14 +927,8 @@ void StorageHttpController::send_storage_download(AsyncWebServerRequest *request
     AsyncWebServerResponse *response = new (std::nothrow) AsyncPreparedResponse(
         "application/octet-stream",
         static_cast<size_t>(file_size),
-        [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || !ref || !ref->port || !ref->download) return 0;
-            const PreparedByteRead read = ref->port->read_download(
-                *ref->download, buffer, max_len, offset);
-            if (read.state == PreparedByteReadState::Retry) {
-                return RESPONSE_TRY_AGAIN;
-            }
-            return read.bytes;
+        [ref](uint8_t *buffer, size_t max_len, size_t offset) -> PreparedByteRead {
+            return ref->port->read_download(*ref->download, buffer, max_len, offset);
         });
     if (!response) {
         request->send(503, "application/json",
@@ -1009,7 +995,7 @@ void StorageHttpController::send_storage_rename(
     if (storage_rename_generation_ == 0) storage_rename_generation_++;
 
     StoragePathCommand command;
-    command.operation = StoragePathOperation::Move;
+    command.operation = StoragePathOperation::UserMove;
     command.source = source;
     command.destination = destination;
     command.generation = storage_rename_generation_;
@@ -1254,11 +1240,22 @@ void StorageHttpController::send_storage_archive_download(
     }
 
     pending->response = std::move(ref);
-    pending->request = request->pause();
+    try {
+        pending->transport = std::make_shared<AsyncDeferredResponse::State>();
+    } catch (const std::bad_alloc &) {
+        request->send(503, "application/json", "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    auto *deferred = new (std::nothrow) AsyncDeferredResponse(pending->transport);
+    if (!deferred) {
+        request->send(503, "application/json", "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
     pending->archive_size = archive_size;
     pending->deadline_ms = millis() + kArchiveResponseStartTimeoutMs;
     memcpy(pending->filename, filename, sizeof(pending->filename));
     pending_archive_download_ = std::move(pending);
+    request->send(deferred);
 }
 
 void StorageHttpController::send_storage_delete_start(

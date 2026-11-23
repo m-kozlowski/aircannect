@@ -6,12 +6,15 @@
 
 #include "board.h"
 #include "ble_sensor_frame.h"
+#include "large_byte_buffer.h"
 
 #if AC_OXIMETRY_BLE_ENABLED
 #include <NimBLEDevice.h>
 #endif
 
 namespace aircannect {
+
+class O2RingRecordingImport;
 
 class BleSensorProtocolEngine {
 public:
@@ -21,19 +24,25 @@ public:
                                     bool invalid,
                                     bool contact_known,
                                     bool contact_present,
-                                    bool charging);
+                                    bool charging, float pi_percent, int16_t motion,
+                                    uint32_t observed_ms);
 
     bool begin();
     void set_sample_callback(SampleCallback callback, void *context);
 
 #if AC_OXIMETRY_BLE_ENABLED
+    uint32_t notification_drops() const { return notification_drops_.load(); }
     bool matches(const NimBLEAdvertisedDevice *device) const;
     bool subscribe(NimBLEClient *client);
 #endif
     void on_connected();
     void invalidate_connection();
     void reset();
-    void poll(uint32_t now_ms);
+    void poll(uint32_t now_ms, O2RingRecordingImport *recordings = nullptr,
+              bool history_ring = false);
+    bool uses_recording_protocol(bool oxyii) const {
+        return active_protocol_ == (oxyii ? ActiveProtocol::Oxyii : ActiveProtocol::Viatom);
+    }
 
 private:
     enum class ActiveProtocol : uint8_t {
@@ -49,15 +58,21 @@ private:
                      bool invalid,
                      bool contact_known = false,
                      bool contact_present = false,
-                     bool charging = false);
+                     bool charging = false, float pi_percent = -1, int16_t motion = -1);
 
 #if AC_OXIMETRY_BLE_ENABLED
+    bool observe_wear(bool evidence, bool charging, uint32_t now_ms);
+    bool worn_ = false;
+    uint32_t last_worn_ms_ = 0;
+
     // NimBLE host callback -> sensor worker SPSC mailbox.
     static constexpr size_t NotificationQueueCapacity = 8;
     static constexpr size_t NotificationMaxBytes = BLE_ATT_MTU_MAX - 3;
 
     struct NotificationSlot {
         uint32_t generation = 0;
+        uint32_t preceding_drops = 0;
+        uint32_t observed_ms = 0;
         ActiveProtocol protocol = ActiveProtocol::None;
         NimBLERemoteCharacteristic *characteristic = nullptr;
         uint16_t length = 0;
@@ -73,6 +88,7 @@ private:
     void reset_fragment_assemblers();
 
     // PLX and Nonin
+    bool plx_spot_check_ = false;
     bool subscribe_plx();
     bool subscribe_nonin();
     void process_plx_notification(const uint8_t *data, size_t len);
@@ -87,6 +103,7 @@ private:
                              bool is_notify);
 
     // Viatom
+    enum class ClockStep : uint8_t { Probe, AwaitInfo, Save, Set, Done };
     struct ViatomState {
         NimBLERemoteCharacteristic *write = nullptr;
         uint8_t rx[64] = {};
@@ -96,7 +113,9 @@ private:
         uint32_t pending_ms = 0;
         uint32_t last_poll_ms = 0;
         bool initial_probe_complete = false;
-        bool need_time_sync = false;
+        ClockStep clock_step = ClockStep::Done;
+        bool file_open = false;
+        std::unique_ptr<LargeByteBuffer> file_rx;
     };
 
     bool subscribe_viatom();
@@ -106,9 +125,10 @@ private:
     void viatom_notify(const uint8_t *data, size_t len);
     void viatom_reset_rx();
     void viatom_clear_pending();
+    bool viatom_poll_recordings(uint32_t now_ms);
     bool viatom_write_packet(uint8_t command,
                              const uint8_t *payload,
-                             size_t payload_len);
+                             size_t payload_len, uint16_t index = 0);
     bool viatom_sync_datetime();
     bool viatom_send_command(uint8_t command,
                              const uint8_t *payload,
@@ -122,6 +142,7 @@ private:
 
     // OxyII
     static constexpr size_t OxyiiRxMax = 640;
+    enum class OxyiiFileStep { Idle, CloseForList, List, Footer, Release, SaveClock };
 
     struct OxyiiState {
         NimBLERemoteCharacteristic *write = nullptr;
@@ -135,12 +156,19 @@ private:
         bool need_auth = false;
         bool need_setup = false;
         bool need_time_sync = false;
+        bool need_identity = false, off_finger = false, file_open = false;
+        OxyiiFileStep file_step = OxyiiFileStep::Idle;
+        uint32_t file_size = 0, read_offset = 0, info_rtt_ms = 0;
+        int64_t wall_ms = 0, info_utc_ms = 0;
+        std::unique_ptr<LargeByteBuffer> list_rx;
     };
 
     bool subscribe_oxyii();
     void oxyii_on_connected();
     void oxyii_reset();
     void oxyii_poll(uint32_t now_ms);
+    void oxyii_poll_history(uint32_t now_ms);
+    void oxyii_history_reply(uint8_t command, uint8_t *payload, size_t length, uint32_t rtt);
     void oxyii_notify(const uint8_t *data, size_t len);
     void oxyii_reset_rx();
     void oxyii_clear_pending();
@@ -166,17 +194,21 @@ private:
     std::atomic<uint32_t> connection_generation_{1};
     std::atomic<uint32_t> notification_read_sequence_{0};
     std::atomic<uint32_t> notification_write_sequence_{0};
-    std::atomic<uint32_t> notification_fault_generation_{0};
+    uint32_t consumed_drops_ = 0;
     std::atomic<uint32_t> notification_drops_{0};
     NotificationSlot *notification_queue_ = nullptr;
+    std::atomic<TaskHandle_t> notification_worker_{nullptr};
     uint32_t reported_notification_drops_ = 0;
     NimBLEClient *client_ = nullptr;
     ViatomState viatom_;
+    O2RingRecordingImport *recordings_ = nullptr;
+    bool history_ring_ = false;
     OxyiiState oxyii_;
 #endif
 
     ActiveProtocol active_protocol_ = ActiveProtocol::None;
     SampleCallback sample_callback_ = nullptr;
+    uint32_t observed_ms_ = 0;
     void *sample_context_ = nullptr;
 };
 

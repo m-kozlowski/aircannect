@@ -31,8 +31,8 @@ public:
     void set_backlight(bool enabled);
     void toggle_backlight();
     void note_interaction();
-    bool previous_page();
-    bool next_page();
+    bool previous_page(bool interactive = true);
+    bool next_page(bool interactive = true);
 
 private:
     struct Field;
@@ -47,7 +47,7 @@ private:
     bool take_snapshot(DisplaySnapshot &snapshot, bool force);
     bool poll_motion(uint32_t now_ms);
     void apply_display_config();
-    bool navigate_page(int8_t direction);
+    bool navigate_page(int8_t direction, bool interactive);
     bool motion_wake_blocked(uint32_t now_ms) const;
     void render(const DisplaySnapshot &snapshot, bool force);
     void render_idle(const DisplaySnapshot &snapshot, uint8_t page);

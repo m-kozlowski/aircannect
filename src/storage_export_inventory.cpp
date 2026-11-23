@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "memory_manager.h"
+#include "oximetry_archive.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -189,13 +190,37 @@ const char *StorageExportInventory::latest_datalog_day() const {
     return datalog_day_count_ != 0 ? datalog_days_[0].name : "";
 }
 
+const char *StorageExportInventory::next_oximetry_source(size_t &cursor) const {
+    while (cursor < scan_->size()) {
+        StorageScanEntryView entry;
+        if (scan_->entry(cursor++, entry) && entry.directory && entry.root_index == state_root_index_ + 1) {
+            const char *name = storage_basename_from_path(entry.path);
+            if (strcmp(entry.path, OximetryArchiveRoot) != 0 && oximetry_source_valid(name)) return name;
+        }
+    }
+    return nullptr;
+}
+
+uint64_t StorageExportInventory::day_revision(const char *day) const {
+    const auto *entry = find_datalog_day(day);
+    return entry ? entry->revision : 0;
+}
+
+bool StorageExportInventory::source_file(const StorageScanEntryView &entry) const {
+    if (entry.directory || entry.root_index >= export_root_count_) return false;
+    if (!oximetry_) return true;
+    std::string_view source, suffix, id;
+    return kind_ == StorageExportInventoryKind::DatalogDay &&
+           oximetry_archive_path(entry.path, source, suffix) &&
+           oximetry_recording_file(source, suffix, id) != OximetryArchiveFile::Other;
+}
+
 bool StorageExportInventory::build_sources() {
     if (!scan_) return false;
 
     for (size_t i = 0; i < scan_->size(); ++i) {
         StorageScanEntryView source;
-        if (scan_->entry(i, source) && !source.directory &&
-            source.root_index < export_root_count_) {
+        if (scan_->entry(i, source) && source_file(source)) {
             source_count_++;
         }
     }
@@ -213,8 +238,7 @@ bool StorageExportInventory::build_sources() {
     size_t source_index = 0;
     for (size_t i = 0; i < scan_->size(); ++i) {
         StorageScanEntryView source;
-        if (!scan_->entry(i, source) || source.directory ||
-            source.root_index >= export_root_count_) {
+        if (!scan_->entry(i, source) || !source_file(source)) {
             continue;
         }
 
@@ -242,18 +266,24 @@ bool StorageExportInventory::build_sources() {
 }
 
 bool StorageExportInventory::build_catalog_days(uint64_t now_epoch) {
+    auto eligible_day = [&](const StorageScanEntryView &entry) -> const char * {
+        if (!entry.directory || entry.root_index != 0) return nullptr;
+        char day[9];
+        std::string_view source, suffix;
+        if (oximetry_ ? !(oximetry_archive_path(entry.path, source, suffix) && suffix.size() == 8)
+                      : !storage_export_datalog_day_from_path(entry.path, day, sizeof(day))) {
+            return nullptr;
+        }
+        const char *name = storage_basename_from_path(entry.path);
+        return storage_export_datalog_day_allowed_at(name, now_epoch) ? name : nullptr;
+    };
+
     if (!scan_) return false;
 
     size_t capacity = 0;
     for (size_t i = 0; i < scan_->size(); ++i) {
         StorageScanEntryView entry;
-        char day[9] = {};
-        if (scan_->entry(i, entry) && entry.directory &&
-            entry.root_index == 0 &&
-            storage_export_datalog_day_from_path(entry.path,
-                                                 day,
-                                                 sizeof(day)) &&
-            storage_export_datalog_day_allowed_at(day, now_epoch)) {
+        if (scan_->entry(i, entry) && eligible_day(entry)) {
             capacity++;
         }
     }
@@ -265,19 +295,13 @@ bool StorageExportInventory::build_catalog_days(uint64_t now_epoch) {
 
     for (size_t i = 0; i < scan_->size(); ++i) {
         StorageScanEntryView entry;
-        char day[9] = {};
-        if (!scan_->entry(i, entry) || !entry.directory ||
-            entry.root_index != 0 ||
-            !storage_export_datalog_day_from_path(entry.path,
-                                                  day,
-                                                  sizeof(day)) ||
-            !storage_export_datalog_day_allowed_at(day, now_epoch)) {
-            continue;
-        }
+        if (!scan_->entry(i, entry)) continue;
+        const char *name = eligible_day(entry);
+        if (!name) continue;
 
         copy_cstr(datalog_days_[datalog_day_count_].name,
                   sizeof(datalog_days_[datalog_day_count_].name),
-                  day);
+                  name);
         datalog_day_count_++;
     }
 
@@ -305,8 +329,17 @@ bool StorageExportInventory::build_catalog_days(uint64_t now_epoch) {
     for (size_t i = 0; i < scan_->size(); ++i) {
         StorageScanEntryView entry;
         char day[9] = {};
-        if (!scan_->entry(i, entry) || entry.directory ||
-            entry.root_index != state_root_index_ ||
+        if (!scan_->entry(i, entry) || entry.directory) continue;
+        if (oximetry_) {
+            const char *name = storage_basename_from_path(entry.path);
+            if (entry.root_index == 0 && strlen(name) == 8 + sizeof(OximetryDayRevisionSuffix) - 1 &&
+                strcmp(name + 8, OximetryDayRevisionSuffix) == 0) {
+                memcpy(day, name, 8);
+                if (auto *d = find_datalog_day(day)) d->revision = entry.size;
+            }
+            continue;
+        }
+        if (entry.root_index != state_root_index_ ||
             !done_path_datalog_day(state_dir_,
                                     entry.path,
                                     day,
@@ -334,7 +367,7 @@ bool StorageExportInventory::build_datalog_day(const char *day,
     datalog_days_[0].file_count = static_cast<uint32_t>(source_count_);
     datalog_days_[0].pending_count = static_cast<uint32_t>(source_count_);
 
-    for (size_t i = 0; i < source_count_; ++i) {
+    for (size_t i = 0; !oximetry_ && i < source_count_; ++i) {
         StorageExportInventoryEntryView source;
         char source_day[9] = {};
         if (!entry(i, source) ||
@@ -363,7 +396,7 @@ StorageExportInventory::create_catalog(
     size_t export_root_count,
     size_t state_root_index,
     const char *state_dir,
-    uint64_t now_epoch) {
+    uint64_t now_epoch, bool oximetry) {
     if (!scan || export_root_count == 0 || !state_dir || !state_dir[0]) {
         return {};
     }
@@ -377,6 +410,7 @@ StorageExportInventory::create_catalog(
     inventory->state_root_index_ = state_root_index;
     inventory->generation_ = inventory->scan_->generation();
     inventory->kind_ = StorageExportInventoryKind::Catalog;
+    inventory->oximetry_ = oximetry;
     copy_cstr(inventory->state_dir_,
               sizeof(inventory->state_dir_),
               state_dir);
@@ -394,7 +428,7 @@ StorageExportInventory::create_datalog_day(
     size_t state_root_index,
     size_t done_root_index,
     const char *state_dir,
-    const char *day) {
+    const char *day, bool oximetry) {
     if (!scan || !state_dir || !state_dir[0] ||
         !storage_export_is_datalog_day_name(day)) {
         return {};
@@ -409,6 +443,7 @@ StorageExportInventory::create_datalog_day(
     inventory->state_root_index_ = state_root_index;
     inventory->generation_ = inventory->scan_->generation();
     inventory->kind_ = StorageExportInventoryKind::DatalogDay;
+    inventory->oximetry_ = oximetry;
     copy_cstr(inventory->state_dir_,
               sizeof(inventory->state_dir_),
               state_dir);
@@ -445,12 +480,8 @@ bool StorageExportInventory::mark_complete(const char *state_path,
     if (complete_[source_index] != 0) return true;
 
     complete_[source_index] = 1;
-    char day[9] = {};
-    if (storage_export_datalog_day_from_descendant(local_path,
-                                                   day,
-                                                   sizeof(day))) {
-        DatalogDay *entry = find_datalog_day(day);
-        if (entry && entry->pending_count != 0) entry->pending_count--;
+    if (kind_ == StorageExportInventoryKind::DatalogDay && datalog_days_[0].pending_count) {
+        datalog_days_[0].pending_count--;
     }
     return true;
 }
@@ -474,16 +505,16 @@ bool StorageExportInventoryLoader::active() const {
 OperationAdmission StorageExportInventoryLoader::request(
     const char *state_dir,
     uint32_t generation,
-    uint64_t now_epoch) {
+    uint64_t now_epoch, const char *oximetry_source, bool discover_oximetry) {
     if (!scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
+    reset();
     if (!state_dir || !state_dir[0] ||
         strlen(state_dir) >= sizeof(state_dir_) || generation == 0) {
         return OperationAdmission::Rejected;
     }
 
-    reset_operation();
     copy_cstr(state_dir_, sizeof(state_dir_), state_dir);
     generation_ = generation;
     now_epoch_ = now_epoch != 0
@@ -491,23 +522,33 @@ OperationAdmission StorageExportInventoryLoader::request(
         : storage_export_current_epoch_seconds_or_zero();
     request_kind_ = RequestKind::Catalog;
 
-    const size_t export_root_count = storage_export_root_count();
-    if (export_root_count + 1 > AC_STORAGE_SCAN_ROOT_MAX) {
+    oximetry_ = oximetry_source != nullptr;
+    if (oximetry_ && (!oximetry_source_valid(oximetry_source) ||
+        !storage_append_child_path(OximetryArchiveRoot, oximetry_source, daily_root_, sizeof(daily_root_)))) {
+        return OperationAdmission::Rejected;
+    }
+    if (!oximetry_) copy_cstr(daily_root_, sizeof(daily_root_), storage_export_root_at(0).path);
+
+    const size_t export_root_count = oximetry_ ? 1 : storage_export_root_count();
+    const size_t root_count = export_root_count + 1 + size_t(discover_oximetry);
+    if (root_count > AC_STORAGE_SCAN_ROOT_MAX) {
         fail("export_scan_root_limit");
         return OperationAdmission::Rejected;
     }
 
     StorageScanRoot roots[AC_STORAGE_SCAN_ROOT_MAX] = {};
-    for (size_t i = 0; i < export_root_count; ++i) {
+    roots[0] = {daily_root_, false};
+    for (size_t i = 1; i < export_root_count; ++i) {
         const StorageExportRoot &root = storage_export_root_at(i);
-        roots[i] = {root.path, i == 0 ? false : root.recursive};
+        roots[i] = {root.path, root.recursive};
     }
     state_root_index_ = export_root_count;
     roots[state_root_index_] = {state_dir_, false};
+    if (discover_oximetry) roots[state_root_index_ + 1] = {OximetryArchiveRoot, false};
 
     StorageScanCommand command;
     command.roots = roots;
-    command.root_count = export_root_count + 1;
+    command.root_count = root_count;
     command.include_directories = true;
     command.generation = generation_;
     const OperationSubmission submission = scan_port_->request_scan(command);
@@ -528,23 +569,18 @@ OperationAdmission StorageExportInventoryLoader::request_datalog_day(
     if (!scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
-    if (!state_dir_[0] || !storage_export_is_datalog_day_name(day) ||
+    if (phase_ != Phase::Ready || !storage_export_is_datalog_day_name(day) ||
         generation == 0) {
         return OperationAdmission::Rejected;
     }
-
-    reset_operation();
-    generation_ = generation;
-    request_kind_ = RequestKind::DatalogDay;
-    copy_cstr(requested_day_, sizeof(requested_day_), day);
 
     char datalog_path[AC_STORAGE_PATH_MAX] = {};
     char state_path[AC_STORAGE_PATH_MAX] = {};
     char done_path[AC_STORAGE_PATH_MAX] = {};
     const int datalog_length = snprintf(datalog_path,
                                         sizeof(datalog_path),
-                                        "/DATALOG/%s",
-                                        day);
+                                        "%s/%s",
+                                        daily_root_, day);
     if (datalog_length <= 0 ||
         static_cast<size_t>(datalog_length) >= sizeof(datalog_path) ||
         !storage_export_build_state_path(state_dir_,
@@ -560,24 +596,23 @@ OperationAdmission StorageExportInventoryLoader::request_datalog_day(
     }
 
     StorageScanRoot roots[] = {
-        {datalog_path, true},
+        {datalog_path, !oximetry_},
         {state_path, false},
         {done_path, false},
     };
-    state_root_index_ = 1;
-
     StorageScanCommand command;
     command.roots = roots;
     command.root_count = sizeof(roots) / sizeof(roots[0]);
     command.include_directories = false;
-    command.generation = generation_;
+    command.generation = generation;
     const OperationSubmission submission = scan_port_->request_scan(command);
-    if (!submission.accepted()) {
-        phase_ = Phase::Idle;
-        request_kind_ = RequestKind::None;
-        return submission.admission;
-    }
+    if (!submission.accepted()) return submission.admission;
 
+    reset_operation();
+    generation_ = generation;
+    request_kind_ = RequestKind::DatalogDay;
+    copy_cstr(requested_day_, sizeof(requested_day_), day);
+    state_root_index_ = 1;
     scan_ticket_ = submission.ticket;
     phase_ = Phase::Scan;
     return OperationAdmission::Accepted;
@@ -585,6 +620,11 @@ OperationAdmission StorageExportInventoryLoader::request_datalog_day(
 
 bool StorageExportInventoryLoader::state_file_matches_request(
     const char *path) const {
+    if (oximetry_ && request_kind_ == RequestKind::Catalog) {
+        char day[9] = {};
+        return done_path_datalog_day(state_dir_, path, day, sizeof(day)) &&
+               inventory_->find_datalog_day(day);
+    }
     if (!path_has_suffix(path, ".state")) return false;
 
     char day[9] = {};
@@ -668,6 +708,19 @@ void StorageExportInventoryLoader::parse_state_line() {
     if (!state_line_overflow_) {
         state_line_[state_line_length_] = '\0';
 
+        if (oximetry_ && request_kind_ == RequestKind::Catalog) {
+            char day[9] = {};
+            if (done_path_datalog_day(state_dir_, state_path_, day, sizeof(day))) {
+                auto *d = inventory_->find_datalog_day(day);
+                char expected[24];
+                const int n = snprintf(expected, sizeof(expected), "%llu",
+                                       static_cast<unsigned long long>(d->revision));
+                d->done = state_line_length_ == size_t(n) && state_file_size_ == size_t(n + 1) &&
+                          memcmp(expected, state_line_, state_line_length_) == 0;
+            }
+            state_line_length_ = 0;
+            return;
+        }
         uint64_t size = 0;
         uint64_t mtime = 0;
         const char *path = nullptr;
@@ -759,17 +812,17 @@ StorageExportInventoryLoadResult StorageExportInventoryLoader::poll(
         if (request_kind_ == RequestKind::Catalog) {
             inventory_ = StorageExportInventory::create_catalog(
                 scan_,
-                storage_export_root_count(),
+                state_root_index_,
                 state_root_index_,
                 state_dir_,
-                now_epoch_);
+                now_epoch_, oximetry_);
         } else if (request_kind_ == RequestKind::DatalogDay) {
             inventory_ = StorageExportInventory::create_datalog_day(
                 scan_,
                 state_root_index_,
                 2,
                 state_dir_,
-                requested_day_);
+                requested_day_, oximetry_);
         }
         if (!inventory_) {
             fail("export_inventory_alloc_failed");
@@ -836,6 +889,8 @@ void StorageExportInventoryLoader::reset_operation() {
 void StorageExportInventoryLoader::reset() {
     reset_operation();
     state_dir_[0] = '\0';
+    daily_root_[0] = '\0';
+    oximetry_ = false;
 }
 
 }  // namespace aircannect

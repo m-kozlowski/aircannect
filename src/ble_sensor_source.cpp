@@ -7,6 +7,8 @@
 #include "debug_log.h"
 #include "oximetry_codec.h"
 #include "string_util.h"
+#include "storage_service.h"
+#include "storage_usb.h"
 
 namespace aircannect {
 
@@ -175,6 +177,9 @@ BleSensorStatus BleSensorSource::status() const {
     portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&mux_));
 #endif
     out = status_;
+#if AC_OXIMETRY_BLE_ENABLED
+    out.notification_drops = protocols_.notification_drops();
+#endif
     out.task_started = task_started_;
     out.scan_count = scan_count_;
     out.scan_generation = scan_generation_;
@@ -286,6 +291,8 @@ bool BleSensorSource::load_known() {
             snprintf(key, sizeof(key), "e%u", i);
             known_[i].autoconnect = prefs.getBool(key, true);
         }
+        known_key(key, sizeof(key), i, "rec");
+        known_[i].recordings = prefs.getBool(key, false);
         known_key(key, sizeof(key), i, "name");
         has_key = prefs.isKey(key);
         String name = prefs.getString(key, "");
@@ -339,6 +346,8 @@ bool BleSensorSource::save_known() const {
         ok = prefs.putUChar(key, snapshot[i].addr_type) != 0 && ok;
         known_key(key, sizeof(key), out_index, "auto");
         ok = prefs.putBool(key, snapshot[i].autoconnect) != 0 && ok;
+        known_key(key, sizeof(key), out_index, "rec");
+        ok = prefs.putBool(key, snapshot[i].recordings) != 0 && ok;
         known_key(key, sizeof(key), out_index, "name");
         ok = prefs.putString(key, snapshot[i].name) != 0 && ok;
         out_index++;
@@ -350,6 +359,8 @@ bool BleSensorSource::save_known() const {
         known_key(key, sizeof(key), out_index, "type");
         remove_nvs_key_if_present(prefs, key);
         known_key(key, sizeof(key), out_index, "auto");
+        remove_nvs_key_if_present(prefs, key);
+        known_key(key, sizeof(key), out_index, "rec");
         remove_nvs_key_if_present(prefs, key);
         known_key(key, sizeof(key), out_index, "name");
         remove_nvs_key_if_present(prefs, key);
@@ -592,6 +603,15 @@ bool BleSensorSource::request_connect(const OximetrySensorDevice &device) {
     return true;
 }
 
+void BleSensorSource::request_live_disconnect() {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+    if (status_.connected && live_disconnect_ == LiveDisconnect::None)
+        live_disconnect_ = LiveDisconnect::Requested;
+    portEXIT_CRITICAL(&mux_);
+#endif
+}
+
 bool BleSensorSource::request_disconnect(bool hold_until_absent) {
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
@@ -656,6 +676,21 @@ bool BleSensorSource::set_autoconnect(const char *addr, bool enabled) {
     if (changed) save_known();
     if (should_start) ensure_task();
     return changed;
+}
+
+bool BleSensorSource::set_recordings(const char *addr, bool enabled) {
+    if (!addr || !*addr) return false;
+    size_t index = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&mux_);
+#endif
+    const bool found = find_addr(addr, index) && known_[index].supports_recordings();
+    const bool changed = found && known_[index].recordings != enabled;
+    if (changed) known_[index].recordings = enabled;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&mux_);
+#endif
+    return found && (!changed || save_known());
 }
 
 bool BleSensorSource::replace_known_sensors(
@@ -979,6 +1014,7 @@ void BleSensorSource::task_loop() {
     set_state(OximetrySensorState::Idle);
     SensorBleScanCallbacks scan_callbacks(this);
     SensorBleClientCallbacks client_callbacks(this);
+    bool import_session = false;
 
     while (true) {
         bool enabled = false;
@@ -1000,6 +1036,10 @@ void BleSensorSource::task_loop() {
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
 #endif
+        if (reset_protocols || !enabled || suspend) {
+            recordings_.end();
+            import_session = false;
+        }
         if (reset_protocols) protocols_.reset();
         if (release_disconnected_client &&
             client_ && !client_->isConnected()) {
@@ -1044,15 +1084,37 @@ void BleSensorSource::task_loop() {
         bool manual_scan = false;
         bool manual_connect = false;
         OximetrySensorDevice manual_target_device;
+        char import_peer[sizeof(connected_addr_)]{};
+        bool downloads = false, oxyii_ring = false;
+        const uint32_t policy_ms = millis();
+        const bool keep_for_import = recordings_.needs_connection(policy_ms);
+        const bool off_finger_timeout = import_session && recordings_.off_finger_timeout(policy_ms);
+
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
 #endif
         disconnect_now = disconnect_requested_;
         disconnect_hold_until_absent = disconnect_hold_until_absent_;
         disconnect_holdoff_kind = disconnect_holdoff_kind_;
+        if (!disconnect_now && (off_finger_timeout || live_disconnect_ != LiveDisconnect::None)) {
+            if (keep_for_import) {
+                live_disconnect_ = LiveDisconnect::DeferredForImport;
+            } else {
+                disconnect_now = true;
+                disconnect_hold_until_absent = true;
+            }
+        }
+        if (disconnect_now) live_disconnect_ = LiveDisconnect::None;
         manual_scan = scan_requested_;
         manual_connect = manual_connect_requested_;
         manual_target_device = manual_target_device_;
+        size_t known_index = 0;
+        if (connected_addr_[0] && find_addr(connected_addr_, known_index) &&
+            known_[known_index].supports_recordings()) {
+            memcpy(import_peer, connected_addr_, sizeof(import_peer));
+            downloads = known_[known_index].recordings;
+            oxyii_ring = known_[known_index].oxyii_ring();
+        }
         disconnect_requested_ = false;
         disconnect_hold_until_absent_ = false;
         disconnect_holdoff_kind_ = AutoconnectHoldoffKind::Standard;
@@ -1082,7 +1144,19 @@ void BleSensorSource::task_loop() {
         }
 
         const uint32_t now_ms = millis();
-        protocols_.poll(now_ms);
+        const bool history_ring = import_peer[0] && protocols_.uses_recording_protocol(oxyii_ring);
+        const bool import = history_ring && !disconnect_now &&
+                            Storage::mounted() && !StorageUsb::suspended();
+        if (import != import_session) {
+            if (import) recordings_.begin(import_peer, StorageService::path_port(),
+                                          StorageService::range_write_port(),
+                                          &StorageService::atomic_write_port(),
+                                          StorageService::notify_oximetry_publication);
+            else recordings_.end();
+            import_session = import;
+        }
+        if (import_session) recordings_.enable_downloads(downloads);
+        protocols_.poll(now_ms, import_session ? &recordings_ : nullptr, history_ring);
         update_autoconnect_holdoffs(
             now_ms, runtime_.passive_observation_active());
 
@@ -1168,7 +1242,7 @@ void BleSensorSource::task_loop() {
 
         if (!manual_scan) {
             if (!connected) set_state(OximetrySensorState::Idle);
-            vTaskDelay(pdMS_TO_TICKS(100));
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
             continue;
         }
 
@@ -1439,12 +1513,13 @@ void BleSensorSource::protocol_sample_callback(
     bool invalid,
     bool contact_known,
     bool contact_present,
-    bool charging) {
+    bool charging, float pi_percent, int16_t motion, uint32_t observed_ms) {
     auto *source = static_cast<BleSensorSource *>(context);
     if (!source) return;
 
     source->publish_sample(spo2_raw, pulse_raw, invalid,
-                           contact_known, contact_present, charging);
+                           contact_known, contact_present, charging, pi_percent, motion,
+                           observed_ms);
 }
 
 void BleSensorSource::advertisement_callback(
@@ -1504,20 +1579,24 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
                                      bool from_invalid_packet,
                                      bool contact_known,
                                      bool contact_present,
-                                     bool charging) {
+                                     bool charging, float pi_percent, int16_t motion,
+                                     uint32_t observed_ms) {
     bool spo2_valid = false;
     bool pulse_valid = false;
     const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
-    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid);
+    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid, 321);
     const bool valid = spo2_valid && pulse_valid && !from_invalid_packet;
 
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
     if (charging) {
-        disconnect_requested_ = true;
-        disconnect_hold_until_absent_ = true;
-        disconnect_holdoff_kind_ = AutoconnectHoldoffKind::Charging;
+        live_disconnect_ = LiveDisconnect::None;
+        if (!recordings_.needs_connection(millis())) {
+            disconnect_requested_ = true;
+            disconnect_hold_until_absent_ = true;
+            disconnect_holdoff_kind_ = AutoconnectHoldoffKind::Charging;
+        }
         status_.notifications++;
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
@@ -1525,14 +1604,23 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
         return;
     }
 
+    if (valid || (live_disconnect_ == LiveDisconnect::DeferredForImport &&
+                  contact_known && contact_present)) {
+        live_disconnect_ = LiveDisconnect::None;
+    }
+
     OximetrySample sample;
     sample.source = OximetrySource::Ble;
-    sample.spo2 = valid ? spo2 : -1;
-    sample.pulse_bpm = valid ? pulse : -1;
+    sample.spo2 = spo2;
+    sample.pulse_bpm = pulse;
     sample.valid = valid;
     sample.contact_known = contact_known;
     sample.contact_present = contact_present;
-    sample.observed_ms = millis();
+    sample.observed_ms = observed_ms;
+    sample.pi_percent = pi_percent;
+    sample.motion = motion;
+    snprintf(sample.peer, sizeof(sample.peer), "%s", connected_addr_);
+    memcpy(sample.serial, recordings_.serial(), sizeof(sample.serial));
     if (connected_name_[0]) {
         snprintf(sample.detail, sizeof(sample.detail),
                  "%s %s", connected_addr_, connected_name_);
@@ -1555,6 +1643,7 @@ void BleSensorSource::callback_disconnected(int reason) {
     portENTER_CRITICAL(&mux_);
 #endif
     protocol_reset_pending_ = true;
+    live_disconnect_ = LiveDisconnect::None;
     client_release_pending_ = true;
     disconnect_pending_ = true;
     pending_disconnect_reason_ = reason;

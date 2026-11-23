@@ -173,12 +173,12 @@ uint64_t file_modified(const char *path) {
         ? static_cast<uint64_t>(info.st_mtime) : 0;
 }
 
-WriteStagingBuffer::~WriteStagingBuffer() {
+DmaStagingBuffer::~DmaStagingBuffer() {
     reset();
 }
 
-uint8_t *WriteStagingBuffer::get(size_t write_size) {
-    if (!attempted_ && write_size >= 1024) {
+uint8_t *DmaStagingBuffer::get(size_t transfer_size) {
+    if (!attempted_ && transfer_size >= 1024) {
         attempted_ = true;
         data_ = static_cast<uint8_t *>(Memory::alloc_dma(Capacity));
     }
@@ -186,17 +186,46 @@ uint8_t *WriteStagingBuffer::get(size_t write_size) {
     return data_;
 }
 
-void WriteStagingBuffer::reset() {
+void DmaStagingBuffer::reset() {
     Memory::free(data_);
     data_ = nullptr;
     attempted_ = false;
+}
+
+void DmaStagingBuffer::configure_reader(FILE *file, size_t bytes, size_t fallback_size) {
+    if (bytes >= Capacity) {
+        auto *buffer = reinterpret_cast<char *>(get(Capacity));
+        if (buffer && setvbuf(file, buffer, _IOFBF, Capacity) == 0) return;
+        reset();
+    }
+
+    if (fallback_size) setvbuf(file, nullptr, _IOFBF, fallback_size);
+}
+
+bool DmaStagingBuffer::seek_reader(FILE *file, uint32_t offset, uint64_t file_size) const {
+    if (offset > INT32_MAX) {
+        errno = EOVERFLOW;
+        return false;
+    }
+
+    const size_t prefix = data_ && offset < file_size ? offset % Capacity : 0;
+    if (fseek(file, static_cast<long>(offset - prefix), SEEK_SET) != 0) return false;
+
+    // Consume the prefix through stdio so later refills start on a DMA page.
+    uint8_t discard[128];
+    for (size_t left = prefix; left;) {
+        const size_t count = std::min(left, sizeof(discard));
+        if (fread(discard, 1, count, file) != count) return false;
+        left -= count;
+    }
+    return true;
 }
 
 namespace {
 
 template <typename Write, typename Span>
 size_t write_staged(Write write, Span span, size_t size,
-                    WriteStagingBuffer &staging) {
+                    DmaStagingBuffer &staging, size_t first_offset = 0) {
     // S3 SDMMC otherwise bounces PSRAM data through one 512-byte DMA sector
     // per transaction. Keep stdio buffers small so they do not undo staging.
     uint8_t *dma = staging.get(size);
@@ -208,18 +237,35 @@ size_t write_staged(Write write, Span span, size_t size,
         if (!data || !available) break;
 
         size_t chunk = std::min(available, size - written);
-        if (dma) {
-            chunk = std::min(WriteStagingBuffer::Capacity, size - written);
+        const size_t position = first_offset + written;
+        constexpr size_t sector = DmaStagingBuffer::SectorBytes;
+        alignas(4) uint8_t joined_sector[sector];
+        uint8_t *gather = dma;
+        if (gather) {
+            chunk = std::min(DmaStagingBuffer::Capacity -
+                position % DmaStagingBuffer::Capacity, size - written);
+        } else if (chunk < size - written) {
+            // A payload span may end mid-sector even without DMA staging.
+            const size_t suffix = (position + chunk) % sector;
+            if (chunk > suffix) {
+                chunk -= suffix;
+            } else {
+                gather = joined_sector;
+                chunk = std::min(sector - position % sector, size - written);
+            }
+        }
+
+        if (gather) {
             size_t copied = 0;
             while (copied < chunk) {
                 data = span(written + copied, available);
                 if (!data || !available) break;
                 const size_t count = std::min(available, chunk - copied);
-                memcpy(dma + copied, data, count);
+                memcpy(gather + copied, data, count);
                 copied += count;
             }
             if (copied != chunk) break;
-            data = dma;
+            data = gather;
         }
         const size_t part = write(data, chunk);
         written += part;
@@ -232,7 +278,7 @@ size_t write_staged(Write write, Span span, size_t size,
 }  // namespace
 
 size_t write_buffer(File &file, const uint8_t *data, size_t size,
-                    WriteStagingBuffer &staging) {
+                    DmaStagingBuffer &staging) {
     return write_staged([&file](const uint8_t *bytes, size_t count) {
         return file.write(bytes, count);
     }, [data, size](size_t offset, size_t &available) {
@@ -242,7 +288,7 @@ size_t write_buffer(File &file, const uint8_t *data, size_t size,
 }
 
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
-                     size_t offset, size_t size, WriteStagingBuffer &staging) {
+                     size_t offset, size_t size, DmaStagingBuffer &staging) {
     release_read_handle(command.path.c_str());
 
     return write_staged([descriptor, &command](const uint8_t *bytes, size_t count) {
@@ -256,7 +302,7 @@ size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
         return written > 0 ? static_cast<size_t>(written) : 0;
     }, [&command, offset](size_t position, size_t &available) {
         return command.span(offset + position, available);
-    }, size, staging);
+    }, size, staging, command.offset + offset);
 }
 
 }  // namespace aircannect::Storage

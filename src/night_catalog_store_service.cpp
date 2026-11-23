@@ -501,12 +501,21 @@ void NightCatalogStoreService::finish_load(
     status_.error[0] = '\0';
 }
 
+void NightCatalogStoreService::invalidate_sources(SleepDayId first, SleepDayId last) {
+    if (!first.valid()) return;
+    if (!missing_first_.valid() || first < missing_first_) missing_first_ = first;
+    if (!missing_last_.valid() || missing_last_ < last) missing_last_ = last;
+}
+
 bool NightCatalogStoreService::sources_stored(
     const NightCatalogRecord &record) const {
     if (runtime_ && runtime_->durable_sources_day.valid() &&
         runtime_->durable_sources_day == record.sleep_day) {
         return true;
     }
+
+    if (missing_first_.valid() && !(record.sleep_day < missing_first_) &&
+        !(missing_last_ < record.sleep_day)) return false;
 
     const auto &baseline = runtime_ && runtime_->save_baseline
         ? runtime_->save_baseline : stored_;
@@ -2089,6 +2098,7 @@ bool NightCatalogStoreService::poll(bool allow_layout_mutation) {
             const bool installed_staging = runtime_->installing;
             reset_operation();
             if (installed_staging) {
+                missing_first_ = missing_last_ = {};
                 runtime_->cleanup_pending = false;
                 runtime_->staging_root_clean = true;
                 clear_staging();
@@ -2278,6 +2288,7 @@ void NightCatalogStoreService::cancel() {
 }
 
 void NightCatalogStoreService::forget_media() {
+    missing_first_ = missing_last_ = {};
     cancel();
 
     if (runtime_) runtime_->layout_ready = false;

@@ -17,6 +17,7 @@ bool BleSensorProtocolEngine::subscribe_plx() {
         service->getCharacteristic(NimBLEUUID("2A5F"));
     if (continuous && continuous->canNotify() &&
         continuous->subscribe(true, plx_notify)) {
+        plx_spot_check_ = false;
         notify_characteristic_.store(continuous, std::memory_order_release);
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor subscribed PLX continuous\n");
@@ -27,6 +28,7 @@ bool BleSensorProtocolEngine::subscribe_plx() {
         service->getCharacteristic(NimBLEUUID("2A5E"));
     if (spot && (spot->canNotify() || spot->canIndicate()) &&
         spot->subscribe(spot->canNotify(), plx_notify)) {
+        plx_spot_check_ = true;
         notify_characteristic_.store(spot, std::memory_order_release);
         Log::logf(CAT_OXI, LOG_DEBUG, "Sensor subscribed PLX spot\n");
         return true;
@@ -63,14 +65,15 @@ void BleSensorProtocolEngine::process_plx_notification(
     bool spo2_valid = false;
     bool pulse_valid = false;
     const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
-    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid);
+    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid, 321);
     const bool valid = spo2_valid && pulse_valid;
+    const float pi = decode_plx_pi(data, len, plx_spot_check_);
 
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "Sensor PLX reading %s spo2=%d pulse=%d\n",
+              "Sensor PLX reading %s spo2=%d pulse=%d pi=%.6g\n",
               valid ? "valid" : "invalid",
-              static_cast<int>(spo2), static_cast<int>(pulse));
-    emit_sample(spo2_raw, pulse_raw, !valid);
+              static_cast<int>(spo2), static_cast<int>(pulse), double(pi));
+    emit_sample(spo2_raw, pulse_raw, !valid, false, false, false, pi);
 }
 #endif
 

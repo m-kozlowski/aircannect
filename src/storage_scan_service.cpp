@@ -39,6 +39,7 @@ struct StorageScanService::Job {
     bool active = false;
     bool abandoned = false;
     bool include_directories = false;
+    StorageScanCommand::Filter filter = nullptr;
     OperationTicket ticket;
     Root roots[AC_STORAGE_SCAN_ROOT_MAX];
     size_t root_count = 0;
@@ -148,6 +149,7 @@ OperationSubmission StorageScanService::request_scan(
     job_->active = true;
     job_->ticket = next_ticket_locked(command.generation);
     job_->include_directories = command.include_directories;
+    job_->filter = command.filter;
     job_->root_count = command.root_count;
     for (size_t i = 0; i < command.root_count; ++i) {
         copy_cstr(job_->roots[i].path,
@@ -386,6 +388,11 @@ bool StorageScanService::scan_next_entry_locked(const char *&error) {
         return true;
     }
 
+    using Visit = StorageScanCommand::Visit;
+    const auto visit = job_->filter
+        ? job_->filter(job_->walk_depth, child.name, child.is_dir) : Visit::Collect;
+    if (visit == Visit::Skip) return true;
+
     char child_path[AC_STORAGE_PATH_MAX] = {};
     if (!storage_append_child_path(frame.path,
                                    child.name,
@@ -400,7 +407,7 @@ bool StorageScanService::scan_next_entry_locked(const char *&error) {
         ? static_cast<uint64_t>(child.last_write)
         : 0;
     if (child.is_dir) {
-        if (job_->include_directories &&
+        if (visit == Visit::Collect && job_->include_directories &&
             !append_entry_locked(child_path,
                                  true,
                                  frame.root_index,
@@ -409,7 +416,7 @@ bool StorageScanService::scan_next_entry_locked(const char *&error) {
             error = "scan_snapshot_alloc_failed";
             return false;
         }
-        if (frame.recursive) {
+        if (frame.recursive && (!job_->filter || visit == Visit::Descend)) {
             return push_directory_locked(child_path,
                                          true,
                                          frame.root_index,

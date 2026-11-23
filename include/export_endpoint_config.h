@@ -25,6 +25,8 @@ struct SleepHqExportConfig {
     char team_id[AC_SLEEPHQ_ID_MAX] = {};
     char device_id[AC_SLEEPHQ_ID_MAX] = {};
     char mask_id[AC_SLEEPHQ_ID_MAX] = {};
+    char oximetry_source[33] = {};
+    bool prefer_oximetry_bin = false;
 };
 
 struct ExportEndpointConfig {

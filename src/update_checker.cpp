@@ -1,6 +1,7 @@
 #include "update_checker.h"
 
 #include <cstring>
+#include <string_view>
 #include <freertos/idf_additions.h>
 
 #include "board.h"
@@ -26,11 +27,21 @@ bool deadline_due(uint32_t now, uint32_t deadline) {
 
 static constexpr uint32_t UPDATE_HEAP_RETRY_MS = 10 * 1000;
 
+std::string_view url_for_log(std::string_view url) {
+    url = url.substr(0, url.find_first_of("?#"));
+    const size_t authority = url.find("://") + 3;
+    const size_t path = url.find('/', authority);
+    const size_t at = url.rfind('@', path);
+    return at == url.npos ? url : url.substr(at + 1);
+}
+
 }  // namespace
 
-void UpdateChecker::begin(const AppConfigData &config, ExportTask &exports) {
+void UpdateChecker::begin(const AppConfigData &config, ExportTask &exports,
+                          SaveUpdateUrl save_update_url) {
     config_ = &config;
     exports_ = &exports;
+    save_update_url_ = save_update_url;
     if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
 
     if (!lock()) return;
@@ -53,6 +64,32 @@ void UpdateChecker::poll(const NetworkSnapshot &network,
     if (!lock()) return;
 
     reap_task_locked();
+    if (!task_ && migration_from_) {
+        char *from = migration_from_;
+        migration_from_ = nullptr;
+        LargeTextBuffer to;
+        migration_to_.swap(to);
+
+        const bool current = task_generation_ == config_generation_ &&
+                             config_->update_url == from;
+        unlock();
+
+        if (current) {
+            const String value(to.c_str());
+            if (value.length() == to.length() && save_update_url_(value)) {
+                const auto old_url = url_for_log(from);
+                const auto new_url = url_for_log(to.c_str());
+                Log::logf(CAT_OTA, LOG_INFO, "update URL migrated from=%.*s to=%.*s\n",
+                          static_cast<int>(old_url.size()), old_url.data(),
+                          static_cast<int>(new_url.size()), new_url.data());
+            } else {
+                Log::logf(CAT_OTA, LOG_WARN, "could not save migrated update URL\n");
+            }
+        }
+        Memory::free(from);
+        return;
+    }
+
     if (status_.active) trace_phase(trace_phase_);
 
     if (config_dirty_) {
@@ -429,34 +466,32 @@ void UpdateChecker::run_task() {
     context.checker = this;
     context.generation = generation;
 
-    size_t manifest_len = 0;
-    OtaUrlError transport_error;
-    trace_phase("manifest_fetch");
-    if (!ota_url_fetch(url, manifest_buffer, AC_OTA_MANIFEST_MAX_BYTES,
-                       manifest_len, transport_error, continue_callback,
-                       &context, trace_callback)) {
-        const bool retry_soon =
-            transport_error.http_status == 0 ||
-            transport_error.http_status == 408 ||
-            transport_error.http_status == 429 ||
-            transport_error.http_status >= 500;
-
-        Memory::free(manifest_buffer);
-        finish_task(url, generation, nullptr, false, {}, {},
-                    transport_error.code, retry_soon, &transport_error);
-        return;
-    }
-    manifest_buffer[manifest_len] = '\0';
-    trace_phase("manifest_parse");
-
     OtaReleaseManifest manifest;
     char manifest_error[AC_OTA_RELEASE_ERROR_MAX] = {};
-    if (!ota_parse_release_manifest(
-            reinterpret_cast<const char *>(manifest_buffer), manifest_len,
-            AC_OTA_RELEASE_TARGET, manifest, manifest_error)) {
+    OtaUrlError transport_error;
+
+    auto fetch_manifest = [&](const char *address, LargeTextBuffer *migration) {
+        size_t length = 0;
+        if (!ota_url_fetch(address, manifest_buffer, AC_OTA_MANIFEST_MAX_BYTES,
+                           length, transport_error, continue_callback,
+                           &context, trace_callback)) return false;
+
+        trace_phase("manifest_parse");
+        return ota_parse_release_manifest(
+            reinterpret_cast<const char *>(manifest_buffer), length,
+            AC_OTA_RELEASE_TARGET, manifest, manifest_error, address, migration);
+    };
+
+    LargeTextBuffer migration;
+    trace_phase("manifest_fetch");
+    if (!fetch_manifest(url, &migration)) {
+        const int http = transport_error.http_status;
+        const bool retry = !manifest_error[0] &&
+                           (http == 0 || http == 408 || http == 429 || http >= 500);
         Memory::free(manifest_buffer);
-        finish_task(url, generation, nullptr, false, {}, {}, manifest_error,
-                    false);
+        finish_task(url, generation, nullptr, false, {}, {},
+                    manifest_error[0] ? manifest_error : transport_error.code,
+                    retry, manifest_error[0] ? nullptr : &transport_error);
         return;
     }
 
@@ -519,6 +554,19 @@ void UpdateChecker::run_task() {
         }
     }
 
+    // Keep the original release if the proposed destination is unavailable.
+    char version[sizeof(manifest.version)];
+    memcpy(version, manifest.version, sizeof(version));
+    bool verified = false;
+    if (migration.length() && !cancelled(generation)) {
+        trace_phase("migration_probe");
+        if (fetch_manifest(migration.c_str(), nullptr)) {
+            verified = ota_resolve_release_artifact_url(
+                migration.c_str(), manifest.preferred_artifact.url,
+                reinterpret_cast<char *>(manifest_buffer), AC_OTA_URL_MAX_LENGTH + 1);
+        }
+    }
+
     if (cancelled(generation)) {
         Memory::free(manifest_buffer);
         finish_task(url, generation, nullptr, false, artifact, {}, "aborted",
@@ -528,20 +576,22 @@ void UpdateChecker::run_task() {
 
     Memory::free(manifest_buffer);
     trace_phase("publish");
-    finish_task(url, generation, &manifest, update_available, artifact,
-                std::move(release_notes), nullptr, false);
+    finish_task(url, generation, version, update_available, artifact,
+                std::move(release_notes), nullptr, false, nullptr,
+                verified ? &migration : nullptr);
 }
 
 void UpdateChecker::finish_task(
     char *url,
     uint32_t generation,
-    const OtaReleaseManifest *manifest,
+    const char *version,
     bool update_available,
     OwnedArtifact artifact,
     std::shared_ptr<const LargeByteBuffer> release_notes,
     const char *error,
     bool retry_soon,
-    const OtaUrlError *transport_error) {
+    const OtaUrlError *transport_error,
+    LargeTextBuffer *verified_migration) {
     bool publish = false;
     const char *deferred_reason = nullptr;
     const uint32_t now = millis();
@@ -565,12 +615,17 @@ void UpdateChecker::finish_task(
                 (retry_soon ? AC_OTA_UPDATE_RETRY_INTERVAL_MS
                             : AC_OTA_UPDATE_CHECK_INTERVAL_MS);
 
-            if (manifest && (!error || !*error)) {
+            if (version && (!error || !*error)) {
                 status_.checked = true;
                 status_.available = update_available;
-                status_.version = manifest->version;
+                status_.version = version;
                 status_.error = "";
 
+                if (verified_migration && !cancel_requested_) {
+                    migration_from_ = url;
+                    url = nullptr;
+                    migration_to_.swap(*verified_migration);
+                }
                 clear_release_locked();
                 if (update_available && artifact.url) {
                     available_artifact_ = artifact;
@@ -602,15 +657,15 @@ void UpdateChecker::finish_task(
     }
 
     trace_phase(error && *error ? "failed" : "finished");
-    if (manifest && (!error || !*error)) {
+    if (version && (!error || !*error)) {
         if (update_available) {
             Log::logf(CAT_OTA, LOG_INFO,
                       "firmware update available current=%s release=%s\n",
-                      aircannect_version(), manifest->version);
+                      aircannect_version(), version);
         } else {
             Log::logf(CAT_OTA, LOG_DEBUG,
                       "firmware update check current=%s latest=%s\n",
-                      aircannect_version(), manifest->version);
+                      aircannect_version(), version);
         }
         return;
     }

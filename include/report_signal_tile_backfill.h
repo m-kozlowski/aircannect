@@ -22,6 +22,9 @@ public:
     bool start(const ReportSignalStoreMetadata &metadata,
                uint32_t generation);
     bool poll();
+    OperationTicket storage_wait() const {
+        return writer_.active() ? writer_.storage_wait() : publication_.storage_wait();
+    }
     void reset();
 
     bool active() const { return active_; }

@@ -12,8 +12,12 @@ constexpr LocalActionDefinition ACTIONS[] = {
      "display_previous_page", "Previous display page"},
     {LocalActionId::DisplayNextPage,
      "display_next_page", "Next display page"},
+    {LocalActionId::DisplayBacklightOn, "display_backlight_on", "Turn on display backlight"},
+    {LocalActionId::DisplayBacklightOff, "display_backlight_off", "Turn off display backlight"},
     {LocalActionId::DisplayToggleBacklight,
      "display_toggle_backlight", "Toggle display backlight"},
+    {LocalActionId::TherapyStart, "therapy_start", "Start therapy"},
+    {LocalActionId::TherapyStop, "therapy_stop", "Stop therapy"},
     {LocalActionId::TherapyToggle,
      "therapy_toggle", "Start or stop therapy"},
     {LocalActionId::PowerOff, "power_off", "Power off AirCANnect"},
@@ -22,6 +26,9 @@ constexpr LocalActionDefinition ACTIONS[] = {
     {LocalActionId::TriggerSync, "trigger_sync", "Sync exports"},
     {LocalActionId::DisconnectCpap,
      "disconnect_cpap", "Disconnect from CPAP"},
+    {LocalActionId::WarmupStart, "warmup_start", "Start warm-up"},
+    {LocalActionId::WarmupStop, "warmup_stop", "Stop warm-up"},
+    {LocalActionId::WarmupToggle, "warmup_toggle", "Start or stop warm-up"},
 };
 
 }  // namespace

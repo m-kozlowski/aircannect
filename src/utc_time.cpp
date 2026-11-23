@@ -1,5 +1,7 @@
 #include "utc_time.h"
 
+#include <charconv>
+#include <string.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -50,9 +52,20 @@ bool parse_utc_iso8601_ms(const char *text, int64_t &epoch_ms) {
     int second = 0;
     int consumed = 0;
 
-    if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d%n",
-               &year, &month, &day, &hour, &minute, &second,
-               &consumed) != 6) {
+    const auto field = [](const char *begin, int width, int &value) {
+        const auto parsed = std::from_chars(begin, begin + width, value);
+        return parsed.ptr == begin + width && parsed.ec == std::errc{};
+    };
+
+    if (strlen(text) >= 19 && text[4] == '-' && text[7] == '-' &&
+        text[10] == 'T' && text[13] == ':' && text[16] == ':' &&
+        field(text, 4, year) && field(text + 5, 2, month) &&
+        field(text + 8, 2, day) && field(text + 11, 2, hour) &&
+        field(text + 14, 2, minute) && field(text + 17, 2, second)) {
+        consumed = 19;
+    } else if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d%n",
+                      &year, &month, &day, &hour, &minute, &second,
+                      &consumed) != 6) {
         return false;
     }
 

@@ -1,4 +1,5 @@
 #include "report_task.h"
+#include "report_oximetry_signals.h"
 
 #include <algorithm>
 #include <atomic>
@@ -131,6 +132,7 @@ struct ReportPublishedState {
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportCatalogJson> catalog_json;
     std::shared_ptr<const NightCatalogLayoutIssues> layout_issues;
+    std::shared_ptr<const ReportOximetryCatalog> originals;
 };
 
 enum class CatalogStorePurpose : uint8_t {
@@ -254,11 +256,19 @@ struct ReportTask::Runtime {
     using RebuildSelection =
         std::vector<ReportArtifactKey, LargeAllocator<ReportArtifactKey>>;
 
-    Runtime() : engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
+    enum WakeInput : uint32_t {
+        Command = 1, Activity = 2, Capture = 4, RefreshInputs = 8, Sources = 16,
+        Summary = 32, Archive = 64, Media = 128, Status = 256,
+    };
+    enum class Continuation { None, Engine, Tiles };
+
+    explicit Runtime(ReportTask &owner) : task_owner(owner),
+        engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
 
     void record_failure(const char *operation, const char *error,
                         SleepDayId sleep_day = {}, uint32_t retry_ms = 0,
                         bool log = true, bool source_preservation_failed = false) {
+        status_pending = true;
         ++command_failures;
         copy_cstr(last_failure.operation, sizeof(last_failure.operation), operation);
         copy_cstr(last_failure.error, sizeof(last_failure.error),
@@ -302,7 +312,12 @@ struct ReportTask::Runtime {
 #endif
     }
 
-    void wake() const {
+    void wake(WakeInput input) {
+        task_owner.wake_inputs_.fetch_or(input);
+        notify_task();
+    }
+
+    void notify_task() {
 #ifdef ARDUINO
         if (task) xTaskNotifyGive(task);
 #endif
@@ -310,7 +325,8 @@ struct ReportTask::Runtime {
 
     OperationAdmission enqueue(
         ReportTaskCommand command,
-        std::shared_ptr<const ReportPeriodResult> *period_ready = nullptr) {
+        std::shared_ptr<const ReportPeriodResult> *period_ready = nullptr,
+        bool retry_failed = false) {
         if (!lock()) return OperationAdmission::Busy;
         if (storage_suspend_requested.load()) {
             unlock();
@@ -342,6 +358,7 @@ struct ReportTask::Runtime {
             }
         }
 
+        std::shared_ptr<const ReportPeriodResult> *retry_slot = nullptr;
         if (command.kind == ReportTaskCommandKind::Period) {
             const ReportPeriodKey key{command.sleep_day, command.period_days, command.period_sessions,
                 command.period_source_revision, command.period_generation};
@@ -355,8 +372,12 @@ struct ReportTask::Runtime {
                     key, *published->catalog, published->store_catalog.get(),
                     issues.get());
 
-                for (const auto &cached : period_cache) {
+                for (auto &cached : period_cache) {
                     if (cached && cached->key == key && cached->revision == revision) {
+                        if (retry_failed && cached->error[0]) {
+                            retry_slot = &cached;
+                            break;
+                        }
                         if (period_ready) *period_ready = cached;
                         unlock();
                         return OperationAdmission::Accepted;
@@ -415,7 +436,7 @@ struct ReportTask::Runtime {
                 }
                 queued.generation = command.generation;
                 unlock();
-                wake();
+                wake(Command);
                 return OperationAdmission::Accepted;
             }
         }
@@ -423,8 +444,10 @@ struct ReportTask::Runtime {
         if (command_count >= AC_REPORT_TASK_COMMAND_CAPACITY) {
             ++command_drops;
             unlock();
+            wake(Status);
             return OperationAdmission::Busy;
         }
+        if (retry_slot) retry_slot->reset();
 
         if (command.kind == ReportTaskCommandKind::Rebuild) {
             RebuildSelection selected;
@@ -461,7 +484,7 @@ struct ReportTask::Runtime {
 
         commands[command_count++] = command;
         unlock();
-        wake();
+        wake(Command);
         return OperationAdmission::Accepted;
     }
 
@@ -481,7 +504,7 @@ struct ReportTask::Runtime {
                     catalog_store.active() || pending_catalog_save ||
                     catalog_refresh.active() || store_catalog_loader.status().active() ||
                     capture_sources.active() || period_running || rebuild.active ||
-                    engine.status().state != ReportEngineState::Idle || engine.status().queued ||
+                    !engine.idle() ||
                     signal_tile_backfill_started || generation_cleanup.deleting()) continue;
             }
             if (commands[i].kind == ReportTaskCommandKind::Period &&
@@ -537,7 +560,7 @@ struct ReportTask::Runtime {
         pending_activity = next;
         activity_pending = true;
         unlock();
-        wake();
+        wake(Activity);
     }
 
     void publish_capture_session(const EdfSessionMetadata &metadata) {
@@ -551,7 +574,24 @@ struct ReportTask::Runtime {
             capture_pending = true;
         }
         unlock();
-        if (changed) wake();
+        if (changed) wake(Capture);
+    }
+
+    // Both callers hold the publication lock. Release it before cancelling I/O.
+    void replace_capture_session_and_unlock() {
+        capture_session = pending_capture;
+        capture_pending = false;
+        unlock();
+
+        (void)engine.cancel_background();
+        capture_build = {};
+        capture_evaluated_end_ms = 0;
+        capture_attempt_end_ms = 0;
+        capture_retry_at_ms = 0;
+        capture_checked_revision = 0;
+        capture_input.reset();
+        capture_progress.reset();
+        capture_attempt_progress.reset();
     }
 
     bool apply_capture_session() {
@@ -580,19 +620,8 @@ struct ReportTask::Runtime {
             rollover_session = capture_session;
             rollover_sources_ready = false;
         }
-        capture_session = pending_capture;
-        capture_pending = false;
-        unlock();
 
-        (void)engine.cancel_background();
-        capture_build = {};
-        capture_evaluated_end_ms = 0;
-        capture_attempt_end_ms = 0;
-        capture_retry_at_ms = 0;
-        capture_checked_revision = 0;
-        capture_input.reset();
-        capture_progress.reset();
-        capture_attempt_progress.reset();
+        replace_capture_session_and_unlock();
         return true;
     }
 
@@ -613,8 +642,8 @@ struct ReportTask::Runtime {
             layout_blocked(capture_session.canonical_sleep_day) ||
             capture_build.valid() || catalog_load_pending ||
             store_purpose != CatalogStorePurpose::None ||
-            engine.status().state != ReportEngineState::Idle ||
-            engine.status().queued != 0 || !capture_storage_ready() ||
+            !engine.idle() ||
+            !capture_storage_ready() ||
             !deadline_due(now_ms, capture_retry_at_ms)) return false;
 
         if (rollover_session.raw_segment_start_ms) {
@@ -753,7 +782,7 @@ struct ReportTask::Runtime {
         bool finalization_pending) {
         // Publish the storage gate even when the session-hint mutex is busy.
         if (edf_finalization_pending.exchange(finalization_pending) != finalization_pending) {
-            wake();
+            wake(RefreshInputs);
         }
 
         if (sessions_ended == 0) return OperationAdmission::Accepted;
@@ -789,7 +818,7 @@ struct ReportTask::Runtime {
         control.background_active = true;
         control.post_therapy_settle_pending = true;
         unlock();
-        wake();
+        wake(RefreshInputs);
         return OperationAdmission::Accepted;
     }
 
@@ -812,47 +841,73 @@ struct ReportTask::Runtime {
         pending_timezone_change = true;
         control.background_active = true;
         unlock();
-        wake();
+        wake(RefreshInputs);
         return OperationAdmission::Accepted;
     }
 
     OperationAdmission publish_source_change(
         const ReportSourceChange &change) {
-        if (!change.valid()) return OperationAdmission::Rejected;
+        if (!change.removals.owners && !change.valid() && !change.oximetry.pending)
+            return OperationAdmission::Rejected;
+        if (!change.removals.owners && !change.valid() && !change.oximetry.refresh_originals)
+            return OperationAdmission::Accepted;
         if (!lock()) return OperationAdmission::Busy;
 
-        ReportSourceChange stamped = change;
-        source_change_revision = increment_generation(
-            source_change_revision);
-        stamped.revision = source_change_revision;
-        merge_report_source_change(pending_source_changes,
-                                   pending_source_change_count,
-                                   stamped);
+        pending_removals.merge(change.removals);
+        if (change.oximetry.pending && change.oximetry.refresh_originals) {
+            originals_dirty.store(true);
+            pending_oximetry_change.merge(change.oximetry);
+        }
 
-        control.background_active = true;
+        if (change.valid()) {
+            ReportSourceChange stamped = change;
+            source_change_revision = increment_generation(source_change_revision);
+            stamped.revision = source_change_revision;
+            merge_report_source_change(pending_source_changes, pending_source_change_count, stamped);
+        }
+
+        if (change.valid() || change.removals.owners) control.background_active = true;
         unlock();
-        wake();
+        wake(Sources);
         return OperationAdmission::Accepted;
     }
 
-    bool apply_pending_source_changes() {
-        ReportSourceChange pending[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
-        size_t pending_count = 0;
+    bool apply_pending_source_changes(uint32_t now_ms) {
         if (!lock()) return false;
+        if (!pending_source_change_count && !pending_oximetry_change.pending && !pending_removals.owners) {
+            unlock();
+            return false;
+        }
 
-        pending_count = pending_source_change_count;
+        ReportSourceChange pending[AC_REPORT_SOURCE_CHANGE_CAPACITY];
+        const size_t pending_count = pending_source_change_count;
         for (size_t i = 0; i < pending_count; ++i) {
             pending[i] = pending_source_changes[i];
         }
         pending_source_change_count = 0;
+        const auto oximetry = pending_oximetry_change;
+        pending_oximetry_change = {};
+        auto removals = pending_removals;
+        if (catalog_store.active() || catalog_store.staging()) removals.owners &= ~RemovedStorageFiles::NightStore;
+        if (summary_archive.status().active) removals.owners &= ~RemovedStorageFiles::SummaryJournal;
+        pending_removals.owners &= ~removals.owners;
+        if (!(pending_removals.owners & RemovedStorageFiles::NightStore))
+            pending_removals.first_source = pending_removals.last_source = {};
         unlock();
 
+        if (removals.owners & RemovedStorageFiles::SummaryJournal) summary_archive.forget_media();
+        if (removals.owners & RemovedStorageFiles::NightStore)
+            catalog_store.invalidate_sources(removals.first_source, removals.last_source);
+        if (removals.owners & (RemovedStorageFiles::NightSources | RemovedStorageFiles::NightStore))
+            schedule_reconcile(now_ms, false);
+
+        oximetry_archive.invalidate(oximetry);
         for (size_t i = 0; i < pending_count; ++i) {
             merge_report_source_change(source_changes,
                                        source_change_count,
                                        pending[i]);
         }
-        return pending_count != 0;
+        return pending_count != 0 || oximetry.pending || removals.owners;
     }
 
     std::shared_ptr<const ReportPublishedState> published_state() const {
@@ -864,17 +919,19 @@ struct ReportTask::Runtime {
     }
 
     bool publish_state() {
+        presentation_pending = true;
         const auto previous = published_state();
         const auto json = catalog
             ? build_report_catalog_json(catalog, store_catalog,
                                         catalog_generation,
-                                        previous ? previous->catalog_json : nullptr)
+                                        previous ? previous->catalog_json : nullptr,
+                                        oximetry_archive.catalog())
             : nullptr;
 
         std::shared_ptr<const ReportPublishedState> next =
             std::make_shared<ReportPublishedState>(ReportPublishedState{
                 catalog, store_catalog, display_summary, json,
-                catalog_store.layout_issues()});
+                catalog_store.layout_issues(), oximetry_archive.originals()});
         if (!next) return false;
 
 #pragma GCC diagnostic push
@@ -882,7 +939,8 @@ struct ReportTask::Runtime {
         std::atomic_store_explicit(
             &published, std::move(next), std::memory_order_release);
 #pragma GCC diagnostic pop
-        return !catalog || json != nullptr;
+        presentation_pending = catalog && !json;
+        return !presentation_pending;
     }
 
     void accept_store_catalog(
@@ -923,11 +981,14 @@ struct ReportTask::Runtime {
                         uint32_t generation,
                         bool discover_stored_nights = true) {
         if (!next || generation == 0) return;
+        settled = false;
 
         observe_catalog_generation(generation);
         catalog_generation = monotonic_generation(
             generation, catalog_generation);
         catalog = std::move(next);
+        oximetry_archive.night_offsets_changed();
+        oximetry_clock_catalog_ready = true;
         display_summary = build_display_report_summary(*catalog);
         engine.publish_catalog(catalog);
 
@@ -1200,15 +1261,111 @@ struct ReportTask::Runtime {
                activity.foreground_report_demand ||
                activity.ota_install_active || activity.export_work_claimed ||
                activity.manual_update_check_active ||
-               engine.status().foreground_active || period_running;
+               engine.foreground_active() || period_running;
+    }
+
+    // Only park a completed pass. A false poll from an owner waiting on I/O
+    // or admission is not proof of quiescence.
+    bool completed_pass() {
+        if (!catalog || idle_cursor < catalog->size() || idle_pass_failed ||
+            catalog_load_pending || store_catalog_load_pending || layout_retry_at_ms ||
+            catalog_store.cleanup_pending() || capture_sources_pending || capture_build.valid() ||
+            compression_wait_bytes || status_pending || presentation_pending ||
+            !generation_cleanup.settled() || summary_archive.status().active || originals_dirty.load() ||
+            oximetry_archive.scan_pending() || oximetry_archive.tracks_pending() ||
+            (spool_availability_needed && activity.supports_as11_spools && activity.as11_rpc_available))
+            return false;
+
+        if (!lock(0)) return false;
+        const bool ready = published_operational.condition == ReportTaskCondition::Complete &&
+            !control.background_active && !queued_inputs();
+        unlock();
+        return ready;
+    }
+
+    // The exchange at dispatch transfers ownership of the hints; it does not
+    // acknowledge them. A busy mailbox stays pending across subsequent passes.
+    void acknowledge_inputs(bool archive_observed) {
+        if (!pending_inputs || !lock(0)) return;
+        if (!command_count) pending_inputs &= ~Command;
+        if (!activity_pending) pending_inputs &= ~Activity;
+        if (!capture_pending) pending_inputs &= ~Capture;
+        if (!pending_session_ended.pending && !pending_timezone_change) pending_inputs &= ~RefreshInputs;
+        if (!pending_source_change_count && !pending_oximetry_change.pending && !pending_removals.owners)
+            pending_inputs &= ~Sources;
+        if (!pending_summary_count) pending_inputs &= ~Summary;
+        if (!status_pending) pending_inputs &= ~Status;
+        if (archive_observed) pending_inputs &= ~Archive;
+        pending_inputs &= ~Media;
+        unlock();
+    }
+
+    bool poll_engine(uint32_t now_ms, size_t record_budget, bool &internal_progress) {
+        const auto phase = engine.state();
+        const auto execution = phase == ReportEngineState::Executing
+            ? engine.execution_progress() : ReportExecutorStatus{};
+
+        const auto before = engine.storage_wait();
+        const uint32_t revision = task_owner.storage_revision_.load();
+        const bool progress = engine.poll(now_ms, activity.therapy_active
+            ? 1 : std::max<size_t>(record_budget, 1));
+
+        observe_wait(Continuation::Engine, before, engine.storage_wait(), revision);
+
+        if (phase == engine.state() && (phase == ReportEngineState::Publishing ||
+            (phase == ReportEngineState::Executing && execution == engine.execution_progress()))) {
+            internal_progress |= progress;
+            return false;
+        }
+        return progress;
+    }
+
+    Continuation next_continuation() const {
+        if (activity.therapy_active || activity.ota_install_active || activity.storage_low_space ||
+            period_running || date_repair.active() || !catalog_store.layout_ready() ||
+            catalog_store.active() || store_catalog_loader.status().active() ||
+            catalog_refresh.active() || capture_sources.active() || summary_acquisition.active() ||
+            summary_archive.status().active || spool_availability_probe.status().active() ||
+            generation_cleanup.waiting_for_storage() || generation_cleanup.deleting() ||
+            oximetry_archive.scan_pending() || presentation_pending) return Continuation::None;
+
+        if (signal_tile_backfill_started && signal_tile_backfill.active()) return Continuation::Tiles;
+        if (engine.building_signals()) return Continuation::Engine;
+        return Continuation::None;
+    }
+
+    void observe_wait(Continuation owner, OperationTicket before,
+                      OperationTicket after, uint32_t revision) {
+        if (before != after) {
+            waiting_owner = owner;
+            waiting_ticket = after;
+            waiting_revision = revision;
+        } else if (owner == waiting_owner && after != waiting_ticket) {
+            waiting_ticket = {};
+        }
+        // An unchanged ticket on a failed try-lock is never armed again:
+        // its completion may already have been published.
+    }
+
+    bool poll_tiles() {
+        const auto before = signal_tile_backfill.storage_wait();
+        const uint32_t revision = task_owner.storage_revision_.load();
+        const bool progress = signal_tile_backfill.poll();
+        observe_wait(Continuation::Tiles, before, signal_tile_backfill.storage_wait(), revision);
+        return progress;
+    }
+
+    bool queued_inputs() const {
+        return command_count || activity_pending || capture_pending || pending_summary_count ||
+            pending_timezone_change || pending_session_ended.pending || pending_removals.owners ||
+            pending_source_change_count || pending_oximetry_change.pending;
     }
 
     bool poll_generation_cleanup(bool catalog_current, bool startup_allowed,
                                  uint32_t now_ms) {
-        const auto status = engine.status();
         const bool allowed = catalog_current && startup_allowed &&
             !local_background_work_blocked() &&
-            status.state == ReportEngineState::Idle && status.queued == 0 &&
+            engine.idle() &&
             !rebuild_started && !capture_build.valid() &&
             (activity.storage_low_space || !post_therapy_build.valid()) &&
             (activity.storage_low_space || !store_catalog_load_pending) &&
@@ -1216,7 +1373,11 @@ struct ReportTask::Runtime {
             !store_catalog_loader.status().active();
 
         const auto space = storage_status ? storage_status->space_snapshot() : StorageSpaceSnapshot{};
-        const bool worked = generation_cleanup.poll(allowed, now_ms, space);
+        if (!allowed) return generation_cleanup.poll(false, now_ms, space);
+
+        const auto before = oximetry_archive.catalog();
+        const bool worked = generation_cleanup.poll(true, now_ms, space);
+        if (before != oximetry_archive.catalog()) publish_state();
         auto metadata = generation_cleanup.take_published_metadata();
         if (metadata.metadata) accept_store_metadata(metadata);
         return worked;
@@ -1254,10 +1415,16 @@ struct ReportTask::Runtime {
 
         next = pending_activity;
         activity_pending = false;
-        unlock();
 
-        const bool therapy_ended =
-            activity.therapy_active && !next.therapy_active;
+        const bool therapy_ended = activity.therapy_active && !next.therapy_active;
+        if (therapy_ended && !pending_capture.raw_segment_start_ms &&
+            (capture_session.raw_segment_start_ms || capture_pending)) {
+            // The recorder can close before the stop, and the next pass may see a restart.
+            replace_capture_session_and_unlock();
+        } else {
+            unlock();
+        }
+
         const bool became_blocked =
             (!background_suspended &&
              (next.therapy_active || next.realtime_stream_active ||
@@ -1271,8 +1438,7 @@ struct ReportTask::Runtime {
             activity.supports_as11_spools != next.supports_as11_spools;
         const bool storage_recovered = activity.storage_low_space && !next.storage_low_space;
 
-        if (therapy_ended || next.ota_install_active ||
-            next.manual_update_check_active || next.export_work_claimed) {
+        if (next.ota_install_active || next.manual_update_check_active || next.export_work_claimed) {
             capture_input.reset();
             capture_checked_revision = 0;
         }
@@ -1587,6 +1753,7 @@ struct ReportTask::Runtime {
             }
         }
         if (timezone_changed) {
+            oximetry_archive.invalidate(ReportOximetryChange::published(true));
             schedule_reconcile(now_ms,
                                false);
         }
@@ -1638,6 +1805,7 @@ struct ReportTask::Runtime {
         }
 
         startup_idle_grace_complete = true;
+        status_pending = true;
         return true;
     }
 
@@ -1649,8 +1817,7 @@ struct ReportTask::Runtime {
             return false;
         }
 
-        const ReportEngineStatus work = engine.status();
-        if (work.state != ReportEngineState::Idle || work.queued != 0) {
+        if (!engine.idle()) {
             return false;
         }
 
@@ -1709,9 +1876,7 @@ struct ReportTask::Runtime {
             return false;
         }
 
-        const ReportEngineStatus engine_status = engine.status();
-        if (engine_status.state != ReportEngineState::Idle ||
-            engine_status.queued != 0) {
+        if (!engine.idle()) {
             return false;
         }
 
@@ -1783,8 +1948,7 @@ struct ReportTask::Runtime {
             return true;
         }
 
-        const ReportEngineStatus status = engine.status();
-        if (status.state != ReportEngineState::Idle || status.queued != 0) {
+        if (!engine.idle()) {
             return false;
         }
 
@@ -1897,8 +2061,7 @@ struct ReportTask::Runtime {
             return true;
         }
 
-        const ReportEngineStatus status = engine.status();
-        if (status.state != ReportEngineState::Idle || status.queued != 0) {
+        if (!engine.idle()) {
             return false;
         }
 
@@ -1923,7 +2086,7 @@ struct ReportTask::Runtime {
             store_catalog->ready(night->sleep_day, night->source_revision)) {
             const ReportSignalStoreCatalogRecord *stored =
                 store_catalog->find(night->sleep_day);
-            if (stored && stored->compression_version == ReportSignalTile::CompressionVersion) {
+            if (stored && ReportSignalTile::cache_complete(stored->compression_version)) {
                 ++idle_cursor;
                 return true;
             }
@@ -2097,7 +2260,7 @@ struct ReportTask::Runtime {
                     catalog_load_pending || pending_catalog_save ||
                     store_purpose != CatalogStorePurpose::None ||
                     catalog_refresh.active() || refresh_generation != 0 ||
-                    engine.status().state != ReportEngineState::Idle) {
+                    !engine.idle()) {
                     unlock();
                     return false;
                 }
@@ -2292,12 +2455,11 @@ struct ReportTask::Runtime {
             worked = true;
         }
 
-        const ReportEngineCompletion completion =
-            engine.status().last_completion;
-        if (!completion.valid() ||
-            completion.request.ticket == observed_engine_completion) {
+        const auto &latest = engine.last_completion();
+        if (!latest.valid() || latest.request.ticket == observed_engine_completion) {
             return worked;
         }
+        const auto completion = latest;
         observed_engine_completion = completion.request.ticket;
         release_loaded_sources();
 
@@ -2428,7 +2590,7 @@ struct ReportTask::Runtime {
             if (current && current->sleep_day == completed_day) {
                 const auto *stored = store_catalog ? store_catalog->find(completed_day) : nullptr;
                 if (!succeeded || !stored ||
-                    stored->compression_version == ReportSignalTile::CompressionVersion) {
+                    ReportSignalTile::cache_complete(stored->compression_version)) {
                     ++idle_cursor;
                 }
             }
@@ -2724,6 +2886,7 @@ struct ReportTask::Runtime {
     }
 
     void publish_status() {
+        status_pending = true;
         log_date_repair();
         if (!lock(0)) return;
         const size_t queued_commands = command_count;
@@ -2816,7 +2979,12 @@ struct ReportTask::Runtime {
         published_operational = next_operational;
         published_diagnostic = next_diagnostic;
         published_date_preview = date_repair.preview();
-        published_completion = engine_status.last_completion;
+        const auto &night = engine_status.last_completion;
+        if (night.valid() && night.request.ticket != published_completion.request.ticket) {
+            completion_serial = increment_generation(completion_serial);
+        }
+        published_completion = night;
+        status_pending = false;
         unlock();
     }
 
@@ -2838,7 +3006,6 @@ struct ReportTask::Runtime {
             period_running = false;
             period_key = {};
             for (auto &cached : period_cache) cached.reset();
-            period_latest.reset();
             period_completed.reset();
             for (auto &failure : failures) failure = {};
             for (auto &failure : metadata_failures) failure = {};
@@ -2856,6 +3023,8 @@ struct ReportTask::Runtime {
 
             engine.clear();
             period_service.cancel();
+            oximetry_archive.reset();
+            oximetry_clock_catalog_ready = false;
             period_service.clear_cache();
             catalog_refresh.cancel();
             catalog_store.forget_media();
@@ -2880,7 +3049,7 @@ struct ReportTask::Runtime {
         worked = spool_availability_probe.poll() || worked;
         worked = generation_cleanup.poll(false, now_ms) || worked;
 
-        if (engine.status().state != ReportEngineState::Idle ||
+        if (!engine.idle() ||
             catalog_refresh.active() || summary_acquisition.active() ||
             catalog_store.active() ||
             spool_availability_probe.status().active() ||
@@ -2944,6 +3113,7 @@ struct ReportTask::Runtime {
         return worked;
     }
 
+    ReportTask &task_owner;
     std::atomic<bool> storage_suspend_requested{false};
     std::atomic<bool> storage_paused{false};
     bool storage_pause_started = false;
@@ -2973,12 +3143,15 @@ struct ReportTask::Runtime {
     std::weak_ptr<const NightCatalog> date_preview_catalog;
     std::weak_ptr<const ReportSignalStoreCatalog> date_preview_store;
     ReportPeriodService period_service;
+    ReportOximetrySignalBuilder oximetry_signals;
+    ReportOximetryArchive oximetry_archive;
+    bool oximetry_clock_catalog_ready = false;
+    std::weak_ptr<const ReportOximetryCatalog> delivered_ring_sources;
+    std::atomic<bool> oximetry_requested{false};
     ReportPeriodKey period_key;
     bool period_running = false;
     std::shared_ptr<const ReportPeriodResult> period_cache[5];
-    std::shared_ptr<const ReportPeriodResult> period_latest;
     std::shared_ptr<const ReportPeriodResult> period_completed;
-    uint32_t period_serial = 0;
     size_t period_cache_cursor = 0;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
@@ -3001,6 +3174,15 @@ struct ReportTask::Runtime {
     std::shared_ptr<const ReportSignalStoreCatalog> store_catalog;
     DisplayReportSummary display_summary;
     std::shared_ptr<const ReportPublishedState> published;
+    bool presentation_pending = false;
+    bool settled = false;
+    bool status_pending = true;
+    uint32_t pending_inputs = 0;
+    uint32_t last_full_ms = 0;
+    Continuation continuation = Continuation::None;
+    Continuation waiting_owner = Continuation::None;
+    OperationTicket waiting_ticket;
+    uint32_t waiting_revision = 0;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
     std::shared_ptr<const NightCatalog> pending_source_update;
     bool source_update_from_rpc = false;
@@ -3030,6 +3212,9 @@ struct ReportTask::Runtime {
     ReportSourceChange pending_source_changes[
         AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t pending_source_change_count = 0;
+    ReportOximetryChange pending_oximetry_change;
+    RemovedStorageFiles pending_removals;
+    std::atomic<bool> originals_dirty{true};
     ReportSourceChange source_changes[AC_REPORT_SOURCE_CHANGE_CAPACITY] = {};
     size_t source_change_count = 0;
     bool pending_catalog_save_source_change = false;
@@ -3118,6 +3303,7 @@ struct ReportTask::Runtime {
     ReportTaskOperationalSnapshot published_operational;
     ReportTaskDiagnosticSnapshot published_diagnostic;
     ReportEngineCompletion published_completion;
+    uint32_t completion_serial = 0;
 
 #ifdef ARDUINO
     mutable SemaphoreHandle_t mutex = nullptr;
@@ -3164,9 +3350,9 @@ bool ReportTask::begin(StorageReadPort &read_port,
 
 #ifdef ARDUINO
     void *memory = Memory::alloc_large(sizeof(Runtime), false);
-    runtime_ = memory ? new (memory) Runtime() : nullptr;
+    runtime_ = memory ? new (memory) Runtime(*this) : nullptr;
 #else
-    runtime_ = new (std::nothrow) Runtime();
+    runtime_ = new (std::nothrow) Runtime(*this);
 #endif
     if (!runtime_) return false;
 
@@ -3192,8 +3378,13 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->spool_availability_probe.begin(spool_port);
     runtime_->store_catalog_loader.begin(read_port);
     runtime_->period_service.begin(read_port, write_port);
+    runtime_->oximetry_archive.begin(scan_port, read_port);
+    runtime_->oximetry_signals.begin(read_port, range_write_port, write_port);
+    runtime_->oximetry_archive.set_signal_builder(runtime_->oximetry_signals);
     if (delete_port) {
         runtime_->generation_cleanup.begin(read_port, scan_port, *delete_port, &write_port);
+        if (path_port) runtime_->generation_cleanup.oximetry().begin(runtime_->oximetry_archive,
+            scan_port, read_port, range_write_port, write_port, *delete_port, *path_port);
         runtime_->date_repair.begin(read_port, write_port, range_write_port, scan_port, *delete_port);
     }
     runtime_->signal_tile_backfill.begin(read_port, range_write_port, write_port);
@@ -3251,7 +3442,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
 void ReportTask::set_storage_suspended(bool suspended) {
     if (!runtime_) return;
     if (runtime_->storage_suspend_requested.exchange(suspended) != suspended) {
-        runtime_->wake();
+        runtime_->wake(Runtime::Media);
     }
 }
 
@@ -3303,7 +3494,7 @@ ReportRebuildStatus ReportTask::rebuild_status() const {
 
 OperationAdmission ReportTask::request_period(
     ReportPeriodKey key,
-    std::shared_ptr<const ReportPeriodResult> *ready) {
+    std::shared_ptr<const ReportPeriodResult> *ready, bool retry_failed) {
     if (ready) ready->reset();
     if (!runtime_ || !runtime_->initialized || !key.valid()) return OperationAdmission::Rejected;
 
@@ -3314,7 +3505,7 @@ OperationAdmission ReportTask::request_period(
     command.period_sessions = key.sessions;
     command.period_source_revision = key.source_revision;
     command.period_generation = key.generation;
-    return runtime_->enqueue(command, ready);
+    return runtime_->enqueue(command, ready, retry_failed);
 }
 
 std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeriodKey key) const {
@@ -3333,12 +3524,12 @@ std::shared_ptr<const ReportPeriodResult> ReportTask::period_snapshot(ReportPeri
     return result;
 }
 
-std::shared_ptr<const ReportPeriodResult> ReportTask::period_completion(uint32_t &serial) const {
-    if (!runtime_ || !runtime_->lock(0)) return {};
-    serial = runtime_->period_serial;
-    const auto result = runtime_->period_latest;
+bool ReportTask::completion_snapshot(uint32_t &serial, ReportEngineCompletion &night) const {
+    if (!runtime_ || !runtime_->lock(0)) return false;
+    serial = runtime_->completion_serial;
+    night = runtime_->published_completion;
     runtime_->unlock();
-    return result;
+    return true;
 }
 
 OperationAdmission ReportTask::request_night(
@@ -3406,17 +3597,19 @@ bool ReportTask::publish_summary_observation(SummaryObservation observation) {
     if ((!observation.payload && !observation.empty_payload) || observation.device_serial.empty() ||
         runtime_->storage_suspend_requested.load() || !runtime_->lock(0)) {
         ++runtime_->summary_archive_drops;
+        runtime_->wake(Runtime::Status);
         return false;
     }
 
     if (runtime_->pending_summary_count == 2) {
         runtime_->unlock();
         ++runtime_->summary_archive_drops;
+        runtime_->wake(Runtime::Status);
         return false;
     }
     runtime_->pending_summary[runtime_->pending_summary_count++] = std::move(observation);
     runtime_->unlock();
-    runtime_->wake();
+    runtime_->wake(Runtime::Summary);
     return true;
 }
 
@@ -3462,6 +3655,15 @@ ReportTask::catalog_json_snapshot() const {
     if (!runtime_) return {};
     const auto state = runtime_->published_state();
     return state ? state->catalog_json : nullptr;
+}
+
+void ReportTask::request_oximetry_index() {
+    if (runtime_ && !runtime_->oximetry_requested.exchange(true)) runtime_->wake(Runtime::Archive);
+}
+
+std::shared_ptr<const ReportOximetryCatalog> ReportTask::oximetry_originals() const {
+    const auto state = runtime_ && !runtime_->originals_dirty.load() ? runtime_->published_state() : nullptr;
+    return state ? state->originals : nullptr;
 }
 
 std::shared_ptr<const ReportSignalStoreCatalog>
@@ -3583,6 +3785,7 @@ ReportSignalRangeQuery ReportTask::query_signal(
         return out;
     }
 
+    out.compression_version = night.view.night.compression_version;
     size_t file_size = 0;
     if (block_count == 0 ||
         !ReportSignalStoreFileCodec::plane_range(
@@ -3666,9 +3869,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     runtime.last_step_ms = now_ms;
 
     if (runtime.storage_suspend_requested.load()) {
+        runtime.continuation = Runtime::Continuation::None;
         return runtime.poll_storage_pause(now_ms);
     }
     if (runtime.storage_pause_started) {
+        runtime.settled = false;
         // Drop notifications captured before the host's edits. Discovery and
         // loading now establish the new card contents, not saved RAM cursors.
         if (!runtime.lock(0)) return false;
@@ -3684,8 +3889,47 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.schedule_reconcile(now_ms, false);
     }
 
+    if (!wake_inputs_.load() && !runtime.pending_inputs &&
+        !(runtime.reconcile_pending && !runtime.rebuild_started && deadline_due(now_ms, runtime.reconcile_due_ms))) {
+        const auto owner = runtime.continuation;
+        if (owner == Runtime::Continuation::None && runtime.settled) {
+            const auto space = runtime.storage_status->space_snapshot();
+            if (space.known && space.free_bytes >= StorageSpacePolicy::ReclaimTarget) return false;
+        }
+
+        if (owner != Runtime::Continuation::None &&
+            now_ms - runtime.last_full_ms < AC_REPORT_TASK_FULL_PASS_MS) {
+            if (runtime.waiting_owner == owner && runtime.waiting_ticket.valid() &&
+                storage_revision_.load() == runtime.waiting_revision) return false;
+
+            bool progress = false;
+            bool needs_full = false;
+            if (owner == Runtime::Continuation::Engine) {
+                needs_full = runtime.poll_engine(now_ms, record_budget, progress);
+                needs_full |= !runtime.engine.building_signals();
+            } else {
+                progress = runtime.poll_tiles();
+                needs_full = !runtime.signal_tile_backfill.active();
+            }
+            if (needs_full) {
+                runtime.continuation = Runtime::Continuation::None;
+                // Consume this publication before the next full pass can start another job.
+                if (owner == Runtime::Continuation::Engine) runtime.observe_engine(now_ms);
+                else runtime.observe_signal_tile_backfill(now_ms);
+                runtime.status_pending = true;
+            }
+            return progress || needs_full;
+        }
+    }
+
+    runtime.last_full_ms = now_ms;
+    runtime.pending_inputs |= wake_inputs_.exchange(0);
+    const bool input_changed = runtime.pending_inputs != 0;
+    runtime.settled = false;
+
+    runtime.continuation = Runtime::Continuation::None;
     bool worked = runtime.apply_pending_refresh_inputs(now_ms);
-    worked = runtime.apply_pending_source_changes() || worked;
+    worked = runtime.apply_pending_source_changes(now_ms) || worked;
     if (!runtime.reconcile_deadline_initialized) {
         runtime.reconcile_pending = true;
         runtime.reconcile_due_ms = now_ms + CATALOG_RECONCILE_IDLE_MS;
@@ -3693,17 +3937,45 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
     worked = runtime.apply_pending_activity() || worked;
+    if (runtime.local_background_work_blocked()) runtime.oximetry_archive.pause_signals();
 
     if (runtime.staging_generation && !runtime.refresh_generation &&
-        (runtime.local_background_work_blocked() || !runtime.pending_refresh.valid() ||
-         runtime.pending_refresh.target.valid() || runtime.pending_catalog_save ||
+        (runtime.rebuild_started || runtime.local_background_work_blocked() ||
+         !runtime.pending_refresh.valid() || runtime.pending_refresh.target.valid() ||
+         runtime.pending_catalog_save ||
          static_cast<int32_t>(runtime.pending_refresh.generation -
                               runtime.staging_generation) > 0)) {
         runtime.discard_refresh_stage();
     }
 
     const bool summary_media_available = runtime.storage_status && runtime.storage_status->mounted();
+    if ((oximetry_consumer_ || runtime.oximetry_requested.load()) && summary_media_available &&
+        !runtime.activity.ota_install_active && !runtime.activity.realtime_stream_active) {
+        if (runtime.oximetry_archive.scan_pending()) {
+            const auto before = runtime.oximetry_archive.catalog();
+            worked = runtime.oximetry_archive.poll(now_ms, runtime.catalog.get()) || worked;
+            if (before != runtime.oximetry_archive.catalog()) runtime.publish_state();
+        }
+        if (runtime.originals_dirty.load()) {
+            const auto originals = runtime.oximetry_archive.originals();
+            const auto state = runtime.published_state();
+            if (originals && state && state->originals == originals && runtime.lock()) {
+                if (!runtime.pending_oximetry_change.pending) runtime.originals_dirty.store(false);
+                runtime.unlock();
+            }
+        }
+        const auto &ring = runtime.oximetry_archive.ring_sources();
+        if (oximetry_consumer_ && runtime.oximetry_clock_catalog_ready && !runtime.catalog_load_pending &&
+            ring && (ring.owner_before(runtime.delivered_ring_sources) ||
+                     runtime.delivered_ring_sources.owner_before(ring))) {
+            oximetry_consumer_(ring);
+            runtime.delivered_ring_sources = ring;
+        }
+    }
     if (runtime.summary_media_available && !summary_media_available) {
+        runtime.oximetry_clock_catalog_ready = false;
+        runtime.oximetry_archive.reset();
+        runtime.originals_dirty.store(true);
         if (runtime.summary_archive.status().active) ++runtime.summary_archive_drops;
         runtime.summary_archive.forget_media();
     }
@@ -3838,8 +4110,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.capture_sources.active() && !runtime.summary_acquisition.active() &&
         !runtime.signal_tile_backfill_started && !runtime.rebuild_started &&
         !runtime.generation_cleanup.deleting()) {
-        const auto engine = runtime.engine.status();
-        if (engine.state == ReportEngineState::Idle && engine.queued == 0 &&
+        if (runtime.engine.idle() &&
             runtime.catalog_store.prepare_layout(CATALOG_STORE_GENERATION) ==
                 OperationAdmission::Accepted) {
             runtime.publish_status();
@@ -3966,6 +4237,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                         break;
                     }
                 } else {
+                    runtime.oximetry_clock_catalog_ready = strcmp(status.error, "read_not_found") == 0;
                     if (strcmp(status.error, "read_not_found") != 0) {
                         runtime.record_failure("load_catalog", status.error);
                     }
@@ -4108,9 +4380,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     worked = runtime.observe_capture_sources(now_ms) || worked;
-    const ReportEngineStatus engine_work = runtime.engine.status();
     if (runtime.store_catalog_loader.status().active() &&
-        (engine_work.state != ReportEngineState::Idle || engine_work.queued != 0 ||
+        (!runtime.engine.idle() ||
          runtime.post_therapy_build.valid())) {
         // Requested-night discovery reads only its night. Resume inventory later,
         // so a late full-catalog snapshot cannot overwrite its publication.
@@ -4407,9 +4678,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    const auto refresh_engine = runtime.engine.status();
-    const bool full_refresh_idle = refresh_engine.state == ReportEngineState::Idle &&
-                                   refresh_engine.queued == 0;
+    const bool full_refresh_idle = runtime.engine.idle();
 
     if (runtime.pending_refresh.valid() &&
         !runtime.rebuild_started &&
@@ -4580,6 +4849,18 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.resume_compression() || worked;
 
+    if (runtime.oximetry_archive.tracks_pending() &&
+        summary_media_available && !runtime.activity.ota_install_active &&
+        !runtime.activity.realtime_stream_active) {
+        const auto before = runtime.oximetry_archive.catalog();
+        const bool idle = startup_allowed && !local_blocked && !runtime.activity.storage_low_space &&
+            !runtime.rebuild_started && !runtime.capture_build.valid() && !runtime.post_therapy_build.valid() &&
+            !runtime.signal_tile_backfill_started && !runtime.generation_cleanup.deleting() &&
+            runtime.engine.idle();
+        worked = runtime.oximetry_archive.poll_signals(now_ms, idle) || worked;
+        if (before != runtime.oximetry_archive.catalog()) runtime.publish_state();
+    }
+
     if (runtime.activity.storage_low_space) {
         worked = runtime.poll_generation_cleanup(
             catalog_current, startup_allowed, now_ms) || worked;
@@ -4604,13 +4885,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.schedule_capture(now_ms) || worked;
 
+    bool internal_progress = false;
     if (runtime.signal_tile_backfill_started) {
-        const ReportEngineStatus backfill_competitor =
-            runtime.engine.status();
         const bool competing_work =
             runtime.local_background_work_blocked() ||
-            backfill_competitor.state != ReportEngineState::Idle ||
-            backfill_competitor.queued != 0 ||
+            !runtime.engine.idle() ||
             runtime.engine.catalog_update_required() ||
             runtime.rebuild_started ||
             runtime.capture_build.valid() ||
@@ -4619,7 +4898,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.cancel_signal_tile_backfill();
             worked = true;
         } else if (runtime.signal_tile_backfill.active()) {
-            worked = runtime.signal_tile_backfill.poll() || worked;
+            internal_progress = runtime.poll_tiles();
         }
         worked = runtime.observe_signal_tile_backfill(now_ms) || worked;
     }
@@ -4631,9 +4910,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     if (!runtime.generation_cleanup.deleting() &&
         (!runtime.activity.therapy_active || runtime.capture_storage_ready())) {
-        worked = runtime.engine.poll(
-            now_ms, runtime.activity.therapy_active
-                ? 1 : std::max<size_t>(record_budget, 1)) || worked;
+        worked = runtime.poll_engine(now_ms, record_budget, internal_progress) || worked;
     }
     if (!runtime.catalog_store.installing()) {
         SourceRevision loaded_revision;
@@ -4669,19 +4946,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
 
         if (runtime.period_completed && runtime.lock(0)) {
-            if (!runtime.period_completed->error[0]) {
-                std::shared_ptr<const ReportPeriodResult> *slot = nullptr;
-                for (auto &cached : runtime.period_cache) {
-                    if (cached && cached->key == runtime.period_completed->key) {
-                        slot = &cached;
-                        break;
-                    }
+            std::shared_ptr<const ReportPeriodResult> *slot = nullptr;
+            for (auto &cached : runtime.period_cache) {
+                if (cached && cached->key == runtime.period_completed->key) {
+                    slot = &cached;
+                    break;
                 }
-                if (!slot) slot = &runtime.period_cache[runtime.period_cache_cursor++ % 5];
-                *slot = runtime.period_completed;
             }
-            runtime.period_latest = runtime.period_completed;
-            runtime.period_serial = increment_generation(runtime.period_serial);
+            if (!slot) slot = &runtime.period_cache[runtime.period_cache_cursor++ % 5];
+            *slot = runtime.period_completed;
+
+            runtime.completion_serial = increment_generation(runtime.completion_serial);
             runtime.period_running = false;
             runtime.unlock();
             if (runtime.period_completed->error[0]) {
@@ -4691,15 +4966,20 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             worked = true;
         }
     }
-    runtime.publish_status();
+    if (worked || runtime.status_pending || input_changed ||
+        runtime.published_operational.retry_in_ms) runtime.publish_status();
 
-    const auto published = runtime.published_state();
-    if (published && published->catalog && !published->catalog_json) {
+    if (runtime.presentation_pending) {
         // Retry failed presentation allocation on the worker's existing cadence.
         runtime.publish_state();
     }
 
-    return worked;
+    runtime.acknowledge_inputs(summary_media_available && !runtime.activity.ota_install_active &&
+                               !runtime.activity.realtime_stream_active);
+    runtime.continuation = runtime.next_continuation();
+    if (worked || internal_progress) return true;
+    runtime.settled = runtime.completed_pass();
+    return false;
 }
 
 void ReportTask::publish_catalog(
@@ -4709,7 +4989,9 @@ void ReportTask::publish_catalog(
 }
 
 void ReportTask::notify_storage_completion() {
-    if (runtime_) runtime_->wake();
+    if (!runtime_) return;
+    storage_revision_.fetch_add(1);
+    runtime_->notify_task();
 }
 
 void ReportTask::task_entry(void *context) {
@@ -4744,12 +5026,18 @@ void ReportTask::run() {
 
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
         } else {
-            const ReportTaskControlSnapshot status = control_snapshot();
-            ulTaskNotifyTake(pdTRUE,
-                             pdMS_TO_TICKS((status.background_active ||
-                                            runtime_->generation_cleanup.waiting_for_storage())
-                                 ? AC_REPORT_TASK_WAIT_TICK_MS
-                                 : AC_REPORT_TASK_IDLE_TICK_MS));
+            uint32_t wait = AC_REPORT_TASK_IDLE_TICK_MS;
+            if (!runtime_->settled || runtime_->storage_suspend_requested.load()) {
+                if (runtime_->continuation != Runtime::Continuation::None) {
+                    const uint32_t elapsed = millis() - runtime_->last_full_ms;
+                    wait = elapsed < AC_REPORT_TASK_FULL_PASS_MS
+                        ? std::min(AC_REPORT_TASK_WAIT_TICK_MS, AC_REPORT_TASK_FULL_PASS_MS - elapsed) : 0;
+                } else if (control_snapshot().background_active || runtime_->generation_cleanup.waiting_for_storage()) {
+                    wait = AC_REPORT_TASK_WAIT_TICK_MS;
+                }
+            }
+
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
         }
 
         batch_started_us = micros();

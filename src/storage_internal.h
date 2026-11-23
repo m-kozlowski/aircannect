@@ -16,24 +16,27 @@ bool format_card_on_boot(char *error, size_t size);
 
 // Storage task only, after all local filesystem users have closed their files.
 void unmount();
+void set_sdmmc_mount_in_progress(bool mounting);
 
 bool ensure_dir(const char *path);
 bool exists(const char *path);
 bool file_stat(const char *path, struct stat &info);
 bool remove(const char *path);
 bool rmdir(const char *path);
-bool rename(const char *from, const char *to);
+bool rename(const char *from, const char *to, bool refresh_catalogs = false);
 File open(const char *path, const char *mode);
+File open_sequential(const char *path);
 // Optional output is the VFS constructor's path-stat snapshot. Request it
 // only for read-only opens; writes do not refresh it.
 File open(const char *path, const char *mode, struct stat *opened_stat);
 File open_observed_file(const char *mount_point, const char *path,
-                         const char *mode, struct stat *opened_stat = nullptr);
+                         const char *mode, struct stat *opened_stat = nullptr,
+                         bool sequential = false);
 int open_descriptor(const char *path, int flags);
 int close_descriptor(const char *path, int descriptor);
 
 // Registered before the worker starts; callbacks run on the storage task.
-using PathChangeCallback = void (*)(const char *path);
+using PathChangeCallback = void (*)(const char *path, bool refresh_catalogs);
 void set_path_change_callback(PathChangeCallback callback);
 
 // Before mutations; nullptr releases the reader for remount/resource pressure.
@@ -50,16 +53,20 @@ bool release_write_handles();
 void release_write_handle(const char *path);
 bool finish_write_handles();
 
-// Owned by one write operation, including all of its bounded worker turns.
-class WriteStagingBuffer {
+// Owned by the open reader or active write, not reserved while idle.
+class DmaStagingBuffer {
 public:
+    static constexpr size_t SectorBytes = 512;
     static constexpr size_t Capacity = 4096;
-    WriteStagingBuffer() = default;
-    ~WriteStagingBuffer();
-    WriteStagingBuffer(const WriteStagingBuffer &) = delete;
-    WriteStagingBuffer &operator=(const WriteStagingBuffer &) = delete;
+    static_assert(Capacity % SectorBytes == 0);
+    DmaStagingBuffer() = default;
+    ~DmaStagingBuffer();
+    DmaStagingBuffer(const DmaStagingBuffer &) = delete;
+    DmaStagingBuffer &operator=(const DmaStagingBuffer &) = delete;
 
-    uint8_t *get(size_t write_size);
+    uint8_t *get(size_t transfer_size);
+    void configure_reader(FILE *file, size_t bytes, size_t fallback_size);
+    bool seek_reader(FILE *file, uint32_t offset, uint64_t file_size) const;
     void reset();
 
 private:
@@ -68,7 +75,7 @@ private:
 };
 
 size_t write_buffers(int descriptor, const StorageRangeWriteCommand &command,
-                     size_t offset, size_t size, WriteStagingBuffer &staging);
+                     size_t offset, size_t size, DmaStagingBuffer &staging);
 
 // Storage-task file preparation and post-close metadata
 enum class ParentDirectoryStep : uint8_t { More, Done, Failed };
@@ -83,7 +90,7 @@ bool ensure_parent_directories(const char *path);
 uint64_t file_modified(const char *path);
 
 size_t write_buffer(File &file, const uint8_t *data, size_t size,
-                    WriteStagingBuffer &staging);
+                    DmaStagingBuffer &staging);
 
 // Storage owner only. Arduino's void flush() hides fflush/fsync failures.
 bool flush_file(File &file);

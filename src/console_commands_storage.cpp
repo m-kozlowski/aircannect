@@ -596,7 +596,7 @@ void StorageConsoleCommands::execute_storage(
         if (!state.storage_generation) state.storage_generation++;
 
         StoragePathCommand request;
-        request.operation = StoragePathOperation::Move;
+        request.operation = StoragePathOperation::UserMove;
         request.source = path;
         request.destination = destination;
         request.generation = state.storage_generation;

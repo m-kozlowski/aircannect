@@ -614,6 +614,7 @@ void ResmedFirmwareRepository::poll() {
     if (!scan_port_ || !path_port_ || !write_port_ || !mutex_) return;
     if (storage_suspended_) return;
 
+    if (files_removed_.exchange(false) && !request_refresh(false)) files_removed_.store(true);
     poll_completion();
     if (action_ == Action::None) start_pending_operation();
 }

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "action_schedule.h"
 #include "app_config_schema.h"
 #include "as11_transport.h"
 #include "board.h"
@@ -64,6 +65,7 @@ struct AppConfigData {
     bool edf_capture_enabled = AC_DEFAULT_EDF_CAPTURE_ENABLED != 0;
 
     ButtonBindingConfig keybindings;
+    ScheduledActions schedule{};
     DisplayOrientation display_orientation =
         DisplayOrientation::BoardDefault;
     bool display_auto_rotate = true;
@@ -80,6 +82,8 @@ struct AppConfigData {
     String sleephq_team_id;
     String sleephq_device_id;
     String sleephq_mask_id;
+    String sleephq_oximetry_source = "auto";
+    String sleephq_oximetry_format = "csv";
 
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
@@ -140,6 +144,7 @@ private:
     bool set_alert_audible_enabled(bool enabled);
     bool set_alert_audible_volume(uint16_t percent);
     bool set_edf_capture_enabled(bool enabled);
+    bool set_schedule(size_t slot, const ScheduledAction &rule);
     bool set_keybindings(const ButtonBindingConfig &keybindings);
     bool set_display_orientation(DisplayOrientation orientation);
     bool set_display_auto_rotate(bool enabled);
@@ -153,6 +158,8 @@ private:
                                  const String &team_id,
                                  const String &device_id);
     bool set_sleephq_mask_id(const String &mask_id);
+    bool set_sleephq_oximetry_source(const String &source);
+    bool set_sleephq_oximetry_format(const String &format);
 
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);

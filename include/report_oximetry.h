@@ -1,0 +1,119 @@
+#pragma once
+
+#include <vector>
+#include <optional>
+#include <string_view>
+#include <utility>
+
+#include "large_allocator.h"
+#include "board_oximetry.h"
+#include "oximetry_archive.h"
+#include "ring_bin_layout.h"
+#include "storage_read_port.h"
+#include "storage_scan_port.h"
+#include "report_source_change.h"
+
+namespace aircannect {
+
+class NightCatalog;
+class ReportOximetrySignalBuilder;
+struct ReportOximetryPlanes;
+
+struct ReportOximetryRecording : OximetryCsv::Header {
+    char source[33]{};
+    char device[33]{}; // Resolved when the catalog is published.
+    char id[37]{};
+    int64_t start_ms = 0, wall_s = 0, local_start_s = 0, observation_ms = 0;
+    uint32_t samples = 0, interval_s = 0;
+    RingBinLayout bin;
+    uint64_t csv_bytes = 0;
+    int64_t csv_end_ms = 0;
+    uint64_t modified = 0;
+    uint32_t missing_csv_scan = 0; // Last directory scan that did not see the derived CSV.
+    bool listed = false;
+    bool export_clock_known = false;
+    char day[9]{};
+    int64_t noon_s = 0, next_noon_s = 0;
+    std::shared_ptr<const ReportOximetryPlanes> planes;
+    uint32_t last_track_warning = 0;
+    bool invalid_tracks = false;
+
+    std::string path() const;
+    bool needs_tracks() const { return !planes && !invalid_tracks; }
+    auto key() const { return std::make_pair(std::string_view(source), std::string_view(id)); }
+    bool same_samples(const ReportOximetryRecording &r) const {
+        return key() == r.key() && start_ms == r.start_ms && size() == r.size() &&
+               modified == r.modified;
+    }
+    bool same_track(const ReportOximetryRecording &r) const {
+        return same_samples(r) && noon_s == r.noon_s && next_noon_s == r.next_noon_s;
+    }
+    uint64_t data_end() const { return csv_bytes ? csv_bytes : bin.offset(samples); }
+    uint64_t size() const { return csv_bytes ? csv_bytes : data_end() + bin.footer(); }
+    int64_t end_ms() const {
+        return csv_bytes ? csv_end_ms : start_ms + int64_t(samples) * interval_s * 1000;
+    }
+    int64_t report_end_ms() const {
+        return csv_bytes ? csv_end_ms - 1 + AC_OXIMETRY_SAMPLE_STALE_MS : end_ms();
+    }
+};
+
+using ReportOximetryCatalog = std::vector<ReportOximetryRecording,
+                                          LargeAllocator<ReportOximetryRecording>>;
+void resolve_oximetry_devices(ReportOximetryCatalog &catalog);
+
+// Resolves originals and publishes their prepared, sleep-day-scoped tracks.
+class ReportOximetryArchive {
+public:
+    void begin(StorageScanPort &scan, StorageReadPort &read);
+    void set_signal_builder(ReportOximetrySignalBuilder &builder) { signals_ = &builder; }
+    void reset();
+    void invalidate(const ReportOximetryChange &change) { pending_.merge(change); }
+    bool scan_pending() const { return offsets_dirty_ || pending_.pending || scanning_.pending; }
+    bool tracks_pending() const { return prepare_pending_; }
+    bool poll(uint32_t now_ms, const NightCatalog *nights = nullptr);
+    void night_offsets_changed() { offsets_dirty_ = true; }
+    bool poll_signals(uint32_t now_ms, bool background_allowed);
+    void pause_signals();
+    const auto &ring_sources() const { return ring_sources_; }
+    auto originals() const {
+        return scanning_.pending || pending_.pending ? nullptr : originals_;
+    }
+    void withdraw(const ReportOximetryRecording &recording);
+    std::shared_ptr<const ReportOximetryCatalog> catalog() const { return published_; }
+
+private:
+    void release();
+    bool step(uint32_t now_ms, const NightCatalog *nights);
+    bool consume_file(const StorageScanEntryView &entry, std::string_view source,
+                      std::string_view id, const uint8_t *bytes, size_t length);
+    void add_file(const StorageScanEntryView &entry, std::string_view source, std::string_view id);
+    void consume_clock(std::string_view source, const uint8_t *bytes, size_t length);
+
+    StorageScanPort *scan_ = nullptr;
+    StorageReadPort *read_ = nullptr;
+    OperationTicket scan_ticket_, read_ticket_;
+    StoragePreparedRead prepared_;
+    std::shared_ptr<const StorageScanSnapshot> files_;
+    size_t index_ = 0;
+    enum class FilePart { Prefix, LiveTail, SFooter };
+    FilePart part_ = FilePart::Prefix;
+    ReportOximetryRecording metadata_;
+    bool clocks_ = false;
+    bool ring_changed_ = false;
+    ReportOximetrySignalBuilder *signals_ = nullptr;
+    bool prepare_pending_ = false, manifest_only_ = true, offsets_dirty_ = false;
+    size_t signal_index_ = 0;
+    uint32_t signal_retry_at_ = 0;
+    std::shared_ptr<ReportOximetryCatalog> preparing_;
+    std::optional<ReportOximetryRecording> active_track_;
+    bool active_manifest_ = false;
+    std::shared_ptr<const ReportOximetryCatalog> ring_sources_;
+    std::shared_ptr<const ReportOximetryCatalog> originals_;
+    ReportOximetryChange pending_{true, true}, scanning_;
+    uint32_t generation_ = 0, retry_at_ = 0;
+    std::shared_ptr<ReportOximetryCatalog> building_;
+    std::shared_ptr<const ReportOximetryCatalog> published_;
+};
+
+}  // namespace aircannect

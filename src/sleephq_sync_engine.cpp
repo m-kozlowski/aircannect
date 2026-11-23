@@ -1,4 +1,5 @@
 #include "sleephq_sync_engine.h"
+#include "oximetry_archive.h"
 
 #include <new>
 #include <stdio.h>
@@ -186,6 +187,8 @@ void SleepHqSyncEngine::unlock() const {
 }
 
 void SleepHqSyncEngine::publish_runtime_locked() {
+    runtime_oximetry_generation_.store(config_.oximetry_source[0] ? oximetry_generation_ : 0);
+    runtime_prefer_oximetry_bin_.store(config_.prefer_oximetry_bin);
     const uint32_t generation = status_.config_generation;
     runtime_state_.store(static_cast<uint8_t>(status_.state));
     runtime_pending_.store(status_.pending);
@@ -305,6 +308,8 @@ void SleepHqSyncEngine::apply_config_locked(const SleepHqExportConfig &config) {
     }
 
     config_ = config;
+    ++oximetry_generation_;
+    oximetry_deadline_.store(0);
     status_.config_generation++;
     status_.configured = snapshot_configured(config_);
     status_.team_id = 0;
@@ -342,7 +347,21 @@ void SleepHqSyncEngine::apply_pending_config_locked() {
 void SleepHqSyncEngine::configure(const SleepHqExportConfig &config) {
     if (!lock(50)) return;
 
-    if (!config_matches_locked(config)) {
+    const bool core_unchanged = config_matches_locked(config);
+    const auto &previous = pending_config_valid_ ? pending_config_ : config_;
+    const bool oximetry_changed = strcmp(previous.oximetry_source, config.oximetry_source) != 0 ||
+                                  previous.prefer_oximetry_bin != config.prefer_oximetry_bin;
+
+    if (core_unchanged && oximetry_changed && !pending_config_valid_ &&
+        current_run_kind_ != RunKind::Oximetry &&
+        !(pending_run_kind_ == RunKind::Oximetry && (status_.pending || retry_due_ms_))) {
+        // Supplemental preferences must not restart a running CPAP import.
+        copy_cstr(config_.oximetry_source, sizeof(config_.oximetry_source), config.oximetry_source);
+        config_.prefer_oximetry_bin = config.prefer_oximetry_bin;
+        ++oximetry_generation_;
+        oximetry_deadline_.store(0);
+        publish_runtime_locked();
+    } else if (!core_unchanged || oximetry_changed) {
         if (status_.state == SleepHqSyncState::Working) {
             pending_config_ = config;
             pending_config_valid_ = true;
@@ -379,6 +398,13 @@ bool SleepHqSyncEngine::request_locked(RunKind kind,
         return false;
     }
     if (status_.state == SleepHqSyncState::Working) return false;
+
+    if (retry_due_ms_ && pending_run_kind_ == RunKind::Oximetry &&
+        kind != RunKind::Oximetry) {
+        // The incoming run replaces the retry. Recheck unsent CSVs after it.
+        ++oximetry_generation_;
+    }
+
     pending_run_kind_ = kind;
     pending_datalog_day_[0] = '\0';
     if (datalog_day) {
@@ -402,6 +428,15 @@ bool SleepHqSyncEngine::request_check(const char *reason) {
     publish_runtime_locked();
     unlock();
     return queued;
+}
+
+bool SleepHqSyncEngine::request_oximetry(const char *day) {
+    if (!lock(0)) return false;
+    const bool accepted = config_.oximetry_source[0] &&
+        request_locked(RunKind::Oximetry, "oximetry", day);
+    publish_runtime_locked();
+    unlock();
+    return accepted;
 }
 
 bool SleepHqSyncEngine::request_sync(const char *reason) {
@@ -482,6 +517,9 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     if (runtime_blocked_.load()) return false;
 
     const RunKind kind = pending_run_kind_;
+    const auto originals = kind == RunKind::Oximetry && oximetry_catalog_ ? oximetry_catalog_() : nullptr;
+    if (kind == RunKind::Oximetry && !originals) return false;
+    const auto checked_team = status_.team_id;
     char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
     char datalog_day[9] = {};
     copy_cstr(reason, sizeof(reason),
@@ -510,21 +548,39 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     status_.import_status[0] = 0;
     abort_requested_.store(false);
     phase_ = WorkPhase::Connect;
+    if (kind == RunKind::Oximetry) {
+        if (!datalog_day[0]) oximetry_deadline_.store(0);
+        try {
+            oximetry_plan_.begin(originals, config_.oximetry_source, datalog_day,
+                                 config_.prefer_oximetry_bin);
+        } catch (const std::bad_alloc &) {
+            fail_locked("oximetry_plan_alloc_failed");
+            return false;
+        }
+        status_.team_id = checked_team;
+        if (!checked_team || !client_.configure(client_config_from_snapshot(config_))) {
+            fail_locked("account_not_ready");
+            return false;
+        }
+        // Reconcile SD receipts before any HTTP request. Recovery retains
+        // its own network phases for an unfinished import.
+        next_oximetry_source_locked();
+    }
     publish_runtime_locked();
-    Log::logf(CAT_EXPORT, LOG_INFO, "[SLEEPHQ] started reason=%s mode=%s\n",
+    Log::logf(CAT_EXPORT, kind == RunKind::Oximetry ? LOG_DEBUG : LOG_INFO, "[SLEEPHQ] started reason=%s mode=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
               current_run_kind_ == RunKind::Check
                   ? "check"
                   : current_run_kind_ == RunKind::PostTherapySync
                         ? "post_therapy_sync"
-                        : "sync");
+                        : current_run_kind_ == RunKind::Oximetry ? "oximetry" : "sync");
     return true;
 }
 
 ExportStep SleepHqSyncEngine::step_load_inventory_locked() {
     char error[AC_SLEEPHQ_ERROR_MAX] = {};
     const StorageExportInventoryLoadResult result =
-        inventory_session_.poll_catalog(state_dir_, error, sizeof(error));
+        inventory_session_.poll_catalog(state_dir_, error, sizeof(error), oximetry_source_);
     if (result == StorageExportInventoryLoadResult::Waiting) {
         return ExportStep::Waiting;
     }
@@ -544,6 +600,7 @@ ExportStep SleepHqSyncEngine::step_load_inventory_locked() {
         phase_ = WorkPhase::NextFile;
         return ExportStep::Working;
     }
+    if (oximetry_source_) return begin_export_work_locked();
     if (!prepare_remote_reconcile_locked(error, sizeof(error))) {
         fail_locked(error[0] ? error : "remote_reconcile_failed");
         return ExportStep::Idle;
@@ -857,6 +914,9 @@ bool SleepHqSyncEngine::release_media() {
 }
 
 void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
+    oximetry_plan_.begin({});
+    oximetry_source_ = nullptr;
+    ring_header_check_ = nullptr;
     client_.disconnect();
     inventory_session_.reset();
     export_planner_.reset();
@@ -959,7 +1019,8 @@ void SleepHqSyncEngine::finish_sync_locked() {
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
     status_.updated_ms = nonzero_millis(millis());
-    Log::logf(CAT_EXPORT, LOG_INFO,
+    const bool no_supplement = current_run_kind_ == RunKind::Oximetry && !status_.files_seen;
+    Log::logf(CAT_EXPORT, no_supplement ? LOG_DEBUG : LOG_INFO,
               "[SLEEPHQ] done seen=%u uploaded=%u skipped=%u failed=%u bytes=%llu\n",
               static_cast<unsigned>(status_.files_seen),
               static_cast<unsigned>(status_.files_uploaded),
@@ -1142,7 +1203,8 @@ bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
     }
 
     StorageExportPlannerConfig config;
-    config.scope = StorageExportPlannerScope::SleepHq;
+    config.scope = oximetry_source_ ? StorageExportPlannerScope::FullCard
+                                    : StorageExportPlannerScope::SleepHq;
     config.state_dir = state_dir_;
     config.now_epoch = storage_export_current_epoch_seconds_or_zero();
     config.trust_completed_finalized_datalog_days = true;
@@ -1151,7 +1213,9 @@ bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
     if (current_run_kind_ == RunKind::PostTherapySync) {
         config.max_datalog_days = SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT;
     }
-    if (current_datalog_day_filter_[0]) {
+    if (oximetry_source_) {
+        config.only_datalog_day = oximetry_plan_.inventory_day();
+    } else if (current_datalog_day_filter_[0]) {
         config.only_datalog_day = current_datalog_day_filter_;
     }
     return export_planner_.begin(config,
@@ -1223,6 +1287,26 @@ bool SleepHqSyncEngine::next_file_locked() {
         export_planner_.next(item, error, sizeof(error));
     switch (result) {
         case StorageExportPlannerResult::Item:
+            if (oximetry_source_) {
+                if (item.kind == StorageExportPlannerItemKind::DatalogDayComplete) {
+                    if (status_.import_id && staged_count_) phase_ = WorkPhase::ProcessImport;
+                    return true;
+                }
+                if (oximetry_plan_.collecting()) {
+                    ring_header_check_ = item.local_state_complete ? nullptr : oximetry_plan_.ring_csv(item.path);
+                    if (ring_header_check_) {
+                        current_file_.configure(*stream_port_, item.path, "", "", item.state_path,
+                            item.info.size, item.info.mtime, item.state_write_mode, false);
+                        phase_ = WorkPhase::OpenLocal;
+                    } else {
+                        oximetry_plan_.inspect(item.path, item.local_state_complete);
+                    }
+                    return true;
+                }
+                if (item.local_state_complete ||
+                    !oximetry_plan_.eligible(item.path,
+                        storage_export_current_epoch_seconds_or_zero(), memory_enabled_)) return true;
+            }
             if (item.kind ==
                 StorageExportPlannerItemKind::DatalogDayComplete) {
                 note_completed_datalog_day_locked(item.datalog_day);
@@ -1268,6 +1352,14 @@ bool SleepHqSyncEngine::next_file_locked() {
             return true;
         }
         case StorageExportPlannerResult::Done:
+            if (oximetry_source_ && !staged_count_) {
+                // An interrupted create may have reserved an empty remote import.
+                // Keep its journal for a later eligible file, never process it empty.
+                status_.import_id = 0;
+                import_batch_active_ = replan_after_import_ = false;
+                next_oximetry_source_locked();
+                return true;
+            }
             phase_ = status_.import_id == 0 ? WorkPhase::Finish
                                         : WorkPhase::ProcessImport;
             if (status_.import_id != 0) import_batch_active_ = true;
@@ -1277,6 +1369,31 @@ bool SleepHqSyncEngine::next_file_locked() {
             return false;
     }
     return true;
+}
+
+void SleepHqSyncEngine::next_oximetry_source_locked() {
+    inventory_session_.reset();
+    export_planner_.reset();
+    oximetry_source_ = oximetry_plan_.next_source();
+    if (!oximetry_source_ && oximetry_plan_.collecting()) {
+        oximetry_plan_.start_uploads();
+        oximetry_source_ = oximetry_plan_.next_source();
+    }
+    if (!oximetry_source_) {
+        const auto due = oximetry_plan_.next_deadline();
+        const auto previous = oximetry_deadline_.load();
+        if (due && (!previous || due < previous)) oximetry_deadline_.store(due);
+        phase_ = WorkPhase::Finish;
+        return;
+    }
+
+    char base[AC_STORAGE_PATH_MAX];
+    if (!build_endpoint_state_dir_locked(status_.team_id, base, sizeof(base)) ||
+        snprintf(state_dir_, sizeof(state_dir_), "%s/ox/%s", base, oximetry_source_) >= int(sizeof(state_dir_))) {
+        fail_locked("state_path_failed");
+        return;
+    }
+    phase_ = WorkPhase::LoadInventory;
 }
 
 bool SleepHqSyncEngine::plan_file_locked(const StorageExportPlannerItem &item) {
@@ -1384,7 +1501,13 @@ bool SleepHqSyncEngine::merge_import_files_locked(
             return false;
         }
 
-        if (!storage_export_contains_path(path)) return false;
+        if (oximetry_source_) {
+            std::string_view source, suffix, id;
+            if (!oximetry_archive_path(path, source, suffix) || source != oximetry_source_)
+                return false;
+            const auto kind = oximetry_recording_file(source, suffix, id);
+            if (kind == OximetryArchiveFile::Other) return false;
+        } else if (!storage_export_contains_path(path)) return false;
 
         StagedFile *entry = find_staged_locked(path);
         if (!entry) {
@@ -1433,8 +1556,8 @@ bool SleepHqSyncEngine::defer_current_file_locked() {
 bool SleepHqSyncEngine::next_deferred_file_locked() {
     StorageExportPlannerItem item;
     char error[AC_SLEEPHQ_ERROR_MAX] = {};
-    const StorageExportPlannerResult metadata =
-        export_planner_.next_sleep_hq_root_file(item, error, sizeof(error));
+    const StorageExportPlannerResult metadata = oximetry_source_ ? StorageExportPlannerResult::Done
+        : export_planner_.next_sleep_hq_root_file(item, error, sizeof(error));
     if (metadata == StorageExportPlannerResult::Item) {
         return plan_file_locked(item);
     }
@@ -1910,6 +2033,7 @@ bool SleepHqSyncEngine::prepare_staged_state_locked() {
     for (size_t i = 0; i < staged_count_; ++i) {
         const StagedFile &entry = staged_[i];
         if (!entry.confirmed) continue;
+        if (oximetry_source_) oximetry_plan_.inspect(entry.path, true);
         if (!state_batch_.add(entry.state_path, entry.path,
                               entry.size, entry.mtime)) {
             state_batch_.clear();
@@ -2720,7 +2844,8 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
             result.ok = client_.create_import(status_.team_id,
                                                mask_id,
                                                result.import,
-                                               &operation);
+                                               &operation,
+                                               current_run_kind_ == RunKind::Oximetry);
             if (!result.ok) {
                 copy_cstr(result.error,
                           sizeof(result.error),
@@ -2733,6 +2858,18 @@ void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
             result.ok = current_file_.open(operation,
                                            result.error,
                                            sizeof(result.error));
+            if (result.ok && ring_header_check_) {
+                char bytes[OximetryCsv::MaxHeader];
+                const size_t length = std::min<uint64_t>(sizeof(bytes), current_file_.state().size);
+                size_t read = 0;
+                SleepHqSyncFile::UploadReader reader(current_file_, operation);
+                result.ok = reader.read(reinterpret_cast<uint8_t *>(bytes), length, read);
+                OximetryCsv::Header header;
+                const auto &r = *ring_header_check_;
+                result.csv_ready = result.ok && OximetryCsv::parse_header(
+                    {bytes, read}, r.source, r.id, header);
+                current_file_.close();
+            }
             if (!result.ok) {
                 if (!result.error[0]) {
                     copy_cstr(result.error,
@@ -3102,6 +3239,13 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
             return ExportStep::Working;
 
         case WorkPhase::OpenLocal:
+            if (ring_header_check_) {
+                if (result.csv_ready) oximetry_plan_.inspect(current_file_.state().path, false);
+                ring_header_check_ = nullptr;
+                clear_current_file_locked();
+                phase_ = WorkPhase::NextFile;
+                return ExportStep::Working;
+            }
             phase_ = validating_staged_hash_ ? WorkPhase::HashLocalFile
                                              : WorkPhase::ResolveRemoteFile;
             return ExportStep::Working;
@@ -3152,6 +3296,11 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
             }
             resuming_import_ = false;
             staged_validation_index_ = 0;
+            if (oximetry_source_ && oximetry_plan_.collecting() &&
+                resumed_import_accepts_files_ && staged_count_) {
+                phase_ = WorkPhase::ProcessImport;
+                return ExportStep::Working;
+            }
             if (!prepare_inflight_write_locked(
                     resumed_import_accepts_files_ ? InflightPhase::Uploading
                                                   : InflightPhase::Processing,
@@ -3423,6 +3572,9 @@ SleepHqSyncRuntimeStatus SleepHqSyncEngine::runtime_status() const {
     out.team_id = runtime_team_id_.load();
     out.completed_check_generation =
         runtime_completed_check_generation_.load();
+    out.oximetry_generation = runtime_oximetry_generation_.load();
+    out.prefer_oximetry_bin = runtime_prefer_oximetry_bin_.load();
+    out.oximetry_deadline = oximetry_deadline_.load();
     return out;
 }
 
