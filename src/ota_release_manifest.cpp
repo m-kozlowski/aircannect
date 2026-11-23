@@ -301,8 +301,10 @@ bool absolute_http_url(const char *url) {
 void read_url_migration(JsonObjectConst rule, const char *configured_url,
                         LargeTextBuffer &destination) {
     const JsonString from = rule["from"].as<JsonString>();
-    if (from.isNull() || from.size() != strlen(configured_url) ||
-        memcmp(from.c_str(), configured_url, from.size()) != 0) return;
+    if (from.isNull()) return;
+    const bool any_source = from.size() == 1 && from.c_str()[0] == '*';
+    if (!any_source && (from.size() != strlen(configured_url) ||
+                        memcmp(from.c_str(), configured_url, from.size()) != 0)) return;
 
     const JsonString to = rule["to"].as<JsonString>();
     if (to.isNull() || to.size() > AC_OTA_URL_MAX_LENGTH) return;
