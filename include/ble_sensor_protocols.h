@@ -33,7 +33,7 @@ public:
 #if AC_OXIMETRY_BLE_ENABLED
     uint32_t notification_drops() const { return notification_drops_.load(); }
     bool matches(const NimBLEAdvertisedDevice *device) const;
-    bool subscribe(NimBLEClient *client);
+    bool subscribe(NimBLEClient *client, const char *name);
 #endif
     void on_connected();
     void invalidate_connection();
@@ -51,6 +51,7 @@ private:
         Nonin,
         Viatom,
         Oxyii,
+        Pc60fw,
     };
 
     void emit_sample(uint16_t spo2_raw,
@@ -101,6 +102,13 @@ private:
                              uint8_t *data,
                              size_t len,
                              bool is_notify);
+
+    // PC-60FW push stream: four-byte header and one-byte length.
+    static bool pc60fw_name(const char *name);
+    bool subscribe_pc60fw();
+    void pc60fw_notify(const uint8_t *data, size_t len);
+    uint8_t pc60fw_rx_[4 + UINT8_MAX];
+    size_t pc60fw_used_ = 0;
 
     // Viatom
     enum class ClockStep : uint8_t { Probe, AwaitInfo, Save, Set, Done };

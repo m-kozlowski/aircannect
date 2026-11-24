@@ -1468,8 +1468,7 @@ bool BleSensorSource::subscribe_client(void *client_ptr, const char *name) {
     if (!client) return false;
     protocols_.reset();
 
-    (void)name;
-    return protocols_.subscribe(client);
+    return protocols_.subscribe(client, name);
 #else
     (void)client_ptr;
     (void)name;
@@ -1584,7 +1583,7 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
     bool spo2_valid = false;
     bool pulse_valid = false;
     const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
-    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid, 321);
+    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid, 511);
     const bool valid = spo2_valid && pulse_valid && !from_invalid_packet;
 
 #if AC_OXIMETRY_BLE_ENABLED

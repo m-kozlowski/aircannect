@@ -73,7 +73,8 @@ void BleSensorProtocolEngine::process_plx_notification(
               "Sensor PLX reading %s spo2=%d pulse=%d pi=%.6g\n",
               valid ? "valid" : "invalid",
               static_cast<int>(spo2), static_cast<int>(pulse), double(pi));
-    emit_sample(spo2_raw, pulse_raw, !valid, false, false, false, pi);
+    emit_sample(spo2_raw, pulse_valid ? pulse_raw : PLX_SFLOAT_NAN,
+                !valid, false, false, false, pi);
 }
 #endif
 

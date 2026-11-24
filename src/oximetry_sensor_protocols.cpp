@@ -97,10 +97,11 @@ bool BleSensorProtocolEngine::matches(
            name.rfind("KidsO2", 0) == 0 ||
            name.rfind("BabyO2", 0) == 0 ||
            name.rfind("OxyLink", 0) == 0 ||
-           name.rfind("Oxylink", 0) == 0;
+           name.rfind("Oxylink", 0) == 0 ||
+           pc60fw_name(name.c_str());
 }
 
-bool BleSensorProtocolEngine::subscribe(NimBLEClient *client) {
+bool BleSensorProtocolEngine::subscribe(NimBLEClient *client, const char *name) {
     reset();
     if (!client || !notification_queue_) return false;
 
@@ -123,6 +124,12 @@ bool BleSensorProtocolEngine::subscribe(NimBLEClient *client) {
     active_protocol_ = ActiveProtocol::Viatom;
     if (subscribe_viatom()) {
         return true;
+    }
+
+    // Nordic UART alone does not identify an oximeter.
+    if (pc60fw_name(name)) {
+        active_protocol_ = ActiveProtocol::Pc60fw;
+        if (subscribe_pc60fw()) return true;
     }
 
     reset();
@@ -152,6 +159,7 @@ void BleSensorProtocolEngine::on_connected() {
         case ActiveProtocol::None:
         case ActiveProtocol::Plx:
         case ActiveProtocol::Nonin:
+        case ActiveProtocol::Pc60fw:
             break;
     }
 #endif
@@ -163,6 +171,7 @@ void BleSensorProtocolEngine::reset() {
     invalidate_connection();
     viatom_reset();
     oxyii_reset();
+    pc60fw_used_ = 0;
     client_ = nullptr;
 #endif
     active_protocol_ = ActiveProtocol::None;
@@ -186,6 +195,7 @@ void BleSensorProtocolEngine::poll(uint32_t now_ms, O2RingRecordingImport *recor
         case ActiveProtocol::None:
         case ActiveProtocol::Plx:
         case ActiveProtocol::Nonin:
+        case ActiveProtocol::Pc60fw:
             break;
     }
 #else
@@ -290,6 +300,9 @@ void BleSensorProtocolEngine::process_notification(
         case ActiveProtocol::Oxyii:
             oxyii_notify(notification.bytes, notification.length);
             break;
+        case ActiveProtocol::Pc60fw:
+            pc60fw_notify(notification.bytes, notification.length);
+            break;
         case ActiveProtocol::None:
             break;
     }
@@ -298,6 +311,7 @@ void BleSensorProtocolEngine::process_notification(
 void BleSensorProtocolEngine::reset_fragment_assemblers() {
     viatom_reset_rx();
     oxyii_reset_rx();
+    pc60fw_used_ = 0;
 }
 #endif
 
