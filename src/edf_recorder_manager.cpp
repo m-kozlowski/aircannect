@@ -1721,7 +1721,7 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         }
 
         if (!assembler_.start_session(status_.recording_start_time,
-                                       session_clock_, true)) {
+                                      session_clock_, active_sa2_input_, true)) {
             set_error(assembler_.status().last_error);
             status_.file_open_failures++;
             next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;

@@ -77,10 +77,12 @@ void EdfStreamAssembler::set_record_observer(EdfRecordObserver observer,
 bool EdfStreamAssembler::start_session(
     const char *device_start_time,
     const As11ClockTransform &clock_transform,
+    EdfSa2Input sa2_input,
     bool awaiting_file_records) {
     if (!allocate_buffers()) return false;
     reset();
     status_.active = true;
+    sa2_input_ = sa2_input;
     awaiting_file_records_ = awaiting_file_records;
     clock_transform_ = clock_transform;
     declared_start_epoch_ms_ = 0;
@@ -157,8 +159,7 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
     if (frame_in_progress_) return EdfFramePrepareStatus::Ready;
 
     int64_t frame_start_ms = 0;
-    if (!parse_frame_start_ms(frame, frame_start_ms) ||
-        !ensure_session_epoch(frame_start_ms)) {
+    if (!parse_frame_start_ms(frame, frame_start_ms)) {
         status_.timestamp_errors++;
         set_error("timestamp");
         return EdfFramePrepareStatus::Rejected;
@@ -166,6 +167,7 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
     FrameTiming timing;
     const bool have_timing =
         resolve_frame_timing(frame, frame_start_ms, timing);
+    if (have_timing) ensure_session_epoch(frame_start_ms);
     const int64_t effective_start_ms =
         have_timing ? timing.effective_start_ms : frame_start_ms;
 
@@ -175,6 +177,9 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
 
         for (size_t i = 0; i < frame.signal_count; ++i) {
             const StreamSignalSpan &span = frame.signals[i];
+            EdfSignalTarget target;
+            if (!stream_target(span.id, target)) continue;
+
             const uint32_t interval = span.sample_interval_ms
                 ? span.sample_interval_ms : frame.interval_ms;
 
@@ -197,7 +202,7 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
     for (size_t i = 0; i < frame.signal_count; ++i) {
         const StreamSignalSpan &span = frame.signals[i];
         EdfSignalTarget target;
-        if (!edf_signal_target_for_stream(span.id, target)) continue;
+        if (!stream_target(span.id, target)) continue;
 
         const uint32_t source_interval =
             span.sample_interval_ms ? span.sample_interval_ms
@@ -262,13 +267,14 @@ bool EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
 
     if (!frame_in_progress_) {
         int64_t frame_start_ms = 0;
-        if (!parse_frame_start_ms(frame, frame_start_ms) ||
-            !ensure_session_epoch(frame_start_ms)) {
+        if (!parse_frame_start_ms(frame, frame_start_ms)) {
             status_.timestamp_errors++;
             set_error("timestamp");
             return true;
         }
-        (void)resolve_frame_timing(frame, frame_start_ms, frame_timing_);
+        if (resolve_frame_timing(frame, frame_start_ms, frame_timing_)) {
+            ensure_session_epoch(frame_start_ms);
+        }
         maybe_rebase_initial_epoch(frame, frame_timing_.effective_start_ms);
 
         status_.frames++;
@@ -305,7 +311,8 @@ bool EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
 EdfSa2IngestStatus EdfStreamAssembler::ingest_sa2_sample(
     const EdfSa2Sample &sample,
     size_t max_records_to_publish) {
-    if (!status_.active || status_.session_start_epoch_ms <= 0 ||
+    if (sa2_input_ != EdfSa2Input::LocalOximetry || !status_.active ||
+        status_.session_start_epoch_ms <= 0 ||
         sample.epoch_ms < status_.session_start_epoch_ms) {
         return EdfSa2IngestStatus::Rejected;
     }
@@ -479,7 +486,7 @@ void EdfStreamAssembler::count_late_frame_samples(
     for (size_t i = 0; i < frame.signal_count; ++i) {
         const StreamSignalSpan &span = frame.signals[i];
         EdfSignalTarget target;
-        if (!edf_signal_target_for_stream(span.id, target) ||
+        if (!stream_target(span.id, target) ||
             target.series != series.id) {
             continue;
         }
@@ -534,7 +541,7 @@ bool EdfStreamAssembler::ingest_series_frame(const StreamFrameData &frame,
         for (size_t i = 0; i < frame.signal_count; ++i) {
             const StreamSignalSpan &span = frame.signals[i];
             EdfSignalTarget target;
-            if (!edf_signal_target_for_stream(span.id, target) ||
+            if (!stream_target(span.id, target) ||
                 target.series != series.id) {
                 continue;
             }
@@ -605,8 +612,7 @@ bool EdfStreamAssembler::resolve_frame_timing(
     for (size_t i = 0; i < frame.signal_count; ++i) {
         const StreamSignalSpan &span = frame.signals[i];
         EdfSignalTarget target;
-        if (!edf_signal_target_for_stream(span.id, target)) continue;
-        (void)target;
+        if (!stream_target(span.id, target)) continue;
 
         const uint32_t source_interval =
             span.sample_interval_ms ? span.sample_interval_ms
@@ -692,7 +698,7 @@ void EdfStreamAssembler::maybe_rebase_initial_epoch(
     for (size_t i = 0; i < frame.signal_count; ++i) {
         const StreamSignalSpan &span = frame.signals[i];
         EdfSignalTarget target;
-        if (!edf_signal_target_for_stream(span.id, target)) continue;
+        if (!stream_target(span.id, target)) continue;
 
         const uint32_t source_interval =
             span.sample_interval_ms ? span.sample_interval_ms
@@ -865,17 +871,22 @@ EdfStreamAssembler::SeriesBuffer EdfStreamAssembler::series(EdfSeriesId id) {
     };
 }
 
+bool EdfStreamAssembler::stream_target(StreamSignalId id,
+                                       EdfSignalTarget &target) const {
+    return edf_signal_target_for_stream(id, target) &&
+           (target.series != EdfSeriesId::Sa2 || sa2_input_ == EdfSa2Input::As11Stream);
+}
+
 bool EdfStreamAssembler::parse_frame_start_ms(const StreamFrameData &frame,
                                               int64_t &start_ms) {
     return edf_parse_as11_utc_ms(frame.start_time, clock_transform_, start_ms);
 }
 
-bool EdfStreamAssembler::ensure_session_epoch(int64_t frame_start_ms) {
+void EdfStreamAssembler::ensure_session_epoch(int64_t frame_start_ms) {
     if (status_.session_start_epoch_ms == 0) {
         status_.session_start_epoch_ms =
             edf_floor_epoch_ms_to_second(frame_start_ms);
     }
-    return true;
 }
 
 void EdfStreamAssembler::set_error(const char *error) {

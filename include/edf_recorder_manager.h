@@ -36,11 +36,6 @@ static constexpr uint32_t AC_EDF_STORAGE_RETRY_MS = 60000;
 static constexpr size_t AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH = 32;
 static constexpr size_t AC_EDF_LOCAL_SA2_QUEUE_DEPTH = 64;
 
-enum class EdfSa2Input : uint8_t {
-    As11Stream,
-    LocalOximetry,
-};
-
 struct EdfCatalogRefreshHint {
     uint32_t sessions_ended = 0;
     SleepDayId sleep_day;

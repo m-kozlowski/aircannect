@@ -67,6 +67,11 @@ struct EdfSa2Sample {
     bool valid = false;
 };
 
+enum class EdfSa2Input : uint8_t {
+    As11Stream,
+    LocalOximetry,
+};
+
 class EdfStreamAssembler {
 public:
     bool begin();
@@ -78,6 +83,7 @@ public:
     // Pending opens allow first-minute assembly, but no record advancement.
     bool start_session(const char *device_start_time,
                        const As11ClockTransform &clock_transform,
+                       EdfSa2Input sa2_input,
                        bool awaiting_file_records = false);
     void set_current_records(
         const uint32_t (&records)[AC_EDF_NUMERIC_SERIES_COUNT]);
@@ -168,8 +174,9 @@ private:
                       bool count_duplicate);
 
     SeriesBuffer series(EdfSeriesId id);
+    bool stream_target(StreamSignalId id, EdfSignalTarget &target) const;
     bool parse_frame_start_ms(const StreamFrameData &frame, int64_t &start_ms);
-    bool ensure_session_epoch(int64_t frame_start_ms);
+    void ensure_session_epoch(int64_t frame_start_ms);
     bool initial_epoch_can_rebase() const;
     void set_error(const char *error);
 
@@ -184,6 +191,7 @@ private:
     int64_t declared_start_epoch_ms_ = 0;
     bool initial_epoch_rebase_allowed_ = false;
     bool awaiting_file_records_ = false;
+    EdfSa2Input sa2_input_ = EdfSa2Input::As11Stream;
     As11ClockTransform clock_transform_;
 
     // Cursor into the frame retained by the recorder during storage pressure.
