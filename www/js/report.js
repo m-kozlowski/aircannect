@@ -883,17 +883,20 @@
 
     function reportRange() {
       const ranges = reportVisibleSessionRanges();
+      const showRecordings = !reportHiddenSessions.size && reportSummaryScope !== "sessions";
+      return reportTimeBounds(ranges, showRecordings ? oximetryView.records : null);
+    }
+
+    function reportTimeBounds(sessions, recordings) {
       let start = Infinity;
       let end = -Infinity;
-      ranges.forEach((range) => {
-        start = Math.min(start, range.start);
-        end = Math.max(end, range.end);
-      });
-      if (oximetryView.source && !reportHiddenSessions.size && reportSummaryScope !== "sessions") {
-        for (const r of oximetryView.files) {
-          start = Math.min(start, Math.max(r.start, oximetryView.night.start));
-          end = Math.max(end, Math.min(oximetryFileEnd(r), oximetryView.night.end));
-        }
+      for (const s of sessions) {
+        start = Math.min(start, s.start);
+        end = Math.max(end, s.end);
+      }
+      for (const r of recordings || []) {
+        start = Math.min(start, r.from);
+        end = Math.max(end, r.to);
       }
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
         start = Number(reportResult && reportResult.start || 0);
@@ -4679,9 +4682,11 @@
       if (pending) return pending;
 
       const definition = reportChartDefinition(key);
-      const range = reportRange();
-      if (!definition || !validReportRange(range)) return Promise.resolve(false);
       const sourceView = oximetryChannels.includes(key) ? oximetryView : null;
+      // The overview survives session toggles. Only its drawing range is filtered.
+      const range = sourceView?.source ? reportTimeBounds([], sourceView.records) : reportResult;
+      if (!definition || !range || !(range.end > range.start)) return Promise.resolve(false);
+
       const context = {
         nightId: reportCurrentNightId,
         revision: reportCurrentRevision,
