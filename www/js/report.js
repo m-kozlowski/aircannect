@@ -591,17 +591,22 @@
       return AirCANnect.format.pad2(date.getHours()) + ":" + AirCANnect.format.pad2(date.getMinutes());
     }
 
-    function applyReportSessionVisibility(nightId, sessions) {
+    function applyReportSessionPreferences(nightId, sessions) {
       const key = nightId ? "aircannect.report.hiddenSessions.v1." + nightId : "";
       if (key !== reportSessionPreferenceKey) {
         reportSessionPreferenceKey = key;
         reportSavedHiddenStarts.clear();
+        reportSavedScope = "night";
         try {
+          if (key && localStorage.getItem(REPORT_SCOPE_KEY + nightId) === "sessions") {
+            reportSavedScope = "sessions";
+          }
           const saved = key && JSON.parse(localStorage.getItem(key));
           if (Array.isArray(saved)) reportSavedHiddenStarts = new Set(saved);
         } catch (_) { /* Browser storage is optional. */ }
       }
 
+      reportSummaryScope = canSelectReportSessions() ? reportSavedScope : "night";
       reportHiddenSessions.clear();
       if (!reportSavedHiddenStarts.size) return;
       for (const session of sessions) {
@@ -3131,6 +3136,10 @@
       return day ? day.slice(0, 4) + "-" + day.slice(4, 6) + "-" + day.slice(6, 8) : "--";
     }
 
+    function canSelectReportSessions() {
+      return !!reportResult?.sessions?.length && !reportResult.active;
+    }
+
     function renderReportViewMode() {
       const period = reportViewMode === "period";
       const oximetryOnly = !period && !!reportResult?.oximetryOnly;
@@ -3158,7 +3167,7 @@
       if (scope) scope.hidden = period || !!reportResult?.oximetryOnly;
       document.querySelectorAll('[data-action="report.scope"]').forEach((button) => {
         button.setAttribute("aria-pressed", String(button.dataset.value === reportSummaryScope));
-        button.disabled = !reportResult || (button.dataset.value === "sessions" && !!reportResult.active);
+        button.disabled = !reportResult || (button.dataset.value === "sessions" && !canSelectReportSessions());
       });
       if (!period && reportSummaryScope === "sessions") {
         AirCANnect.ui.text("reportSummaryCaption", i18n.message("ui.selected.sessions"));
@@ -3318,8 +3327,8 @@
     }
 
     function renderReportSummary() {
-      renderReportViewMode();
       if (reportViewMode === "period") {
+        renderReportViewMode();
         renderReportPeriod();
         return;
       }
@@ -3327,8 +3336,9 @@
       const selected = selectedReportNight();
 
       const sessions = reportResult?.sessions || selected?.sessions || [];
-      applyReportSessionVisibility(
+      applyReportSessionPreferences(
         reportResult ? reportCurrentNightId : reportNightLoadKey(selected), sessions);
+      renderReportViewMode();
 
       const dateBtn = document.getElementById("reportDateBtn");
       if (dateBtn) {
@@ -4845,7 +4855,6 @@
       const keepView = preserveView && nightId === reportCurrentNightId &&
         !!reportResult;
       const savedZoom = keepView ? reportZoom : null;
-      const savedScope = keepView ? reportSummaryScope : "night";
       const token = ++reportLoadToken;
       reportOffline = false;
       if (!keepView) {
@@ -4889,7 +4898,6 @@
         if (changed) {
           const savedPin = keepView ? reportPinnedTime : null;
           if (keepView) resetReportData();
-          reportSummaryScope = savedScope;
           reportResult = res.result;
           reportZoom = savedZoom;
           setReportPin(savedPin);
@@ -5149,7 +5157,14 @@
       const scope = element.dataset.value;
       if (!["night", "sessions"].includes(scope) || scope === reportSummaryScope) return;
       cancelReportPeriodRequest();
-      reportSummaryScope = scope;
+      reportSavedScope = scope;
+      try {
+        const key = REPORT_SCOPE_KEY + reportCurrentNightId;
+        if (scope === "sessions") localStorage.setItem(key, scope);
+        else localStorage.removeItem(key);
+      } catch (_) {
+        AirCANnect.ui.message("reportMsg", i18n.message("report.preferences_failed"), false);
+      }
       reportSelectionResult = null;
       renderReportSummary();
       renderReportCharts();
@@ -5261,6 +5276,8 @@
     let reportEvents = [];
     const reportHiddenSessions = new Set();
     let reportSessionPreferenceKey = "";
+    const REPORT_SCOPE_KEY = "aircannect.report.summaryScope.v1.";
+    let reportSavedScope = "night";
     let reportSavedHiddenStarts = new Set();
     let reportDrawItems = [];
     let reportDrawPending = false;
