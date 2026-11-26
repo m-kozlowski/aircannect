@@ -591,6 +591,42 @@
       return AirCANnect.format.pad2(date.getHours()) + ":" + AirCANnect.format.pad2(date.getMinutes());
     }
 
+    function applyReportSessionVisibility(nightId, sessions) {
+      const key = nightId ? "aircannect.report.hiddenSessions.v1." + nightId : "";
+      if (key !== reportSessionPreferenceKey) {
+        reportSessionPreferenceKey = key;
+        reportSavedHiddenStarts.clear();
+        try {
+          const saved = key && JSON.parse(localStorage.getItem(key));
+          if (Array.isArray(saved)) reportSavedHiddenStarts = new Set(saved);
+        } catch (_) { /* Browser storage is optional. */ }
+      }
+
+      reportHiddenSessions.clear();
+      if (!reportSavedHiddenStarts.size) return;
+      for (const session of sessions) {
+        const start = Number(session.start);
+        if (reportSavedHiddenStarts.has(start)) reportHiddenSessions.add(start);
+      }
+      if (sessions.every(s => reportHiddenSessions.has(Number(s.start)))) {
+        reportHiddenSessions.clear();
+      }
+    }
+
+    function saveReportSessionVisibility() {
+      reportSavedHiddenStarts = new Set(reportHiddenSessions);
+      try {
+        if (reportHiddenSessions.size) {
+          localStorage.setItem(reportSessionPreferenceKey,
+            JSON.stringify([...reportHiddenSessions]));
+        } else {
+          localStorage.removeItem(reportSessionPreferenceKey);
+        }
+      } catch (_) {
+        AirCANnect.ui.message("reportMsg", i18n.message("report.preferences_failed"), false);
+      }
+    }
+
     function renderReportSessions(sessions) {
       const container = document.getElementById("reportSessions");
       if (!container) return;
@@ -618,6 +654,7 @@
               if (sessions.filter((s) => !reportHiddenSessions.has(Number(s.start))).length <= 1) return;
               reportHiddenSessions.add(start);
             }
+            saveReportSessionVisibility();
             renderReportSessions(sessions);
             renderReportCharts();
             if (reportSummaryScope === "sessions") {
@@ -3277,6 +3314,10 @@
       const nights = reportNightsNewestFirst();
       const selected = selectedReportNight();
 
+      const sessions = reportResult?.sessions || selected?.sessions || [];
+      applyReportSessionVisibility(
+        reportResult ? reportCurrentNightId : reportNightLoadKey(selected), sessions);
+
       const dateBtn = document.getElementById("reportDateBtn");
       if (dateBtn) {
         if (selected) {
@@ -3327,8 +3368,7 @@
       AirCANnect.ui.text("reportCsr", csrVisible ? Math.round(Number(data.csr_minutes)) + "m" : "--");
 
       renderReportEventCounts(statistics);
-      renderReportSessions(reportResult && reportResult.sessions ?
-        reportResult.sessions : selected ? selected.sessions : []);
+      renderReportSessions(sessions);
       updateReportZoomControls();
     }
 
@@ -4793,7 +4833,6 @@
       const keepView = preserveView && nightId === reportCurrentNightId &&
         !!reportResult;
       const savedZoom = keepView ? reportZoom : null;
-      const savedHiddenSessions = keepView ? [...reportHiddenSessions] : [];
       const savedScope = keepView ? reportSummaryScope : "night";
       const token = ++reportLoadToken;
       reportOffline = false;
@@ -4842,7 +4881,6 @@
           reportResult = res.result;
           reportZoom = savedZoom;
           setReportPin(savedPin);
-          savedHiddenSessions.forEach((key) => reportHiddenSessions.add(key));
 
           const loaded = await loadSignalStoreBase(
             token, nightId, night, controller.signal);
@@ -5210,6 +5248,8 @@
     let reportSeries = {};
     let reportEvents = [];
     const reportHiddenSessions = new Set();
+    let reportSessionPreferenceKey = "";
+    let reportSavedHiddenStarts = new Set();
     let reportDrawItems = [];
     let reportDrawPending = false;
     let reportDrawRetryCount = 0;
