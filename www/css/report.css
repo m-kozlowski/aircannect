@@ -405,6 +405,7 @@
     }
 
     .report-summary-heading .report-summary-caption { margin: 0; }
+    #reportOximetrySource { width: 13.5em; max-width: 100%; }
 
     .report-metrics {
       display: grid;

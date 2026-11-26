@@ -3152,11 +3152,15 @@
       return !!night?.sessions?.length && !night.active;
     }
 
-    function renderReportViewMode() {
+    function renderReportViewMode(night) {
       const period = reportViewMode === "period";
-      const oximetryOnly = !period && !!reportResult?.oximetryOnly;
+      const oximetryOnly = !period && !!(reportResult || night)?.oximetryOnly;
       const picker = document.getElementById("reportOximetryPicker");
-      if (picker) picker.hidden = period || !oximetryView.options.length;
+      if (picker) {
+        const pending = !period && night && !oximetryView.night && nightOximetryFiles(night).length > 0;
+        picker.hidden = period || (!pending && !oximetryView.options.length);
+        picker.style.visibility = pending ? "hidden" : "";
+      }
       for (const id of ["reportNightActions", "reportZoomTools", "reportCharts"]) {
         const element = document.getElementById(id);
         if (element) element.hidden = period;
@@ -3176,7 +3180,7 @@
       AirCANnect.ui.text("reportSummaryCaption", period ? i18n.message("report.period_summary") : i18n.message("ui.night.summary"));
       AirCANnect.ui.text("reportStatisticsScope", period ? i18n.message("report.full_period") : i18n.message("ui.full.night"));
       const scope = document.getElementById("reportSummaryScope");
-      if (scope) scope.hidden = period || !!reportResult?.oximetryOnly;
+      if (scope) scope.hidden = period || oximetryOnly;
       document.querySelectorAll('[data-action="report.scope"]').forEach((button) => {
         button.setAttribute("aria-pressed", String(button.dataset.value === reportSummaryScope));
         button.disabled = !reportResult || (button.dataset.value === "sessions" && !canSelectReportSessions(reportResult));
@@ -3410,7 +3414,7 @@
 
       applyReportSessionPreferences(
         reportResult ? reportCurrentNightId : reportNightLoadKey(selected), reportResult || selected);
-      renderReportViewMode();
+      renderReportViewMode(selected);
 
       const dateBtn = document.getElementById("reportDateBtn");
       if (dateBtn) {
