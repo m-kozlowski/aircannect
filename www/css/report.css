@@ -408,13 +408,13 @@
     .report-summary-heading:has(#reportSummaryScope:not([hidden])) {
       container: night-summary / inline-size;
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: min(8rem, 30%) minmax(0, 1fr) auto;
       grid-auto-rows: minmax(var(--summary-control-height), auto);
     }
 
     .report-summary-heading .report-summary-caption { margin: 0; }
     #reportSummaryScope { grid-column: 3; justify-self: end; }
-    #reportOximetryPicker { display: flex; align-items: center; justify-self: center; gap: 4px; min-width: 0; }
+    #reportOximetryPicker { display: flex; align-items: center; justify-self: center; gap: 4px; max-width: 100%; min-width: 0; }
     #reportOximetrySource { width: 13.5em; max-width: 100%; min-width: 0; height: var(--summary-control-height); }
 
     @container night-summary (max-width: 36rem) {
