@@ -591,31 +591,30 @@
       return AirCANnect.format.pad2(date.getHours()) + ":" + AirCANnect.format.pad2(date.getMinutes());
     }
 
+    function reportSessionPreferences(id) {
+      let scope = "night", hidden = new Set();
+      try {
+        if (id && localStorage.getItem(REPORT_SCOPE_KEY + id) === "sessions") scope = "sessions";
+        const saved = id && JSON.parse(localStorage.getItem(REPORT_HIDDEN_KEY + id));
+        if (Array.isArray(saved)) hidden = new Set(saved);
+      } catch (_) { /* Browser storage is optional. */ }
+      return {scope, hidden};
+    }
+
+    function effectiveHiddenSessions(sessions, saved) {
+      const hidden = new Set(sessions.map(s => Number(s.start)).filter(start => saved.has(start)));
+      if (sessions.every(s => hidden.has(Number(s.start)))) hidden.clear();
+      return hidden;
+    }
+
     function applyReportSessionPreferences(nightId, sessions) {
-      const key = nightId ? "aircannect.report.hiddenSessions.v1." + nightId : "";
+      const key = nightId ? REPORT_HIDDEN_KEY + nightId : "";
       if (key !== reportSessionPreferenceKey) {
         reportSessionPreferenceKey = key;
-        reportSavedHiddenStarts.clear();
-        reportSavedScope = "night";
-        try {
-          if (key && localStorage.getItem(REPORT_SCOPE_KEY + nightId) === "sessions") {
-            reportSavedScope = "sessions";
-          }
-          const saved = key && JSON.parse(localStorage.getItem(key));
-          if (Array.isArray(saved)) reportSavedHiddenStarts = new Set(saved);
-        } catch (_) { /* Browser storage is optional. */ }
+        ({scope: reportSavedScope, hidden: reportSavedHiddenStarts} = reportSessionPreferences(nightId));
       }
-
       reportSummaryScope = canSelectReportSessions() ? reportSavedScope : "night";
-      reportHiddenSessions.clear();
-      if (!reportSavedHiddenStarts.size) return;
-      for (const session of sessions) {
-        const start = Number(session.start);
-        if (reportSavedHiddenStarts.has(start)) reportHiddenSessions.add(start);
-      }
-      if (sessions.every(s => reportHiddenSessions.has(Number(s.start)))) {
-        reportHiddenSessions.clear();
-      }
+      reportHiddenSessions = effectiveHiddenSessions(sessions, reportSavedHiddenStarts);
     }
 
     function saveReportSessionVisibility() {
@@ -2810,15 +2809,26 @@
         +selected.id.slice(6, 8));
       const nights = new Map((reportSummary && reportSummary.nights || []).map((night) => [night.id, night]));
       const metricIndex = reportMetricTiles.indexOf(metric) - 1;
+      const selection = reportSummaryScope === "sessions";
+      const overrides = reportSessionTrend?.points;
       const points = [];
       for (let ago = 13; ago >= 0; ago--) {
         const date = new Date(end - ago * 86400000);
         const iso = date.toISOString().slice(0, 10);
         const night = nights.get(iso.replace(/-/g, ""));
-        const saved = !night || night.active ? null : metric.key === "duration"
-          ? reportNumber(night.duration_min)
-          : reportNumber(night.means && night.means[metricIndex]);
-        points.push({id: night?.id, date: iso, value: ago === 0 ? value : saved});
+        let point = null;
+        if (ago === 0) point = value;
+        else if (night && !night.active) {
+          if (selection && (!overrides || overrides.has(night.id))) {
+            const body = overrides?.get(night.id);
+            if (body) point = reportMetricValue(metric, body, null);
+          } else {
+            point = metric.key === "duration"
+              ? reportNumber(selection ? night.report_duration_min : night.duration_min)
+              : reportNumber(night.means?.[metricIndex]);
+          }
+        }
+        points.push({id: night?.id, date: iso, value: point});
       }
       const reference = points.slice(6, 13).map((point) => point.value).filter((v) => v !== null);
       return {points, count: reference.length,
@@ -2930,16 +2940,16 @@
       return svg;
     }
 
-    function renderReportTiles(result, selected, period = false, selection = false) {
+    function renderReportTiles(result, selected, period = false) {
       const container = document.getElementById("reportMetricTiles");
       if (!container) return;
       container.replaceChildren();
       reportMetricTiles.forEach((metric) => {
         const value = period && metric.key === "duration"
           ? result?.nights ? result.duration_min / result.nights : null
-          : reportMetricValue(metric, result, selected);
-        const trend = selection ? {mean: null, count: 0, points: []} : reportTrend(metric, selected, value);
-        const button = document.createElement(period || selection ? "div" : "button");
+          : reportMetricValue(metric, result, reportSummaryScope === "sessions" ? null : selected);
+        const trend = reportTrend(metric, selected, value);
+        const button = document.createElement(period ? "div" : "button");
         button.type = "button";
         button.className = "report-metric";
         button.dataset.action = "report.metric";
@@ -2947,19 +2957,21 @@
         button.style.setProperty("--metric-color", metric.color);
         button.setAttribute("aria-expanded", String(reportHistoryMetric === metric.key));
         button.setAttribute("aria-controls", "reportMetricHistory");
-        i18n.text(button, i18n.message("report.metric_comparison", {
+        const comparison = i18n.message("report.metric_comparison", {
           label: metric.label, value: formatReportMetric(metric, trend.mean),
           unit: metric.unit, count: trend.count,
-        }), "title");
-        if (period || selection) {
+        });
+        i18n.text(button, !period && reportSummaryScope === "sessions"
+          ? i18n.join([i18n.message("report.selected_calculated"), comparison], "; ")
+          : comparison, "title");
+        if (period) {
           delete button.dataset.action;
           delete button.dataset.value;
           button.removeAttribute("aria-expanded");
           button.removeAttribute("aria-controls");
           const coverage = metric.key === "duration" ? result?.nights
             : metric.key === "ahi" ? result?.ahi_nights : result?.statistics?.[metric.key]?.nights;
-          i18n.text(button, selection ? i18n.message("report.selected_calculated")
-            : i18n.message("report.coverage", {
+          i18n.text(button, i18n.message("report.coverage", {
               count: coverage || 0, days: reportPeriodDays,
             }), "title");
         }
@@ -2972,9 +2984,9 @@
         i18n.text(button.querySelector(".report-metric-unit"), metric.unit);
         i18n.text(button.querySelector(".report-metric-delta"), formatReportMetric(metric,
           value === null || trend.mean === null ? null : value - trend.mean, true));
-        if (period || selection) {
+        if (period) {
           i18n.text(button.querySelector(".report-metric-delta"), "");
-          if (period && metric.key === "duration") {
+          if (metric.key === "duration") {
             i18n.text(button.querySelector(".report-metric-label"), i18n.message("report.therapy_mean"));
             i18n.text(button.querySelector(".report-metric-unit"), result?.nights
               ? i18n.message("report.total_duration", {
@@ -2984,7 +2996,7 @@
         }
 
         if (metric.key === "ahi") button.querySelector(".report-metric-main").appendChild(reportAhiPie(result));
-        else if (!period && !selection) {
+        else if (!period) {
           const spark = svgNode("svg", {class: "report-spark", "aria-hidden": "true"});
           (metric.key === "duration" ? button.querySelector(".report-metric-unit") :
             button.querySelector(".report-metric-main")).appendChild(spark);
@@ -3002,11 +3014,13 @@
         button.setAttribute("aria-expanded", String(button.dataset.value === reportHistoryMetric));
       });
       const metric = reportMetricTiles.find((item) => item.key === reportHistoryMetric);
-      panel.hidden = !metric || reportViewMode === "period" || reportSummaryScope === "sessions";
+      panel.hidden = !metric || reportViewMode === "period";
       if (panel.hidden) return;
 
       const selected = selectedReportNight();
-      const trend = reportTrend(metric, selected, reportMetricValue(metric, reportResult, selected));
+      const selection = reportSummaryScope === "sessions";
+      const trend = reportTrend(metric, selected, reportMetricValue(metric,
+        selection ? reportSelectionResult : reportResult, selection ? null : selected));
       AirCANnect.ui.text("reportHistoryTitle", i18n.join([metric.label, metric.unit,
         i18n.message("report.comparison_nights", {count: trend.count}),
       ].filter(Boolean), " · "));
@@ -3253,6 +3267,73 @@
       reportPeriodWaiting = null;
     }
 
+    function reportSelectionRequest(id, result, hidden) {
+      const indices = result.sessions.flatMap((s, i) => hidden.has(Number(s.start)) ? [] : [i]).join(",");
+      const version = result.generation + "." + result.source_revision;
+      return {key: "sessions:v1:" + id + ":" + version + ":" + indices,
+        url: "/api/report/summary?night=" + id + "&sessions=" + indices + "&v=" + version};
+    }
+
+    async function reportAggregateBody(response, key, saved, signal) {
+      if (response.status === 304 && saved) return saved.body;
+      if (response.status !== 200) {
+        throw i18n.failure(AirCANnect.http.responseError(await response.text(), response.status));
+      }
+      const body = await response.json();
+      if (!signal.aborted) void writeReportCache([{key, value: {
+        body, etag: response.headers.get("ETag") || ""}, bytes: JSON.stringify(body).length * 2}]);
+      return body;
+    }
+
+    async function historicalReportPoint(night, prefs, signal) {
+      const response = await pollSignalStoreNight(reportLoadToken, night.id, signal, night);
+      const result = response?.result;
+      if (!result || result.active || signal.aborted) return null;
+      if (prefs.scope !== "sessions" || !result.sessions.length) return result;
+
+      const {key, url} = reportSelectionRequest(night.id, result,
+        effectiveHiddenSessions(result.sessions, prefs.hidden));
+      const saved = (await readReportCache([key])).get(key);
+      if (saved) return saved.body;
+      return pollReportFetch({
+        active: () => !signal.aborted, maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
+        request: () => AirCANnect.http.request(url, conditionalRequestOptions(null, signal)).catch(() => null),
+        handle: async reply => reply?.status === 202 ? {waitForReport: true}
+          : {done: true, value: reply && await reportAggregateBody(reply, key, null, signal)},
+      });
+    }
+
+    function updateSessionTrend(selected) {
+      const id = selected?.id;
+      if (reportSessionTrend?.id === id && reportSessionTrend?.index === reportSummary) return;
+      reportSessionTrend?.controller.abort();
+      reportSessionTrend = null;
+      if (!id) return;
+
+      const points = new Map();
+      const controller = new AbortController();
+      reportSessionTrend = {id, index: reportSummary, points, controller};
+      const first = reportDayOffset(id, -13);
+      const jobs = [];
+      for (const night of reportSummary.nights) {
+        if (night.id < first || night.id >= id || night.active) continue;
+        const prefs = reportSessionPreferences(night.id);
+        if (prefs.scope === "night" && night.report_duration_min != null) continue;
+        points.set(night.id, null);
+        // Do not trigger a background rebuild of an unopened, unpublished night.
+        if (night.materialized === false && !night.report_revision) continue;
+        jobs.push(async () => {
+          if (controller.signal.aborted) return;
+          try {
+            points.set(night.id, await historicalReportPoint(night, prefs, controller.signal));
+          } catch (_) { /* Unavailable historical metrics remain gaps. */ }
+        });
+      }
+      if (jobs.length) void runReportFetchJobs(jobs, 1).then(() => {
+        if (!controller.signal.aborted) renderReportSummary();
+      });
+    }
+
     async function loadReportPeriod(retryFailed = false) {
       const selection = reportViewMode === "night" && reportSummaryScope === "sessions";
       if (reportViewMode !== "period" && !selection) return;
@@ -3265,14 +3346,9 @@
       reportPeriodController = controller;
       reportPeriodWaiting = null;
       const current = () => reportPeriodController === controller && !controller.signal.aborted;
-      const selected = selection ? reportResult.sessions.map((s, i) =>
-        reportHiddenSessions.has(Number(s.start)) ? null : i).filter((i) => i !== null) : null;
-      const version = reportCurrentGeneration + "." + reportCurrentRevision;
-      const key = selection ? "sessions:v1:" + reportCurrentNightId + ":" + version + ":" + selected.join(",")
-        : "period:v3:" + reportPeriodEnd + ":" + reportPeriodDays;
-      const url = selection ? "/api/report/summary?night=" + reportCurrentNightId +
-        "&sessions=" + selected.join(",") + "&v=" + version
-        : "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays;
+      const {key, url} = selection ? reportSelectionRequest(reportCurrentNightId, reportResult, reportHiddenSessions)
+        : {key: "period:v3:" + reportPeriodEnd + ":" + reportPeriodDays,
+          url: "/api/report/summary?night=" + reportPeriodEnd + "&days=" + reportPeriodDays};
       let saved = null;
       AirCANnect.ui.message("reportMsg", selection ? i18n.message("report.loading_sessions") : i18n.message("report.loading_period"), true, true);
       try {
@@ -3289,17 +3365,10 @@
           AirCANnect.ui.message("reportMsg", selection ? i18n.message("report.preparing_sessions") : i18n.message("report.preparing_period"), true, true);
           return;
         }
-        if (response.status !== 200 && !(response.status === 304 && saved)) {
-          const text = await response.text();
-          throw i18n.failure(AirCANnect.http.responseError(text, response.status));
-        }
-        const body = response.status === 304 ? saved.body : await response.json();
+        const body = await reportAggregateBody(response, key, saved, controller.signal);
         if (!current()) return;
         if (selection) reportSelectionResult = body;
         else reportPeriodResult = body;
-        if (response.status === 200) void writeReportCache([{key, value: {
-          body, etag: response.headers.get("ETag") || "",
-        }, bytes: JSON.stringify(body).length * 2}]);
         renderReportSummary();
         const notes = [];
         if (body.active_nights) notes.push(i18n.message("report.active_excluded", {count: body.active_nights}));
@@ -3328,6 +3397,7 @@
 
     function renderReportSummary() {
       if (reportViewMode === "period") {
+        updateSessionTrend(null);
         renderReportViewMode();
         renderReportPeriod();
         return;
@@ -3364,12 +3434,13 @@
       const displayable = reportResult &&
         (reportResult.state === "ready" || reportResult.state === "partial");
       const selection = reportSummaryScope === "sessions";
+      updateSessionTrend(selection && reportSelectionResult ? selected : null);
       const data = selection ? reportSelectionResult : displayable ? reportResult : null;
       const statistics = selection && data ? {...data, events_available: data.event_nights > 0,
         ca_count: data.events[0], oa_count: data.events[1], ua_count: data.events[2],
         hypopnea_count: data.events[3], arousal_count: data.events[4]} : data;
       AirCANnect.ui.text("reportRdi", reportNumber(data?.rdi) !== null ? i18n.numberMessage(Number(data.rdi), 2, 2) : "--");
-      renderReportTiles(statistics, selection ? null : selected, false, selection);
+      renderReportTiles(statistics, selected);
       renderReportStatistics(statistics);
       renderReportSettings(displayable ? reportResult : null);
 
@@ -3425,6 +3496,7 @@
     }
 
     function cancelReportRequests(preserveRange = false) {
+      updateSessionTrend(null);
       cancelReportPeriodRequest();
       reportFinishDrag(true, false);
       cancelReportLoadRequest();
@@ -3814,7 +3886,7 @@
       return result;
     }
 
-    async function pollSignalStoreNight(token, nightId, signal) {
+    async function pollSignalStoreNight(token, nightId, signal, history = null) {
       const url = "/api/report/result?night=" + encodeURIComponent(nightId);
       if (!reportResultClientCache.has(url)) {
         const saved = (await readReportCache([url])).get(url);
@@ -3826,8 +3898,15 @@
           } catch (_) { /* A corrupt browser entry is a cache miss. */ }
         }
       }
+      const prior = history && lruGet(reportResultClientCache, url)?.decoded;
+      if (prior && prior.generation === history.report_generation &&
+          prior.source_revision === history.report_revision) return {status: 200, result: prior};
+
       const offline = () => {
         const cached = lruGet(reportResultClientCache, url);
+        if (history?.report_revision && (cached?.decoded.source_revision !== history.report_revision ||
+            (history.report_generation && cached?.decoded.generation !== history.report_generation)))
+          return {done: true, value: null};
         if (!cached) throw i18n.failure("report.no_browser_copy");
         return {done: true, value: {
           status: 200, result: cached.decoded, cached: true,
@@ -3836,7 +3915,7 @@
       const timeoutValue = {status: 0, result: null};
       let revisionAtRequest;
       return pollReportFetch({
-        active: () => token === reportLoadToken,
+        active: () => !signal.aborted && token === reportLoadToken,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         timeoutValue,
@@ -3889,7 +3968,7 @@
           if (response.status === 202) {
             timeoutValue.status = 202;
             timeoutValue.revision = revisionAtRequest;
-            AirCANnect.ui.message(
+            if (!history) AirCANnect.ui.message(
               "reportMsg", i18n.message("report.preparing"), true, true);
             return {done: false, waitForReport: true};
           }
@@ -5274,7 +5353,9 @@
     const reportResultClientCache = new Map();
     let reportSeries = {};
     let reportEvents = [];
-    const reportHiddenSessions = new Set();
+    let reportHiddenSessions = new Set();
+    let reportSessionTrend = null;
+    const REPORT_HIDDEN_KEY = "aircannect.report.hiddenSessions.v1.";
     let reportSessionPreferenceKey = "";
     const REPORT_SCOPE_KEY = "aircannect.report.summaryScope.v1.";
     let reportSavedScope = "night";

@@ -16,6 +16,7 @@ struct ReportSignalStoreCatalogRecord {
     SourceRevision rejected_source_revision;
     uint32_t flags = 0;
     uint32_t metadata_size = 0;
+    uint32_t duration_minutes = 0;
     uint16_t compression_version = 0;
     uint8_t source_flags = 0;
     uint8_t checkpoint_slot = 0;

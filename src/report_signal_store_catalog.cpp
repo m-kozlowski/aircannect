@@ -25,6 +25,10 @@ ReportSignalStoreCatalogRecord ReportSignalStoreCatalogBuilder::project(
 
     const auto &m = night.metrics;
     const auto &s = night.statistics;
+    record.duration_minutes =
+        (m.valid_mask & (1u << static_cast<unsigned>(NightCatalogMetric::DurationMinutes)))
+        ? m.duration_minutes : (night.closed_therapy_duration_ms + 30000) / 60000;
+
     const int32_t values[] = {m.ahi_milli, m.ipap_mean_milli,
         m.leak_mean_milli, s.tidal_volume.mean_milli, s.minute_ventilation.mean_milli};
     const bool valid[] = {(m.valid_mask & 1u) != 0,

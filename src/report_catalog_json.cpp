@@ -38,6 +38,7 @@ uint64_t catalog_identity(const NightCatalog &catalog,
         mix(stored ? stored->source_revision.value() : 0);
         mix(stored ? stored->metadata_size : 0);
         if (stored) {
+            mix(stored->duration_minutes);
             mix(stored->flags & REPORT_SIGNAL_STORE_NIGHT_TIME_UNRESOLVED);
             mix(stored->trend_valid_mask);
             for (size_t metric = 0; metric < 5; ++metric) {
@@ -78,7 +79,7 @@ bool format_catalog_etag(const NightCatalog &catalog,
     const int written = snprintf(
         out,
         out_size,
-        "\"catalog-v5-%08lx-%016llx\"",
+        "\"catalog-v6-%08lx-%016llx\"",
         static_cast<unsigned long>(generation),
         static_cast<unsigned long long>(catalog_identity(catalog, store, oximetry, oximetry_identity)));
     return written > 0 && static_cast<size_t>(written) < out_size;
@@ -209,7 +210,7 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                     "%s{\"id\":\"%s\",\"start\":%lld,\"end\":%lld,"
                     "\"duration_min\":%lu,\"materialized\":%s,"
                     "\"time_conflict\":%s,\"active\":%s,"
-                    "\"report_generation\":%lu,\"sessions\":[",
+                    "\"report_generation\":%lu,",
                     first_night_ ? "" : ",",
                     day,
                     static_cast<long long>(night.day_start_ms),
@@ -224,6 +225,14 @@ bool ReportCatalogJsonReader::prepare_fragment() {
                     static_cast<unsigned long>(
                         materialized ? stored->generation : 0));
                 if (!formatted) return false;
+
+                if (stored && !append_format(
+                        "\"report_revision\":\"%016llx\",\"report_duration_min\":%lu,",
+                        static_cast<unsigned long long>(stored->source_revision.value()),
+                        static_cast<unsigned long>(stored->duration_minutes))) {
+                    return false;
+                }
+                if (!append_text("\"sessions\":[")) return false;
 
                 first_night_ = false;
                 session_index_ = 0;
