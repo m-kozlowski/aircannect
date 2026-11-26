@@ -470,6 +470,7 @@
     #reportHistoryTitle { margin-right: auto; }
     #reportHistoryPlot { display: block; width: 100%; height: 150px; }
     #reportHistoryPlot text { font-size: 11px; fill: var(--muted); }
+    #reportHistoryPlot circle[role="link"] { cursor: pointer; }
 
     @media (max-width: 800px) {
       .report-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }

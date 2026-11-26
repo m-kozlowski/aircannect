@@ -2813,15 +2813,16 @@
         const saved = !night || night.active ? null : metric.key === "duration"
           ? reportNumber(night.duration_min)
           : reportNumber(night.means && night.means[metricIndex]);
-        points.push({date: iso, value: ago === 0 ? value : saved});
+        points.push({id: night?.id, date: iso, value: ago === 0 ? value : saved});
       }
       const reference = points.slice(6, 13).map((point) => point.value).filter((v) => v !== null);
       return {points, count: reference.length,
         mean: reference.length ? reference.reduce((sum, v) => sum + v, 0) / reference.length : null};
     }
 
-    function drawReportTrend(svg, trend, metric, expanded, selectPoint) {
+    function drawReportTrend(svg, trend, metric, {openNights = false, selectPoint} = {}) {
       svg.replaceChildren();
+      const expanded = openNights || !!selectPoint;
       const width = expanded ? Math.max(260, svg.clientWidth || 600) : 48;
       const height = expanded ? 150 : 22;
       const left = expanded ? 50 : 2, right = expanded ? 24 : 2;
@@ -2859,12 +2860,22 @@
       }
       trend.points.forEach((point, i) => {
         if (point.value === null) return;
-        const dot = svgNode("circle", {cx: x(i), cy: y(point.value), r: expanded ? 3 : 1.3, fill: metric.color});
+        const center = {cx: x(i), cy: y(point.value)};
+        const dot = svgNode("circle", {...center, r: expanded ? 3 : 1.3, fill: metric.color});
+        svg.appendChild(dot);
+
+        let target = dot;
+        if (openNights && point.id) {
+          target = svgNode("circle", {...center, r: 12, fill: "transparent", role: "link", tabindex: 0});
+          target.dataset.action = target.dataset.enterAction = "report.open-night";
+          target.dataset.value = point.id;
+          svg.appendChild(target);
+        }
+
         const title = svgNode("title", {});
         i18n.text(title, i18n.join([point.date, ": ",
           formatReportMetric(metric, point.value), " ", metric.unit]));
-        dot.appendChild(title);
-        svg.appendChild(dot);
+        target.appendChild(title);
       });
 
       if (expanded) {
@@ -2972,7 +2983,7 @@
           const spark = svgNode("svg", {class: "report-spark", "aria-hidden": "true"});
           (metric.key === "duration" ? button.querySelector(".report-metric-unit") :
             button.querySelector(".report-metric-main")).appendChild(spark);
-          drawReportTrend(spark, trend, metric, false);
+          drawReportTrend(spark, trend, metric);
         }
         container.appendChild(button);
       });
@@ -3002,7 +3013,7 @@
       i18n.text(plot, i18n.join([metric.label, ": ", i18n.join(trend.points.map(
         (p) => i18n.join([p.date, " ", formatReportMetric(metric, p.value)])), ", "),
       ]), "aria-label");
-      drawReportTrend(plot, trend, metric, true);
+      drawReportTrend(plot, trend, metric, {openNights: true});
     }
 
     function renderReportStatistics(result, period = false) {
@@ -3207,7 +3218,7 @@
         container.appendChild(section);
         const points = daily.map((night) => ({id: night.id, date: reportDayLabel(night.id),
           value: reportNumber(index === 0 ? night.duration_min : night.means[index - 1])}));
-        drawReportTrend(svg, {points, mean: null}, metric, true, (point) => {
+        const selectPoint = (point) => {
           const readout = document.getElementById("reportPeriodReadout");
           if (!readout) return;
           const caption = document.createElement("span");
@@ -3218,10 +3229,11 @@
           const button = document.createElement("button");
           button.className = "btn";
           i18n.text(button, i18n.message("report.open_night"));
-          button.dataset.action = "report.period-night";
+          button.dataset.action = "report.open-night";
           button.dataset.value = point.id;
           readout.appendChild(button);
-        });
+        };
+        drawReportTrend(svg, {points, mean: null}, metric, {selectPoint});
       });
     }
 
@@ -5168,7 +5180,7 @@
       renderReportSummary();
       loadReportPeriod(true);
     });
-    AirCANnect.actions.register("report.period-night", (_event, element) => {
+    AirCANnect.actions.register("report.open-night", (_event, element) => {
       cancelReportRequests();
       reportViewMode = "night";
       pickReportNight(element.dataset.value);
