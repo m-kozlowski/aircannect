@@ -607,14 +607,14 @@
       return hidden;
     }
 
-    function applyReportSessionPreferences(nightId, sessions) {
+    function applyReportSessionPreferences(nightId, night) {
       const key = nightId ? REPORT_HIDDEN_KEY + nightId : "";
       if (key !== reportSessionPreferenceKey) {
         reportSessionPreferenceKey = key;
         ({scope: reportSavedScope, hidden: reportSavedHiddenStarts} = reportSessionPreferences(nightId));
       }
-      reportSummaryScope = canSelectReportSessions() ? reportSavedScope : "night";
-      reportHiddenSessions = effectiveHiddenSessions(sessions, reportSavedHiddenStarts);
+      reportSummaryScope = canSelectReportSessions(night) ? reportSavedScope : "night";
+      reportHiddenSessions = effectiveHiddenSessions(night?.sessions || [], reportSavedHiddenStarts);
     }
 
     function saveReportSessionVisibility() {
@@ -705,7 +705,7 @@
 
     function resetReportData() {
       clearOximetryView();
-      reportSummaryScope = "night";
+      cancelReportPeriodRequest();
       reportSelectionResult = null;
       reportFinishDrag(true, false);
       cancelReportRangeRequest();
@@ -855,8 +855,6 @@
 
     function activateSignalStoreNight(nightId, revision, generation, store) {
       cancelReportRangeRequest();
-      if (reportViewMode === "night") cancelReportPeriodRequest();
-      reportSelectionResult = null;
 
       const nightPrefix = String(nightId) + ":";
       const generationPrefix = nightPrefix + generation + ":";
@@ -3150,8 +3148,8 @@
       return day ? day.slice(0, 4) + "-" + day.slice(4, 6) + "-" + day.slice(6, 8) : "--";
     }
 
-    function canSelectReportSessions() {
-      return !!reportResult?.sessions?.length && !reportResult.active;
+    function canSelectReportSessions(night) {
+      return !!night?.sessions?.length && !night.active;
     }
 
     function renderReportViewMode() {
@@ -3181,7 +3179,7 @@
       if (scope) scope.hidden = period || !!reportResult?.oximetryOnly;
       document.querySelectorAll('[data-action="report.scope"]').forEach((button) => {
         button.setAttribute("aria-pressed", String(button.dataset.value === reportSummaryScope));
-        button.disabled = !reportResult || (button.dataset.value === "sessions" && !canSelectReportSessions());
+        button.disabled = !reportResult || (button.dataset.value === "sessions" && !canSelectReportSessions(reportResult));
       });
       if (!period && reportSummaryScope === "sessions") {
         AirCANnect.ui.text("reportSummaryCaption", i18n.message("ui.selected.sessions"));
@@ -3354,6 +3352,11 @@
       try {
         saved = (await readReportCache([key])).get(key);
         if (!current()) return;
+        if (selection && saved && !reportSelectionResult) {
+          reportSelectionResult = saved.body;
+          renderReportSummary();
+        }
+
         const options = conditionalRequestOptions(saved, controller.signal);
         if (retryFailed) options.headers["X-Report-Retry"] = "1";
         const revision = reportBuildRevision();
@@ -3405,9 +3408,8 @@
       const nights = reportNightsNewestFirst();
       const selected = selectedReportNight();
 
-      const sessions = reportResult?.sessions || selected?.sessions || [];
       applyReportSessionPreferences(
-        reportResult ? reportCurrentNightId : reportNightLoadKey(selected), sessions);
+        reportResult ? reportCurrentNightId : reportNightLoadKey(selected), reportResult || selected);
       renderReportViewMode();
 
       const dateBtn = document.getElementById("reportDateBtn");
@@ -3461,7 +3463,7 @@
       AirCANnect.ui.text("reportCsr", csrVisible ? Math.round(Number(data.csr_minutes)) + "m" : "--");
 
       renderReportEventCounts(statistics);
-      renderReportSessions(sessions);
+      renderReportSessions((reportResult || selected)?.sessions || []);
       updateReportZoomControls();
     }
 
