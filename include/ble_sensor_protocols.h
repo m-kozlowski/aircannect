@@ -149,7 +149,7 @@ private:
         bool is_notify);
 
     // OxyII
-    static constexpr size_t OxyiiRxMax = 640;
+    static constexpr size_t OxyiiRxMax = 8 + 640; // Envelope + padded live or file block.
     enum class OxyiiFileStep { Idle, CloseForList, List, Footer, Release, SaveClock };
 
     struct OxyiiState {
@@ -162,6 +162,8 @@ private:
         uint32_t last_poll_ms = 0;
         uint8_t sequence = 0;
         bool need_auth = false;
+        bool encrypted = false;
+        uint8_t session_key[16]{};
         bool need_setup = false;
         bool need_time_sync = false;
         bool need_identity = false, off_finger = false, file_open = false;
@@ -175,6 +177,7 @@ private:
     void oxyii_on_connected();
     void oxyii_reset();
     void oxyii_poll(uint32_t now_ms);
+    void oxyii_auth_reply(const uint8_t *payload, size_t size);
     void oxyii_poll_history(uint32_t now_ms);
     void oxyii_history_reply(uint8_t command, uint8_t *payload, size_t length, uint32_t rtt);
     void oxyii_notify(const uint8_t *data, size_t len);
@@ -187,8 +190,7 @@ private:
     bool oxyii_send_command(uint8_t command,
                             const uint8_t *payload,
                             size_t payload_len,
-                            uint32_t now_ms,
-                            bool expect_reply = true);
+                            uint32_t now_ms);
     bool oxyii_send_auth(uint32_t now_ms);
     bool oxyii_sync_datetime(uint32_t now_ms);
     static void oxyii_notify_callback(

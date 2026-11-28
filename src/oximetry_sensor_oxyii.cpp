@@ -10,6 +10,10 @@
 #include "oximetry_codec.h"
 #include "ring_bin_layout.h"
 
+#if AC_OXIMETRY_BLE_ENABLED
+#include <mbedtls/aes.h>
+#endif
+
 namespace aircannect {
 
 namespace {
@@ -51,9 +55,11 @@ int64_t ring_wall_ms(const uint8_t *p) {
 }
 static constexpr uint8_t OXYII_NO_PENDING_CMD = 0xfe;
 static constexpr uint32_t OXYII_SENSOR_POLL_MS = 1000;
+static constexpr uint32_t OXYII_AUTH_WAIT_MS = 1000;
 static constexpr uint32_t OXYII_RESPONSE_TIMEOUT_MS = 1500;
 static constexpr uint32_t OXYII_FILE_TIMEOUT_MS = 6000;
-static constexpr size_t OXYII_TX_MAX = 32;
+constexpr size_t padded_size(size_t n) { return (n / 16 + 1) * 16; }
+static constexpr size_t OXYII_MAX_REQUEST = 20; // OPEN has the largest request.
 
 static constexpr uint8_t LEPUCLOUD_MD5[16] = {
     0xc2, 0xa7, 0xcf, 0x50, 0xda, 0xfe, 0xd8, 0x85,
@@ -85,6 +91,38 @@ const char *oxyii_command_name(uint8_t command) {
 }  // namespace
 
 #if AC_OXIMETRY_BLE_ENABLED
+namespace {
+
+bool crypt_blocks(const uint8_t (&key)[16], uint8_t *data, size_t size, bool encrypt) {
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    int rc = encrypt ? mbedtls_aes_setkey_enc(&aes, key, 128)
+                     : mbedtls_aes_setkey_dec(&aes, key, 128);
+
+    const int mode = encrypt ? MBEDTLS_AES_ENCRYPT : MBEDTLS_AES_DECRYPT;
+    for (size_t i = 0; !rc && i < size; i += 16) {
+        rc = mbedtls_aes_crypt_ecb(&aes, mode, data + i, data + i);
+    }
+
+    mbedtls_aes_free(&aes);
+    return rc == 0;
+}
+
+bool decrypt_payload(const uint8_t (&key)[16], uint8_t *data, size_t &size) {
+    if (!size || size % 16 || !crypt_blocks(key, data, size, false)) return false;
+
+    const size_t pad = data[size - 1];
+    if (!pad || pad > 16) return false;
+    for (size_t i = size - pad; i < size; ++i) {
+        if (data[i] != pad) return false;
+    }
+
+    size -= pad;
+    return true;
+}
+
+} // namespace
+
 bool BleSensorProtocolEngine::subscribe_oxyii() {
     if (!client_) return false;
 
@@ -131,15 +169,46 @@ void BleSensorProtocolEngine::oxyii_reset() {
     oxyii_ = {};
 }
 
+void BleSensorProtocolEngine::oxyii_auth_reply(const uint8_t *payload, size_t size) {
+    // Plaintext rings either stay silent or acknowledge without a key.
+    const bool offers_key = size >= 2 && (payload[0] ^ LEPUCLOUD_MD5[0]) == 1 &&
+        (payload[1] ^ LEPUCLOUD_MD5[1]) == sizeof(oxyii_.session_key);
+
+    if (!offers_key && (size == 0 || size == 16)) {
+        if (oxyii_.pending_cmd == OXYII_CMD_AUTH) {
+            oxyii_clear_pending();
+            Log::logf(CAT_OXI, LOG_DEBUG, "Sensor OxyII plaintext session (no key)\n");
+        }
+        return;
+    }
+
+    if (oxyii_.pending_cmd != OXYII_CMD_AUTH || !offers_key || size < 20) {
+        Log::logf(CAT_OXI, LOG_WARN, "OxyII unexpected AUTH response; disconnecting\n");
+        client_->disconnect();
+        return;
+    }
+
+    for (size_t i = 0; i < sizeof(oxyii_.session_key); ++i) {
+        oxyii_.session_key[i] = payload[i + 4] ^ LEPUCLOUD_MD5[(i + 4) % 16];
+    }
+    oxyii_.encrypted = true;
+    oxyii_clear_pending();
+    Log::logf(CAT_OXI, LOG_DEBUG, "Sensor OxyII encrypted session\n");
+}
+
 void BleSensorProtocolEngine::oxyii_poll(uint32_t now_ms) {
     if (!client_ || !client_->isConnected() || !oxyii_.write) return;
 
-    const auto timeout = history_command(oxyii_.pending_cmd) ?
+    const auto timeout = oxyii_.pending_cmd == OXYII_CMD_AUTH ? OXYII_AUTH_WAIT_MS :
+        history_command(oxyii_.pending_cmd) ?
         OXYII_FILE_TIMEOUT_MS : OXYII_RESPONSE_TIMEOUT_MS;
     if (oxyii_.pending_cmd != OXYII_NO_PENDING_CMD && now_ms - oxyii_.pending_ms >= timeout) {
-        Log::logf(CAT_OXI, LOG_DEBUG,
-                  "Sensor OxyII response timeout cmd=%s\n",
-                  oxyii_command_name(oxyii_.pending_cmd));
+        if (oxyii_.pending_cmd == OXYII_CMD_AUTH) {
+            Log::logf(CAT_OXI, LOG_DEBUG, "Sensor OxyII plaintext session (no AUTH reply)\n");
+        } else {
+            Log::logf(CAT_OXI, LOG_DEBUG, "Sensor OxyII response timeout cmd=%s\n",
+                      oxyii_command_name(oxyii_.pending_cmd));
+        }
         if (history_command(oxyii_.pending_cmd) && oxyii_.pending_cmd != Info) {
             if (recordings_) recordings_->fail("ble_response_timeout");
             client_->disconnect(); // Some firmware stops answering F3 until reconnect.
@@ -225,7 +294,7 @@ void BleSensorProtocolEngine::oxyii_poll_history(uint32_t now_ms) {
         command = Close;
     } else if (s.file_step == Step::List) {
         command = List;
-        s.list_rx = LargeByteBuffer::allocate(8 + 1 + 255 * 16);
+        s.list_rx = LargeByteBuffer::allocate(8 + padded_size(1 + 255 * 16));
         if (!s.list_rx) {
             recordings_->fail("out_of_memory");
             s.file_step = Step::Idle;
@@ -366,34 +435,40 @@ void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {
     oxyii_reset_rx();
 
     const uint8_t pending_command = oxyii_.pending_cmd;
+    auto *payload = rx + 7;
+    if (command == OXYII_CMD_AUTH) {
+        if (rx[3] == 1 && rx[4] == 0) oxyii_auth_reply(payload, frame.payload_len);
+        return;
+    }
+
+    if (command != pending_command || rx[3] != 1) return;
+    if (history_command(command) && rx[4] != uint8_t(oxyii_.sequence - 1)) return;
+
+    // SETUP, SET_TIME and CLOSE are acknowledgements, not encrypted data.
+    if (oxyii_.encrypted &&
+        (command == OXYII_CMD_LIVE_SAMPLES || (history_command(command) && command != Close)) &&
+        !decrypt_payload(oxyii_.session_key, payload, frame.payload_len)) {
+        Log::logf(CAT_OXI, LOG_DEBUG, "Sensor OxyII invalid encrypted %s reply\n",
+                  oxyii_command_name(command));
+        return;
+    }
+
     if (history_command(command)) {
-        if (command != pending_command || rx[3] != 1 ||
-            rx[4] != uint8_t(oxyii_.sequence - 1)) return;
         const auto rtt = millis() - oxyii_.pending_ms;
         const auto owner = std::move(oxyii_.list_rx);
         oxyii_clear_pending();
-        oxyii_history_reply(command, rx + 7, frame.payload_len, rtt);
+        oxyii_history_reply(command, payload, frame.payload_len, rtt);
         return;
     }
-    if (pending_command == OXYII_CMD_SETUP && command == OXYII_CMD_SETUP) {
+    if (command == OXYII_CMD_SETUP || command == OXYII_CMD_SET_TIME) {
         oxyii_clear_pending();
-        oxyii_.need_identity = history_ring_;
-        oxyii_.need_time_sync = true;
+        if (command == OXYII_CMD_SETUP) {
+            oxyii_.need_identity = history_ring_;
+            oxyii_.need_time_sync = true;
+        }
         return;
     }
-    if (pending_command == OXYII_CMD_SET_TIME &&
-        command == OXYII_CMD_SET_TIME) {
-        oxyii_clear_pending();
-        return;
-    }
-    if (pending_command != OXYII_CMD_LIVE_SAMPLES ||
-        command != OXYII_CMD_LIVE_SAMPLES) {
-        Log::logf(CAT_OXI, LOG_DEBUG,
-                  "Sensor OxyII RX ignored cmd=%s pending=%s\n",
-                  oxyii_command_name(command),
-                  oxyii_command_name(pending_command));
-        return;
-    }
+    if (command != OXYII_CMD_LIVE_SAMPLES) return;
 
     if (frame.payload_len < 10) {
         Log::logf(CAT_OXI, LOG_DEBUG,
@@ -446,16 +521,24 @@ bool BleSensorProtocolEngine::oxyii_write_frame(
     const uint8_t *payload,
     size_t payload_len,
     uint8_t sequence) {
-    if (!oxyii_.write) return false;
+    if (!oxyii_.write || payload_len > OXYII_MAX_REQUEST) return false;
 
-    uint8_t frame[OXYII_TX_MAX] = {};
+    const bool encrypt = oxyii_.encrypted && command != OXYII_CMD_AUTH;
+    const size_t wire_len = encrypt ? padded_size(payload_len) : payload_len;
+    uint8_t frame[8 + padded_size(OXYII_MAX_REQUEST)] = {};
     if (!write_ble_sensor_frame_header(frame, sizeof(frame), 0xa5,
-                                       command, payload_len)) {
+                                       command, wire_len)) {
         return false;
     }
-    const size_t frame_len = payload_len + 8;
     frame[4] = sequence;
     if (payload && payload_len) memcpy(frame + 7, payload, payload_len);
+    if (encrypt) {
+        const auto pad = wire_len - payload_len;
+        memset(frame + 7 + payload_len, static_cast<int>(pad), pad);
+        if (!crypt_blocks(oxyii_.session_key, frame + 7, wire_len, true)) return false;
+    }
+
+    const size_t frame_len = wire_len + 8;
     write_ble_sensor_frame_crc(frame, frame_len);
     return oxyii_.write->writeValue(frame, frame_len, false);
 }
@@ -464,17 +547,14 @@ bool BleSensorProtocolEngine::oxyii_send_command(
     uint8_t command,
     const uint8_t *payload,
     size_t payload_len,
-    uint32_t now_ms,
-    bool expect_reply) {
-    const uint8_t sequence = oxyii_.sequence++;
-    if (!oxyii_write_frame(command, payload, payload_len, sequence)) {
+    uint32_t now_ms) {
+    if (!oxyii_write_frame(command, payload, payload_len, oxyii_.sequence)) {
         return false;
     }
 
-    if (expect_reply) {
-        oxyii_.pending_cmd = command;
-        oxyii_.pending_ms = now_ms;
-    }
+    ++oxyii_.sequence;
+    oxyii_.pending_cmd = command;
+    oxyii_.pending_ms = now_ms;
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor OxyII TX cmd=%s payload_len=%u\n",
               oxyii_command_name(command),
@@ -507,7 +587,7 @@ bool BleSensorProtocolEngine::oxyii_send_auth(uint32_t now_ms) {
         payload[i] = session_key[i] ^ LEPUCLOUD_MD5[i];
     }
     return oxyii_send_command(OXYII_CMD_AUTH, payload, sizeof(payload),
-                              now_ms, false);
+                              now_ms);
 }
 
 bool BleSensorProtocolEngine::oxyii_sync_datetime(uint32_t now_ms) {
