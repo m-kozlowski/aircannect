@@ -30,6 +30,7 @@ enum class ResmedOtaOperation : uint8_t {
     None,
     Install,
     Dump,
+    ReadOtaKey,
 };
 
 const char *resmed_ota_operation_name(ResmedOtaOperation operation);
@@ -67,6 +68,7 @@ struct ResmedOtaStatus {
     bool confirmation_required = false;
     bool recovery_available = false;
     bool can_available = false;
+    uint32_t ota_key_result_id = 0;
     size_t total_size = 0;
     size_t uploaded_bytes = 0;
     size_t xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
@@ -105,8 +107,15 @@ public:
                       const String &filename);
     bool begin_prepared_install(const ResmedPreparedFirmware &firmware);
     bool discard_prepared_firmware(const ResmedPreparedFirmware &firmware);
+
+    // Patched-bootloader reads and explicit recovery
     bool request_firmware_dump();
-    bool confirm_dump_bootloader(const String &confirm);
+    bool request_ota_key_read();
+    bool take_ota_key(uint32_t result_id, String &key,
+                      bool &configured, bool &matches);
+    bool confirm_service_bootloader(const String &confirm);
+
+    // Native RPC upload and apply
     bool submit_block(size_t offset, const String &hex_data);
     bool request_check();
     bool request_apply_plain(bool reset_settings, const String &confirm);
@@ -187,19 +196,25 @@ private:
     void poll_native_apply_boot();
     void clear_native_apply_wait();
 
-    void poll_firmware_dump();
-    bool begin_dump_identity_refresh(bool after_recovery);
-    bool capture_dump_identity();
+    bool request_service_read(ResmedOtaOperation operation);
+    bool service_read_operation() const;
+    void poll_service_read();
+    bool submit_ota_key_read();
+    void finish_ota_key_read(
+        const std::shared_ptr<const LargeByteBuffer> &response,
+        const As11ServicePacketHeader &header);
+    bool begin_service_read_identity_refresh(bool after_recovery);
+    bool capture_service_read_identity();
     bool request_dump_path_check(DumpPathCheck check);
     void poll_dump_path_check();
-    bool begin_dump_service();
+    bool begin_service_read();
     bool begin_dump_upload();
     void poll_dump_upload();
     bool submit_dump_read();
     bool submit_dump_chunk();
     void finish_dump_read(const std::shared_ptr<const LargeByteBuffer> &response,
                           const As11ServicePacketHeader &header);
-    void require_dump_bootloader();
+    void require_service_bootloader();
     void finish_firmware_dump();
     void cancel_dump_upload();
 
@@ -288,7 +303,8 @@ private:
     uint32_t service_reset_accepted_ms_ = 0;
     uint32_t service_reset_boot_revision_ = 0;
 
-    // Firmware dump and bootloader recovery
+    // Service reads and bootloader recovery
+    uint32_t ota_key_result_generation_ = 0;
     OperationTicket dump_path_ticket_;
     DumpPathCheck dump_path_check_ = DumpPathCheck::None;
     uint32_t dump_path_generation_ = 0;

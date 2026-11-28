@@ -18,6 +18,8 @@
     let resmedDirectUploadBusy = false;
     let resmedUploadOperation = null;
     let resmedCanAvailable = true;
+    let resmedKeyBusy = false;
+    let resmedKeySaving = false;
 
     let otaReloadTimer = null;
 
@@ -565,7 +567,8 @@
       if (phase === "checking_storage") return i18n.message("ota.checking_repository");
       if (phase === "opening") return i18n.message("ota.opening", {target});
       if (phase === "entering_service") return i18n.message("ota.entering_service");
-      if (phase === "dumping") return i18n.message("ota.reading_firmware");
+      if (phase === "dumping") return i18n.message(data.operation === "read_ota_key" ?
+        "ota.key_reading" : "ota.reading_firmware");
       if (phase === "publishing") return data.operation === "dump" ?
         i18n.message("ota.saving_dump") : i18n.message("ota.publishing");
       if (phase === "bootloader_required") {
@@ -587,8 +590,7 @@
       if (phase === "verified") return i18n.message("ota.verified");
       if (phase === "applying") return i18n.message("ota.installing");
       if (phase === "resetting") return i18n.message("ota.restarting_resmed");
-      if (phase === "complete") return data.operation === "dump" ?
-        resmedOtaDumpSavedText(data) : i18n.message("ota.complete");
+      if (phase === "complete") return resmedOtaCompleteText(data);
       if (phase === "error") return data.last_error || i18n.message("ota.resmed_failed");
       return phase || "--";
     }
@@ -679,6 +681,12 @@
           resmedDirectUploadBusy;
       }
 
+      const keyRead = document.getElementById("resmedOtaKeyReadBtn");
+      if (keyRead) {
+        keyRead.disabled = !resmedCanAvailable || data.active ||
+          resmedDirectUploadBusy || resmedKeyBusy || resmedKeySaving;
+      }
+
       const dumpConfirm = document.getElementById("resmedOtaDumpConfirmBtn");
       if (dumpConfirm) {
         dumpConfirm.hidden = !data.confirmation_required;
@@ -713,8 +721,7 @@
       } else if (data.phase === "verified") {
         AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.verified"), true, true);
       } else if (data.phase === "complete") {
-        AirCANnect.ui.message("resmedOtaMsg", data.operation === "dump" ?
-          resmedOtaDumpSavedText(data) : i18n.message("ota.complete"), true, true);
+        AirCANnect.ui.message("resmedOtaMsg", resmedOtaCompleteText(data), true, true);
       } else if (data.active) {
         AirCANnect.ui.message("resmedOtaMsg", stateText, true, true);
       }
@@ -1168,6 +1175,125 @@
       }
     }
 
+    function resmedOtaCompleteText(data) {
+      if (data.operation === "dump") return resmedOtaDumpSavedText(data);
+      return i18n.message(data.operation === "read_ota_key" ?
+        "ota.key_ready" : "ota.complete");
+    }
+
+    async function finishResmedServiceRead(result) {
+      AirCANnect.ui.message("resmedOtaMsg", resmedOtaCompleteText(result), true, true);
+      if (result.operation !== "read_ota_key") {
+        loadResmedRepository(true);
+        return;
+      }
+
+      // The secret is fetched once, outside the shared status/snapshot path.
+      const response = await AirCANnect.http.request("/api/resmed-ota/ota-key", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({action: "result", result_id: result.ota_key_result_id}),
+      });
+      const data = await response.json();
+      if (!response.ok) throw i18n.failure(data.error || "ota_key_result_unavailable");
+
+      document.getElementById("resmedOtaKeyValue").value = data.key;
+      const dialog = document.getElementById("resmedOtaKeyDialog");
+      AirCANnect.ui.clearMessage("resmedOtaKeyMsg");
+      AirCANnect.ui.text("resmedOtaKeyQuestion", i18n.message(data.matches ?
+        "ota.key_already_saved" : data.configured ? "ota.key_replace_question" :
+        "ota.key_save_question"));
+      document.getElementById("resmedOtaKeySaveBtn").hidden = data.matches;
+      i18n.text(document.getElementById("resmedOtaKeyCloseBtn"),
+        i18n.message(data.matches ? "ui.close" : "ota.key_close"));
+      dialog.showModal();
+    }
+
+    async function resmedOtaReadKey() {
+      if (resmedKeyBusy || resmedKeySaving) return;
+      if (!confirm(i18n.t("ota.key_read_confirm"))) return;
+
+      resmedKeyBusy = true;
+      document.getElementById("resmedOtaKeyReadBtn").disabled = true;
+      try {
+        const request = await postResmedOta("/api/resmed-ota/ota-key", {action: "read"});
+        const result = await waitResmedOta((data) =>
+          data.operation === "read_ota_key" &&
+          (data.phase === "complete" || data.confirmation_required), 4200,
+          request.eventSerial);
+        if (!result.confirmation_required) await finishResmedServiceRead(result);
+      } catch (error) {
+        AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
+      } finally {
+        resmedKeyBusy = false;
+        document.getElementById("resmedOtaKeyReadBtn").disabled =
+          !resmedCanAvailable || !!resmedOtaData?.active ||
+          resmedDirectUploadBusy || resmedKeySaving;
+      }
+    }
+
+    function closeResmedOtaKey() {
+      if (resmedKeySaving) return;
+      document.getElementById("resmedOtaKeyValue").value = "";
+      document.getElementById("resmedOtaKeyDialog").close();
+    }
+
+    async function copyResmedOtaKey() {
+      const field = document.getElementById("resmedOtaKeyValue");
+      if (!field.value) return;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(field.value);
+        } else {
+          // The device WebUI is also used over plain HTTP on the LAN.
+          field.focus();
+          field.select();
+          if (!document.execCommand("copy")) throw i18n.failure("ota.key_copy_failed");
+        }
+        AirCANnect.ui.message("resmedOtaKeyMsg", i18n.message("ota.key_copied"), true);
+      } catch (error) {
+        AirCANnect.ui.message("resmedOtaKeyMsg", i18n.message("ota.key_copy_failed"), false);
+      }
+    }
+
+    async function saveResmedOtaKey() {
+      const field = document.getElementById("resmedOtaKeyValue");
+      if (!field.value || resmedKeySaving) return;
+      const save = document.getElementById("resmedOtaKeySaveBtn");
+      const close = document.getElementById("resmedOtaKeyCloseBtn");
+      resmedKeySaving = true;
+      save.disabled = true;
+      close.disabled = true;
+      AirCANnect.ui.clearMessage("resmedOtaKeyMsg");
+
+      try {
+        const afterSerial = AirCANnect.snapshots.read("config").serial;
+        const response = await AirCANnect.http.requestOk("/api/config", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({as11_ota_key: field.value}),
+        });
+        const update = await response.json();
+        if (!Number(update.revision)) throw i18n.failure("error.missing_config_revision");
+
+        const result = await AirCANnect.snapshots.wait("config",
+          (data) => Number(data.revision) === Number(update.revision), afterSerial,
+          5000, i18n.message("error.config_timeout"));
+        if (!result.ok) throw i18n.failure(result.error || "error.config_failed");
+
+        field.value = "";
+        document.getElementById("resmedOtaKeyDialog").close();
+        AirCANnect.ui.message("resmedOtaMsg", i18n.message("ota.key_saved"), true, true);
+      } catch (error) {
+        AirCANnect.ui.message("resmedOtaKeyMsg", i18n.error(error), false);
+      } finally {
+        resmedKeySaving = false;
+        save.disabled = false;
+        close.disabled = false;
+      }
+    }
+
     async function resmedOtaDump() {
       try {
         const request = await postResmedOta("/api/resmed-ota/dump", {});
@@ -1177,8 +1303,7 @@
           request.eventSerial);
         if (result.confirmation_required) return;
 
-        AirCANnect.ui.message("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
-        loadResmedRepository(true);
+        await finishResmedServiceRead(result);
       } catch (error) {
         AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
       }
@@ -1187,7 +1312,9 @@
     async function resmedOtaConfirmBootloader() {
       const current = await getResmedOta();
       if (!current.confirmation_required || !current.recovery_available) return;
-      if (!confirm(i18n.t("ota.recovery_confirm", {path: current.recovery_path}))) {
+      const prompt = current.operation === "read_ota_key" ?
+        "ota.key_recovery_confirm" : "ota.recovery_confirm";
+      if (!confirm(i18n.t(prompt, {path: current.recovery_path}))) {
         return;
       }
 
@@ -1199,8 +1326,7 @@
         const result = await waitResmedOta(
           (data) => data.phase === "complete", 4200,
           request.eventSerial);
-        AirCANnect.ui.message("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
-        loadResmedRepository(true);
+        await finishResmedServiceRead(result);
       } catch (error) {
         AirCANnect.ui.message("resmedOtaMsg", i18n.error(error), false, true);
       }
@@ -1234,6 +1360,20 @@
     AirCANnect.actions.register("resmed.repository-choose", () =>
       resmedRepositoryChooseFiles());
     AirCANnect.actions.register("resmed.dump", () => resmedOtaDump());
+    AirCANnect.actions.register("resmed.key-read", () => resmedOtaReadKey());
+    AirCANnect.actions.register("resmed.key-copy", () => copyResmedOtaKey());
+    AirCANnect.actions.register("resmed.key-save", () => saveResmedOtaKey());
+    AirCANnect.actions.register("resmed.key-close", () => closeResmedOtaKey());
+    AirCANnect.startup.register(() => {
+      const dialog = document.getElementById("resmedOtaKeyDialog");
+      dialog.addEventListener("cancel", (event) => {
+        if (resmedKeySaving) event.preventDefault();
+      });
+      dialog.addEventListener("close", () => {
+        document.getElementById("resmedOtaKeyValue").value = "";
+        AirCANnect.ui.clearMessage("resmedOtaKeyMsg");
+      });
+    });
     AirCANnect.actions.register("resmed.repository-refresh", () =>
       loadResmedRepository(true));
     AirCANnect.actions.register("resmed.dump-confirm", () =>

@@ -44,7 +44,7 @@ private:
         ResmedInit,
         ResmedBlock,
         ResmedInstall,
-        ResmedDump,
+        ResmedServiceRead,
         ResmedDumpConfirm,
         ResmedCheck,
         ResmedApplyPlain,

@@ -39,6 +39,7 @@ static constexpr uint8_t AS11_SERVICE_STATUS_BUSY = 0x0D;
 
 // Storage payloads
 static constexpr uint8_t AS11_SERVICE_TARGET_FGCB = 0x01;
+static constexpr uint8_t AS11_SERVICE_TARGET_SPIN = 0x02;
 static constexpr size_t AS11_SERVICE_STORAGE_ADDRESS_BYTES = 5;
 static constexpr size_t AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES = 4064;
 static constexpr size_t AS11_SERVICE_LZ4_RAW_MAX_BYTES = 4080;

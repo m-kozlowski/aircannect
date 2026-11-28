@@ -21,7 +21,7 @@ Use **Native RPC** unless the device already has a compatible patched
 bootloader and there is a reason to use service mode.
 
 AirMini supports Native RPC over CAN only. Patched Bootloader and
-**Dump current** are not available for AirMini.
+**Dump firmware** are not available for AirMini.
 
 ### Stock firmware, Airbreak, and the OTA key
 
@@ -89,7 +89,7 @@ requiring it to be added to the repository first.
 
 ## Dumping current firmware
 
-**Dump current** reads the complete internal firmware through Patched
+**Dump firmware** reads the complete internal firmware through Patched
 Bootloader service mode and saves it in the repository. This requires physical
 CAN and a compatible patched bootloader. The resulting name has the form:
 
@@ -105,6 +105,16 @@ fallback is performed only after explicit confirmation.
 
 The service protocol itself is documented in
 [airbreak-plus](https://github.com/m-kozlowski/airbreak-plus/blob/master/docs/as11/bootloader_service_protocol.md).
+
+## Reading the OTA key
+
+**Read OTA key** in the **Patched Bootloader** section reads the connected
+Air11's key over CAN and restarts the device. It requires a compatible patched
+bootloader, with the same confirmed installation fallback as **Dump firmware**.
+
+The result dialog shows the key and lets you copy it or save it as
+`as11_ota_key`. Reading alone does not change the configuration. Saving replaces
+an existing key; closing the dialog leaves it unchanged.
 
 ## Typical installation
 

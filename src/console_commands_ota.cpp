@@ -282,7 +282,7 @@ void handle_resmed_ota(Print &out,
     if (command.startsWith("dump confirm ")) {
         String confirm = rest.substring(strlen("dump confirm "));
         trim_inplace(confirm);
-        if (resmed_ota.confirm_dump_bootloader(confirm)) {
+        if (resmed_ota.confirm_service_bootloader(confirm)) {
             out.println("[RESMED OTA] patched bootloader install queued");
         } else {
             const ResmedOtaStatus status = resmed_ota.status();

@@ -49,6 +49,26 @@
     </form>
   </dialog>
 
+  <dialog class="release-notes-dialog ota-key-dialog" id="resmedOtaKeyDialog"
+          aria-labelledby="resmedOtaKeyTitle">
+    <header><h2 id="resmedOtaKeyTitle" data-i18n="ota.key_ready"></h2></header>
+    <div class="release-notes-content">
+      <label for="resmedOtaKeyValue" data-i18n="config.field.as11_ota_key.label"></label>
+      <textarea id="resmedOtaKeyValue" readonly rows="3" spellcheck="false"></textarea>
+      <div class="btns">
+        <button class="btn" data-action="resmed.key-copy" data-i18n="ota.key_copy"></button>
+      </div>
+      <p id="resmedOtaKeyQuestion"></p>
+      <div class="msg" id="resmedOtaKeyMsg" role="status"></div>
+    </div>
+    <div class="btns">
+      <button class="btn" id="resmedOtaKeyCloseBtn"
+              data-action="resmed.key-close" data-i18n="ota.key_close"></button>
+      <button class="btn primary" id="resmedOtaKeySaveBtn"
+              data-action="resmed.key-save" data-i18n="ota.key_save"></button>
+    </div>
+  </dialog>
+
   <dialog class="report-charts-dialog" id="reportChartsDialog"
           aria-labelledby="reportChartsDialogTitle">
     <header>
@@ -816,6 +836,15 @@
                 <option value="FGCB" data-i18n="ui.full.flash.fgbl.conf.appl"></option>
               </select>
             </div>
+            <div class="section-title" data-i18n="ui.patched.bootloader"></div>
+            <div class="btns">
+              <button class="btn" id="resmedOtaDumpBtn"
+                      data-action="resmed.dump" data-i18n="ui.dump.firmware"></button>
+              <button class="btn" id="resmedOtaKeyReadBtn"
+                      data-action="resmed.key-read" data-i18n="ota.key_read"></button>
+              <button class="btn danger" id="resmedOtaDumpConfirmBtn"
+                      hidden data-action="resmed.dump-confirm" data-i18n="ui.install.patched.bootloader.and.retry"></button>
+            </div>
             <div class="section-title" data-i18n="ui.firmware.repository"></div>
             <div class="storage-toolbar">
               <span class="storage-path" id="resmedRepositoryPath">
@@ -824,12 +853,8 @@
               <div class="btns">
                 <button class="btn primary" id="resmedRepositoryAddBtn"
                         data-action="resmed.repository-choose" data-i18n="ui.add"></button>
-                <button class="btn" id="resmedOtaDumpBtn"
-                        data-action="resmed.dump" data-i18n="ui.dump.current"></button>
                 <button class="btn" id="resmedRepositoryRefreshBtn"
                         data-action="resmed.repository-refresh" data-i18n="ui.refresh"></button>
-                <button class="btn danger" id="resmedOtaDumpConfirmBtn"
-                        hidden data-action="resmed.dump-confirm" data-i18n="ui.install.patched.bootloader.and.retry"></button>
               </div>
               <input id="resmedRepositoryInput" type="file" multiple hidden
                      accept=".abc,.bin,.img"

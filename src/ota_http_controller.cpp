@@ -195,6 +195,7 @@ void build_resmed_ota_json(JsonOut &json,
                   status.confirmation_required);
     json_add_bool(json, "recovery_available", status.recovery_available);
     json_add_bool(json, "can_available", status.can_available);
+    json_add_int(json, "ota_key_result_id", status.ota_key_result_id);
     json_add_string(json, "prepare_state",
                     resmed_firmware_prepare_state_name(prepare.state));
     json_add_bool(json, "prepare_active", prepare.active());
@@ -568,6 +569,76 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
         },
         nullptr, http_request_body_handler);
 
+    server.on(
+        AsyncURIMatcher::exact("/api/resmed-ota/ota-key"), HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            JsonDocument doc;
+            std::string body;
+            if (!http_parse_json_body(request, doc, body)) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad json\"}");
+                return;
+            }
+
+            if (!doc["action"].is<const char *>()) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad action\"}");
+                return;
+            }
+            const char *action = doc["action"].as<const char *>();
+            if (strcmp(action, "result") == 0) {
+                if (!doc["result_id"].is<uint32_t>()) {
+                    request->send(400, "application/json",
+                                  "{\"ok\":false,\"error\":\"bad result id\"}");
+                    return;
+                }
+
+                String key;
+                bool configured = false;
+                bool matches = false;
+                if (!resmed_ota_->take_ota_key(
+                        doc["result_id"].as<uint32_t>(), key,
+                        configured, matches)) {
+                    request->send(409, "application/json",
+                                  "{\"ok\":false,\"error\":\"ota_key_result_unavailable\"}");
+                    return;
+                }
+
+                String json = "{\"ok\":true";
+                json_add_string(json, "key", key.c_str());
+                json_add_bool(json, "configured", configured);
+                json_add_bool(json, "matches", matches);
+                json += '}';
+                auto *response = request->beginResponse(200, "application/json", json);
+                if (!response) {
+                    request->send(503, "application/json",
+                                  "{\"ok\":false,\"error\":\"response_alloc_failed\"}");
+                    return;
+                }
+
+                response->addHeader("Cache-Control", "no-store");
+                request->send(response);
+                request_resmed_snapshot();
+                return;
+            }
+            if (strcmp(action, "read") != 0) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad action\"}");
+                return;
+            }
+            if (resmed_ota_->active() || resmed_preparer_->active()) {
+                request->send(409, "application/json",
+                              "{\"ok\":false,\"error\":\"resmed_ota_active\"}");
+                return;
+            }
+
+            Command command;
+            command.kind = CommandKind::ResmedServiceRead;
+            command.flag = true;
+            send_queue_result(request, enqueue(std::move(command)));
+        },
+        nullptr, http_request_body_handler);
+
     server.on(AsyncURIMatcher::exact("/api/resmed-ota/dump"), HTTP_POST,
               [this](AsyncWebServerRequest *request) {
         if (resmed_ota_->active() || resmed_preparer_->active()) {
@@ -578,7 +649,7 @@ void OtaHttpController::register_routes(HttpRouteRegistry &server) {
         }
 
         Command command;
-        command.kind = CommandKind::ResmedDump;
+        command.kind = CommandKind::ResmedServiceRead;
         send_queue_result(request, enqueue(std::move(command)));
     });
 
@@ -860,15 +931,19 @@ void OtaHttpController::execute(Command &command) {
             }
             break;
 
-        case CommandKind::ResmedDump:
-            if (!resmed_ota_->request_firmware_dump()) {
+        case CommandKind::ResmedServiceRead: {
+            const bool accepted = command.flag
+                ? resmed_ota_->request_ota_key_read()
+                : resmed_ota_->request_firmware_dump();
+            if (!accepted) {
                 Log::logf(CAT_OTA, LOG_WARN,
-                          "[RESMED] firmware dump rejected\n");
+                          "[RESMED] service read rejected\n");
             }
             break;
+        }
 
         case CommandKind::ResmedDumpConfirm:
-            if (!resmed_ota_->confirm_dump_bootloader(
+            if (!resmed_ota_->confirm_service_bootloader(
                     String(command.confirmation.c_str()))) {
                 Log::logf(CAT_OTA, LOG_WARN,
                           "[RESMED] patched bootloader confirmation "

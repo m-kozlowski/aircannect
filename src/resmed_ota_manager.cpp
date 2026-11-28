@@ -22,6 +22,7 @@
 #include "little_endian.h"
 #include "memory_manager.h"
 #include "resmed_firmware_dump.h"
+#include "resmed_firmware_catalog.h"
 #include "runtime_clock.h"
 #include "storage_path_port.h"
 #include "storage_stream_port.h"
@@ -42,6 +43,7 @@ static constexpr uint64_t FirmwareDumpFreeReserveBytes = 1024 * 1024;
 static constexpr uint32_t FirmwareDumpIdentityTimeoutMs = 30000;
 static constexpr uint32_t FirmwareDumpRecoveryBootTimeoutMs = 30000;
 static constexpr size_t ResmedOtaKeyBytes = 32;
+static constexpr uint32_t ResmedOtaKeyOffset = 0x100;
 
 bool valid_sha256(String value) {
     value.trim();
@@ -109,6 +111,7 @@ const char *resmed_ota_operation_name(ResmedOtaOperation operation) {
         case ResmedOtaOperation::None: return "none";
         case ResmedOtaOperation::Install: return "install";
         case ResmedOtaOperation::Dump: return "dump";
+        case ResmedOtaOperation::ReadOtaKey: return "read_ota_key";
     }
     return "none";
 }
@@ -151,6 +154,10 @@ struct ResmedOtaManager::ColdState {
     uint8_t prepared_block[AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES] = {};
     std::unique_ptr<LargeByteBuffer> service_lz4_state;
 
+    // Never included in status snapshots or logs; consumed by the result request.
+    char read_ota_key[ResmedOtaKeyBytes * 2 + 1] = {};
+    bool read_ota_key_configured = false;
+    bool read_ota_key_matches = false;
     ResmedFirmwareDumpIdentity dump_identity;
     std::unique_ptr<LargeByteBuffer> dump_buffer;
     std::shared_ptr<const LargeByteBuffer> dump_pending_chunk;
@@ -210,7 +217,7 @@ void ResmedOtaManager::poll() {
     poll_preparer_result();
     poll_rpc_completion();
     poll_service_completion();
-    poll_firmware_dump();
+    poll_service_read();
     poll_recovery_boot();
     poll_native_apply_boot();
     poll_prepared_transfer();
@@ -325,6 +332,40 @@ bool ResmedOtaManager::begin_prepared_install(
 }
 
 bool ResmedOtaManager::request_firmware_dump() {
+    return request_service_read(ResmedOtaOperation::Dump);
+}
+
+bool ResmedOtaManager::request_ota_key_read() {
+    return request_service_read(ResmedOtaOperation::ReadOtaKey);
+}
+
+bool ResmedOtaManager::service_read_operation() const {
+    return cold_->status.operation == ResmedOtaOperation::Dump ||
+           cold_->status.operation == ResmedOtaOperation::ReadOtaKey;
+}
+
+bool ResmedOtaManager::take_ota_key(uint32_t result_id, String &key,
+                                   bool &configured, bool &matches) {
+    ScopedLock lock(*this, 1000);
+    if (!lock || !cold_ || result_id == 0 ||
+        cold_->status.ota_key_result_id != result_id ||
+        cold_->status.operation != ResmedOtaOperation::ReadOtaKey ||
+        cold_->status.phase != ResmedOtaPhase::Complete ||
+        !cold_->read_ota_key[0]) {
+        return false;
+    }
+
+    key = cold_->read_ota_key;
+    if (key.length() != ResmedOtaKeyBytes * 2) return false;
+
+    configured = cold_->read_ota_key_configured;
+    matches = cold_->read_ota_key_matches;
+    memset(cold_->read_ota_key, 0, sizeof(cold_->read_ota_key));
+    cold_->status.ota_key_result_id = 0;
+    return true;
+}
+
+bool ResmedOtaManager::request_service_read(ResmedOtaOperation operation) {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_ || !rpc_ || !device_ || !service_ ||
         !path_port_ || !upload_port_) {
@@ -344,18 +385,16 @@ bool ResmedOtaManager::request_firmware_dump() {
     }
 
     clear_session();
-    cold_->status.operation = ResmedOtaOperation::Dump;
-    cold_->status.transport = ResmedFirmwareInstallTransport::Service;
-    cold_->status.target = "FGCB";
+    cold_->status.operation = operation;
     if (!guard_device_idle_for_upgrade()) return false;
 
-    return begin_dump_identity_refresh(false);
+    return begin_service_read_identity_refresh(false);
 }
 
-bool ResmedOtaManager::confirm_dump_bootloader(const String &confirm) {
+bool ResmedOtaManager::confirm_service_bootloader(const String &confirm) {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_ || !preparer_ ||
-        cold_->status.operation != ResmedOtaOperation::Dump ||
+        !service_read_operation() ||
         cold_->status.phase != ResmedOtaPhase::BootloaderRequired) {
         return false;
     }
@@ -734,7 +773,7 @@ void ResmedOtaManager::abort(const char *reason) {
     if (!lock || !cold_) return;
 
     const char *result = reason ? reason : "aborted";
-    if (cold_->status.operation == ResmedOtaOperation::Dump &&
+    if (service_read_operation() &&
         dump_service_entered_) {
         set_error(result);
     } else {
@@ -1050,7 +1089,7 @@ bool ResmedOtaManager::begin_recovery_install(
     if (!firmware.valid() || firmware.transport !=
                                  ResmedFirmwareInstallTransport::Rpc ||
         strcmp(firmware.image.target, "FGBL") != 0 ||
-        cold_->status.operation != ResmedOtaOperation::Dump ||
+        !service_read_operation() ||
         cold_->status.phase != ResmedOtaPhase::PreparingBootloader) {
         return false;
     }
@@ -1166,7 +1205,7 @@ void ResmedOtaManager::poll_recovery_boot() {
         dump_recovery_install_ = false;
         close_prepared_stream(true);
         schedule_prepared_cleanup();
-        (void)begin_dump_identity_refresh(true);
+        (void)begin_service_read_identity_refresh(true);
         return;
     }
 
@@ -1176,13 +1215,18 @@ void ResmedOtaManager::poll_recovery_boot() {
     }
 }
 
-void ResmedOtaManager::poll_firmware_dump() {
-    if (cold_->status.operation != ResmedOtaOperation::Dump) return;
+void ResmedOtaManager::poll_service_read() {
+    if (!service_read_operation()) return;
 
     switch (cold_->status.phase) {
         case ResmedOtaPhase::ReadingIdentity:
             if (device_->identity_revision() != dump_identity_revision_) {
-                if (!capture_dump_identity()) return;
+                if (!capture_service_read_identity()) return;
+
+                if (cold_->status.operation == ResmedOtaOperation::ReadOtaKey) {
+                    (void)begin_service_read();
+                    return;
+                }
 
                 cold_->status.phase = ResmedOtaPhase::CheckingStorage;
                 dump_path_check_ = DumpPathCheck::Output;
@@ -1201,7 +1245,9 @@ void ResmedOtaManager::poll_firmware_dump() {
 
         case ResmedOtaPhase::Dumping:
         case ResmedOtaPhase::Publishing:
-            poll_dump_upload();
+            if (cold_->status.operation == ResmedOtaOperation::Dump) {
+                poll_dump_upload();
+            }
             return;
 
         case ResmedOtaPhase::Resetting:
@@ -1227,15 +1273,15 @@ void ResmedOtaManager::poll_firmware_dump() {
     }
 }
 
-bool ResmedOtaManager::begin_dump_identity_refresh(bool after_recovery) {
+bool ResmedOtaManager::begin_service_read_identity_refresh(bool after_recovery) {
     if (!device_ || !rpc_) return false;
 
     dump_identity_revision_ = device_->identity_revision();
     dump_identity_started_ms_ = millis();
     cold_->status.phase = ResmedOtaPhase::ReadingIdentity;
-    cold_->status.operation = ResmedOtaOperation::Dump;
     cold_->status.transport = ResmedFirmwareInstallTransport::Service;
-    cold_->status.target = "FGCB";
+    cold_->status.target = cold_->status.operation == ResmedOtaOperation::ReadOtaKey
+        ? "SPIN" : "FGCB";
     cold_->status.filename = "";
     cold_->status.source_path = "";
     cold_->status.last_error = "";
@@ -1254,8 +1300,30 @@ bool ResmedOtaManager::begin_dump_identity_refresh(bool after_recovery) {
     return true;
 }
 
-bool ResmedOtaManager::capture_dump_identity() {
+bool ResmedOtaManager::capture_service_read_identity() {
     const As11DeviceState &state = device_->state();
+    if (cold_->status.operation == ResmedOtaOperation::ReadOtaKey) {
+        char directory[AC_STORAGE_PATH_MAX] = {};
+        auto &identity = cold_->dump_identity;
+        if (!resmed_firmware_bootloader_version_from_text(
+                state.bootloader_identifier().c_str(),
+                identity.bootloader_version, sizeof(identity.bootloader_version)) ||
+            !resmed_firmware_patched_bootloader_path(
+                identity.bootloader_version, directory, sizeof(directory),
+                identity.patched_bootloader_path,
+                sizeof(identity.patched_bootloader_path))) {
+            set_error("firmware_identity_invalid");
+            return false;
+        }
+
+        cold_->status.total_size = ResmedOtaKeyBytes;
+        cold_->status.uploaded_bytes = 0;
+        cold_->status.progress_percent = 0;
+        cold_->status.recovery_path = identity.patched_bootloader_path;
+        cold_->status.last_result = "identity_ready";
+        return true;
+    }
+
     if (!state.variant_id_valid() ||
         !resmed_firmware_dump_identity(
             state.product_name().c_str(),
@@ -1346,7 +1414,7 @@ void ResmedOtaManager::poll_dump_path_check() {
             set_error("firmware_dump_exists");
             return;
         }
-        (void)begin_dump_service();
+        (void)begin_service_read();
         return;
     }
 
@@ -1362,7 +1430,7 @@ void ResmedOtaManager::poll_dump_path_check() {
     cold_->status.last_error = "service_entry_timeout";
 }
 
-bool ResmedOtaManager::begin_dump_service() {
+bool ResmedOtaManager::begin_service_read() {
     if (!service_ || !service_->acquire(As11ServiceOwner::ResmedOta)) {
         set_error("service_busy");
         return false;
@@ -1483,6 +1551,32 @@ void ResmedOtaManager::poll_dump_upload() {
     }
 }
 
+bool ResmedOtaManager::submit_ota_key_read() {
+    // SecurityData OTA slot: SPI NOR offset, not an STM32 absolute address.
+    uint8_t payload[7] = {AS11_SERVICE_TARGET_SPIN};
+    put_le32(payload + 1, ResmedOtaKeyOffset);
+    put_le16(payload + 5, ResmedOtaKeyBytes);
+    cold_->status.phase = ResmedOtaPhase::Dumping;
+    return submit_service_request(AS11_SERVICE_COMMAND_READ, payload,
+                                  sizeof(payload), ServiceWaitingFor::Read);
+}
+
+void ResmedOtaManager::finish_ota_key_read(
+    const std::shared_ptr<const LargeByteBuffer> &response,
+    const As11ServicePacketHeader &header) {
+    if (header.payload_length != ResmedOtaKeyBytes ||
+        !hex_encode(response->data() + AS11_SERVICE_PACKET_HEADER_BYTES,
+                    ResmedOtaKeyBytes, cold_->read_ota_key,
+                    sizeof(cold_->read_ota_key), HexCase::Upper)) {
+        set_error("ota_key_read_invalid");
+        return;
+    }
+
+    cold_->status.uploaded_bytes = ResmedOtaKeyBytes;
+    update_progress();
+    (void)submit_service_reset();
+}
+
 bool ResmedOtaManager::submit_dump_read() {
     if (service_waiting_for_ != ServiceWaitingFor::None ||
         dump_read_offset_ >= cold_->status.total_size) {
@@ -1574,7 +1668,7 @@ void ResmedOtaManager::finish_dump_read(
     }
 }
 
-void ResmedOtaManager::require_dump_bootloader() {
+void ResmedOtaManager::require_service_bootloader() {
     release_service();
     dump_service_entered_ = false;
     cold_->status.phase = ResmedOtaPhase::CheckingStorage;
@@ -1802,9 +1896,9 @@ void ResmedOtaManager::handle_service_response(
     }
 
     if (completed == ServiceWaitingFor::Enter &&
-        cold_->status.operation == ResmedOtaOperation::Dump &&
+        service_read_operation() &&
         header.status == AS11_SERVICE_STATUS_ENTRY_TIMEOUT) {
-        require_dump_bootloader();
+        require_service_bootloader();
         return;
     }
 
@@ -1816,7 +1910,11 @@ void ResmedOtaManager::handle_service_response(
         return;
     }
     if (completed == ServiceWaitingFor::Read) {
-        finish_dump_read(response, header);
+        if (cold_->status.operation == ResmedOtaOperation::ReadOtaKey) {
+            finish_ota_key_read(response, header);
+        } else {
+            finish_dump_read(response, header);
+        }
         return;
     }
     if (completed != ServiceWaitingFor::Enter && header.payload_length != 0) {
@@ -1827,11 +1925,16 @@ void ResmedOtaManager::handle_service_response(
     cold_->status.last_result = "ok";
     switch (completed) {
         case ServiceWaitingFor::Enter:
-            if (cold_->status.operation == ResmedOtaOperation::Dump) {
+            if (service_read_operation()) {
                 dump_service_entered_ = true;
                 Log::logf(CAT_OTA, LOG_INFO,
-                          "[RESMED] service entered for firmware dump\n");
-                (void)begin_dump_upload();
+                          "[RESMED] service entered for %s\n",
+                          resmed_ota_operation_name(cold_->status.operation));
+                if (cold_->status.operation == ResmedOtaOperation::ReadOtaKey) {
+                    (void)submit_ota_key_read();
+                } else {
+                    (void)begin_dump_upload();
+                }
             } else {
                 cold_->status.phase = ResmedOtaPhase::Erasing;
                 Log::logf(CAT_OTA, LOG_INFO,
@@ -2075,13 +2178,29 @@ void ResmedOtaManager::poll_service_reset() {
     if (!device_ || service_reset_accepted_ms_ == 0) return;
 
     if (device_->boot_revision() != service_reset_boot_revision_) {
-        if (cold_->status.operation == ResmedOtaOperation::Dump) {
+        if (service_read_operation()) {
             if (dump_error_reset_pending_) {
                 char error[AC_STORAGE_ERROR_MAX] = {};
                 copy_cstr(error, sizeof(error), cold_->dump_pending_error);
                 dump_error_reset_pending_ = false;
                 cold_->dump_pending_error[0] = '\0';
                 finish_error(error[0] ? error : "firmware_dump_failed");
+            } else if (cold_->status.operation == ResmedOtaOperation::ReadOtaKey) {
+                cold_->status.phase = ResmedOtaPhase::Complete;
+                cold_->status.waiting = false;
+                cold_->status.last_result = "ota_key_ready";
+                // ConfigService mutates its String on this same main loop;
+                // the HTTP result consumer must not read that String concurrently.
+                cold_->read_ota_key_configured = ota_key_ && ota_key_->length() != 0;
+                cold_->read_ota_key_matches = cold_->read_ota_key_configured &&
+                    ota_key_->equalsIgnoreCase(cold_->read_ota_key);
+
+                if (++ota_key_result_generation_ > INT32_MAX) {
+                    ota_key_result_generation_ = 1;
+                }
+                cold_->status.ota_key_result_id = ota_key_result_generation_;
+                dump_service_entered_ = false;
+                release_service();
             } else {
                 finish_firmware_dump();
             }
@@ -2424,6 +2543,9 @@ void ResmedOtaManager::clear_session() {
     service_started_ms_ = 0;
     service_reset_accepted_ms_ = 0;
     service_reset_boot_revision_ = 0;
+    memset(cold_->read_ota_key, 0, sizeof(cold_->read_ota_key));
+    cold_->read_ota_key_configured = false;
+    cold_->read_ota_key_matches = false;
     cold_->dump_identity = {};
     cold_->dump_pending_error[0] = '\0';
     dump_identity_revision_ = 0;
@@ -2452,7 +2574,7 @@ void ResmedOtaManager::set_error(const char *error) {
         return;
     }
 
-    if (cold_->status.operation == ResmedOtaOperation::Dump &&
+    if (service_read_operation() &&
         dump_service_entered_ && service_) {
         copy_cstr(cold_->dump_pending_error,
                   sizeof(cold_->dump_pending_error),
@@ -2479,6 +2601,8 @@ void ResmedOtaManager::set_error(const char *error) {
 }
 
 void ResmedOtaManager::finish_error(const char *error) {
+    memset(cold_->read_ota_key, 0, sizeof(cold_->read_ota_key));
+    cold_->status.ota_key_result_id = 0;
     clear_native_apply_wait();
     release_service();
     cancel_dump_upload();
